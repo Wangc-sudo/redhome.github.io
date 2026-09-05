@@ -155,9 +155,9 @@ def main():
             )
             log(f"webhook 推送成功 -> {push.get('groupName', push.get('webhook'))}")
         else:
-            client.send_group_message(
+            client.send_group_markdown(
                 push["robotCode"], push["openConversationId"],
-                "sampleMarkdown", {"title": f"渠道日报 {target_str}", "text": markdown},
+                f"渠道日报 {target_str}", markdown,
             )
             log(f"群消息推送成功 -> {push.get('groupName', 'unknown')}")
 

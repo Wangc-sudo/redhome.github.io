@@ -48,6 +48,8 @@ def resolve_target(robot_config, mode=None):
     elif "openConversationId" in test:
         target["mode"] = "groupSend"
         target["openConversationId"] = test["openConversationId"]
+        if "robotCode" in test:
+            target["robotCode"] = test["robotCode"]
         if "groupName" in test:
             target["groupName"] = test["groupName"]
         target.pop("webhook", None)

@@ -75,6 +75,22 @@ class TestResolveTarget(unittest.TestCase):
         self.assertEqual(result["secret"], "test-secret")
         self.assertNotIn("openConversationId", result)
 
+    def test_test_mode_injects_robot_code_for_webhook_origin(self):
+        os.environ["TEST_MODE"] = "1"
+        original = {"mode": "webhook", "webhook": "https://prod.example.com/webhook"}
+        test_group.load_test_groups = lambda path=None: {
+            "default": {
+                "groupName": "功能验证群",
+                "openConversationId": "test-cid",
+                "robotCode": "test-rc",
+            }
+        }
+        result = test_group.resolve_target(original)
+        self.assertEqual(result["mode"], "groupSend")
+        self.assertEqual(result["robotCode"], "test-rc")
+        self.assertEqual(result["openConversationId"], "test-cid")
+        self.assertNotIn("webhook", result)
+
 
 if __name__ == "__main__":
     unittest.main()
