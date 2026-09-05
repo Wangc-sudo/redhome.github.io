@@ -188,8 +188,97 @@ def do_check(config, state, now, day):
         log(log_dir, f"待执行DING: {names_text}")
 
 
+def _load_input(path):
+    path = Path(path)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("deptUserList") or []
+    result = {}
+    for it in items:
+        info = it.get("userInfo") or {}
+        if info.get("name") and info.get("userId"):
+            result[info["name"]] = info["userId"]
+    return result
+
+
+def _apply_alias(name, aliases):
+    return aliases.get(name, name)
+
+
 def org_sync(config, inputs, active_region):
-    raise NotImplementedError
+    log_dir = Path(config.get("logDir", Path(__file__).parent / "logs"))
+    org = config["org"]
+    aliases = org.get("aliases", {})
+    archives = org["archives"]
+
+    snapshots = {}
+    for region, path in inputs.items():
+        snap = _load_input(path)
+        if snap is None:
+            log(log_dir, f"缺少快照文件 {Path(path).name}，跳过该区域")
+            continue
+        snapshots[region] = snap
+
+    if not snapshots:
+        log(log_dir, "无任何快照输入，退出")
+        return False, []
+
+    changes = []
+    active_updates = []
+
+    for region, snap in snapshots.items():
+        arch = archives.get(region, {})
+        added = {n: u for n, u in snap.items() if n not in arch}
+        removed = {n: u for n, u in arch.items() if n not in snap}
+        changed_uid = {n: (arch[n], snap[n]) for n in snap if n in arch and arch[n] != snap[n]}
+
+        if not (added or removed or changed_uid):
+            log(log_dir, f"[{region}] 无变化 ({len(arch)}人)")
+            continue
+
+        for n, u in added.items():
+            arch[n] = u
+            changes.append(f"[{region}] 入职/新增: {n} ({u})")
+        for n in removed:
+            del arch[n]
+            changes.append(f"[{region}] 离职/调出: {n}")
+        for n, (old, new) in changed_uid.items():
+            arch[n] = new
+            changes.append(f"[{region}] ID变更: {n} {old}->{new}")
+
+        if region == active_region:
+            for n in added:
+                active_updates.append(("add", n))
+            for n in removed:
+                active_updates.append(("remove", n))
+            for n in changed_uid:
+                active_updates.append(("update", n))
+
+    if not changes:
+        log(log_dir, "全部区域无变化")
+        org["lastSync"] = datetime.now().isoformat(timespec="seconds")
+        config["org"] = org
+        return False, []
+
+    members = config["members"]
+    for action, real_name in active_updates:
+        table_name = _apply_alias(real_name, aliases)
+        uid = archives[active_region].get(real_name)
+        if action in ("add", "update"):
+            if members.get(table_name) == uid:
+                continue
+            members[table_name] = uid
+            log(log_dir, f"催报名单更新: +{table_name} ({uid})")
+        elif action == "remove":
+            if table_name in members:
+                del members[table_name]
+                log(log_dir, f"催报名单更新: -{table_name}")
+
+    org["lastSync"] = datetime.now().isoformat(timespec="seconds")
+    config["org"] = org
+    config["members"] = members
+    return True, changes
 
 
 def recalc_totals(config):
