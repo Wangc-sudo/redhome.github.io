@@ -228,7 +228,8 @@ def org_sync(config, inputs, active_region):
     active_updates = []
 
     for region, snap in snapshots.items():
-        arch = archives.get(region, {})
+        archives.setdefault(region, {})
+        arch = archives[region]
         added = {n: u for n, u in snap.items() if n not in arch}
         removed = {n: u for n, u in arch.items() if n not in snap}
         changed_uid = {n: (arch[n], snap[n]) for n in snap if n in arch and arch[n] != snap[n]}
