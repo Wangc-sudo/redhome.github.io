@@ -8,7 +8,7 @@ import sys
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.daily_robot.core import _load_input, _apply_alias, org_sync
+from common.daily_robot.core import _load_input, _apply_alias, _parse_num, org_sync
 
 
 class TestLoadInput(unittest.TestCase):
@@ -99,3 +99,23 @@ class TestOrgSync(unittest.TestCase):
             self.assertEqual(config["members"], {"Alice": "u2"})
             self.assertEqual(config["org"]["archives"]["shaoxing"], {"Alice": "u2"})
             self.assertTrue(any("ID变更" in c for c in changes))
+
+
+class TestParseNum(unittest.TestCase):
+    def test_integer_string(self):
+        self.assertEqual(_parse_num("123"), 123.0)
+
+    def test_float_string(self):
+        self.assertEqual(_parse_num("123.45"), 123.45)
+
+    def test_comma_separator(self):
+        self.assertEqual(_parse_num("1,234.5"), 1234.5)
+
+    def test_none_returns_none(self):
+        self.assertIsNone(_parse_num(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(_parse_num(""))
+
+    def test_invalid_string_returns_none(self):
+        self.assertIsNone(_parse_num("abc"))
