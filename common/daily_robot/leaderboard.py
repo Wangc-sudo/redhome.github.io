@@ -64,7 +64,11 @@ def collect(config, include_today=False):
             if v is None or str(v).strip() == "":
                 unfilled += 1
             else:
-                completed += _parse_num(v) or 0
+                parsed = _parse_num(v)
+                if parsed is None:
+                    unfilled += 1
+                else:
+                    completed += parsed
         people.append({
             "name": name, "dept": dept, "target": target, "completed": completed,
             "unfilled": unfilled,
@@ -145,7 +149,7 @@ def build_html(config, now, elapsed, people):
 
     n_elapsed = len(elapsed)
     n_total = len(workdays)
-    progress = n_elapsed / n_total
+    progress = n_elapsed / n_total if n_total else 0
     total_completed = sum(p["completed"] for p in people)
     total_target = sum(p["target"] for p in people)
     overall_rate = total_completed / total_target if total_target else 0
@@ -290,7 +294,7 @@ def build_html(config, now, elapsed, people):
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{display}销售完成率榜单 · {month}月</title>
+<title>{html_mod.escape(display)}销售完成率榜单 · {html_mod.escape(month)}月</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#1f2329;padding:16px;max-width:1080px;margin:0 auto}}
@@ -340,7 +344,7 @@ table.mini td,table.mini th{{padding:4px 6px}}
 @media(max-width:760px){{.split{{grid-template-columns:1fr}}.bar{{min-width:90px}}}}
 .pill{{display:inline-block;background:#eef0f3;border-radius:6px;padding:2px 10px;font-size:12px;color:#4e5761;margin-right:6px}}
 </style></head><body>
-<h1>{display}销售日报 · 完成率榜单</h1>
+<h1>{html_mod.escape(display)}销售日报 · 完成率榜单</h1>
 <div class="sub">{now.year}年{month}月 · {now.month}月{elapsed[-1] if elapsed else now.day}日（周{weekday}） · 数据截至 {stat_thru} · 生成于 {gen_time}</div>
 
 <div class="cards">
