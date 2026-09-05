@@ -1,0 +1,25 @@
+# 杭州销售完成率榜单服务编排
+# 用法: LEADERBOARD_TOKEN=<令牌> docker compose up -d
+services:
+  leaderboard:
+    build: .
+    image: digital-ops/leaderboard:latest
+    container_name: leaderboard
+    restart: unless-stopped
+    ports:
+      - "8300:8300"
+    environment:
+      # 推送令牌（必须与本机推送脚本环境变量一致；未设置则后端拒绝所有推送）
+      - LEADERBOARD_TOKEN=${LEADERBOARD_TOKEN:?请在环境变量中设置 LEADERBOARD_TOKEN}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8300/healthz',timeout=3)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
