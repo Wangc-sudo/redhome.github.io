@@ -133,7 +133,7 @@ def build_bc_markdown(config, url=None):
                      f"**{_fmt_pct(st['rate'])}** | {diff_txt} / {proj_txt} |")
     if url:
         lines.append("")
-        lines.append(f"📊 [点击查看完整榜单（个人明细）]({url})")
+        lines.append(f"📊 [点击查看完整榜单（个人明细）](<{url}>)")
     return "\n".join(lines)
 
 
@@ -188,7 +188,7 @@ def build_html(config, now, elapsed, people):
         rank_cls = "top" if i < 5 else ("bottom" if i >= len(people) - 5 else "")
         dept_lb = dept_label.get(p["dept"], p["dept"])
         return f"""<tr class="{rank_cls}">
-<td class="rank">{i+1 if i>=5 or i<len(people)-5 else ''}</td>
+<td class="rank">{i+1 if i<5 or i>=len(people)-5 else ''}</td>
 <td class="strong">{html_mod.escape(p['name'])}</td><td>{html_mod.escape(dept_lb)}</td>
 <td class="num">{_fmt_wan(p['completed'])}</td><td class="num muted">{_fmt_wan(p['target'])}</td>
 <td>{bar(rate)}</td><td>{diff_badge(rate)}</td>
@@ -294,7 +294,7 @@ def build_html(config, now, elapsed, people):
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html_mod.escape(display)}销售完成率榜单 · {html_mod.escape(month)}月</title>
+<title>{html_mod.escape(display)}销售完成率榜单 · {month}月</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#1f2329;padding:16px;max-width:1080px;margin:0 auto}}
@@ -349,7 +349,7 @@ table.mini td,table.mini th{{padding:4px 6px}}
 
 <div class="cards">
   <div class="card"><div class="k">时间进度</div><div class="v">{_fmt_pct(progress)}</div><div class="s">{n_elapsed} / {n_total} 个工作日</div></div>
-  <div class="card"><div class="k">{display}整体完成率</div><div class="v {'g' if overall_rate>=progress else 'r'}">{_fmt_pct(overall_rate)}</div><div class="s">{_fmt_wan(total_completed)} / {_fmt_wan(total_target)}</div></div>
+  <div class="card"><div class="k">{html_mod.escape(display)}整体完成率</div><div class="v {'g' if overall_rate>=progress else 'r'}">{_fmt_pct(overall_rate)}</div><div class="s">{_fmt_wan(total_completed)} / {_fmt_wan(total_target)}</div></div>
   <div class="card"><div class="k">整体进度差</div><div class="v {'g' if overall_rate>=progress else 'r'}">{_fmt_pct(overall_rate-progress)}</div><div class="s">相对时间进度</div></div>
   <div class="card"><div class="k">参与人数</div><div class="v">{len(people)}</div><div class="s">未填 0 天：{sum(1 for p in people if p['unfilled']==0)} 人</div></div>
 </div>
@@ -381,8 +381,8 @@ table.mini td,table.mini th{{padding:4px 6px}}
 · 时间进度 = 已过工作日 {n_elapsed} ÷ 全月工作日 {n_total} = {_fmt_pct(progress)}（黑竖线为达标基准）<br>
 · 进度差 = 完成率 − 时间进度，正值领先、负值落后；预计月末 = 完成率 ÷ 时间进度（线性外推，仅供参考）<br>
 · 未填 = 已过工作日中空白的单元格数（填 0 不算未填）<br>
-· 部门维度含 {display} 各项目部及运营总监<br>
-· 群播报口径：仅部门维度，不含个人明细{f"与 {exclude_note}" if exclude_note else ""}
+· 部门维度含 {html_mod.escape(display)} 各项目部及运营总监<br>
+· 群播报口径：仅部门维度，不含个人明细{f"与 {html_mod.escape(exclude_note)}" if exclude_note else ""}
 </div>
 
 <script>
