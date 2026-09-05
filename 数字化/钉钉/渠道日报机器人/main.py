@@ -19,6 +19,7 @@ from pathlib import Path
 
 from dingtalk_client import DingTalkClient, DingTalkError
 import channel_report as cr
+from common.test_group import resolve_target
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
@@ -144,21 +145,21 @@ def main():
             write_run_log(target_str, True, "DRY RUN")
             return 0
 
-        push = cfg["push"]
-        if push["mode"] == "webhook":
+        push = resolve_target(cfg["push"])
+        if push.get("mode") == "webhook":
             client.send_webhook_markdown(
                 push["webhook"],
                 title=f"渠道日报 {target_str}",
                 markdown_text=markdown,
                 secret=push.get("secret", ""),
             )
-            log("webhook 推送成功")
+            log(f"webhook 推送成功 -> {push.get('groupName', push.get('webhook'))}")
         else:
             client.send_group_message(
                 push["robotCode"], push["openConversationId"],
                 "sampleMarkdown", {"title": f"渠道日报 {target_str}", "text": markdown},
             )
-            log("群消息推送成功")
+            log(f"群消息推送成功 -> {push.get('groupName', 'unknown')}")
 
         write_run_log(target_str, True, "ok")
         log("=== 完成 ===")
