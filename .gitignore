@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# 运行日志与运行时状态（本地保留，不入库）
+logs/
+*.log
+.reminder_state.json
+.schedule_state.json
+.stock_alert_state.json
+.purchase_state.json
+.stock_cache.json
+org_input_*.json
+
+# 生成产物（每次运行时重新生成，发布前由脚本写入；.gitkeep 保留目录骨架）
+数字化/钉钉/杭州日报机器人/leaderboard.html
+数字化/钉钉/榜单页面/*
+!数字化/钉钉/榜单页面/.gitkeep
+数字化/钉钉/渠道日报机器人/hot-items-page/*
+!数字化/钉钉/渠道日报机器人/hot-items-page/.gitkeep
+
+# 机密配置（含 appSecret/凭据，永不入库；模板见 config.example.json）
+config.json
+wdt_credentials.json
+config-local/

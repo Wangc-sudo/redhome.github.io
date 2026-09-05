@@ -1,0 +1,41 @@
+{
+  "_说明": "渠道日报表群机器人配置。复制为 config.json 后填写真实值。敏感凭据也可改用环境变量 DINGTALK_APP_KEY / DINGTALK_APP_SECRET。",
+
+  "dingtalk": {
+    "appKey": "dingg85lqvifeny3ywfi",
+    "appSecret": "<待填：开发者后台-BI应用-点查看复制>",
+    "operatorId": "<待填：有AI表格权限的钉钉用户userId>"
+  },
+
+  "base": {
+    "_说明": "9月电商渠道日报表 Base。跨月时改 baseId（见 dtsync-datasources.json 的 bases 列表）",
+    "baseId": "QOG9lyrgJPmxNQlwIw4QDd6q8zN67Mw4",
+    "dailySalesTable": "<待填：各渠道每日总销售表名，用 python discover_tables.py 查询后填入>"
+  },
+
+  "fields": {
+    "_说明": "留空则自动模糊识别；识别不准时在此显式指定表内字段名",
+    "date": "",
+    "channel": "",
+    "sales": "",
+    "target": "",
+    "achievementRate": ""
+  },
+
+  "report": {
+    "dateOffset": -1,
+    "title": "渠道日报",
+    "channelsOrder": ["天猫", "京东", "拼多多", "猫超", "即时零售", "直播", "私域", "抖音"],
+    "includeAchievement": true,
+    "emptyDataAlsoPush": false
+  },
+
+  "push": {
+    "mode": "webhook",
+    "webhook": "<待填：渠道日报表群-群设置-机器人-webhook地址>",
+    "secret": "",
+    "_groupSend备选": "mode=groupSend 时使用下方两项（企业机器人发群消息）",
+    "robotCode": "",
+    "openConversationId": ""
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "_说明": "杭州销售日报提醒机器人配置模板。复制为 config.json 并填写真实值。凭据同渠道日报机器人（企业应用「提醒事项」）。换月建新表后需更新 base/tableId/calendar。",
+  "dingtalk": {
+    "appKey": "<企业应用AppKey>",
+    "appSecret": "<企业应用AppSecret>",
+    "operatorId": "<操作人userId>"
+  },
+  "base": {
+    "baseId": "<钉钉AI表格baseId>",
+    "tableId": "<日报表tableId>",
+    "tableUrl": "<日报表访问地址>"
+  },
+  "calendar": {
+    "month": 9,
+    "restDays": [6, 13, 19, 25, 26, 27],
+    "_说明": "当月休息日列表，依据钉钉考勤核验。每月换表时更新。"
+  },
+  "org": {
+    "rootDeptId": 1050135497,
+    "aliases": { "通讯录实名": "表内用名" },
+    "_说明": "组织同步档案（org_sync.py 维护）。区域: hangzhou=杭州催报区(对应日报表), shaoxing=绍兴区, other=其他。depts 为各区域部门ID。",
+    "depts": {
+      "hangzhou": [1049728636, 1049886665, 1050078449, 1050062512],
+      "shaoxing": [1050416052, 1049663672, 1050408252],
+      "other": [1049860586, 1049857611, 1050135497]
+    },
+    "archives": {
+      "hangzhou": { "姓名": "userId" },
+      "shaoxing": { "姓名": "userId" },
+      "other": { "姓名": "userId" }
+    },
+    "lastSync": "2026-09-05T00:06:43"
+  },
+  "robot": {
+    "robotCode": "<机器人robotCode>",
+    "openConversationId": "<群openConversationId>",
+    "groupName": "线下事业部杭州日报群"
+  },
+  "members": { "姓名": "userId" },
+  "ccUsers": {
+    "_说明": "20:00 催办时固定@的人",
+    "沈聪": "<userId>"
+  },
+  "schedule": {
+    "remindHour": 18,
+    "checkHour": 20,
+    "_说明": "cron 0 18,20 * * * 触发，--once 按当前小时自动决定跑提醒还是检查"
+  }
+}

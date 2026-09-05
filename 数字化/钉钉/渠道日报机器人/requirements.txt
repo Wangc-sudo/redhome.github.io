@@ -1,0 +1,6 @@
+# 渠道日报机器人依赖（保持最小化，纯标准库 + 无第三方依赖亦可运行）
+# dingtalk_client.py / channel_report.py / main.py 仅使用 Python 标准库（urllib/hmac/json 等）
+# 因此 requirements.txt 实际为空。如后续扩展 Excel 读取再添加：
+# requests
+# pandas
+# openpyxl
