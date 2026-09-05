@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 import html as html_mod
-import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -66,7 +64,7 @@ def collect(config, include_today=False):
             if v is None or str(v).strip() == "":
                 unfilled += 1
             else:
-                completed += float(str(v).replace(",", "") or 0)
+                completed += _parse_num(v) or 0
         people.append({
             "name": name, "dept": dept, "target": target, "completed": completed,
             "unfilled": unfilled,
@@ -232,7 +230,7 @@ def build_html(config, now, elapsed, people):
       <span class="muted small">{st['count']}人 · 目标 {_fmt_wan(st['target'])}</span></div>
     <div class="dept-rate {cls}">{_fmt_pct(st['rate'])} {diff_html}</div>
   </div>
-  <div class="dept-sub">累计 <b>{_fmt_wan(st['completed'])}</b> · 人均 {_fmt_wan(st['completed']/st['count'])} · 日均 {_fmt_wan(st['completed']/n_elapsed)}</div>
+  <div class="dept-sub">累计 <b>{_fmt_wan(st['completed'])}</b> · 人均 {_fmt_wan(st['completed']/st['count'])} · 日均 {_fmt_wan(st['completed']/(n_elapsed or 1))}</div>
   <table class="mini"><thead><tr><th>#</th><th>姓名</th><th>完成</th><th>目标</th><th>完成率</th><th>进度差</th></tr></thead>
   <tbody>{mrows}</tbody></table>
 </div>""")
@@ -278,14 +276,10 @@ def build_html(config, now, elapsed, people):
             f'<td class="num muted">{_fmt_wan(st["target"])}</td>'
             f'<td class="num {cls}" style="font-weight:700">{_fmt_pct(st["rate"])}</td>'
             f'<td>{diff_html}</td>'
-            f'<td class="num">{_fmt_wan(st["completed"]/n_elapsed)}</td>'
+            f'<td class="num">{_fmt_wan(st["completed"]/(n_elapsed or 1))}</td>'
             f'<td class="num">{proj_txt}</td>'
             f'<td class="num">{unf_html}</td></tr>')
     dept_bc_html = "\n".join(dept_bc_rows)
-    # 播报口径的整体数
-    bc_total_completed = sum(p["completed"] for p in bc_people)
-    bc_total_target = sum(p["target"] for p in bc_people)
-    bc_overall_rate = bc_total_completed / bc_total_target if bc_total_target else 0
 
     weekday = "一二三四五六日"[now.weekday()]
     gen_time = now.strftime("%Y-%m-%d %H:%M")
