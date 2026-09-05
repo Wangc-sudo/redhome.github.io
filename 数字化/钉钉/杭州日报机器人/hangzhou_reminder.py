@@ -23,6 +23,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from common.dingtalk import DingTalkClient
+from common.test_group import resolve_target
 
 CONFIG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 STATE_FILE = BASE_DIR / ".reminder_state.json"
@@ -98,11 +99,11 @@ def fetch_status(dt, day):
 
 
 def send_group(title, text, at_ids=None):
-    robot = CONFIG["robot"]
+    robot = resolve_target(CONFIG["robot"])
     client = DingTalk(CONFIG["dingtalk"])
     r = client.send_group_markdown(robot["robotCode"], robot["openConversationId"],
                                    title, text, at_user_ids=at_ids)
-    log(f"已发群消息: {title} (at={at_ids})")
+    log(f"已发群消息: {title} (at={at_ids}) -> {robot.get('groupName', 'unknown')}")
     return r
 
 
