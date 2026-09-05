@@ -30,6 +30,51 @@ class TestResolveTarget(unittest.TestCase):
         result = test_group.resolve_target(original)
         self.assertEqual(result, original)
 
+    def test_test_mode_overrides_open_conversation_id(self):
+        os.environ["TEST_MODE"] = "1"
+        original = {"robotCode": "rc", "openConversationId": "prod-cid"}
+        test_group.load_test_groups = lambda path=None: {
+            "default": {
+                "groupName": "功能验证群",
+                "groupNumber": "197925004762",
+                "openConversationId": "test-cid",
+            }
+        }
+        result = test_group.resolve_target(original)
+        self.assertEqual(result["robotCode"], "rc")
+        self.assertEqual(result["openConversationId"], "test-cid")
+        self.assertEqual(result["groupName"], "功能验证群")
+        self.assertEqual(result["mode"], "groupSend")
+
+    def test_explicit_mode_overrides_env(self):
+        os.environ["TEST_MODE"] = "1"
+        original = {"robotCode": "rc", "openConversationId": "prod-cid"}
+        test_group.load_test_groups = lambda path=None: {
+            "default": {"openConversationId": "test-cid"}
+        }
+        result = test_group.resolve_target(original, mode="prod")
+        self.assertEqual(result, original)
+
+    def test_webhook_test_group(self):
+        os.environ["TEST_MODE"] = "1"
+        original = {
+            "mode": "webhook",
+            "webhook": "https://prod.example.com/webhook",
+            "secret": "prod-secret",
+        }
+        test_group.load_test_groups = lambda path=None: {
+            "default": {
+                "groupName": "功能验证群",
+                "webhook": "https://test.example.com/webhook",
+                "secret": "test-secret",
+            }
+        }
+        result = test_group.resolve_target(original)
+        self.assertEqual(result["mode"], "webhook")
+        self.assertEqual(result["webhook"], "https://test.example.com/webhook")
+        self.assertEqual(result["secret"], "test-secret")
+        self.assertNotIn("openConversationId", result)
+
 
 if __name__ == "__main__":
     unittest.main()
