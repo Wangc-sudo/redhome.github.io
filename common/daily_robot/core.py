@@ -192,7 +192,10 @@ def _load_input(path):
     path = Path(path)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
     items = data.get("deptUserList") or []
     result = {}
     for it in items:
@@ -223,6 +226,9 @@ def org_sync(config, inputs, active_region):
     if not snapshots:
         log(log_dir, "无任何快照输入，退出")
         return False, []
+
+    if active_region not in snapshots:
+        log(log_dir, f"警告：未找到 active_region={active_region} 的快照，成员列表不会更新")
 
     changes = []
     active_updates = []
