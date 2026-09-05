@@ -173,3 +173,29 @@ class DingTalkClient:
         if result.get("errcode") != 0:
             raise DingTalkError(f"webhook 发送失败: {result}")
         return result
+
+
+def send_markdown(client, push_cfg, title, text, at_user_ids=None, at_mobiles=None):
+    """按 push_cfg.mode 自动选择 webhook 或企业机器人 groupSend 发送 Markdown。
+
+    :param client: DingTalkClient 实例
+    :param push_cfg: 推送配置，需包含 mode（webhook/groupSend）及对应字段；
+                     通常先经 common.test_group.resolve_target 处理以支持 TEST_MODE。
+    :param title: 消息标题
+    :param text: markdown 正文
+    :param at_user_ids: groupSend 模式下要 @ 的用户 ID 列表
+    :param at_mobiles: webhook 模式下要 @ 的手机号列表
+    """
+    mode = push_cfg.get("mode", "webhook")
+    if mode == "webhook":
+        return client.send_webhook_markdown(
+            push_cfg["webhook"], title, text,
+            secret=push_cfg.get("secret", ""),
+            at_mobiles=at_mobiles,
+        )
+    if mode == "groupSend":
+        return client.send_group_markdown(
+            push_cfg["robotCode"], push_cfg["openConversationId"],
+            title, text, at_user_ids=at_user_ids,
+        )
+    raise DingTalkError(f"不支持的推送模式: {mode}")

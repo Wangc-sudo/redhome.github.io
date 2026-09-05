@@ -26,9 +26,15 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.dingtalk import DingTalkClient, send_markdown
+from common.test_group import resolve_target
 from wdt_client import WdtClient
 
-BASE_DIR = Path(__file__).parent
 STATE_FILE = BASE_DIR / ".order_risk_state.json"
 
 RISK_THRESHOLD = 3          # 同店铺同地区同日最低订单数
@@ -61,7 +67,7 @@ def pull_orders(client, day):
         end = f"{day} {hour:02d}:59:59"
         page = 0
         while True:
-            d = client.call("sales.TradeQuery.queryWithDetail",
+            d = dt_client.call("sales.TradeQuery.queryWithDetail",
                             {"start_time": start, "end_time": end,
                              "time_type": "2", "status": TARGET_STATUSES},
                             page_size=100, page_no=page, calc_total=0)
@@ -143,18 +149,6 @@ def build_messages(groups, day, skipped_pdd):
     return msgs
 
 
-def send_webhook(webhook, title, text):
-    import urllib.request
-    body = json.dumps({"msgtype": "markdown",
-                       "markdown": {"title": title, "text": text}}).encode()
-    req = urllib.request.Request(webhook, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        r = json.loads(resp.read().decode())
-    if r.get("errcode") != 0:
-        raise RuntimeError(f"webhook 失败: {r}")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--today", action="store_true")
@@ -171,7 +165,9 @@ def main():
 
     cfg = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
     wdt = json.loads((BASE_DIR / "wdt_credentials.json").read_text(encoding="utf-8"))
-    client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    dt_client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    client = DingTalkClient.from_config(cfg["dingtalk"])
+    push = resolve_target(cfg["push"])
 
     print(f"拉取 {day} 订单（0-{end_hour}点，60分钟切片）...")
     orders = []
@@ -181,7 +177,7 @@ def main():
         end = f"{day} {hour:02d}:59:59"
         page = 0
         while True:
-            d = client.call("sales.TradeQuery.queryWithDetail",
+            d = dt_client.call("sales.TradeQuery.queryWithDetail",
                             {"start_time": start, "end_time": end,
                              "time_type": "2", "status": TARGET_STATUSES},
                             page_size=100, page_no=page, calc_total=0)
@@ -212,9 +208,10 @@ def main():
         return 0
 
     for m in msgs:
-        send_webhook(cfg["push"]["webhook"], f"订单风险防控提醒 {day}", m)
+        send_markdown(client, push, f"订单风险防控提醒 {day}", m)
         time.sleep(1)
-    print(f"已推送订单风控提醒")
+    print(f"已推送订单风控提醒"+
+          f" -> {push.get('groupName', push.get('webhook', 'unknown'))}")
     return 0
 
 

@@ -26,9 +26,15 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.dingtalk import DingTalkClient, send_markdown
+from common.test_group import resolve_target
 from wdt_client import WdtClient
 
-BASE_DIR = Path(__file__).parent
 STATE_FILE = BASE_DIR / ".stock_alert_state.json"
 
 # ---------- 配置（沿用旧参数） ----------
@@ -229,18 +235,6 @@ def build_messages(urgent, oversold):
     return msgs
 
 
-def send_webhook(webhook, title, text):
-    import urllib.request
-    body = json.dumps({"msgtype": "markdown",
-                       "markdown": {"title": title, "text": text}}).encode()
-    req = urllib.request.Request(webhook, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        r = json.loads(resp.read().decode())
-    if r.get("errcode") != 0:
-        raise RuntimeError(f"webhook 失败: {r}")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
@@ -249,12 +243,14 @@ def main():
 
     cfg = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
     wdt = json.loads((BASE_DIR / "wdt_credentials.json").read_text(encoding="utf-8"))
-    client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    dt_client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    client = DingTalkClient.from_config(cfg["dingtalk"])
+    push = resolve_target(cfg["push"])
 
     if args.fresh and STOCK_CACHE.exists():
         STOCK_CACHE.unlink()
 
-    stock_map = get_stock(client)
+    stock_map = get_stock(dt_client)
     print(f"  共 {len(stock_map)} 个SKU")
 
     urgent, oversold = forecast(stock_map)
@@ -276,10 +272,11 @@ def main():
         return 0
 
     for m in msgs:
-        send_webhook(cfg["push"]["webhook"], "库存补货提醒", m)
+        send_markdown(client, push, "库存补货提醒", m)
         time.sleep(1)
     save_state(state)
-    print(f"已推送库存预警（紧急{len(new_urgent)} 超卖{len(new_oversold)}）")
+    print(f"已推送库存预警（紧急{len(new_urgent)} 超卖{len(new_oversold)}）"+
+          f" -> {push.get('groupName', push.get('webhook', 'unknown'))}")
     return 0
 
 

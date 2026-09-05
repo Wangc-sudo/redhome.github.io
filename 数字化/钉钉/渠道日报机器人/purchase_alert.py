@@ -23,9 +23,15 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.dingtalk import DingTalkClient, send_markdown
+from common.test_group import resolve_target
 from wdt_client import WdtClient
 
-BASE_DIR = Path(__file__).parent
 STATE_FILE = BASE_DIR / ".purchase_state.json"
 STATE_KEEP = 5000  # 状态文件最多保留条数
 
@@ -110,19 +116,6 @@ def build_markdown(new_rows):
     return "\n".join(lines)
 
 
-def send_webhook(webhook, title, text):
-    import urllib.request
-    body = json.dumps({"msgtype": "markdown",
-                       "markdown": {"title": title, "text": text}}).encode()
-    req = urllib.request.Request(webhook, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        r = json.loads(resp.read().decode())
-    if r.get("errcode") != 0:
-        raise RuntimeError(f"webhook 失败: {r}")
-    return r
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=int, default=1, help="回溯小时数，默认1")
@@ -131,9 +124,11 @@ def main():
 
     cfg = load_config()
     wdt_cfg = json.loads((BASE_DIR / "wdt_credentials.json").read_text(encoding="utf-8"))
-    client = WdtClient(wdt_cfg["sid"], wdt_cfg["appkey"], wdt_cfg["appsecret"])
+    dt_client = WdtClient(wdt_cfg["sid"], wdt_cfg["appkey"], wdt_cfg["appsecret"])
+    client = DingTalkClient.from_config(cfg["dingtalk"])
+    push = resolve_target(cfg["push"])
 
-    rows = pull_purchase(client, args.hours)
+    rows = pull_purchase(dt_client, args.hours)
     state = load_state()
     new_rows = [r for r in rows if r["key"] not in state]
     print(f"拉取 {len(rows)} 条明细，新提醒 {len(new_rows)} 条")
@@ -147,10 +142,11 @@ def main():
         print("\n" + md + "\n")
         return 0
 
-    send_webhook(cfg["push"]["webhook"], "采购入库提醒", md)
+    send_markdown(client, push, "采购入库提醒", md)
     state.update(r["key"] for r in new_rows)
     save_state(state)
-    print(f"已推送 {len(new_rows)} 条新增采购入库提醒")
+    print(f"已推送 {len(new_rows)} 条新增采购入库提醒"+
+          f" -> {push.get('groupName', push.get('webhook', 'unknown'))}")
     return 0
 
 

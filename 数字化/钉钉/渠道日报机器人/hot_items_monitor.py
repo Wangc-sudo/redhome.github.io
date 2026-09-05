@@ -24,9 +24,15 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.dingtalk import DingTalkClient, send_markdown
+from common.test_group import resolve_target
 from wdt_client import WdtClient
 
-BASE_DIR = Path(__file__).parent
 STOCK_CACHE = BASE_DIR / ".stock_cache.json"  # 与 stock_alert 共用缓存
 HTML_OUT_DIR = BASE_DIR / "hot-items-page"    # 全文HTML输出目录（供托管发布）
 
@@ -258,18 +264,6 @@ def build_message(watch, by_sales):
     return "\n".join(lines)
 
 
-def send_webhook(webhook, title, text):
-    import urllib.request
-    body = json.dumps({"msgtype": "markdown",
-                       "markdown": {"title": title, "text": text}}).encode()
-    req = urllib.request.Request(webhook, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        r = json.loads(resp.read().decode())
-    if r.get("errcode") != 0:
-        raise RuntimeError(f"webhook 失败: {r}")
-
-
 def cfg_page_url():
     """从 config.json 读取全文托管页地址（hot_items_page_url），未配置返回 None"""
     try:
@@ -376,12 +370,14 @@ def main():
 
     cfg = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
     wdt = json.loads((BASE_DIR / "wdt_credentials.json").read_text(encoding="utf-8"))
-    client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    dt_client = WdtClient(wdt["sid"], wdt["appkey"], wdt["appsecret"])
+    client = DingTalkClient.from_config(cfg["dingtalk"])
+    push = resolve_target(cfg["push"])
 
     if args.fresh and STOCK_CACHE.exists():
         STOCK_CACHE.unlink()
 
-    stock_map = get_stock(client)
+    stock_map = get_stock(dt_client)
     print(f"共 {len(stock_map)} SKU")
     watch, by_sales = calc_watchlist(stock_map)
     n_out = sum(1 for x in watch if x["status"] == "断货中")
@@ -397,8 +393,9 @@ def main():
         print("\n" + msg + "\n")
         return 0
 
-    send_webhook(cfg["push"]["webhook"], "热卖品监控", msg)
-    print("已推送热卖品监控")
+    send_markdown(client, push, "热卖品监控", msg)
+    print("已推送热卖品监控"+
+          f" -> {push.get('groupName', push.get('webhook', 'unknown'))}")
     return 0
 
 

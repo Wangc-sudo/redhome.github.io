@@ -22,9 +22,15 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-TZ_CN = timezone(timedelta(hours=8))  # 钉钉 date 字段为 CST 午夜毫秒时间戳
-
 BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.dingtalk import DingTalkClient, send_markdown
+from common.test_group import resolve_target
+
+TZ_CN = timezone(timedelta(hours=8))  # 钉钉 date 字段为 CST 午夜毫秒时间戳
 
 # ---------- 配置 ----------
 BASE_ID = "QOG9lyrgJPmxNQlwIw4QDd6q8zN67Mw4"
@@ -208,13 +214,11 @@ def build_md(day_str, today, prev, mtd, targets):
     return "\n".join(lines)
 
 
-def load_push_config():
-    """webhook 从 config.json 读（与原 main.py 共用），读不到则报错"""
+def load_config():
+    """读取 config.json（与原 main.py 共用），读不到则报错"""
     cfg_path = BASE_DIR / "config.json"
     if cfg_path.exists():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        return (cfg["dingtalk"]["appKey"], cfg["dingtalk"]["appSecret"],
-                cfg["dingtalk"]["operatorId"], cfg["push"]["webhook"])
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
     print("未找到 config.json")
     sys.exit(1)
 
@@ -228,8 +232,11 @@ def main():
     day = args.date or (datetime.now(TZ_CN).date() - timedelta(days=1)).isoformat()
     prev = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    app_key, app_secret, operator_id, webhook = load_push_config()
-    dt = DT(app_key, app_secret, operator_id)
+    cfg = load_config()
+    dt = DT(cfg["dingtalk"]["appKey"], cfg["dingtalk"]["appSecret"],
+            cfg["dingtalk"]["operatorId"])
+    client = DingTalkClient.from_config(cfg["dingtalk"])
+    push = resolve_target(cfg["push"])
 
     # 表名 → sheetId
     sheets = {s["name"]: s["id"] for s in dt.sheets()}
@@ -254,8 +261,8 @@ def main():
         print("\n" + md + "\n")
         return
 
-    dt.send_webhook_markdown(webhook, f"渠道日报 {day}", md)
-    print("推送成功")
+    send_markdown(client, push, f"渠道日报 {day}", md)
+    print(f"推送成功 -> {push.get('groupName', push.get('webhook', 'unknown'))}")
 
 
 if __name__ == "__main__":
