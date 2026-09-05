@@ -91,17 +91,16 @@ def send_group(config, title, text, at_ids=None):
 
 
 def do_remind(config, state, now, day):
+    log_dir = Path(config.get("logDir", Path(__file__).parent / "logs"))
     key = f"remind_{now:%Y%m%d}"
     if state.get(key):
-        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
-            "今日提醒已发过，跳过")
+        log(log_dir, "今日提醒已发过，跳过")
         return
 
-    filled, unfilled, total, skipped = fetch_status(config)
-    log(Path(config.get("logDir", Path(__file__).parent / "logs")),
-        f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    filled, unfilled, _, _ = fetch_status(config)
+    log(log_dir, f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
     if not unfilled:
-        log(Path(config.get("logDir", Path(__file__).parent / "logs")), "全员已填写，不发提醒")
+        log(log_dir, "全员已填写，不发提醒")
         state[key] = datetime.now().isoformat()
         save_state(config["stateFile"], state)
         return
@@ -135,31 +134,33 @@ def do_remind(config, state, now, day):
 
 
 def do_check(config, state, now, day):
+    log_dir = Path(config.get("logDir", Path(__file__).parent / "logs"))
     key = f"check_{now:%Y%m%d}"
     if state.get(key):
-        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
-            "今日检查已发过，跳过")
+        log(log_dir, "今日检查已发过，跳过")
         print("NO_ACTION: 今日检查已发过")
         return
 
-    filled, unfilled, total, skipped = fetch_status(config)
-    log(Path(config.get("logDir", Path(__file__).parent / "logs")),
-        f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    filled, unfilled, _, _ = fetch_status(config)
+    log(log_dir, f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
     if not unfilled:
-        log(Path(config.get("logDir", Path(__file__).parent / "logs")), "全员已填写，不发催办")
+        log(log_dir, "全员已填写，不发催办")
         state[key] = datetime.now().isoformat()
         save_state(config["stateFile"], state)
         print("NO_ACTION: 全员已填写")
         return
 
     members = config["members"]
-    cc = config["ccUsers"]
+    cc = config.get("ccUsers", {})
     ding_ids = [members[n] for n in unfilled if members.get(n)]
     missing = [n for n in unfilled if not members.get(n)]
     weekday = "一二三四五六日"[now.weekday()]
     url = config["base"]["tableUrl"]
     names_text = "、".join(unfilled)
-    at_ids = list(ding_ids) + [cc["沈聪"]]
+    at_ids = list(ding_ids)
+    cc_shen = cc.get("沈聪")
+    if cc_shen:
+        at_ids.append(cc_shen)
     display = config["region"].get("displayName", config["region"]["name"])
 
     lines = [f"### ⏰ 销售日报未填写（{display} {now.month}月{day}日）", ""]
@@ -184,8 +185,7 @@ def do_check(config, state, now, day):
         print("DING_CMD_START")
         print(cmd)
         print("DING_CMD_END")
-        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
-            f"待执行DING: {names_text}")
+        log(log_dir, f"待执行DING: {names_text}")
 
 
 def org_sync(config, inputs, active_region):
