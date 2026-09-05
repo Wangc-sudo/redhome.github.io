@@ -91,11 +91,101 @@ def send_group(config, title, text, at_ids=None):
 
 
 def do_remind(config, state, now, day):
-    raise NotImplementedError
+    key = f"remind_{now:%Y%m%d}"
+    if state.get(key):
+        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
+            "今日提醒已发过，跳过")
+        return
+
+    filled, unfilled, total, skipped = fetch_status(config)
+    log(Path(config.get("logDir", Path(__file__).parent / "logs")),
+        f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    if not unfilled:
+        log(Path(config.get("logDir", Path(__file__).parent / "logs")), "全员已填写，不发提醒")
+        state[key] = datetime.now().isoformat()
+        save_state(config["stateFile"], state)
+        return
+
+    members = config["members"]
+    at_ids, missing = [], []
+    for name in unfilled:
+        uid = members.get(name)
+        if uid:
+            at_ids.append(uid)
+        else:
+            missing.append(name)
+
+    weekday = "一二三四五六日"[now.weekday()]
+    url = config["base"]["tableUrl"]
+    display = config["region"].get("displayName", config["region"]["name"])
+    lines = [f"### 📋 销售日报填写提醒（{display} {now.month}月{day}日 周{weekday}）", ""]
+    lines.append(f"以下 **{len(unfilled)}** 位同事还未填写今日销售日报，请尽快填写：")
+    lines.append("")
+    lines.append(f"**{'、'.join(unfilled)}**")
+    lines.append("")
+    lines.append("也可直接在群里 **@提醒事项 + 数字** 报数（如 `@提醒事项 12800`，报 0 也行）")
+    lines.append("")
+    lines.append(f"[点此填写]({url})")
+    if missing:
+        lines.append("")
+        lines.append(f"（{'、'.join(missing)} 未在通讯录映射中，无法@，请手动提醒）")
+    send_group(config, "销售日报填写提醒", "\n".join(lines), at_ids=at_ids)
+    state[key] = datetime.now().isoformat()
+    save_state(config["stateFile"], state)
 
 
 def do_check(config, state, now, day):
-    raise NotImplementedError
+    key = f"check_{now:%Y%m%d}"
+    if state.get(key):
+        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
+            "今日检查已发过，跳过")
+        print("NO_ACTION: 今日检查已发过")
+        return
+
+    filled, unfilled, total, skipped = fetch_status(config)
+    log(Path(config.get("logDir", Path(__file__).parent / "logs")),
+        f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    if not unfilled:
+        log(Path(config.get("logDir", Path(__file__).parent / "logs")), "全员已填写，不发催办")
+        state[key] = datetime.now().isoformat()
+        save_state(config["stateFile"], state)
+        print("NO_ACTION: 全员已填写")
+        return
+
+    members = config["members"]
+    cc = config["ccUsers"]
+    ding_ids = [members[n] for n in unfilled if members.get(n)]
+    missing = [n for n in unfilled if not members.get(n)]
+    weekday = "一二三四五六日"[now.weekday()]
+    url = config["base"]["tableUrl"]
+    names_text = "、".join(unfilled)
+    at_ids = list(ding_ids) + [cc["沈聪"]]
+    display = config["region"].get("displayName", config["region"]["name"])
+
+    lines = [f"### ⏰ 销售日报未填写（{display} {now.month}月{day}日）", ""]
+    lines.append(f"截至 20:00，以下 **{len(unfilled)}** 位同事仍未填写：")
+    lines.append("")
+    lines.append(f"**{names_text}**")
+    lines.append("")
+    lines.append("已同步 DING 提醒以上人员，请在群里 @提醒事项 报数或直接填写。")
+    lines.append(f"[点此填写]({url})")
+    if missing:
+        lines.append("")
+        lines.append(f"（{'、'.join(missing)} 未在通讯录映射中，无法@，请手动提醒）")
+    send_group(config, "销售日报未填写", "\n".join(lines), at_ids=at_ids)
+    state[key] = datetime.now().isoformat()
+    save_state(config["stateFile"], state)
+
+    if ding_ids:
+        content = (f"【销售日报催办】{display} {now.month}月{day}日（周{weekday}）：你还未填写今日销售日报，"
+                   f"请在群里 @提醒事项 报数或填写表格 {url}")
+        cmd = (f'dws ding message send --robot-code {config["robot"]["robotCode"]} '
+               f'--users {",".join(ding_ids)} --content "{content}" --type app --format json')
+        print("DING_CMD_START")
+        print(cmd)
+        print("DING_CMD_END")
+        log(Path(config.get("logDir", Path(__file__).parent / "logs")),
+            f"待执行DING: {names_text}")
 
 
 def org_sync(config, inputs, active_region):
