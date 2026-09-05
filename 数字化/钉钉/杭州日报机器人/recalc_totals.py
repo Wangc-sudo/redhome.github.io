@@ -10,8 +10,10 @@
 - 只在有差异时写入，减少 API 调用
 """
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\9255589586e631a2\.qwenworkcn\workspace\mtmi1epasnu4mygi\outputs\hangzhou-report-robot")
+BASE_DIR = Path(__file__).parent
+sys.path.insert(0, str(BASE_DIR))
 from hangzhou_reminder import DingTalk, CONFIG
 
 client = DingTalk(CONFIG["dingtalk"])
