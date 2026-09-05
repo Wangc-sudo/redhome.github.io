@@ -389,4 +389,59 @@ def recalc_totals(config):
 
 
 def check_data(config):
-    raise NotImplementedError
+    client = DingTalkClient.from_config(config["dingtalk"])
+    base = config["base"]
+    calendar = config["calendar"]
+    month = calendar["month"]
+    workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
+    target_col = f"{month}月销量目标（万）"
+    records = client.list_records(base["baseId"], base["tableId"])
+    problems = []
+
+    for rec in records:
+        f = rec.get("fields") or {}
+        name = f.get("责任人")
+        if not name:
+            problems.append(f"[空责任人行] id={rec.get('id')} keys={list(f.keys())[:5]}")
+            continue
+        if "合计" in str(name):
+            continue
+
+        for rest in calendar.get("restDays", []):
+            if f"{rest}日" in f:
+                problems.append(f"[{name}] 残留休息日列 {rest}日 = {f[f'{rest}日']}")
+
+        vals = {}
+        for d in workdays:
+            v = f.get(f"{d}日")
+            if v is not None and str(v).strip() != "":
+                try:
+                    vals[d] = float(str(v).replace(",", ""))
+                except ValueError:
+                    problems.append(f"[{name}] {d}日 非数值: {v!r}")
+
+        today = datetime.now().day
+        suspicious_future = {d: v for d, v in vals.items() if d > today and v > 0}
+        if suspicious_future:
+            problems.append(f"[{name}] 未来日期已有大额数据: {suspicious_future}")
+
+        day_sum = sum(vals.values())
+        try:
+            rate = float(str(f.get("达成率")))
+            target = float(str(f.get(target_col)).replace(",", ""))
+            if target > 0 and abs(rate - day_sum / target) > 0.005:
+                problems.append(f"[{name}] 达成率({rate:.4f}) 与累计/目标({day_sum/target:.4f}) 不符")
+        except (TypeError, ValueError):
+            pass
+
+        print(f"{name}: 已填{len(vals)}列 累计={int(day_sum)}")
+
+    print()
+    print("=" * 60)
+    if problems:
+        print(f"发现 {len(problems)} 个问题:")
+        for p in problems:
+            print(" -", p)
+    else:
+        print("数据体检通过，无问题")
+    return problems
