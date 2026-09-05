@@ -14,97 +14,25 @@
 """
 import json
 import sys
-import time
-import urllib.request
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
+_REPO_ROOT = BASE_DIR.parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from common.dingtalk import DingTalkClient
+
 CONFIG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 STATE_FILE = BASE_DIR / ".reminder_state.json"
 LOG_DIR = BASE_DIR / "logs"
 
-
-def _http_json(url, method="GET", body=None, headers=None, timeout=15):
-    data = json.dumps(body).encode() if body is not None else None
-    hdr = {"Content-Type": "application/json"}
-    if headers:
-        hdr.update(headers)
-    req = urllib.request.Request(url, data=data, method=method, headers=hdr)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
-
-
-class DingTalk:
-    def __init__(self, cfg):
-        self.app_key = cfg["appKey"]
-        self.app_secret = cfg["appSecret"]
-        self.operator_id = cfg["operatorId"]
-        self._token = None
-        self._token_ts = 0.0
-        self._old_token = None
-        self._old_ts = 0.0
-
-    def token(self):
-        if self._token and time.time() - self._token_ts < 6000:
-            return self._token
-        r = _http_json("https://api.dingtalk.com/v1.0/oauth2/accessToken",
-                       method="POST",
-                       body={"appKey": self.app_key, "appSecret": self.app_secret})
-        if "accessToken" not in r:
-            raise RuntimeError(f"获取token失败: {r}")
-        self._token = r["accessToken"]
-        self._token_ts = time.time()
-        return self._token
-
-    def _headers(self):
-        return {"x-acs-dingtalk-access-token": self.token(),
-                "Content-Type": "application/json"}
-
-    # ---------- notable / AI表格 ----------
-    def list_fields(self, base_id, sheet_id):
-        url = (f"https://api.dingtalk.com/v1.0/notable/bases/{base_id}"
-               f"/sheets/{sheet_id}/fields?operatorId={self.operator_id}")
-        return _http_json(url, headers=self._headers()).get("value", [])
-
-    def list_records(self, base_id, sheet_id, page_size=100, max_pages=10):
-        records, next_token, page = [], "", 0
-        while page < max_pages:
-            url = (f"https://api.dingtalk.com/v1.0/notable/bases/{base_id}"
-                   f"/sheets/{sheet_id}/records?operatorId={self.operator_id}"
-                   f"&pageSize={page_size}")
-            if next_token:
-                url += f"&nextToken={next_token}"
-            data = _http_json(url, headers=self._headers())
-            records.extend(data.get("records", data.get("value", [])))
-            page += 1
-            if not data.get("hasMore") or not data.get("nextToken"):
-                break
-        return records
-
-    def update_records(self, base_id, sheet_id, updates):
-        """updates: [{id: recordId, fields: {字段名: 值}}]"""
-        url = (f"https://api.dingtalk.com/v1.0/notable/bases/{base_id}"
-               f"/sheets/{sheet_id}/records?operatorId={self.operator_id}")
-        return _http_json(url, method="PUT", body={"records": updates}, headers=self._headers())
-
-    # ---------- 群机器人消息（sampleMarkdownDX，支持@） ----------
-    def send_group_markdown(self, robot_code, conv_id, title, text, at_user_ids=None):
-        msg_param = {"title": title, "text": text}
-        if at_user_ids:
-            msg_param["atUserIds"] = at_user_ids
-        body = {
-            "robotCode": robot_code,
-            "openConversationId": conv_id,
-            "msgKey": "sampleMarkdownDX",
-            "msgParam": json.dumps(msg_param, ensure_ascii=False),
-        }
-        r = _http_json("https://api.dingtalk.com/v1.0/robot/groupMessages/send",
-                       method="POST", body=body, headers=self._headers())
-        if "errcode" in r and r["errcode"] not in (0, None):
-            raise RuntimeError(f"群消息发送失败: {r}")
-        return r
+# 兼容旧引用（hangzhou_listener / check_data / leaderboard_report / recalc_totals
+# 均从本模块 import DingTalk 并传 config 字典）——统一实现见 common/dingtalk.py
+def DingTalk(cfg):
+    """旧接口兼容: DingTalk({"appKey":..,"appSecret":..,"operatorId":..}) → DingTalkClient"""
+    return DingTalkClient.from_config(cfg)
 
 
 # ---------- 状态/日志 ----------

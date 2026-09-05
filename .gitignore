@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 
+# IDE（Visual Studio 等）
+.vs/
+.idea/
+*.suo
+
 # 运行日志与运行时状态（本地保留，不入库）
 logs/
 *.log
@@ -18,6 +23,9 @@ org_input_*.json
 !数字化/钉钉/榜单页面/.gitkeep
 数字化/钉钉/渠道日报机器人/hot-items-page/*
 !数字化/钉钉/渠道日报机器人/hot-items-page/.gitkeep
+
+# 榜单服务运行时数据（SQLite）
+数字化/钉钉/榜单服务/data/
 
 # 机密配置（含 appSecret/凭据，永不入库；模板见 config.example.json）
 config.json
