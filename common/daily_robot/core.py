@@ -397,6 +397,7 @@ def check_data(config):
     target_col = f"{month}月销量目标（万）"
     records = client.list_records(base["baseId"], base["tableId"])
     problems = []
+    today = datetime.now().day
 
     for rec in records:
         f = rec.get("fields") or {}
@@ -420,7 +421,6 @@ def check_data(config):
                 except ValueError:
                     problems.append(f"[{name}] {d}日 非数值: {v!r}")
 
-        today = datetime.now().day
         suspicious_future = {d: v for d, v in vals.items() if d > today and v > 0}
         if suspicious_future:
             problems.append(f"[{name}] 未来日期已有大额数据: {suspicious_future}")
