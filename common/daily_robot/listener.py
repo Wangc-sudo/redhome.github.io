@@ -3,6 +3,7 @@ import json
 import re
 import sys
 import time as _t
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -91,7 +92,7 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
         try:
             self._handle_report(incoming, text, sender_uid, sender_name)
         except Exception as e:
-            self.log(f"处理异常: {e}")
+            self.log(f"处理异常: {traceback.format_exc()}")
             try:
                 self._reply(incoming, f"⚠️ 处理报数时出错：{e}")
             except Exception:
@@ -179,5 +180,5 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
             tgt_disp = int(target) if target == int(target) else target
             return f"{total}", f"{tgt_disp}", ratio_str
         except Exception as e:
-            self.log(f"计算完成比例失败: {e}")
+            self.log(f"计算完成比例失败: {traceback.format_exc()}")
             return None, None, None
