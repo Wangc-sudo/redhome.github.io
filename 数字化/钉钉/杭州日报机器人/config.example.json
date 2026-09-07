@@ -1,5 +1,15 @@
 {
   "_说明": "杭州销售日报提醒机器人配置模板。复制为 config.json 并填写真实值。凭据同渠道日报机器人（企业应用「提醒事项」）。换月建新表后需更新 base/tableId/calendar。",
+  "region": {
+    "name": "hangzhou",
+    "displayName": "杭州",
+    "activeOrgRegion": "hangzhou",
+    "deptOrder": ["杭中", "滨萧", "余杭"],
+    "deptLabel": {"杭州运营总监": "运营总监"},
+    "broadcastExclude": ["余发兴"],
+    "totalPrefixes": ["杭中", "滨萧", "余杭"],
+    "allDeptNames": ["杭中", "滨萧", "余杭", "杭州运营总监"]
+  },
   "dingtalk": {
     "appKey": "<企业应用AppKey>",
     "appSecret": "<企业应用AppSecret>",
@@ -32,6 +42,7 @@
     "lastSync": "2026-09-05T00:06:43"
   },
   "robot": {
+    "mode": "groupSend",
     "robotCode": "<机器人robotCode>",
     "openConversationId": "<群openConversationId>",
     "groupName": "线下事业部杭州日报群"
