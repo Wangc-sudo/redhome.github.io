@@ -1,0 +1,55 @@
+{
+  "_说明": "绍兴销售日报提醒机器人配置模板。复制为 config.json 并填写真实值。凭据同杭州机器人（企业应用「提醒事项」）。换月建新表后需更新 base/tableId/calendar。",
+  "region": {
+    "name": "shaoxing",
+    "displayName": "绍兴",
+    "activeOrgRegion": "shaoxing",
+    "deptOrder": ["绍兴", "诸暨", "绍兴运营总监"],
+    "deptLabel": {"绍兴运营总监": "运营总监"},
+    "broadcastExclude": [],
+    "totalPrefixes": ["绍兴", "诸暨"],
+    "allDeptNames": ["绍兴", "诸暨", "绍兴运营总监"]
+  },
+  "dingtalk": {
+    "appKey": "<企业应用AppKey>",
+    "appSecret": "<企业应用AppSecret>",
+    "operatorId": "<操作人unionId>"
+  },
+  "base": {
+    "baseId": "N7dx2rn0Jbl4O5yguNdqpvg1WMGjLRb3",
+    "tableId": "mgqo9inoj99gtv5cfii9r",
+    "tableUrl": "https://alidocs.dingtalk.com/i/nodes/N7dx2rn0Jbl4O5yguNdqpvg1WMGjLRb3?entrance=data&sheetId=mgqo9inoj99gtv5cfii9r"
+  },
+  "calendar": {
+    "month": 9,
+    "restDays": [6, 13, 19, 25, 26, 27],
+    "_说明": "当月休息日列表，依据钉钉考勤核验。每月换表时更新。"
+  },
+  "org": {
+    "rootDeptId": 1050135497,
+    "aliases": {},
+    "_说明": "组织同步档案（org_sync.py 维护）。",
+    "depts": {
+      "shaoxing": [1050416052, 1049663672, 1050408252]
+    },
+    "archives": {
+      "shaoxing": {}
+    },
+    "lastSync": ""
+  },
+  "robot": {
+    "mode": "groupSend",
+    "robotCode": "<机器人robotCode>",
+    "openConversationId": "cidO7oMaE/xLi8uyyHj4t2tgw==",
+    "groupName": "线下绍兴日报群"
+  },
+  "members": {},
+  "ccUsers": {
+    "_说明": "20:00 催办时固定@的人",
+    "沈聪": "<userId>"
+  },
+  "schedule": {
+    "remindHour": 18,
+    "checkHour": 20
+  }
+}
