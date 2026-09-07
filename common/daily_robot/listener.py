@@ -62,6 +62,7 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
                     m[str(name).strip()] = rec["id"]
             self._name2rid = m
             self.log(f"记录映射已加载: {len(m)} 人")
+        return self._name2rid
 
     def _reply(self, incoming, text):
         self.reply_text(text, incoming)
