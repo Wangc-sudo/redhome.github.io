@@ -1,0 +1,94 @@
+2026-06  (type=number)
+公司主体  (type=text)
+2026-12  (type=number)
+2026-09  (type=number)
+店铺名称  (type=text)
+2026-04  (type=number)
+平台  (type=singleSelect)
+2026-07  (type=number)
+2026-02  (type=number)
+2026-05  (type=number)
+2026-03  (type=number)
+2026-08  (type=number)
+费用项目  (type=singleSelect)
+2026-10  (type=number)
+2026-01  (type=number)
+期初余额  (type=number)
+2026-11  (type=number)
+填写人  (type=singleSelect)
+
+Total: 18 fields
+[
+  {
+    "name": "2026-06",
+    "type": "number"
+  },
+  {
+    "name": "公司主体",
+    "type": "text"
+  },
+  {
+    "name": "2026-12",
+    "type": "number"
+  },
+  {
+    "name": "2026-09",
+    "type": "number"
+  },
+  {
+    "name": "店铺名称",
+    "type": "text"
+  },
+  {
+    "name": "2026-04",
+    "type": "number"
+  },
+  {
+    "name": "平台",
+    "type": "singleSelect"
+  },
+  {
+    "name": "2026-07",
+    "type": "number"
+  },
+  {
+    "name": "2026-02",
+    "type": "number"
+  },
+  {
+    "name": "2026-05",
+    "type": "number"
+  },
+  {
+    "name": "2026-03",
+    "type": "number"
+  },
+  {
+    "name": "2026-08",
+    "type": "number"
+  },
+  {
+    "name": "费用项目",
+    "type": "singleSelect"
+  },
+  {
+    "name": "2026-10",
+    "type": "number"
+  },
+  {
+    "name": "2026-01",
+    "type": "number"
+  },
+  {
+    "name": "期初余额",
+    "type": "number"
+  },
+  {
+    "name": "2026-11",
+    "type": "number"
+  },
+  {
+    "name": "填写人",
+    "type": "singleSelect"
+  }
+]

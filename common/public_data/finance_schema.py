@@ -287,6 +287,36 @@ _FIN_OFFLINE_DEPOSIT_OTHER_RECEIVABLES = _t("fin_offline_deposit_other_receivabl
 ])
 
 
+_DAILY_REPORT_OFFLINE = _t("daily_report_offline", [
+    _c("region", "VARCHAR(50)", "text"),
+    _c("responsible_person", "VARCHAR(255)", "text"),
+    _c("department", "VARCHAR(255)", "text"),
+    _c("business_date", "DATE", "date"),
+    _c("sales_amount", "DECIMAL(20,4)", "currency"),
+    _c("daily_target", "DECIMAL(20,4)", "currency"),
+    _c("achievement_rate", "DECIMAL(20,4)", "currency"),
+    _c("monthly_target", "DECIMAL(20,4)", "currency"),
+    _c("note", "TEXT", "text"),
+], [
+    _idx("idx_region_date", "region", "business_date"),
+    _idx("idx_person_date", "responsible_person", "business_date"),
+])
+
+
+_CHANNEL_DAILY_SALES = _t("channel_daily_sales", [
+    _c("channel", "VARCHAR(50)", "text"),
+    _c("store_name", "VARCHAR(255)", "text"),
+    _c("business_date", "DATE", "date"),
+    _c("sales_amount", "DECIMAL(20,4)", "currency"),
+    _c("promotion_cost", "DECIMAL(20,4)", "currency"),
+    _c("roi", "DECIMAL(20,4)", "currency"),
+    _c("responsible_person", "JSON", "user"),
+], [
+    _idx("idx_channel_date", "channel", "business_date"),
+    _idx("idx_date_store", "business_date", "store_name"),
+])
+
+
 _TABLES = {
     "fin_store_commission": _FIN_STORE_COMMISSION,
     "fin_tax_declaration_2026": _FIN_TAX_DECLARATION_2026,
@@ -306,6 +336,8 @@ _TABLES = {
     "fin_daily_funds": _FIN_DAILY_FUNDS,
     "fin_offline_receivables_aging": _FIN_OFFLINE_RECEIVABLES_AGING,
     "fin_offline_deposit_other_receivables": _FIN_OFFLINE_DEPOSIT_OTHER_RECEIVABLES,
+    "daily_report_offline": _DAILY_REPORT_OFFLINE,
+    "channel_daily_sales": _CHANNEL_DAILY_SALES,
 }
 
 

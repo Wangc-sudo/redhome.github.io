@@ -5,7 +5,27 @@ from dataclasses import dataclass, field
 
 from common.public_data.db import named_lock, transaction
 from common.public_data.dingtalk_read import DingTalkReadError
+from common.public_data.transforms import apply_transform
 from common.public_data.wdt_read import PaginationLimitExceeded, WdtReadError
+
+
+def _transform_field_mapping(transform):
+    """Return field mapping entries for transform-generated fields.
+
+    These are synthetic source names (not real DingTalk fields) that the
+    transform injects into each record.  They map to themselves because
+    the post-transform field keys already match the target column names.
+    """
+    kind = transform["type"]
+    if kind == "melt":
+        mapping = {"business_date": "business_date",
+                   transform["value_column"]: transform["value_column"]}
+        for key in transform.get("inject", {}):
+            mapping[key] = key
+        return mapping
+    if kind == "inject":
+        return {key: key for key in transform["values"]}
+    return {}
 
 
 class LiveSyncError(RuntimeError):
@@ -86,6 +106,8 @@ class LiveSyncService:
             manifest_sha256=manifest.sha256,
             started_at=started_at,
         )
+        mart_conn = self._connections.mart
+        mart_conn.commit()
 
         datasets_summary = []
 
@@ -102,24 +124,25 @@ class LiveSyncService:
                 sync_run_id=run_id,
                 finished_at=self._now(),
             )
+            mart_conn.commit()
 
         except _ProjectionFailure as exc:
-            # Raw data was committed successfully but the mart summary
-            # step failed.  The run can be recovered later via
-            # ``rebuild_projection``.
             self._mart_repo.mark_projection_pending(
                 sync_run_id=run_id,
                 failure_code="projection_failed",
                 finished_at=self._now(),
             )
+            mart_conn.commit()
             raise exc.__cause__ from None
 
         except Exception as exc:
+            mart_conn.rollback()
             self._mart_repo.mark_failed(
                 sync_run_id=run_id,
                 failure_code=self._failure_code(exc),
                 finished_at=self._now(),
             )
+            mart_conn.commit()
             raise
 
         return SyncResult(run_id=run_id, datasets=datasets_summary)
@@ -182,6 +205,7 @@ class LiveSyncService:
             sync_run_id=sync_run_id,
             finished_at=self._now(),
         )
+        self._connections.mart.commit()
 
         return SyncResult(run_id=sync_run_id, datasets=datasets_summary)
 
@@ -200,8 +224,16 @@ class LiveSyncService:
         with named_lock(conn, lock_name):
             records = self._dingtalk_gateway.read_records(sheet)
 
-        # 3. Persist raw records inside a transaction.
+        # 3. Apply transform if configured (melt / inject).
+        if sheet.transform:
+            records = apply_transform(records, sheet.transform)
+
+        # 4. Build field mapping and persist raw records.
         field_mapping = {f.source_name: f.column for f in sheet.fields}
+        if sheet.transform:
+            field_mapping.update(
+                _transform_field_mapping(sheet.transform)
+            )
 
         with transaction(conn):
             self._dingtalk_repo.upsert_records(
@@ -212,10 +244,10 @@ class LiveSyncService:
                 synced_at=self._now(),
             )
 
-        # 4. Advance state.
+        # 5. Advance state.
         self._mart_repo.mark_raw_committed(run_id)
 
-        # 5. Save summary — if this fails, wrap as _ProjectionFailure so
+        # 6. Save summary — if this fails, wrap as _ProjectionFailure so
         #    the outer handler knows raw was already committed.
         try:
             return self._save_dingtalk_summary(sheet, records, run_id)

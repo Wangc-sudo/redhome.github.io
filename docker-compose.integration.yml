@@ -42,11 +42,11 @@ services:
     build:
       context: .
       dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
     depends_on:
       mysql:
         condition: service_healthy
     command:
-      - python3
       - -m
       - common.public_data.cli
       - live-sync

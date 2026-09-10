@@ -87,19 +87,36 @@ def build_gateways(credentials, connections):
     from common.public_data.wdt_read import WdtReadGateway
 
     dingtalk_creds = credentials["dingtalk"]
-    wdt_creds = credentials["wdt"]
+    wdt_creds = credentials.get("wdt", {})
 
     dingtalk_gateway = DingTalkReadGateway(
-        transport=None,  # placeholder -- real transport built from creds
         app_key=dingtalk_creds["app_key"],
         app_secret=dingtalk_creds["app_secret"],
         operator_id=dingtalk_creds["operator_id"],
     )
-    wdt_gateway = WdtReadGateway(
-        client=None,  # placeholder -- real client built from creds
-    )
+
+    # WDT gateway: build real client if creds look valid, else stub
+    wdt_call = _build_wdt_call(wdt_creds)
+    wdt_gateway = WdtReadGateway(call=wdt_call)
 
     return dingtalk_gateway, wdt_gateway
+
+
+def _build_wdt_call(wdt_creds):
+    """Return a WdtClient.call-compatible callable, or a stub if creds are placeholders."""
+    sid = wdt_creds.get("sid", "")
+    app_key = wdt_creds.get("app_key", "")
+    app_secret = wdt_creds.get("app_secret", "")
+
+    # Placeholder detection: if any field looks like the example template, return stub
+    if not sid or not app_key or not app_secret or "replace" in sid.lower():
+        def _wdt_stub(**kwargs):
+            raise RuntimeError("WDT credentials are placeholders; cannot call WDT API")
+        return _wdt_stub
+
+    from common.wdt.client import WdtClient
+    client = WdtClient(sid=sid, appkey=app_key, appsecret=app_secret)
+    return client.call
 
 
 def build_service(settings, credentials, manifest):
@@ -122,6 +139,7 @@ def build_service(settings, credentials, manifest):
     conns = _Connections()
     conns.dingtalk = dingtalk_conn
     conns.wdt = wdt_conn
+    conns.mart = mart_conn
 
     dingtalk_gateway, wdt_gateway = build_gateways(credentials, conns)
 
@@ -129,6 +147,7 @@ def build_service(settings, credentials, manifest):
     wdt_repo = WdtRawRepository(wdt_conn)
     mart_repo = MartRepository(mart_conn)
 
+    from datetime import datetime, timezone
     return LiveSyncService(
         dingtalk_gateway=dingtalk_gateway,
         wdt_gateway=wdt_gateway,
@@ -136,7 +155,7 @@ def build_service(settings, credentials, manifest):
         wdt_repository=wdt_repo,
         mart_repository=mart_repo,
         connections=conns,
-        now=None,
+        now=lambda: datetime.now(timezone.utc),
         new_run_id=lambda: str(uuid.uuid4()),
     )
 
@@ -297,3 +316,7 @@ def main(argv=None):
         sys.exit(1)
 
     handler(args)
+
+
+if __name__ == "__main__":
+    main()

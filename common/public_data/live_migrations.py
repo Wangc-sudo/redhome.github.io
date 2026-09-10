@@ -29,6 +29,7 @@ def _build_finance_table_ddl(table) -> str:
 
     column_defs.append("  PRIMARY KEY (`dingtalk_record_id`)")
     column_defs.append("  KEY `idx_synced_at` (`synced_at`)")
+    column_defs.append("  KEY `idx_sync_run_id` (`sync_run_id`)")
     for index in table.indexes:
         cols = ", ".join(_quote(c) for c in index.columns)
         column_defs.append(f"  KEY `{index.name}` ({cols})")
@@ -114,8 +115,35 @@ def _build_dingtalk_ddl() -> tuple[str, ...]:
     return tuple(ddls)
 
 
+_DIM_PRODUCT_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_product` (\n"
+    "  `spec_no` VARCHAR(100) NOT NULL,\n"
+    "  `barcode` VARCHAR(100) DEFAULT NULL,\n"
+    "  `goods_id` VARCHAR(50) DEFAULT NULL,\n"
+    "  `goods_no` VARCHAR(100) DEFAULT NULL,\n"
+    "  `goods_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `spec_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `brand_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `series_name` VARCHAR(100) DEFAULT NULL,\n"
+    "  `class_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `retail_price` DECIMAL(12,2) DEFAULT NULL,\n"
+    "  `wholesale_price` DECIMAL(12,2) DEFAULT NULL,\n"
+    "  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `raw_json` JSON DEFAULT NULL,\n"
+    "  PRIMARY KEY (`spec_no`),\n"
+    "  KEY `idx_brand_series` (`brand_name`, `series_name`),\n"
+    "  KEY `idx_goods_name` (`goods_name`(100))\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
 def _build_wdt_ddl() -> tuple[str, ...]:
     return (_WDT_RECORDS_DDL,)
+
+
+def _build_wdt_dim_product_ddl() -> tuple[str, ...]:
+    return (_DIM_PRODUCT_DDL,)
 
 
 def _build_mart_ddl() -> tuple[str, ...]:
@@ -125,6 +153,7 @@ def _build_mart_ddl() -> tuple[str, ...]:
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
+    ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
 )
 

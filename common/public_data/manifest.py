@@ -19,6 +19,7 @@ _ALLOWED_WDT_METHODS = frozenset({
     "sales.TradeQuery.queryWithDetail",
     "wms.stockin.Purchase.queryWithDetail",
     "wms.StockSpec.search2",
+    "goods_query",
 })
 
 _KNOWN_TABLES = frozenset({
@@ -40,6 +41,8 @@ _KNOWN_TABLES = frozenset({
     "fin_daily_funds",
     "fin_offline_receivables_aging",
     "fin_offline_deposit_other_receivables",
+    "daily_report_offline",
+    "channel_daily_sales",
     "wdt_records",
 })
 
@@ -63,6 +66,7 @@ class DingTalkSheet:
     target_table: str
     max_pages: int
     fields: tuple[FieldMapping, ...]
+    transform: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -108,9 +112,87 @@ def _validate_dotted_id(value: str, label: str) -> None:
         raise ManifestError(f"{label} must be a dotted identifier: {value!r}")
 
 
+def _parse_transform(raw, prefix: str) -> dict | None:
+    """Parse and validate the optional ``transform`` block on a sheet."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ManifestError(f"{prefix}.transform must be an object")
+
+    kind = raw.get("type")
+    if kind not in ("melt", "inject"):
+        raise ManifestError(
+            f"{prefix}.transform.type must be 'melt' or 'inject' (got {kind!r})"
+        )
+
+    if kind == "melt":
+        year = raw.get("year")
+        if not isinstance(year, int) or year < 2000:
+            raise ManifestError(f"{prefix}.transform.year must be a valid year")
+        month = raw.get("month")
+        if not isinstance(month, int) or not (1 <= month <= 12):
+            raise ManifestError(f"{prefix}.transform.month must be 1..12")
+        date_columns = raw.get("date_columns")
+        if not isinstance(date_columns, dict) or not date_columns:
+            raise ManifestError(
+                f"{prefix}.transform.date_columns must be a non-empty object"
+            )
+        for col_name, day in date_columns.items():
+            if not isinstance(col_name, str) or not col_name:
+                raise ManifestError(
+                    f"{prefix}.transform.date_columns key must be non-empty"
+                )
+            if not isinstance(day, int) or not (1 <= day <= 31):
+                raise ManifestError(
+                    f"{prefix}.transform.date_columns[{col_name!r}] must be 1..31"
+                )
+        value_column = raw.get("value_column")
+        if not isinstance(value_column, str) or not value_column:
+            raise ManifestError(
+                f"{prefix}.transform.value_column is required for melt"
+            )
+
+        result = {
+            "type": "melt",
+            "year": year,
+            "month": month,
+            "date_columns": dict(date_columns),
+            "value_column": value_column,
+        }
+
+        inject = raw.get("inject")
+        if inject is not None:
+            if not isinstance(inject, dict) or not inject:
+                raise ManifestError(
+                    f"{prefix}.transform.inject must be a non-empty object"
+                )
+            for key in inject:
+                if not isinstance(key, str) or not key:
+                    raise ManifestError(
+                        f"{prefix}.transform.inject key must be non-empty"
+                    )
+            result["inject"] = dict(inject)
+
+        return result
+
+    if kind == "inject":
+        values = raw.get("values")
+        if not isinstance(values, dict) or not values:
+            raise ManifestError(
+                f"{prefix}.transform.values must be a non-empty object"
+            )
+        for key, val in values.items():
+            if not isinstance(key, str) or not key:
+                raise ManifestError(
+                    f"{prefix}.transform.values key must be non-empty"
+                )
+        return {"type": "inject", "values": dict(values)}
+
+    return None
+
+
 def _load_dingtalk_bases(bases: list, known_tables: frozenset) -> tuple[DingTalkSheet, ...]:
     sheets: list[DingTalkSheet] = []
-    seen_sheet_ids: set[str] = set()
     seen_datasets: set[str] = set()
 
     for base_index, base in enumerate(bases):
@@ -123,6 +205,8 @@ def _load_dingtalk_bases(bases: list, known_tables: frozenset) -> tuple[DingTalk
         raw_sheets = base.get("sheets")
         if not isinstance(raw_sheets, list):
             raise ManifestError(f"dingtalk.bases[{base_index}].sheets must be a list")
+
+        seen_sheet_ids: set[str] = set()
 
         for sheet_index, raw in enumerate(raw_sheets):
             prefix = f"dingtalk.bases[{base_index}].sheets[{sheet_index}]"
@@ -182,6 +266,8 @@ def _load_dingtalk_bases(bases: list, known_tables: frozenset) -> tuple[DingTalk
                     )
                 fields.append(FieldMapping(source_name=source_name, column=column, source_type=source_type))
 
+            transform = _parse_transform(raw.get("transform"), prefix)
+
             sheets.append(DingTalkSheet(
                 base_id=base_id,
                 sheet_id=sheet_id,
@@ -190,6 +276,7 @@ def _load_dingtalk_bases(bases: list, known_tables: frozenset) -> tuple[DingTalk
                 target_table=target_table,
                 max_pages=max_pages,
                 fields=tuple(fields),
+                transform=transform,
             ))
 
     return tuple(sheets)

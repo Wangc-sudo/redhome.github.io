@@ -39,7 +39,14 @@ def _convert_value(value, column_def):
     if source_type == "date" or mysql_type == "DATE":
         if value is None:
             return None
-        return date.fromisoformat(value)
+        # Handle different date formats from DingTalk API
+        if isinstance(value, date):
+            return value
+        if isinstance(value, (int, float)):
+            # Timestamp in milliseconds
+            return date.fromtimestamp(value / 1000)
+        # String format
+        return date.fromisoformat(str(value))
 
     # --- JSON (user, unidirectionalLink, or JSON mysql_type) ---
     if mysql_type == "JSON" or source_type in ("user", "unidirectionalLink"):

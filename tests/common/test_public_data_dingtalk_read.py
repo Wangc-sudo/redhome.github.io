@@ -372,13 +372,19 @@ class DingTalkReadGatewayTests(unittest.TestCase):
 
                 self.assertEqual(1, len(requests))
 
-    def test_rejects_field_schema_drift_and_canonicalizes_field_hash(self):
-        field_schemas = {
-            "extra": [
-                {"name": "公司主体", "type": "text"},
-                {"name": "费用项目", "type": "text"},
-                {"name": "额外字段", "type": "text"},
-            ],
+    def test_allows_extra_remote_fields_but_rejects_missing_or_type_changed(self):
+        sheet_response = {"value": [{"id": "sheet-1", "name": "店铺扣点费用管理"}]}
+
+        extra_fields = [
+            {"name": "公司主体", "type": "text"},
+            {"name": "费用项目", "type": "text"},
+            {"name": "额外字段", "type": "text"},
+        ]
+        gateway = self._gateway([sheet_response, {"value": extra_fields}])
+        snapshot = gateway.validate_sheet(_sheet())
+        self.assertIsInstance(snapshot, DingTalkSchemaSnapshot)
+
+        failure_cases = {
             "missing": [{"name": "公司主体", "type": "text"}],
             "type_changed": [
                 {"name": "公司主体", "type": "number"},
@@ -390,9 +396,8 @@ class DingTalkReadGatewayTests(unittest.TestCase):
                 {"name": "公司主体", "type": "text"},
             ],
         }
-        sheet_response = {"value": [{"id": "sheet-1", "name": "店铺扣点费用管理"}]}
 
-        for name, fields in field_schemas.items():
+        for name, fields in failure_cases.items():
             with self.subTest(name=name):
                 gateway = self._gateway([sheet_response, {"value": fields}])
 

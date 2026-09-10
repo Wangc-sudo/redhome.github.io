@@ -130,7 +130,8 @@ class DingTalkReadGateway:
             remote_names.add(name)
             remote_fields_set.add((name, field_type))
 
-        if remote_fields_set != expected_fields:
+        missing = expected_fields - remote_fields_set
+        if missing:
             raise self._failure(sheet.dataset, "field schema")
 
         fields_json = json.dumps(

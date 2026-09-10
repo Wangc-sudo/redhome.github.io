@@ -1,0 +1,1456 @@
+
+============================================================
+Discovering: fin_store_commission (KGZLxjv9VGjmo2zLuYonDNjOW6EDybno/5y8vtogysp4dwysq5spc8)
+============================================================
+  Fields (19):
+    - 2026-11  (type=number)
+    - 2026-08  (type=number)
+    - 2026-07  (type=number)
+    - 2026-02  (type=number)
+    - 公司主体  (type=text)
+    - 费用项目  (type=singleSelect)
+    - 2026-06  (type=number)
+    - 店铺名称  (type=text)
+    - 填写人  (type=user)
+    - 2026-10  (type=number)
+    - 2026-09  (type=number)
+    - 2026-03  (type=number)
+    - 2026-01  (type=number)
+    - 2026-04  (type=number)
+    - 备注  (type=multipleSelect)
+    - 平台  (type=singleSelect)
+    - 2026-05  (type=number)
+    - 2026-12  (type=number)
+    - 费用类别  (type=singleSelect)
+
+============================================================
+Discovering: fin_tax_declaration_2026 (dpYLaezmVNZ3MxPwiK2GA4ewVrMqPxX6/q1wnmyq6r4r6xfdsqlvyw)
+============================================================
+  Fields (16):
+    - 日期  (type=date)
+    - 申报日期  (type=date)
+    - 实际申报的增值税  (type=number)
+    - 实际申报的收入  (type=number)
+    - 校验2  (type=text)
+    - 工会经费  (type=number)
+    - 社保  (type=number)
+    - 申报的工资总额  (type=number)
+    - 个人所得税  (type=number)
+    - 城镇土地使用税  (type=number)
+    - 房产税  (type=number)
+    - 企业所得税  (type=number)
+    - 进项税额转出  (type=text)
+    - 上期留抵税额  (type=number)
+    - 申报人  (type=user)
+    - 公司主体  (type=text)
+
+============================================================
+Discovering: fin_ecommerce_promotion_recharge_balance (r1R7q3QmWe4D5BqNTXxnB9k68xkXOEP2/Y2yOyXt)
+============================================================
+  ERROR: DingTalk read request failed
+
+============================================================
+Discovering: fin_ecommerce_platform_deposit (ZX6GRezwJlNpeB4asQ5v1XBOWdqbropQ/k4z3335fh3s7y9k6hu8fd)
+============================================================
+  Fields (10):
+    - 保证金缴纳时间  (type=text)
+    - 店铺是否正常运营  (type=singleSelect)
+    - 平台  (type=singleSelect)
+    - 填写人  (type=user)
+    - 公司主体  (type=text)
+    - 保证金余额  (type=number)
+    - 店铺名称  (type=text)
+    - 项目  (type=text)
+    - 是否复核  (type=singleSelect)
+    - 复核人  (type=user)
+
+============================================================
+Discovering: fin_ecommerce_store_funds_balance (R1zknDm0WRlPXQGwu2kqRRA5JBQEx5rG/e2q1741g5aekd54ecyudv)
+============================================================
+  Fields (15):
+    - 店铺名称  (type=text)
+    - 渠道  (type=singleSelect)
+    - 202601  (type=currency)
+    - 公司主体  (type=text)
+    - 202602  (type=currency)
+    - 202603  (type=currency)
+    - 202604  (type=currency)
+    - 是否复核  (type=singleSelect)
+    - 复核人  (type=user)
+    - 填写人  (type=user)
+    - 父记录  (type=unidirectionalLink)
+    - 202605  (type=currency)
+    - 202606  (type=currency)
+    - 202607  (type=currency)
+    - 202608  (type=currency)
+
+============================================================
+Discovering: fin_billion_subsidy (jb9Y4gmKWrZn9yzvienZODMaWGXn6lpz/hERWDMS)
+============================================================
+  Fields (12):
+    - 日期  (type=date)
+    - 销售商品品名  (type=text)
+    - 百亿补贴比率  (type=number)
+    - 费用返还比率  (type=number)
+    - 销售金额  (type=number)
+    - 销售店铺名称  (type=text)
+    - 申请开票日期  (type=date)
+    - 补贴到账日期  (type=date)
+    - 补贴到账金额  (type=number)
+    - 填写人  (type=user)
+    - 财务确认人  (type=user)
+    - 开票金额  (type=number)
+
+============================================================
+Discovering: fin_daily_funds (r1R7q3QmWe4D5BqNTZmpnY198xkXOEP2/ljudw0h1p9licd4vchp08)
+============================================================
+  Fields (160):
+    - 4日（货款/服务支出）  (type=currency)
+    - 12日其他支出  (type=currency)
+    - 9日（其他收入）  (type=currency)
+    - 6日（货款/服务支出）  (type=currency)
+    - 27日（其他收入）  (type=currency)
+    - 18日（其他收入）  (type=currency)
+    - 12日（其他收入）  (type=currency)
+    - 27日（货款/服务收入）  (type=currency)
+    - 2日其他支出  (type=currency)
+    - 20日其他支出  (type=currency)
+    - 10日（其他收入）  (type=currency)
+    - 13日其他支出  (type=currency)
+    - 15日（其他收入）  (type=currency)
+    - 22日其他支出  (type=currency)
+    - 3日（货款/服务收入）  (type=currency)
+    - 25日（货款/服务收入）  (type=currency)
+    - 公司  (type=text)
+    - 15日（工薪社保支出）  (type=currency)
+    - 14日（货款/服务支出）  (type=currency)
+    - 1日（货款/服务收入）  (type=currency)
+    - 11日其他支出  (type=currency)
+    - 15日其他支出  (type=currency)
+    - 25日（其他收入）  (type=currency)
+    - 29日（货款/服务支出）  (type=currency)
+    - 8日（货款/服务收入）  (type=currency)
+    - 28日（工薪社保支出）  (type=currency)
+    - 27日（工薪社保支出）  (type=currency)
+    - 22日（货款/服务支出）  (type=currency)
+    - 29日其他支出  (type=currency)
+    - 17日（其他收入）  (type=currency)
+    - 28日（货款/服务收入）  (type=currency)
+    - 20日（货款/服务收入）  (type=currency)
+    - 26日（货款/服务支出）  (type=currency)
+    - 4日其他支出  (type=currency)
+    - 21日（其他收入）  (type=currency)
+    - 18日（工薪社保支出）  (type=currency)
+    - 9日（货款/服务支出）  (type=currency)
+    - 9日其他支出  (type=currency)
+    - 8日（货款/服务支出）  (type=currency)
+    - 23日（货款/服务收入）  (type=currency)
+    - 6日其他支出  (type=currency)
+    - 29日（其他收入）  (type=currency)
+    - 1日（其他收入）  (type=currency)
+    - 2日（工薪社保支出）  (type=currency)
+    - 12日（货款/服务收入）  (type=currency)
+    - 16日（货款/服务支出）  (type=currency)
+    - 24日（工薪社保支出）  (type=currency)
+    - 8日（其他收入）  (type=currency)
+    - 30日（工薪社保支出）  (type=currency)
+    - 31日（工薪社保支出）  (type=currency)
+    - 18日（货款/服务收入）  (type=currency)
+    - 31日（其他收入）  (type=currency)
+    - 11日（工薪社保支出）  (type=currency)
+    - 15日（货款/服务支出）  (type=currency)
+    - 5日（货款/服务收入）  (type=currency)
+    - 26日（货款/服务收入）  (type=currency)
+    - 6日（其他收入）  (type=currency)
+    - 银行  (type=text)
+    - 16日（工薪社保支出）  (type=currency)
+    - 10日（货款/服务支出）  (type=currency)
+    - 12日（货款/服务支出）  (type=currency)
+    - 18日（货款/服务支出）  (type=currency)
+    - 2日（货款/服务收入）  (type=currency)
+    - 21日（工薪社保支出）  (type=currency)
+    - 22日（货款/服务收入）  (type=currency)
+    - 29日（货款/服务收入）  (type=currency)
+    - 22日（工薪社保支出）  (type=currency)
+    - 7日（货款/服务支出）  (type=currency)
+    - 21日（货款/服务支出）  (type=currency)
+    - 10日（货款/服务收入）  (type=currency)
+    - 25日（货款/服务支出）  (type=currency)
+    - 20日（货款/服务支出）  (type=currency)
+    - 17日其他支出  (type=currency)
+    - 9日（货款/服务收入）  (type=currency)
+    - 11日（货款/服务支出）  (type=currency)
+    - 27日（货款/服务支出）  (type=currency)
+    - 30日（其他收入）  (type=currency)
+    - 4日（其他收入）  (type=currency)
+    - 6日（货款/服务收入）  (type=currency)
+    - 14日（货款/服务收入）  (type=currency)
+    - 11日（货款/服务收入）  (type=currency)
+    - 1日（货款/服务支出）  (type=currency)
+    - 7日（其他收入）  (type=currency)
+    - 6日（工薪社保支出）  (type=currency)
+    - 4日（工薪社保支出）  (type=currency)
+    - 19日（工薪社保支出）  (type=currency)
+    - 16日（其他收入）  (type=currency)
+    - 31日（货款/服务收入）  (type=currency)
+    - 19日（货款/服务支出）  (type=currency)
+    - 2日（货款/服务支出）  (type=currency)
+    - 19日（其他收入）  (type=currency)
+    - 17日（货款/服务收入）  (type=currency)
+    - 14日（其他收入）  (type=currency)
+    - 期初余额  (type=currency)
+    - 24日（其他收入）  (type=currency)
+    - 24日其他支出  (type=currency)
+    - 7日（工薪社保支出）  (type=currency)
+    - 8日（工薪社保支出）  (type=currency)
+    - 27日其他支出  (type=currency)
+    - 26日（其他收入）  (type=currency)
+    - 4日（货款/服务收入）  (type=currency)
+    - 30日（货款/服务支出）  (type=currency)
+    - 3日其他支出  (type=currency)
+    - 20日（工薪社保支出）  (type=currency)
+    - 5日（其他收入）  (type=currency)
+    - 21日（货款/服务收入）  (type=currency)
+    - 3日（工薪社保支出）  (type=currency)
+    - 30日（货款/服务收入）  (type=currency)
+    - 13日（其他收入）  (type=currency)
+    - 1日其他支出  (type=currency)
+    - 13日（货款/服务收入）  (type=currency)
+    - 5日其他支出  (type=currency)
+    - 22日（其他收入）  (type=currency)
+    - 18日其他支出  (type=currency)
+    - 24日（货款/服务收入）  (type=currency)
+    - 11日（其他收入）  (type=currency)
+    - 19日（货款/服务收入）  (type=currency)
+    - 1日（工薪社保支出）  (type=currency)
+    - 28日（货款/服务支出）  (type=currency)
+    - 30日其他支出  (type=currency)
+    - 13日（工薪社保支出）  (type=currency)
+    - 25日（工薪社保支出）  (type=currency)
+    - 7日其他支出  (type=currency)
+    - 28日其他支出  (type=currency)
+    - 8日其他支出  (type=currency)
+    - 13日（货款/服务支出）  (type=currency)
+    - 26日（工薪社保支出）  (type=currency)
+    - 5日（工薪社保支出）  (type=currency)
+    - 12日（工薪社保支出）  (type=currency)
+    - 14日其他支出  (type=currency)
+    - 2日（其他收入）  (type=currency)
+    - 31日其他支出  (type=currency)
+    - 15日（货款/服务收入）  (type=currency)
+    - 28日（其他收入）  (type=currency)
+    - 23日（工薪社保支出）  (type=currency)
+    - 17日（货款/服务支出）  (type=currency)
+    - 10日（工薪社保支出）  (type=currency)
+    - 29日（工薪社保支出）  (type=currency)
+    - 20日（其他收入）  (type=currency)
+    - 16日（货款/服务收入）  (type=currency)
+    - 3日（其他收入）  (type=currency)
+    - 23日其他支出  (type=currency)
+    - 21日其他支出  (type=currency)
+    - 7日（货款/服务收入）  (type=currency)
+    - 5日（货款/服务支出）  (type=currency)
+    - 10日其他支出  (type=currency)
+    - 23日（货款/服务支出）  (type=currency)
+    - 16日其他支出  (type=currency)
+    - 25日其他支出  (type=currency)
+    - 14日（工薪社保支出）  (type=currency)
+    - 26日其他支出  (type=currency)
+    - 9日（工薪社保支出）  (type=currency)
+    - 3日（货款/服务支出）  (type=currency)
+    - 填表人  (type=user)
+    - 31日（货款/服务支出）  (type=currency)
+    - 17日（工薪社保支出）  (type=currency)
+    - 24日（货款/服务支出）  (type=currency)
+    - 19日其他支出  (type=currency)
+    - 23日（其他收入）  (type=currency)
+    - 父记录  (type=unidirectionalLink)
+
+============================================================
+Discovering: fin_offline_receivables_aging (vy20BglGWOayj65ltG0Oq2leJA7depqY/bzjkk0ayura1iaxp1csm1)
+============================================================
+  Fields (15):
+    - 往来单位  (type=text)
+    - 账龄（31-60天）  (type=number)
+    - 类别  (type=singleSelect)
+    - 账龄（0-30天）  (type=number)
+    - 公司主体  (type=singleSelect)
+    - 说明  (type=text)
+    - 更新日期  (type=date)
+    - 应收账款期末余额  (type=number)
+    - 逾期金额  (type=number)
+    - 编制人  (type=user)
+    - 复核人  (type=user)
+    - 复核时间  (type=date)
+    - 业务部门确认  (type=text)
+    - 确认人  (type=user)
+    - 负责人  (type=user)
+
+============================================================
+Discovering: fin_ecommerce_prepayment_supplier_invoice (jb9Y4gmKWrZn9yzviQ9XOoQ9WGXn6lpz/63eg8lu2zpqikfl5uh0ls)
+============================================================
+  Fields (11):
+    - 说明要求  (type=text)
+    - 应付-暂估账面  (type=number)
+    - 公司主体  (type=text)
+    - 账账相符核对  (type=singleSelect)
+    - 未到货未到票情况说明  (type=text)
+    - 核对人  (type=user)
+    - 未到票金额  (type=number)
+    - 日期  (type=text)
+    - 账面预付账款  (type=number)
+    - 供应商名称  (type=text)
+    - 填写人  (type=user)
+
+============================================================
+Discovering: fin_offline_deposit_other_receivables (G1DKw2zgV2wdnYZGHBB4xgzxJB5r9YAn/k4z3335fh3s7y9k6hu8fd)
+============================================================
+  Fields (10):
+    - 保证金缴纳时间  (type=date)
+    - 是否正常合作  (type=singleSelect)
+    - 填写人  (type=user)
+    - 公司主体  (type=singleSelect)
+    - 保证金余额  (type=number)
+    - 往来单位（供应商）  (type=text)
+    - 项目  (type=singleSelect)
+    - 更新时间  (type=date)
+    - 复核人  (type=user)
+    - 说明  (type=text)
+
+
+============================================================
+SUMMARY JSON
+============================================================
+{
+  "fin_store_commission": {
+    "base_id": "KGZLxjv9VGjmo2zLuYonDNjOW6EDybno",
+    "sheet_id": "5y8vtogysp4dwysq5spc8",
+    "fields": [
+      {
+        "name": "2026-11",
+        "type": "number"
+      },
+      {
+        "name": "2026-08",
+        "type": "number"
+      },
+      {
+        "name": "2026-07",
+        "type": "number"
+      },
+      {
+        "name": "2026-02",
+        "type": "number"
+      },
+      {
+        "name": "公司主体",
+        "type": "text"
+      },
+      {
+        "name": "费用项目",
+        "type": "singleSelect"
+      },
+      {
+        "name": "2026-06",
+        "type": "number"
+      },
+      {
+        "name": "店铺名称",
+        "type": "text"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      },
+      {
+        "name": "2026-10",
+        "type": "number"
+      },
+      {
+        "name": "2026-09",
+        "type": "number"
+      },
+      {
+        "name": "2026-03",
+        "type": "number"
+      },
+      {
+        "name": "2026-01",
+        "type": "number"
+      },
+      {
+        "name": "2026-04",
+        "type": "number"
+      },
+      {
+        "name": "备注",
+        "type": "multipleSelect"
+      },
+      {
+        "name": "平台",
+        "type": "singleSelect"
+      },
+      {
+        "name": "2026-05",
+        "type": "number"
+      },
+      {
+        "name": "2026-12",
+        "type": "number"
+      },
+      {
+        "name": "费用类别",
+        "type": "singleSelect"
+      }
+    ]
+  },
+  "fin_tax_declaration_2026": {
+    "base_id": "dpYLaezmVNZ3MxPwiK2GA4ewVrMqPxX6",
+    "sheet_id": "q1wnmyq6r4r6xfdsqlvyw",
+    "fields": [
+      {
+        "name": "日期",
+        "type": "date"
+      },
+      {
+        "name": "申报日期",
+        "type": "date"
+      },
+      {
+        "name": "实际申报的增值税",
+        "type": "number"
+      },
+      {
+        "name": "实际申报的收入",
+        "type": "number"
+      },
+      {
+        "name": "校验2",
+        "type": "text"
+      },
+      {
+        "name": "工会经费",
+        "type": "number"
+      },
+      {
+        "name": "社保",
+        "type": "number"
+      },
+      {
+        "name": "申报的工资总额",
+        "type": "number"
+      },
+      {
+        "name": "个人所得税",
+        "type": "number"
+      },
+      {
+        "name": "城镇土地使用税",
+        "type": "number"
+      },
+      {
+        "name": "房产税",
+        "type": "number"
+      },
+      {
+        "name": "企业所得税",
+        "type": "number"
+      },
+      {
+        "name": "进项税额转出",
+        "type": "text"
+      },
+      {
+        "name": "上期留抵税额",
+        "type": "number"
+      },
+      {
+        "name": "申报人",
+        "type": "user"
+      },
+      {
+        "name": "公司主体",
+        "type": "text"
+      }
+    ]
+  },
+  "fin_ecommerce_promotion_recharge_balance": {
+    "base_id": "r1R7q3QmWe4D5BqNTXxnB9k68xkXOEP2",
+    "sheet_id": "Y2yOyXt",
+    "error": "DingTalk read request failed"
+  },
+  "fin_ecommerce_platform_deposit": {
+    "base_id": "ZX6GRezwJlNpeB4asQ5v1XBOWdqbropQ",
+    "sheet_id": "k4z3335fh3s7y9k6hu8fd",
+    "fields": [
+      {
+        "name": "保证金缴纳时间",
+        "type": "text"
+      },
+      {
+        "name": "店铺是否正常运营",
+        "type": "singleSelect"
+      },
+      {
+        "name": "平台",
+        "type": "singleSelect"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      },
+      {
+        "name": "公司主体",
+        "type": "text"
+      },
+      {
+        "name": "保证金余额",
+        "type": "number"
+      },
+      {
+        "name": "店铺名称",
+        "type": "text"
+      },
+      {
+        "name": "项目",
+        "type": "text"
+      },
+      {
+        "name": "是否复核",
+        "type": "singleSelect"
+      },
+      {
+        "name": "复核人",
+        "type": "user"
+      }
+    ]
+  },
+  "fin_ecommerce_store_funds_balance": {
+    "base_id": "R1zknDm0WRlPXQGwu2kqRRA5JBQEx5rG",
+    "sheet_id": "e2q1741g5aekd54ecyudv",
+    "fields": [
+      {
+        "name": "店铺名称",
+        "type": "text"
+      },
+      {
+        "name": "渠道",
+        "type": "singleSelect"
+      },
+      {
+        "name": "202601",
+        "type": "currency"
+      },
+      {
+        "name": "公司主体",
+        "type": "text"
+      },
+      {
+        "name": "202602",
+        "type": "currency"
+      },
+      {
+        "name": "202603",
+        "type": "currency"
+      },
+      {
+        "name": "202604",
+        "type": "currency"
+      },
+      {
+        "name": "是否复核",
+        "type": "singleSelect"
+      },
+      {
+        "name": "复核人",
+        "type": "user"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      },
+      {
+        "name": "父记录",
+        "type": "unidirectionalLink"
+      },
+      {
+        "name": "202605",
+        "type": "currency"
+      },
+      {
+        "name": "202606",
+        "type": "currency"
+      },
+      {
+        "name": "202607",
+        "type": "currency"
+      },
+      {
+        "name": "202608",
+        "type": "currency"
+      }
+    ]
+  },
+  "fin_billion_subsidy": {
+    "base_id": "jb9Y4gmKWrZn9yzvienZODMaWGXn6lpz",
+    "sheet_id": "hERWDMS",
+    "fields": [
+      {
+        "name": "日期",
+        "type": "date"
+      },
+      {
+        "name": "销售商品品名",
+        "type": "text"
+      },
+      {
+        "name": "百亿补贴比率",
+        "type": "number"
+      },
+      {
+        "name": "费用返还比率",
+        "type": "number"
+      },
+      {
+        "name": "销售金额",
+        "type": "number"
+      },
+      {
+        "name": "销售店铺名称",
+        "type": "text"
+      },
+      {
+        "name": "申请开票日期",
+        "type": "date"
+      },
+      {
+        "name": "补贴到账日期",
+        "type": "date"
+      },
+      {
+        "name": "补贴到账金额",
+        "type": "number"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      },
+      {
+        "name": "财务确认人",
+        "type": "user"
+      },
+      {
+        "name": "开票金额",
+        "type": "number"
+      }
+    ]
+  },
+  "fin_daily_funds": {
+    "base_id": "r1R7q3QmWe4D5BqNTZmpnY198xkXOEP2",
+    "sheet_id": "ljudw0h1p9licd4vchp08",
+    "fields": [
+      {
+        "name": "4日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "12日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "9日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "6日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "27日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "18日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "12日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "27日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "2日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "20日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "10日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "13日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "15日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "22日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "3日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "25日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "公司",
+        "type": "text"
+      },
+      {
+        "name": "15日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "14日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "1日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "11日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "15日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "25日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "29日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "8日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "28日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "27日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "22日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "29日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "17日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "28日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "20日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "26日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "4日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "21日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "18日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "9日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "9日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "8日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "23日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "6日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "29日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "1日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "2日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "12日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "16日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "24日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "8日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "30日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "31日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "18日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "31日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "11日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "15日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "5日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "26日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "6日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "银行",
+        "type": "text"
+      },
+      {
+        "name": "16日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "10日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "12日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "18日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "2日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "21日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "22日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "29日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "22日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "7日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "21日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "10日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "25日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "20日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "17日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "9日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "11日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "27日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "30日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "4日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "6日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "14日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "11日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "1日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "7日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "6日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "4日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "19日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "16日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "31日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "19日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "2日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "19日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "17日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "14日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "期初余额",
+        "type": "currency"
+      },
+      {
+        "name": "24日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "24日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "7日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "8日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "27日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "26日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "4日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "30日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "3日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "20日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "5日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "21日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "3日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "30日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "13日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "1日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "13日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "5日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "22日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "18日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "24日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "11日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "19日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "1日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "28日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "30日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "13日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "25日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "7日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "28日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "8日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "13日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "26日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "5日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "12日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "14日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "2日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "31日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "15日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "28日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "23日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "17日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "10日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "29日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "20日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "16日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "3日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "23日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "21日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "7日（货款/服务收入）",
+        "type": "currency"
+      },
+      {
+        "name": "5日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "10日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "23日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "16日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "25日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "14日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "26日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "9日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "3日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "填表人",
+        "type": "user"
+      },
+      {
+        "name": "31日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "17日（工薪社保支出）",
+        "type": "currency"
+      },
+      {
+        "name": "24日（货款/服务支出）",
+        "type": "currency"
+      },
+      {
+        "name": "19日其他支出",
+        "type": "currency"
+      },
+      {
+        "name": "23日（其他收入）",
+        "type": "currency"
+      },
+      {
+        "name": "父记录",
+        "type": "unidirectionalLink"
+      }
+    ]
+  },
+  "fin_offline_receivables_aging": {
+    "base_id": "vy20BglGWOayj65ltG0Oq2leJA7depqY",
+    "sheet_id": "bzjkk0ayura1iaxp1csm1",
+    "fields": [
+      {
+        "name": "往来单位",
+        "type": "text"
+      },
+      {
+        "name": "账龄（31-60天）",
+        "type": "number"
+      },
+      {
+        "name": "类别",
+        "type": "singleSelect"
+      },
+      {
+        "name": "账龄（0-30天）",
+        "type": "number"
+      },
+      {
+        "name": "公司主体",
+        "type": "singleSelect"
+      },
+      {
+        "name": "说明",
+        "type": "text"
+      },
+      {
+        "name": "更新日期",
+        "type": "date"
+      },
+      {
+        "name": "应收账款期末余额",
+        "type": "number"
+      },
+      {
+        "name": "逾期金额",
+        "type": "number"
+      },
+      {
+        "name": "编制人",
+        "type": "user"
+      },
+      {
+        "name": "复核人",
+        "type": "user"
+      },
+      {
+        "name": "复核时间",
+        "type": "date"
+      },
+      {
+        "name": "业务部门确认",
+        "type": "text"
+      },
+      {
+        "name": "确认人",
+        "type": "user"
+      },
+      {
+        "name": "负责人",
+        "type": "user"
+      }
+    ]
+  },
+  "fin_ecommerce_prepayment_supplier_invoice": {
+    "base_id": "jb9Y4gmKWrZn9yzviQ9XOoQ9WGXn6lpz",
+    "sheet_id": "63eg8lu2zpqikfl5uh0ls",
+    "fields": [
+      {
+        "name": "说明要求",
+        "type": "text"
+      },
+      {
+        "name": "应付-暂估账面",
+        "type": "number"
+      },
+      {
+        "name": "公司主体",
+        "type": "text"
+      },
+      {
+        "name": "账账相符核对",
+        "type": "singleSelect"
+      },
+      {
+        "name": "未到货未到票情况说明",
+        "type": "text"
+      },
+      {
+        "name": "核对人",
+        "type": "user"
+      },
+      {
+        "name": "未到票金额",
+        "type": "number"
+      },
+      {
+        "name": "日期",
+        "type": "text"
+      },
+      {
+        "name": "账面预付账款",
+        "type": "number"
+      },
+      {
+        "name": "供应商名称",
+        "type": "text"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      }
+    ]
+  },
+  "fin_offline_deposit_other_receivables": {
+    "base_id": "G1DKw2zgV2wdnYZGHBB4xgzxJB5r9YAn",
+    "sheet_id": "k4z3335fh3s7y9k6hu8fd",
+    "fields": [
+      {
+        "name": "保证金缴纳时间",
+        "type": "date"
+      },
+      {
+        "name": "是否正常合作",
+        "type": "singleSelect"
+      },
+      {
+        "name": "填写人",
+        "type": "user"
+      },
+      {
+        "name": "公司主体",
+        "type": "singleSelect"
+      },
+      {
+        "name": "保证金余额",
+        "type": "number"
+      },
+      {
+        "name": "往来单位（供应商）",
+        "type": "text"
+      },
+      {
+        "name": "项目",
+        "type": "singleSelect"
+      },
+      {
+        "name": "更新时间",
+        "type": "date"
+      },
+      {
+        "name": "复核人",
+        "type": "user"
+      },
+      {
+        "name": "说明",
+        "type": "text"
+      }
+    ]
+  }
+}

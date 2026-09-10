@@ -1,0 +1,2034 @@
+{
+  "version": 1,
+  "dingtalk": {
+    "bases": [
+      {
+        "base_id": "KGZLxjv9VGjmo2zLuYonDNjOW6EDybno",
+        "sheets": [
+          {
+            "sheet_id": "5y8vtogysp4dwysq5spc8",
+            "sheet_name": "店铺扣点费用管理",
+            "dataset": "fin_store_commission",
+            "target_table": "fin_store_commission",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "费用项目": {
+                "column": "fee_item",
+                "source_type": "singleSelect"
+              },
+              "店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "备注": {
+                "column": "remark_values",
+                "source_type": "multipleSelect"
+              },
+              "平台": {
+                "column": "platform",
+                "source_type": "singleSelect"
+              },
+              "费用类别": {
+                "column": "fee_category",
+                "source_type": "singleSelect"
+              },
+              "2026-01": {
+                "column": "amount_2026_01",
+                "source_type": "number"
+              },
+              "2026-02": {
+                "column": "amount_2026_02",
+                "source_type": "number"
+              },
+              "2026-03": {
+                "column": "amount_2026_03",
+                "source_type": "number"
+              },
+              "2026-04": {
+                "column": "amount_2026_04",
+                "source_type": "number"
+              },
+              "2026-05": {
+                "column": "amount_2026_05",
+                "source_type": "number"
+              },
+              "2026-06": {
+                "column": "amount_2026_06",
+                "source_type": "number"
+              },
+              "2026-07": {
+                "column": "amount_2026_07",
+                "source_type": "number"
+              },
+              "2026-08": {
+                "column": "amount_2026_08",
+                "source_type": "number"
+              },
+              "2026-09": {
+                "column": "amount_2026_09",
+                "source_type": "number"
+              },
+              "2026-10": {
+                "column": "amount_2026_10",
+                "source_type": "number"
+              },
+              "2026-11": {
+                "column": "amount_2026_11",
+                "source_type": "number"
+              },
+              "2026-12": {
+                "column": "amount_2026_12",
+                "source_type": "number"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "dpYLaezmVNZ3MxPwiK2GA4ewVrMqPxX6",
+        "sheets": [
+          {
+            "sheet_id": "q1wnmyq6r4r6xfdsqlvyw",
+            "sheet_name": "纳税申报核算表-2026",
+            "dataset": "fin_tax_declaration_2026",
+            "target_table": "fin_tax_declaration_2026",
+            "max_pages": 100,
+            "field_mapping": {
+              "日期": {
+                "column": "tax_date",
+                "source_type": "date"
+              },
+              "申报日期": {
+                "column": "filing_date",
+                "source_type": "date"
+              },
+              "实际申报的增值税": {
+                "column": "actual_vat_amount",
+                "source_type": "number"
+              },
+              "实际申报的收入": {
+                "column": "actual_declared_revenue",
+                "source_type": "number"
+              },
+              "校验2": {
+                "column": "validation_note",
+                "source_type": "text"
+              },
+              "工会经费": {
+                "column": "union_fund_amount",
+                "source_type": "number"
+              },
+              "社保": {
+                "column": "social_insurance_amount",
+                "source_type": "number"
+              },
+              "申报的工资总额": {
+                "column": "declared_payroll_amount",
+                "source_type": "number"
+              },
+              "个人所得税": {
+                "column": "individual_income_tax_amount",
+                "source_type": "number"
+              },
+              "城镇土地使用税": {
+                "column": "urban_land_use_tax_amount",
+                "source_type": "number"
+              },
+              "房产税": {
+                "column": "property_tax_amount",
+                "source_type": "number"
+              },
+              "企业所得税": {
+                "column": "corporate_income_tax_amount",
+                "source_type": "number"
+              },
+              "进项税额转出": {
+                "column": "input_tax_transfer_note",
+                "source_type": "text"
+              },
+              "上期留抵税额": {
+                "column": "prior_period_input_tax_credit",
+                "source_type": "number"
+              },
+              "申报人": {
+                "column": "filer",
+                "source_type": "user"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              }
+            }
+          },
+          {
+            "sheet_id": "41xpJGt",
+            "sheet_name": "销售核对表-2026",
+            "dataset": "fin_tax_sales_reconciliation_2026",
+            "target_table": "fin_tax_sales_reconciliation_2026",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "销售单销售金额（13%）": {
+                "column": "sales_order_amount_13pct",
+                "source_type": "number"
+              },
+              "销货单销售金额（6%）": {
+                "column": "sales_delivery_amount_6pct",
+                "source_type": "number"
+              },
+              "总账销售收入": {
+                "column": "general_ledger_sales_revenue",
+                "source_type": "number"
+              },
+              "期间": {
+                "column": "period_date",
+                "source_type": "date"
+              },
+              "填表人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "销货单销售金额（其他税率）": {
+                "column": "sales_delivery_amount_other_rate",
+                "source_type": "number"
+              },
+              "销项税额2": {
+                "column": "output_tax_amount_2",
+                "source_type": "number"
+              }
+            }
+          },
+          {
+            "sheet_id": "yjSyAqj",
+            "sheet_name": "印花税核算表",
+            "dataset": "fin_tax_stamp_duty",
+            "target_table": "fin_tax_stamp_duty",
+            "max_pages": 100,
+            "field_mapping": {
+              "应税凭证名称": {
+                "column": "taxable_document_name",
+                "source_type": "singleSelect"
+              },
+              "计税金额": {
+                "column": "taxable_amount",
+                "source_type": "currency"
+              },
+              "适用税率": {
+                "column": "applicable_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "所属纳税申报期": {
+                "column": "tax_filing_period",
+                "source_type": "date"
+              }
+            }
+          },
+          {
+            "sheet_id": "RbxfN7i",
+            "sheet_name": "无票销售申报汇总表",
+            "dataset": "fin_tax_uninvoiced_sales_summary",
+            "target_table": "fin_tax_uninvoiced_sales_summary",
+            "max_pages": 100,
+            "field_mapping": {
+              "销售公司名称": {
+                "column": "sales_company_name",
+                "source_type": "singleSelect"
+              },
+              "无票销售税率": {
+                "column": "uninvoiced_sales_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "期间": {
+                "column": "period_date",
+                "source_type": "date"
+              },
+              "开具以前月份发票税率": {
+                "column": "prior_period_invoice_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "预开票税率": {
+                "column": "pre_invoice_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "无票申报税率": {
+                "column": "uninvoiced_filing_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              }
+            }
+          },
+          {
+            "sheet_id": "SH6CVsK",
+            "sheet_name": "无票销售登记",
+            "dataset": "fin_tax_uninvoiced_sales",
+            "target_table": "fin_tax_uninvoiced_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              },
+              "无票销售税率": {
+                "column": "uninvoiced_sales_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "无票销售不含税金额": {
+                "column": "uninvoiced_sales_excl_tax_amount",
+                "source_type": "number"
+              },
+              "期间": {
+                "column": "period_date",
+                "source_type": "date"
+              }
+            }
+          },
+          {
+            "sheet_id": "Y40OtDP",
+            "sheet_name": "开具以前月份发票登记表",
+            "dataset": "fin_tax_prior_period_invoice",
+            "target_table": "fin_tax_prior_period_invoice",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              },
+              "开具以前月份发票税率": {
+                "column": "prior_period_invoice_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "开具以前月份发票不含税金额": {
+                "column": "prior_period_invoice_excl_tax_amount_raw",
+                "source_type": "text"
+              },
+              "期间": {
+                "column": "period_date",
+                "source_type": "date"
+              },
+              "父记录": {
+                "column": "parent_record_refs",
+                "source_type": "unidirectionalLink"
+              }
+            }
+          },
+          {
+            "sheet_id": "KOqVpRS",
+            "sheet_name": "预开票登记表",
+            "dataset": "fin_tax_pre_invoice",
+            "target_table": "fin_tax_pre_invoice",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              },
+              "预开票税率": {
+                "column": "pre_invoice_tax_rate",
+                "source_type": "singleSelect"
+              },
+              "预开票不含税金额": {
+                "column": "pre_invoice_excl_tax_amount",
+                "source_type": "number"
+              },
+              "期间": {
+                "column": "period_date",
+                "source_type": "date"
+              }
+            }
+          },
+          {
+            "sheet_id": "5MEHmH6",
+            "sheet_name": "进项发票管理表",
+            "dataset": "fin_tax_input_invoice",
+            "target_table": "fin_tax_input_invoice",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "开票日期": {
+                "column": "invoice_date",
+                "source_type": "date"
+              },
+              "销售方名称": {
+                "column": "seller_name",
+                "source_type": "text"
+              },
+              "不含税金额": {
+                "column": "excl_tax_amount",
+                "source_type": "number"
+              },
+              "税率": {
+                "column": "tax_rate",
+                "source_type": "singleSelect"
+              },
+              "认证月份": {
+                "column": "certification_month",
+                "source_type": "date"
+              },
+              "入账月份": {
+                "column": "accounting_month",
+                "source_type": "date"
+              },
+              "经办人": {
+                "column": "handler",
+                "source_type": "user"
+              },
+              "发票编码": {
+                "column": "invoice_number",
+                "source_type": "text"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "r1R7q3QmWe4D5BqNTXxnB9k68xkXOEP2",
+        "sheets": [
+          {
+            "sheet_id": "8jz4u8jzpaqsiliw5b5z3",
+            "sheet_name": "推广费余额明细表",
+            "dataset": "fin_ecommerce_promotion_recharge_balance",
+            "target_table": "fin_ecommerce_promotion_recharge_balance",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "平台": {
+                "column": "platform",
+                "source_type": "singleSelect"
+              },
+              "费用项目": {
+                "column": "fee_item",
+                "source_type": "singleSelect"
+              },
+              "期初余额": {
+                "column": "opening_balance",
+                "source_type": "number"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "singleSelect"
+              },
+              "2026-01": {
+                "column": "amount_2026_01",
+                "source_type": "number"
+              },
+              "2026-02": {
+                "column": "amount_2026_02",
+                "source_type": "number"
+              },
+              "2026-03": {
+                "column": "amount_2026_03",
+                "source_type": "number"
+              },
+              "2026-04": {
+                "column": "amount_2026_04",
+                "source_type": "number"
+              },
+              "2026-05": {
+                "column": "amount_2026_05",
+                "source_type": "number"
+              },
+              "2026-06": {
+                "column": "amount_2026_06",
+                "source_type": "number"
+              },
+              "2026-07": {
+                "column": "amount_2026_07",
+                "source_type": "number"
+              },
+              "2026-08": {
+                "column": "amount_2026_08",
+                "source_type": "number"
+              },
+              "2026-09": {
+                "column": "amount_2026_09",
+                "source_type": "number"
+              },
+              "2026-10": {
+                "column": "amount_2026_10",
+                "source_type": "number"
+              },
+              "2026-11": {
+                "column": "amount_2026_11",
+                "source_type": "number"
+              },
+              "2026-12": {
+                "column": "amount_2026_12",
+                "source_type": "number"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "ZX6GRezwJlNpeB4asQ5v1XBOWdqbropQ",
+        "sheets": [
+          {
+            "sheet_id": "k4z3335fh3s7y9k6hu8fd",
+            "sheet_name": "平台保证金管理",
+            "dataset": "fin_ecommerce_platform_deposit",
+            "target_table": "fin_ecommerce_platform_deposit",
+            "max_pages": 100,
+            "field_mapping": {
+              "保证金缴纳时间": {
+                "column": "deposit_paid_at_raw",
+                "source_type": "text"
+              },
+              "店铺是否正常运营": {
+                "column": "store_operating_status",
+                "source_type": "singleSelect"
+              },
+              "平台": {
+                "column": "platform",
+                "source_type": "singleSelect"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "保证金余额": {
+                "column": "deposit_balance",
+                "source_type": "number"
+              },
+              "店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "项目": {
+                "column": "project_name",
+                "source_type": "text"
+              },
+              "是否复核": {
+                "column": "review_status",
+                "source_type": "singleSelect"
+              },
+              "复核人": {
+                "column": "reviewer",
+                "source_type": "user"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "R1zknDm0WRlPXQGwu2kqRRA5JBQEx5rG",
+        "sheets": [
+          {
+            "sheet_id": "e2q1741g5aekd54ecyudv",
+            "sheet_name": "店铺资金余额核对表",
+            "dataset": "fin_ecommerce_store_funds_balance",
+            "target_table": "fin_ecommerce_store_funds_balance",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "渠道": {
+                "column": "channel",
+                "source_type": "singleSelect"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "是否复核": {
+                "column": "review_status",
+                "source_type": "singleSelect"
+              },
+              "复核人": {
+                "column": "reviewer",
+                "source_type": "user"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "父记录": {
+                "column": "parent_record_refs",
+                "source_type": "unidirectionalLink"
+              },
+              "202601": {
+                "column": "balance_202601",
+                "source_type": "currency"
+              },
+              "202602": {
+                "column": "balance_202602",
+                "source_type": "currency"
+              },
+              "202603": {
+                "column": "balance_202603",
+                "source_type": "currency"
+              },
+              "202604": {
+                "column": "balance_202604",
+                "source_type": "currency"
+              },
+              "202605": {
+                "column": "balance_202605",
+                "source_type": "currency"
+              },
+              "202606": {
+                "column": "balance_202606",
+                "source_type": "currency"
+              },
+              "202607": {
+                "column": "balance_202607",
+                "source_type": "currency"
+              },
+              "202608": {
+                "column": "balance_202608",
+                "source_type": "currency"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "jb9Y4gmKWrZn9yzvienZODMaWGXn6lpz",
+        "sheets": [
+          {
+            "sheet_id": "hERWDMS",
+            "sheet_name": "百亿补贴管理表-拼多多",
+            "dataset": "fin_billion_subsidy_pdd",
+            "target_table": "fin_billion_subsidy_pdd",
+            "max_pages": 200,
+            "field_mapping": {
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售商品品名": {
+                "column": "product_name",
+                "source_type": "text"
+              },
+              "百亿补贴比率": {
+                "column": "billion_subsidy_rate",
+                "source_type": "number"
+              },
+              "费用返还比率": {
+                "column": "expense_rebate_rate",
+                "source_type": "number"
+              },
+              "销售金额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "销售店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "申请开票日期": {
+                "column": "invoice_application_date",
+                "source_type": "date"
+              },
+              "补贴到账日期": {
+                "column": "subsidy_received_date",
+                "source_type": "date"
+              },
+              "补贴到账金额": {
+                "column": "subsidy_received_amount",
+                "source_type": "number"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "财务确认人": {
+                "column": "finance_confirmer",
+                "source_type": "user"
+              },
+              "开票金额": {
+                "column": "invoice_amount",
+                "source_type": "number"
+              }
+            }
+          },
+          {
+            "sheet_id": "jhmpFYu",
+            "sheet_name": "百亿补贴管理表-抖音",
+            "dataset": "fin_billion_subsidy_douyin",
+            "target_table": "fin_billion_subsidy_douyin",
+            "max_pages": 200,
+            "field_mapping": {
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售店铺名称": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "百亿补贴比率": {
+                "column": "billion_subsidy_rate",
+                "source_type": "number"
+              },
+              "费用返还比率": {
+                "column": "expense_rebate_rate",
+                "source_type": "number"
+              },
+              "销售金额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "财务确认人": {
+                "column": "finance_confirmer",
+                "source_type": "user"
+              },
+              "补贴到账金额": {
+                "column": "subsidy_received_amount",
+                "source_type": "number"
+              },
+              "补贴到账日期": {
+                "column": "subsidy_received_date",
+                "source_type": "date"
+              },
+              "申请开票日期": {
+                "column": "invoice_application_date",
+                "source_type": "date"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "销售商品名称": {
+                "column": "product_name",
+                "source_type": "text"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "r1R7q3QmWe4D5BqNTZmpnY198xkXOEP2",
+        "sheets": [
+          {
+            "sheet_id": "ljudw0h1p9licd4vchp08",
+            "sheet_name": "每日资金明细",
+            "dataset": "fin_daily_funds",
+            "target_table": "fin_daily_funds",
+            "max_pages": 100,
+            "field_mapping": {
+              "公司": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "银行": {
+                "column": "bank_name",
+                "source_type": "text"
+              },
+              "期初余额": {
+                "column": "opening_balance",
+                "source_type": "currency"
+              },
+              "填表人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "父记录": {
+                "column": "parent_record_refs",
+                "source_type": "unidirectionalLink"
+              },
+              "1日（货款/服务收入）": {
+                "column": "day_01_goods_service_income",
+                "source_type": "currency"
+              },
+              "1日（货款/服务支出）": {
+                "column": "day_01_goods_service_expense",
+                "source_type": "currency"
+              },
+              "1日（工薪社保支出）": {
+                "column": "day_01_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "1日（其他收入）": {
+                "column": "day_01_other_income",
+                "source_type": "currency"
+              },
+              "1日其他支出": {
+                "column": "day_01_other_expense",
+                "source_type": "currency"
+              },
+              "2日（货款/服务收入）": {
+                "column": "day_02_goods_service_income",
+                "source_type": "currency"
+              },
+              "2日（货款/服务支出）": {
+                "column": "day_02_goods_service_expense",
+                "source_type": "currency"
+              },
+              "2日（工薪社保支出）": {
+                "column": "day_02_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "2日（其他收入）": {
+                "column": "day_02_other_income",
+                "source_type": "currency"
+              },
+              "2日其他支出": {
+                "column": "day_02_other_expense",
+                "source_type": "currency"
+              },
+              "3日（货款/服务收入）": {
+                "column": "day_03_goods_service_income",
+                "source_type": "currency"
+              },
+              "3日（货款/服务支出）": {
+                "column": "day_03_goods_service_expense",
+                "source_type": "currency"
+              },
+              "3日（工薪社保支出）": {
+                "column": "day_03_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "3日（其他收入）": {
+                "column": "day_03_other_income",
+                "source_type": "currency"
+              },
+              "3日其他支出": {
+                "column": "day_03_other_expense",
+                "source_type": "currency"
+              },
+              "4日（货款/服务收入）": {
+                "column": "day_04_goods_service_income",
+                "source_type": "currency"
+              },
+              "4日（货款/服务支出）": {
+                "column": "day_04_goods_service_expense",
+                "source_type": "currency"
+              },
+              "4日（工薪社保支出）": {
+                "column": "day_04_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "4日（其他收入）": {
+                "column": "day_04_other_income",
+                "source_type": "currency"
+              },
+              "4日其他支出": {
+                "column": "day_04_other_expense",
+                "source_type": "currency"
+              },
+              "5日（货款/服务收入）": {
+                "column": "day_05_goods_service_income",
+                "source_type": "currency"
+              },
+              "5日（货款/服务支出）": {
+                "column": "day_05_goods_service_expense",
+                "source_type": "currency"
+              },
+              "5日（工薪社保支出）": {
+                "column": "day_05_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "5日（其他收入）": {
+                "column": "day_05_other_income",
+                "source_type": "currency"
+              },
+              "5日其他支出": {
+                "column": "day_05_other_expense",
+                "source_type": "currency"
+              },
+              "6日（货款/服务收入）": {
+                "column": "day_06_goods_service_income",
+                "source_type": "currency"
+              },
+              "6日（货款/服务支出）": {
+                "column": "day_06_goods_service_expense",
+                "source_type": "currency"
+              },
+              "6日（工薪社保支出）": {
+                "column": "day_06_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "6日（其他收入）": {
+                "column": "day_06_other_income",
+                "source_type": "currency"
+              },
+              "6日其他支出": {
+                "column": "day_06_other_expense",
+                "source_type": "currency"
+              },
+              "7日（货款/服务收入）": {
+                "column": "day_07_goods_service_income",
+                "source_type": "currency"
+              },
+              "7日（货款/服务支出）": {
+                "column": "day_07_goods_service_expense",
+                "source_type": "currency"
+              },
+              "7日（工薪社保支出）": {
+                "column": "day_07_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "7日（其他收入）": {
+                "column": "day_07_other_income",
+                "source_type": "currency"
+              },
+              "7日其他支出": {
+                "column": "day_07_other_expense",
+                "source_type": "currency"
+              },
+              "8日（货款/服务收入）": {
+                "column": "day_08_goods_service_income",
+                "source_type": "currency"
+              },
+              "8日（货款/服务支出）": {
+                "column": "day_08_goods_service_expense",
+                "source_type": "currency"
+              },
+              "8日（工薪社保支出）": {
+                "column": "day_08_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "8日（其他收入）": {
+                "column": "day_08_other_income",
+                "source_type": "currency"
+              },
+              "8日其他支出": {
+                "column": "day_08_other_expense",
+                "source_type": "currency"
+              },
+              "9日（货款/服务收入）": {
+                "column": "day_09_goods_service_income",
+                "source_type": "currency"
+              },
+              "9日（货款/服务支出）": {
+                "column": "day_09_goods_service_expense",
+                "source_type": "currency"
+              },
+              "9日（工薪社保支出）": {
+                "column": "day_09_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "9日（其他收入）": {
+                "column": "day_09_other_income",
+                "source_type": "currency"
+              },
+              "9日其他支出": {
+                "column": "day_09_other_expense",
+                "source_type": "currency"
+              },
+              "10日（货款/服务收入）": {
+                "column": "day_10_goods_service_income",
+                "source_type": "currency"
+              },
+              "10日（货款/服务支出）": {
+                "column": "day_10_goods_service_expense",
+                "source_type": "currency"
+              },
+              "10日（工薪社保支出）": {
+                "column": "day_10_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "10日（其他收入）": {
+                "column": "day_10_other_income",
+                "source_type": "currency"
+              },
+              "10日其他支出": {
+                "column": "day_10_other_expense",
+                "source_type": "currency"
+              },
+              "11日（货款/服务收入）": {
+                "column": "day_11_goods_service_income",
+                "source_type": "currency"
+              },
+              "11日（货款/服务支出）": {
+                "column": "day_11_goods_service_expense",
+                "source_type": "currency"
+              },
+              "11日（工薪社保支出）": {
+                "column": "day_11_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "11日（其他收入）": {
+                "column": "day_11_other_income",
+                "source_type": "currency"
+              },
+              "11日其他支出": {
+                "column": "day_11_other_expense",
+                "source_type": "currency"
+              },
+              "12日（货款/服务收入）": {
+                "column": "day_12_goods_service_income",
+                "source_type": "currency"
+              },
+              "12日（货款/服务支出）": {
+                "column": "day_12_goods_service_expense",
+                "source_type": "currency"
+              },
+              "12日（工薪社保支出）": {
+                "column": "day_12_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "12日（其他收入）": {
+                "column": "day_12_other_income",
+                "source_type": "currency"
+              },
+              "12日其他支出": {
+                "column": "day_12_other_expense",
+                "source_type": "currency"
+              },
+              "13日（货款/服务收入）": {
+                "column": "day_13_goods_service_income",
+                "source_type": "currency"
+              },
+              "13日（货款/服务支出）": {
+                "column": "day_13_goods_service_expense",
+                "source_type": "currency"
+              },
+              "13日（工薪社保支出）": {
+                "column": "day_13_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "13日（其他收入）": {
+                "column": "day_13_other_income",
+                "source_type": "currency"
+              },
+              "13日其他支出": {
+                "column": "day_13_other_expense",
+                "source_type": "currency"
+              },
+              "14日（货款/服务收入）": {
+                "column": "day_14_goods_service_income",
+                "source_type": "currency"
+              },
+              "14日（货款/服务支出）": {
+                "column": "day_14_goods_service_expense",
+                "source_type": "currency"
+              },
+              "14日（工薪社保支出）": {
+                "column": "day_14_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "14日（其他收入）": {
+                "column": "day_14_other_income",
+                "source_type": "currency"
+              },
+              "14日其他支出": {
+                "column": "day_14_other_expense",
+                "source_type": "currency"
+              },
+              "15日（货款/服务收入）": {
+                "column": "day_15_goods_service_income",
+                "source_type": "currency"
+              },
+              "15日（货款/服务支出）": {
+                "column": "day_15_goods_service_expense",
+                "source_type": "currency"
+              },
+              "15日（工薪社保支出）": {
+                "column": "day_15_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "15日（其他收入）": {
+                "column": "day_15_other_income",
+                "source_type": "currency"
+              },
+              "15日其他支出": {
+                "column": "day_15_other_expense",
+                "source_type": "currency"
+              },
+              "16日（货款/服务收入）": {
+                "column": "day_16_goods_service_income",
+                "source_type": "currency"
+              },
+              "16日（货款/服务支出）": {
+                "column": "day_16_goods_service_expense",
+                "source_type": "currency"
+              },
+              "16日（工薪社保支出）": {
+                "column": "day_16_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "16日（其他收入）": {
+                "column": "day_16_other_income",
+                "source_type": "currency"
+              },
+              "16日其他支出": {
+                "column": "day_16_other_expense",
+                "source_type": "currency"
+              },
+              "17日（货款/服务收入）": {
+                "column": "day_17_goods_service_income",
+                "source_type": "currency"
+              },
+              "17日（货款/服务支出）": {
+                "column": "day_17_goods_service_expense",
+                "source_type": "currency"
+              },
+              "17日（工薪社保支出）": {
+                "column": "day_17_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "17日（其他收入）": {
+                "column": "day_17_other_income",
+                "source_type": "currency"
+              },
+              "17日其他支出": {
+                "column": "day_17_other_expense",
+                "source_type": "currency"
+              },
+              "18日（货款/服务收入）": {
+                "column": "day_18_goods_service_income",
+                "source_type": "currency"
+              },
+              "18日（货款/服务支出）": {
+                "column": "day_18_goods_service_expense",
+                "source_type": "currency"
+              },
+              "18日（工薪社保支出）": {
+                "column": "day_18_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "18日（其他收入）": {
+                "column": "day_18_other_income",
+                "source_type": "currency"
+              },
+              "18日其他支出": {
+                "column": "day_18_other_expense",
+                "source_type": "currency"
+              },
+              "19日（货款/服务收入）": {
+                "column": "day_19_goods_service_income",
+                "source_type": "currency"
+              },
+              "19日（货款/服务支出）": {
+                "column": "day_19_goods_service_expense",
+                "source_type": "currency"
+              },
+              "19日（工薪社保支出）": {
+                "column": "day_19_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "19日（其他收入）": {
+                "column": "day_19_other_income",
+                "source_type": "currency"
+              },
+              "19日其他支出": {
+                "column": "day_19_other_expense",
+                "source_type": "currency"
+              },
+              "20日（货款/服务收入）": {
+                "column": "day_20_goods_service_income",
+                "source_type": "currency"
+              },
+              "20日（货款/服务支出）": {
+                "column": "day_20_goods_service_expense",
+                "source_type": "currency"
+              },
+              "20日（工薪社保支出）": {
+                "column": "day_20_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "20日（其他收入）": {
+                "column": "day_20_other_income",
+                "source_type": "currency"
+              },
+              "20日其他支出": {
+                "column": "day_20_other_expense",
+                "source_type": "currency"
+              },
+              "21日（货款/服务收入）": {
+                "column": "day_21_goods_service_income",
+                "source_type": "currency"
+              },
+              "21日（货款/服务支出）": {
+                "column": "day_21_goods_service_expense",
+                "source_type": "currency"
+              },
+              "21日（工薪社保支出）": {
+                "column": "day_21_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "21日（其他收入）": {
+                "column": "day_21_other_income",
+                "source_type": "currency"
+              },
+              "21日其他支出": {
+                "column": "day_21_other_expense",
+                "source_type": "currency"
+              },
+              "22日（货款/服务收入）": {
+                "column": "day_22_goods_service_income",
+                "source_type": "currency"
+              },
+              "22日（货款/服务支出）": {
+                "column": "day_22_goods_service_expense",
+                "source_type": "currency"
+              },
+              "22日（工薪社保支出）": {
+                "column": "day_22_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "22日（其他收入）": {
+                "column": "day_22_other_income",
+                "source_type": "currency"
+              },
+              "22日其他支出": {
+                "column": "day_22_other_expense",
+                "source_type": "currency"
+              },
+              "23日（货款/服务收入）": {
+                "column": "day_23_goods_service_income",
+                "source_type": "currency"
+              },
+              "23日（货款/服务支出）": {
+                "column": "day_23_goods_service_expense",
+                "source_type": "currency"
+              },
+              "23日（工薪社保支出）": {
+                "column": "day_23_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "23日（其他收入）": {
+                "column": "day_23_other_income",
+                "source_type": "currency"
+              },
+              "23日其他支出": {
+                "column": "day_23_other_expense",
+                "source_type": "currency"
+              },
+              "24日（货款/服务收入）": {
+                "column": "day_24_goods_service_income",
+                "source_type": "currency"
+              },
+              "24日（货款/服务支出）": {
+                "column": "day_24_goods_service_expense",
+                "source_type": "currency"
+              },
+              "24日（工薪社保支出）": {
+                "column": "day_24_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "24日（其他收入）": {
+                "column": "day_24_other_income",
+                "source_type": "currency"
+              },
+              "24日其他支出": {
+                "column": "day_24_other_expense",
+                "source_type": "currency"
+              },
+              "25日（货款/服务收入）": {
+                "column": "day_25_goods_service_income",
+                "source_type": "currency"
+              },
+              "25日（货款/服务支出）": {
+                "column": "day_25_goods_service_expense",
+                "source_type": "currency"
+              },
+              "25日（工薪社保支出）": {
+                "column": "day_25_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "25日（其他收入）": {
+                "column": "day_25_other_income",
+                "source_type": "currency"
+              },
+              "25日其他支出": {
+                "column": "day_25_other_expense",
+                "source_type": "currency"
+              },
+              "26日（货款/服务收入）": {
+                "column": "day_26_goods_service_income",
+                "source_type": "currency"
+              },
+              "26日（货款/服务支出）": {
+                "column": "day_26_goods_service_expense",
+                "source_type": "currency"
+              },
+              "26日（工薪社保支出）": {
+                "column": "day_26_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "26日（其他收入）": {
+                "column": "day_26_other_income",
+                "source_type": "currency"
+              },
+              "26日其他支出": {
+                "column": "day_26_other_expense",
+                "source_type": "currency"
+              },
+              "27日（货款/服务收入）": {
+                "column": "day_27_goods_service_income",
+                "source_type": "currency"
+              },
+              "27日（货款/服务支出）": {
+                "column": "day_27_goods_service_expense",
+                "source_type": "currency"
+              },
+              "27日（工薪社保支出）": {
+                "column": "day_27_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "27日（其他收入）": {
+                "column": "day_27_other_income",
+                "source_type": "currency"
+              },
+              "27日其他支出": {
+                "column": "day_27_other_expense",
+                "source_type": "currency"
+              },
+              "28日（货款/服务收入）": {
+                "column": "day_28_goods_service_income",
+                "source_type": "currency"
+              },
+              "28日（货款/服务支出）": {
+                "column": "day_28_goods_service_expense",
+                "source_type": "currency"
+              },
+              "28日（工薪社保支出）": {
+                "column": "day_28_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "28日（其他收入）": {
+                "column": "day_28_other_income",
+                "source_type": "currency"
+              },
+              "28日其他支出": {
+                "column": "day_28_other_expense",
+                "source_type": "currency"
+              },
+              "29日（货款/服务收入）": {
+                "column": "day_29_goods_service_income",
+                "source_type": "currency"
+              },
+              "29日（货款/服务支出）": {
+                "column": "day_29_goods_service_expense",
+                "source_type": "currency"
+              },
+              "29日（工薪社保支出）": {
+                "column": "day_29_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "29日（其他收入）": {
+                "column": "day_29_other_income",
+                "source_type": "currency"
+              },
+              "29日其他支出": {
+                "column": "day_29_other_expense",
+                "source_type": "currency"
+              },
+              "30日（货款/服务收入）": {
+                "column": "day_30_goods_service_income",
+                "source_type": "currency"
+              },
+              "30日（货款/服务支出）": {
+                "column": "day_30_goods_service_expense",
+                "source_type": "currency"
+              },
+              "30日（工薪社保支出）": {
+                "column": "day_30_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "30日（其他收入）": {
+                "column": "day_30_other_income",
+                "source_type": "currency"
+              },
+              "30日其他支出": {
+                "column": "day_30_other_expense",
+                "source_type": "currency"
+              },
+              "31日（货款/服务收入）": {
+                "column": "day_31_goods_service_income",
+                "source_type": "currency"
+              },
+              "31日（货款/服务支出）": {
+                "column": "day_31_goods_service_expense",
+                "source_type": "currency"
+              },
+              "31日（工薪社保支出）": {
+                "column": "day_31_payroll_social_insurance_expense",
+                "source_type": "currency"
+              },
+              "31日（其他收入）": {
+                "column": "day_31_other_income",
+                "source_type": "currency"
+              },
+              "31日其他支出": {
+                "column": "day_31_other_expense",
+                "source_type": "currency"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "vy20BglGWOayj65ltG0Oq2leJA7depqY",
+        "sheets": [
+          {
+            "sheet_id": "bzjkk0ayura1iaxp1csm1",
+            "sheet_name": "线下—应收账款账龄分析表",
+            "dataset": "fin_offline_receivables_aging",
+            "target_table": "fin_offline_receivables_aging",
+            "max_pages": 100,
+            "field_mapping": {
+              "往来单位": {
+                "column": "counterparty_name",
+                "source_type": "text"
+              },
+              "账龄（31-60天）": {
+                "column": "aging_31_60_days_amount",
+                "source_type": "number"
+              },
+              "类别": {
+                "column": "receivable_category",
+                "source_type": "singleSelect"
+              },
+              "账龄（0-30天）": {
+                "column": "aging_0_30_days_amount",
+                "source_type": "number"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "说明": {
+                "column": "description_note",
+                "source_type": "text"
+              },
+              "更新日期": {
+                "column": "updated_date",
+                "source_type": "date"
+              },
+              "应收账款期末余额": {
+                "column": "accounts_receivable_ending_balance",
+                "source_type": "number"
+              },
+              "逾期金额": {
+                "column": "overdue_amount",
+                "source_type": "number"
+              },
+              "编制人": {
+                "column": "prepared_by",
+                "source_type": "user"
+              },
+              "复核人": {
+                "column": "reviewer",
+                "source_type": "user"
+              },
+              "复核时间": {
+                "column": "reviewed_at",
+                "source_type": "date"
+              },
+              "业务部门确认": {
+                "column": "business_department_confirmation",
+                "source_type": "text"
+              },
+              "确认人": {
+                "column": "confirmer",
+                "source_type": "user"
+              },
+              "负责人": {
+                "column": "owner",
+                "source_type": "user"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "jb9Y4gmKWrZn9yzviQ9XOoQ9WGXn6lpz",
+        "sheets": [
+          {
+            "sheet_id": "63eg8lu2zpqikfl5uh0ls",
+            "sheet_name": "电商预付及供应商发票管理表",
+            "dataset": "fin_ecommerce_prepayment_supplier_invoice",
+            "target_table": "fin_ecommerce_prepayment_supplier_invoice",
+            "max_pages": 100,
+            "field_mapping": {
+              "说明要求": {
+                "column": "requirement_note",
+                "source_type": "text"
+              },
+              "应付-暂估账面": {
+                "column": "accounts_payable_estimated_ledger_amount",
+                "source_type": "number"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "text"
+              },
+              "账账相符核对": {
+                "column": "ledger_reconciliation_status",
+                "source_type": "singleSelect"
+              },
+              "未到货未到票情况说明": {
+                "column": "undelivered_uninvoiced_note",
+                "source_type": "text"
+              },
+              "核对人": {
+                "column": "reviewer",
+                "source_type": "user"
+              },
+              "未到票金额": {
+                "column": "uninvoiced_amount",
+                "source_type": "number"
+              },
+              "日期": {
+                "column": "statement_date_raw",
+                "source_type": "text"
+              },
+              "账面预付账款": {
+                "column": "prepayment_ledger_amount",
+                "source_type": "number"
+              },
+              "供应商名称": {
+                "column": "supplier_name",
+                "source_type": "text"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "G1DKw2zgV2wdnYZGHBB4xgzxJB5r9YAn",
+        "sheets": [
+          {
+            "sheet_id": "k4z3335fh3s7y9k6hu8fd",
+            "sheet_name": "线下保证金及其他应收管理-202602",
+            "dataset": "fin_offline_deposit_other_receivables",
+            "target_table": "fin_offline_deposit_other_receivables",
+            "max_pages": 100,
+            "field_mapping": {
+              "保证金缴纳时间": {
+                "column": "deposit_paid_at_raw",
+                "source_type": "date"
+              },
+              "是否正常合作": {
+                "column": "cooperation_status",
+                "source_type": "singleSelect"
+              },
+              "填写人": {
+                "column": "submitted_by",
+                "source_type": "user"
+              },
+              "公司主体": {
+                "column": "company_entity",
+                "source_type": "singleSelect"
+              },
+              "保证金余额": {
+                "column": "deposit_balance",
+                "source_type": "number"
+              },
+              "往来单位（供应商）": {
+                "column": "supplier_name",
+                "source_type": "text"
+              },
+              "项目": {
+                "column": "project_name",
+                "source_type": "singleSelect"
+              },
+              "更新时间": {
+                "column": "updated_at",
+                "source_type": "date"
+              },
+              "复核人": {
+                "column": "reviewer",
+                "source_type": "user"
+              },
+              "说明": {
+                "column": "description_note",
+                "source_type": "text"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "dpYLaezmVNZ3MxPwiK3kebgpVrMqPxX6",
+        "sheets": [
+          {
+            "sheet_id": "jnhs2a8hndoysj42to99r",
+            "sheet_name": "9月销售日报",
+            "dataset": "daily_report_offline_hangzhou",
+            "target_table": "daily_report_offline",
+            "max_pages": 100,
+            "field_mapping": {
+              "项目部": {
+                "column": "department",
+                "source_type": "text"
+              },
+              "责任人": {
+                "column": "responsible_person",
+                "source_type": "text"
+              },
+              "日均目标": {
+                "column": "daily_target",
+                "source_type": "number"
+              },
+              "达成率": {
+                "column": "achievement_rate",
+                "source_type": "number"
+              },
+              "9月销量目标（万）": {
+                "column": "monthly_target",
+                "source_type": "number"
+              },
+              "补充说明": {
+                "column": "note",
+                "source_type": "text"
+              }
+            },
+            "transform": {
+              "type": "melt",
+              "year": 2026,
+              "month": 9,
+              "date_columns": {
+                "1日": 1,
+                "2日": 2,
+                "3日": 3,
+                "4日": 4,
+                "5日": 5,
+                "6日": 6,
+                "7日": 7,
+                "8日": 8,
+                "9日": 9,
+                "10日": 10,
+                "11日": 11,
+                "12日": 12,
+                "13日": 13,
+                "14日": 14,
+                "15日": 15,
+                "16日": 16,
+                "17日": 17,
+                "18日": 18,
+                "19日": 19,
+                "20日": 20,
+                "21日": 21,
+                "22日": 22,
+                "23日": 23,
+                "24日": 24,
+                "25日": 25,
+                "26日": 26,
+                "27日": 27,
+                "28日": 28,
+                "29日": 29,
+                "30日": 30
+              },
+              "value_column": "sales_amount",
+              "inject": {
+                "region": "杭州"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "N7dx2rn0Jbl4O5yguNdqpvg1WMGjLRb3",
+        "sheets": [
+          {
+            "sheet_id": "mgqo9inoj99gtv5cfii9r",
+            "sheet_name": "9月",
+            "dataset": "daily_report_offline_shaoxing",
+            "target_table": "daily_report_offline",
+            "max_pages": 100,
+            "field_mapping": {
+              "项目部": {
+                "column": "department",
+                "source_type": "text"
+              },
+              "责任人": {
+                "column": "responsible_person",
+                "source_type": "text"
+              },
+              "日均目标": {
+                "column": "daily_target",
+                "source_type": "number"
+              },
+              "达成率": {
+                "column": "achievement_rate",
+                "source_type": "number"
+              },
+              "9月销量目标（万）": {
+                "column": "monthly_target",
+                "source_type": "number"
+              },
+              "补充说明": {
+                "column": "note",
+                "source_type": "text"
+              }
+            },
+            "transform": {
+              "type": "melt",
+              "year": 2026,
+              "month": 9,
+              "date_columns": {
+                "1日": 1,
+                "2日": 2,
+                "3日": 3,
+                "4日": 4,
+                "5日": 5,
+                "6日": 6,
+                "7日": 7,
+                "8日": 8,
+                "9日": 9,
+                "10日": 10,
+                "11日": 11,
+                "12日": 12,
+                "13日": 13,
+                "14日": 14,
+                "15日": 15,
+                "16日": 16,
+                "17日": 17,
+                "18日": 18,
+                "19日": 19,
+                "20日": 20,
+                "21日": 21,
+                "22日": 22,
+                "23日": 23,
+                "24日": 24,
+                "25日": 25,
+                "26日": 26,
+                "27日": 27,
+                "28日": 28,
+                "29日": 29,
+                "30日": 30
+              },
+              "value_column": "sales_amount",
+              "inject": {
+                "region": "绍兴"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "base_id": "QOG9lyrgJPmxNQlwIw4QDd6q8zN67Mw4",
+        "sheets": [
+          {
+            "sheet_id": "6AJ3wpa",
+            "sheet_name": "天猫渠道数据9",
+            "dataset": "channel_daily_sales_tmall",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "天猫"
+              }
+            }
+          },
+          {
+            "sheet_id": "WCaC6Yx",
+            "sheet_name": "京东渠道数据9",
+            "dataset": "channel_daily_sales_jd",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              },
+              "父记录": {
+                "column": "parent_record_refs",
+                "source_type": "unidirectionalLink"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "京东"
+              }
+            }
+          },
+          {
+            "sheet_id": "gYQlqjn",
+            "sheet_name": "拼多多渠道数据9",
+            "dataset": "channel_daily_sales_pdd",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              },
+              "父记录": {
+                "column": "parent_record_refs",
+                "source_type": "unidirectionalLink"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "拼多多"
+              }
+            }
+          },
+          {
+            "sheet_id": "s2wLsNP",
+            "sheet_name": "猫超渠道数据9",
+            "dataset": "channel_daily_sales_maochao",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "猫超"
+              }
+            }
+          },
+          {
+            "sheet_id": "opo5gl8",
+            "sheet_name": "即时零售渠道数据9",
+            "dataset": "channel_daily_sales_instant_retail",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "即时零售"
+              }
+            }
+          },
+          {
+            "sheet_id": "uRjZ8u5",
+            "sheet_name": "直播渠道数据9",
+            "dataset": "channel_daily_sales_live",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "直播"
+              }
+            }
+          },
+          {
+            "sheet_id": "ViSjPlk",
+            "sheet_name": "私域渠道数据9",
+            "dataset": "channel_daily_sales_private",
+            "target_table": "channel_daily_sales",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "number"
+              },
+              "推广费": {
+                "column": "promotion_cost",
+                "source_type": "number"
+              },
+              "ROI": {
+                "column": "roi",
+                "source_type": "number"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "channel": "私域"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "wdt": {
+    "datasets": []
+  }
+}

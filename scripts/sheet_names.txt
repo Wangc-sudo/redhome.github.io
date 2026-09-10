@@ -1,0 +1,94 @@
+{
+  "KGZLxjv9VGjmo2zLuYonDNjOW6EDybno": [
+    [
+      "5y8vtogysp4dwysq5spc8",
+      "店铺扣点费用管理"
+    ]
+  ],
+  "dpYLaezmVNZ3MxPwiK2GA4ewVrMqPxX6": [
+    [
+      "q1wnmyq6r4r6xfdsqlvyw",
+      "纳税申报核算表-2026"
+    ],
+    [
+      "41xpJGt",
+      "销售核对表-2026"
+    ],
+    [
+      "yjSyAqj",
+      "印花税核算表"
+    ],
+    [
+      "RbxfN7i",
+      "无票销售申报汇总表"
+    ],
+    [
+      "SH6CVsK",
+      "无票销售登记"
+    ],
+    [
+      "Y40OtDP",
+      "开具以前月份发票登记表"
+    ],
+    [
+      "KOqVpRS",
+      "预开票登记表"
+    ],
+    [
+      "5MEHmH6",
+      "进项发票管理表"
+    ]
+  ],
+  "r1R7q3QmWe4D5BqNTXxnB9k68xkXOEP2": [
+    [
+      "8jz4u8jzpaqsiliw5b5z3",
+      "推广费余额明细表"
+    ]
+  ],
+  "ZX6GRezwJlNpeB4asQ5v1XBOWdqbropQ": [
+    [
+      "k4z3335fh3s7y9k6hu8fd",
+      "平台保证金管理"
+    ]
+  ],
+  "R1zknDm0WRlPXQGwu2kqRRA5JBQEx5rG": [
+    [
+      "e2q1741g5aekd54ecyudv",
+      "店铺资金余额核对表"
+    ]
+  ],
+  "jb9Y4gmKWrZn9yzvienZODMaWGXn6lpz": [
+    [
+      "hERWDMS",
+      "百亿补贴管理表-拼多多"
+    ],
+    [
+      "jhmpFYu",
+      "百亿补贴管理表-抖音"
+    ]
+  ],
+  "r1R7q3QmWe4D5BqNTZmpnY198xkXOEP2": [
+    [
+      "ljudw0h1p9licd4vchp08",
+      "每日资金明细"
+    ]
+  ],
+  "vy20BglGWOayj65ltG0Oq2leJA7depqY": [
+    [
+      "bzjkk0ayura1iaxp1csm1",
+      "线下—应收账款账龄分析表"
+    ]
+  ],
+  "jb9Y4gmKWrZn9yzviQ9XOoQ9WGXn6lpz": [
+    [
+      "63eg8lu2zpqikfl5uh0ls",
+      "电商预付及供应商发票管理表"
+    ]
+  ],
+  "G1DKw2zgV2wdnYZGHBB4xgzxJB5r9YAn": [
+    [
+      "k4z3335fh3s7y9k6hu8fd",
+      "线下保证金及其他应收管理-202602"
+    ]
+  ]
+}
