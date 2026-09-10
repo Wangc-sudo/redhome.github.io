@@ -36,6 +36,45 @@ services:
       PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
       INTEGRATION_TEST_RUNNER: "1"
 
+  sync-runner:
+    profiles:
+      - live-sync
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - python3
+      - -m
+      - common.public_data.cli
+      - live-sync
+      - --live-read
+      - --confirm-local-test-write
+      - --source-credentials
+      - /run/live-input/source-credentials.json
+    environment:
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_MANIFEST_PATH:-/dev/null}
+        target: /run/live-input/manifest.json
+        read_only: true
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
+        target: /run/live-input/source-credentials.json
+        read_only: true
+
 volumes:
   public-data-mysql-data:
     name: public-data-mysql-data

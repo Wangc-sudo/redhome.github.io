@@ -32,6 +32,22 @@
 - `docker-compose.integration.yml` 只启动本地 Ubuntu 测试容器与本地 MySQL 8.4 测试库；运行 `docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from test-runner` 不会触发真实源同步或外部写入。
 - WDT 受限读取、manifest、raw/mart 迁移、同步编排、真实源验收和业务脚本切换至数据库仍未实施；现有机器人尚未切换运行路径。任何调度切换均须由运维人员另行确认。
 
+### 受限实时同步验收
+
+- 实时同步命令 `live-sync` 只能由运维人员在 Docker 宿主机上手动执行，不会随 `docker compose up` 自动启动。
+- 只写入本地测试数据库（`raw_dingtalk_test`、`raw_wdt_test`、`mart_ops_test`），不对外部系统做任何写入。
+- manifest 文件和凭据文件必须存放在仓库目录之外；凭据模板见 `docker/integration/live-source-credentials.example.json`。
+- 命令格式：
+
+```bash
+PUBLIC_DATA_LIVE_MANIFEST_PATH=/absolute/path/manifest.json \
+PUBLIC_DATA_LIVE_CREDENTIALS_PATH=/absolute/path/source-credentials.json \
+docker compose -f docker-compose.integration.yml --profile live-sync run --rm sync-runner
+```
+
+- 验收标准：连续两次执行上述命令，各数据集的 `record_id_digest` 与 raw 表主键行数保持一致。
+- 任何 `failed` 或 `projection_pending` 状态的 sync run 均视为验收失败，须排查后重试。
+
 ## 分支与变更流程
 
 - `main`：随时可运行的稳定版本，本机定时任务只执行 main
