@@ -1,6 +1,9 @@
 {
-  "dingtalkAiTables": [],
-  "wangdian": {"datasets": []},
-  "dailyReportProjections": [],
-  "channelProjections": []
+  "version": 1,
+  "dingtalk": {
+    "bases": []
+  },
+  "wdt": {
+    "datasets": []
+  }
 }
