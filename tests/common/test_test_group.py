@@ -1,6 +1,7 @@
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # 把 repo 根目录加入路径，确保能 import common
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -9,7 +10,7 @@ import sys
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common import test_group
+from common.dingtalk import test_group
 
 
 class TestResolveTarget(unittest.TestCase):
@@ -54,6 +55,13 @@ class TestResolveTarget(unittest.TestCase):
         }
         result = test_group.resolve_target(original, mode="prod")
         self.assertEqual(result, original)
+
+    def test_missing_default_hint_uses_migrated_path(self):
+        with patch.object(test_group, "load_test_groups", return_value={}):
+            with self.assertRaisesRegex(
+                RuntimeError, r"common/dingtalk/test_groups\.json"
+            ):
+                test_group.resolve_target({}, mode="test")
 
     def test_webhook_test_group(self):
         os.environ["TEST_MODE"] = "1"

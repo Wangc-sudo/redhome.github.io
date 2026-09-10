@@ -1,0 +1,13 @@
+.git/
+.github/
+.worktrees/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+config.json
+wdt_credentials.json
+config-local/
+common/dingtalk/test_groups.json
+logs/
+state/
+*.html

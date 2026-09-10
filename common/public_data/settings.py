@@ -1,0 +1,97 @@
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+_REQUIRED_ENVIRONMENT_KEYS = (
+    "APP_ENV",
+    "PUBLIC_DATA_RDS_HOST",
+    "PUBLIC_DATA_RDS_PORT",
+    "PUBLIC_DATA_RDS_USER",
+    "PUBLIC_DATA_RDS_PASSWORD",
+    "PUBLIC_DATA_DINGTALK_DATABASE",
+    "PUBLIC_DATA_WDT_DATABASE",
+    "PUBLIC_DATA_MART_DATABASE",
+    "PUBLIC_DATA_CONFIG",
+)
+
+
+@dataclass(frozen=True)
+class DatabaseSettings:
+    host: str
+    port: int
+    user: str
+    password: str
+    name: str
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_env: str
+    dingtalk_database: DatabaseSettings
+    wdt_database: DatabaseSettings
+    mart_database: DatabaseSettings
+    source_config_path: Path
+
+    @classmethod
+    def from_environment(cls, environ=None):
+        environment = os.environ if environ is None else environ
+        values = {key: environment.get(key) for key in _REQUIRED_ENVIRONMENT_KEYS}
+        missing_keys = [
+            key
+            for key, value in values.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing_keys:
+            raise ValueError(
+                "Missing required public-data settings: " + ", ".join(missing_keys)
+            )
+
+        app_env = values["APP_ENV"]
+        if app_env not in ("test", "production"):
+            raise ValueError("APP_ENV must be either 'test' or 'production'")
+
+        port_value = values["PUBLIC_DATA_RDS_PORT"]
+        if not port_value.isdecimal():
+            raise ValueError("PUBLIC_DATA_RDS_PORT must be a decimal integer")
+        port = int(port_value)
+        if not 1 <= port <= 65535:
+            raise ValueError("PUBLIC_DATA_RDS_PORT must be between 1 and 65535")
+
+        database_names = {
+            "dingtalk": values["PUBLIC_DATA_DINGTALK_DATABASE"],
+            "wdt": values["PUBLIC_DATA_WDT_DATABASE"],
+            "mart": values["PUBLIC_DATA_MART_DATABASE"],
+        }
+        for database_name in database_names.values():
+            is_test_database = database_name.endswith("_test")
+            if app_env == "test" and not is_test_database:
+                raise ValueError("APP_ENV=test requires database names ending in '_test'")
+            if app_env == "production" and is_test_database:
+                raise ValueError("APP_ENV=production rejects database names ending in '_test'")
+
+        config_path = Path(values["PUBLIC_DATA_CONFIG"])
+        try:
+            with config_path.open(encoding="utf-8") as config_file:
+                config = json.load(config_file)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("PUBLIC_DATA_CONFIG must contain a JSON object") from error
+        if not isinstance(config, dict):
+            raise ValueError("PUBLIC_DATA_CONFIG must contain a JSON object")
+
+        connection_values = {
+            "host": values["PUBLIC_DATA_RDS_HOST"],
+            "port": port,
+            "user": values["PUBLIC_DATA_RDS_USER"],
+            "password": values["PUBLIC_DATA_RDS_PASSWORD"],
+        }
+        return cls(
+            app_env=app_env,
+            dingtalk_database=DatabaseSettings(
+                name=database_names["dingtalk"], **connection_values
+            ),
+            wdt_database=DatabaseSettings(name=database_names["wdt"], **connection_values),
+            mart_database=DatabaseSettings(name=database_names["mart"], **connection_values),
+            source_config_path=config_path,
+        )

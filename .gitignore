@@ -31,6 +31,7 @@ org_input_*.json
 config.json
 wdt_credentials.json
 config-local/
+config-local/public-data/
 
 # 测试群真实配置（含 openConversationId）
-common/test_groups.json
+common/dingtalk/test_groups.json

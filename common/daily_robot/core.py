@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.dingtalk import DingTalkClient, DingTalkError, send_markdown
-from common.test_group import resolve_target
+from common.dingtalk.test_group import resolve_target
 
 
 def log(log_dir, msg):

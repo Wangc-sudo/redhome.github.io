@@ -1,0 +1,41 @@
+name: public-data-integration
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: local-integration-root
+    volumes:
+      - public-data-mysql-data:/var/lib/mysql
+      - ./docker/integration/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping --host=127.0.0.1 --user=root --password=$${MYSQL_ROOT_PASSWORD} --silent
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      INTEGRATION_TEST_RUNNER: "1"
+
+volumes:
+  public-data-mysql-data:
+    name: public-data-mysql-data

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """钉钉测试群统一配置选择器。
 
-环境变量 TEST_MODE=1 时，把机器人的目标群切换到 common/test_groups.json 里的 default 群。
+环境变量 TEST_MODE=1 时，把机器人的目标群切换到 common/dingtalk/test_groups.json 里的 default 群。
 """
 import json
 import os
@@ -37,7 +37,7 @@ def resolve_target(robot_config, mode=None):
     groups = load_test_groups()
     test = groups.get("default")
     if not test:
-        raise RuntimeError("common/test_groups.json 缺少 default 节点")
+        raise RuntimeError("common/dingtalk/test_groups.json 缺少 default 节点")
 
     target = dict(robot_config)
     if "webhook" in test:
@@ -56,7 +56,7 @@ def resolve_target(robot_config, mode=None):
         target.pop("secret", None)
     else:
         raise RuntimeError(
-            "common/test_groups.json/default 缺少 webhook 或 openConversationId"
+            "common/dingtalk/test_groups.json/default 缺少 webhook 或 openConversationId"
         )
 
     return target
