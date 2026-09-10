@@ -270,7 +270,9 @@ class LiveSyncServiceTests(unittest.TestCase):
         self.wdt_gateway.read_dataset.assert_not_called()
 
         # Raw repos were queried.
-        self.dingtalk_repo.summary_for_run.assert_called_once_with(_RUN_ID)
+        self.dingtalk_repo.summary_for_run.assert_called_once_with(
+            "fin_store_commission", _RUN_ID,
+        )
         self.wdt_repo.summary_for_run.assert_called_once_with(_RUN_ID)
 
         # Two summaries saved (one per dataset).

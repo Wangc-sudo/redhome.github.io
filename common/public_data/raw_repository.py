@@ -130,6 +130,26 @@ class DingTalkRawRepository:
 
                 cursor.execute(sql, tuple(params))
 
+    def summary_for_run(self, table_name, sync_run_id):
+        """Return row-level summary for *sync_run_id* from *table_name*.
+
+        Parameters
+        ----------
+        table_name : str
+            A key known to :mod:`finance_schema`.
+        sync_run_id : str
+        """
+        finance_schema.table_definition(table_name)
+        sql = (
+            "SELECT `dingtalk_record_id` AS `source_record_id`, "
+            "`sync_run_id` "
+            f"FROM `{table_name}` "
+            "WHERE `sync_run_id` = %s"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.execute(sql, (sync_run_id,))
+            return cursor.fetchall()
+
 
 class WdtRawRepository:
     """Persists WDT gateway records into ``wdt_records``."""
@@ -193,3 +213,4 @@ class WdtRawRepository:
         )
         with contextlib.closing(self._connection.cursor()) as cursor:
             cursor.execute(sql, (sync_run_id,))
+            return cursor.fetchall()

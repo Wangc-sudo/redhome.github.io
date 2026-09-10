@@ -14,6 +14,12 @@ class FakeCursor:
     def execute(self, query, parameters=None):
         self.executed.append((query, parameters))
 
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
     def close(self):
         pass
 

@@ -32,6 +32,9 @@ class MartRepository:
         self._statuses[sync_run_id] = "started"
 
     def mark_raw_committed(self, sync_run_id):
+        current = self._statuses.get(sync_run_id)
+        if current == "raw_committed":
+            return
         self._update_status(sync_run_id, "raw_committed")
 
     def mark_completed(self, sync_run_id, *, finished_at):
@@ -48,6 +51,24 @@ class MartRepository:
             sync_run_id, "projection_pending",
             failure_code=failure_code, finished_at=finished_at,
         )
+
+    def load_run_status(self, sync_run_id):
+        """Query the DB for the current status of *sync_run_id* and cache it.
+
+        This allows a freshly-constructed ``MartRepository`` to participate in
+        recovery flows (e.g. ``rebuild_projection``) where the run was created
+        by a previous process.
+        """
+        sql = (
+            "SELECT `status` FROM `sync_runs` "
+            "WHERE `sync_run_id` = %s"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.execute(sql, (sync_run_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Unknown sync_run_id: {sync_run_id}")
+        self._statuses[sync_run_id] = row["status"]
 
     # -- dataset summary -----------------------------------------------------
 

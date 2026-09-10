@@ -133,10 +133,13 @@ class LiveSyncService:
 
         No gateway method is invoked — this is a pure raw-to-mart repair.
         """
+        self._mart_repo.load_run_status(sync_run_id)
         datasets_summary = []
 
         for sheet in manifest.dingtalk_sheets:
-            records = self._dingtalk_repo.summary_for_run(sync_run_id)
+            records = self._dingtalk_repo.summary_for_run(
+                sheet.target_table, sync_run_id,
+            )
             record_ids = [r["source_record_id"] for r in records]
             digest = self._compute_digest(record_ids)
 
