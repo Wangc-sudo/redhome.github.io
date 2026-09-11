@@ -270,6 +270,38 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             "/app/docker/integration/regions.seed.json",
         )
 
+    def test_pages_runner_is_opt_in_and_credential_free(self):
+        configuration = self._compose_config("pages")
+        pages = configuration["services"]["pages-hangzhou"]
+
+        self.assertEqual(pages.get("profiles"), ["pages"])
+        self.assertEqual(
+            "service_healthy", pages["depends_on"]["mysql"]["condition"]
+        )
+        self.assertNotIn("ports", pages)
+
+        command = pages.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertIn("common.daily_robot.mart_cli", parts)
+        self.assertIn("leaderboard-html", parts)
+        self.assertIn("--confirm-local-test-write", parts)
+        self.assertNotIn("--live-read", parts)
+        self.assertNotIn("--live-send", parts)
+
+        # Business line (spec section 7): no credentials; the only mount is
+        # the HTML output directory.
+        targets = {
+            v.get("target", "") if isinstance(v, dict) else ""
+            for v in pages.get("volumes", [])
+        }
+        self.assertEqual(targets, {"/output"})
+
+        environment = pages["environment"]
+        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_SERVICE_ID"), "pages-hangzhou"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -281,5 +281,61 @@ class LeaderboardCliTests(unittest.TestCase):
         load_settings.assert_not_called()
 
 
+class LeaderboardHtmlCliTests(unittest.TestCase):
+    """The leaderboard-html page subcommand."""
+
+    def test_writes_the_page_and_prints_a_safe_summary(self):
+        import tempfile
+
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        data = LeaderboardData(
+            business_date=date(2026, 9, 11),
+            elapsed=(1, 2, 3),
+            people=({"name": "李四", "dept": "滨萧", "target": 1000,
+                     "completed": 500.0, "unfilled": 8, "rate": 0.5},),
+            workdays=frozenset({date(2026, 9, 10)}),
+        )
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"hangzhou": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart"), \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.build_html_page",
+                   return_value="<html>完成率榜单</html>") as build_page, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 11, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            target = Path(tmp) / "nested" / "hangzhou.html"
+            with redirect_stdout(output):
+                main([
+                    "leaderboard-html", "--confirm-local-test-write",
+                    "--region", "hangzhou", "--output", str(target),
+                ])
+
+            page = target.read_text(encoding="utf-8")
+
+        self.assertEqual(page, "<html>完成率榜单</html>")
+        build_page.assert_called_once()
+        text = output.getvalue()
+        self.assertIn("kind=leaderboard-html", text)
+        self.assertIn("status=written", text)
+        self.assertIn("people=1", text)
+
+    def test_leaderboard_html_requires_confirmation(self):
+        with patch("common.daily_robot.mart_cli.load_settings") as load_settings:
+            with self.assertRaises(SystemExit) as raised:
+                main(["leaderboard-html", "--output", "/tmp/x.html"])
+        self.assertNotEqual(0, raised.exception.code)
+        load_settings.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

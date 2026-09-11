@@ -18,6 +18,7 @@ import argparse
 import os
 import sys
 from datetime import date, datetime
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,11 @@ def build_view(region_cfg, workdays, *, year, month):
 def render_bc(region, calendar, now, elapsed, people, url=None):
     from common.daily_robot.leaderboard import render_bc_markdown
     return render_bc_markdown(region, calendar, now, elapsed, people, url=url)
+
+
+def build_html_page(view, now, elapsed, people):
+    from common.daily_robot.leaderboard import build_html
+    return build_html(view, now, elapsed, people)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +279,64 @@ def _handle_leaderboard(args):
         sys.exit(1)
 
 
+def _handle_leaderboard_html(args):
+    """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        region = _resolve_region(args)
+        if not region:
+            _print_failure("region_required")
+            sys.exit(1)
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+        cfg = configs.get(region)
+        if cfg is None:
+            _print_failure("unknown_region")
+            sys.exit(1)
+
+        now = datetime.now()
+        business_date = (
+            date.fromisoformat(args.date) if getattr(args, "date", None)
+            else now.date()
+        )
+
+        conn = connect_mart(settings)
+        data = mart_collect_data(conn, region=region, business_date=business_date)
+        view = build_view(
+            cfg, data.workdays,
+            year=business_date.year, month=business_date.month,
+        )
+        page = build_html_page(view, now, list(data.elapsed), list(data.people))
+
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(page, encoding="utf-8")
+        print(
+            f"service={service_id} region={region} kind=leaderboard-html "
+            f"status=written people={len(data.people)}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -308,6 +372,28 @@ def main(argv=None):
             help="business date override (YYYY-MM-DD, default: today)",
         )
 
+    # -- leaderboard-html ------------------------------------------------------
+    html_sub = subparsers.add_parser(
+        "leaderboard-html", help="Render the leaderboard HTML page to a file"
+    )
+    html_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    html_sub.add_argument(
+        "--region", default=None,
+        help="business region (default: $ROBOT_REGION)",
+    )
+    html_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    html_sub.add_argument(
+        "--date", default=None,
+        help="business date override (YYYY-MM-DD, default: today)",
+    )
+    html_sub.add_argument("--output", required=True)
+
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
@@ -315,6 +401,9 @@ def main(argv=None):
 
     if args.command == "leaderboard":
         _handle_leaderboard(args)
+        return
+    if args.command == "leaderboard-html":
+        _handle_leaderboard_html(args)
         return
 
     _handle(args, kind=None if args.command == "once" else args.command)

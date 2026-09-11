@@ -342,6 +342,46 @@ services:
         target: /run/live-input/source-credentials.json
         read_only: true
 
+  # 业务线 pages-leaderboard（阶段 4）：只读 mart_ops 生成榜单 HTML 到挂载
+  # 目录；发布通道（QW Pages）维持现状由运维执行。零凭据。
+  pages-hangzhou:
+    profiles:
+      - pages
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.daily_robot.mart_cli
+      - leaderboard-html
+      - --confirm-local-test-write
+      - --output
+      - /output/hangzhou.html
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: pages-hangzhou
+      ROBOT_REGION: hangzhou
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
+        target: /output
+
 volumes:
   public-data-mysql-data:
     name: public-data-mysql-data
