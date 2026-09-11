@@ -32,8 +32,17 @@
 | `docker/integration/calendar.seed.json` | 版本受控的工作日历种子（只记 rule） | 已落地 |
 | `docker-compose.integration.yml` | `extract-mart` 服务（profile `extract`，无任何凭据挂载） | 已落地 |
 | `docker/integration/pipelines.seed.yaml` | 注册 `extract-mart`（`reads`/`schedule`） | 已落地 |
-| `common/public_data/org_read.py` | 钉钉通讯录只读 gateway（部门子树 → 成员） | **待落地** |
-| `common/public_data/extract_mart.py` | 追加 `dim_robot_member` 写入方（整体替换） | **待落地** |
+| `common/public_data/org_read.py` | 钉钉通讯录只读 gateway（`listsub`/`listid`/`user/get`）+ `collect_members`（子树展开、区域优先级归属）+ `load_org_seed` | 已落地 |
+| `common/public_data/manifest.py` | `dingtalk.org` 数据集声明（`OrgDataset`；区域映射不在 manifest，在种子） | 已落地 |
+| `common/public_data/live_migrations.py` | 新增 `raw-dingtalk-org-v1`：`raw_dingtalk.dingtalk_org_member` | 已落地 |
+| `common/public_data/raw_repository.py` | `OrgRawRepository`（按 user_id upsert + 按 run 摘要） | 已落地 |
+| `common/public_data/live_sync.py` | `sync-dingtalk` 组织同步分支（声明了但缺网关/缺种子 = 显式失败）+ rebuild 支持 | 已落地 |
+| `common/public_data/extract_mart.py` | 最新 run 投影 `dim_robot_member`（整体替换；raw 为空则跳过不清空） | 已落地 |
+| `docker/integration/org.seed.json` | 版本受控「区域 → 顶层部门 ID」种子（键序即优先级，other 兜底排最后） | 已落地 |
+| `common/public_data/settings.py` / `cli.py` / compose | `PUBLIC_DATA_ORG_SEED` 接入 `sync-dingtalk`（种子非凭据；`extract-mart` 仍零凭据） | 已落地 |
+| `tests/common/test_public_data_org_read.py` | 网关 / 种子 / 采集逻辑 26 例 | 已落地 |
+| `common/metrics/daily_report.py` | 「未填 / 达成率」共享口径单点（纯口径 + 结构性补全查询），robot 与榜单共同 import | 已落地 |
+| `tests/common/test_daily_report_metrics.py` | 口径自证（melt 陷阱、空值=未填、九月场景）、查询形状 21 例 | 已落地 |
 | `tests/common/test_public_data_extract_mart.py` | 投影白名单、幂等 upsert、run 状态机、日历推导测试 | 已落地 |
 | `tests/common/test_calendar_utils.py` | 新增 `TestLoadCalendarSeed` / `TestMonthDays`：种子解析、自证 2026-09、明确失败路径 | 已落地 |
 | `tests/test_integration_environment.py` | `extract` profile 的 Compose 合约：可选启动且**凭据零挂载** | 已落地 |
@@ -71,12 +80,16 @@
 - [x] **Step 2: 合约测试。** `test_extract_runner_is_opt_in_and_credential_free` 断言：可选启动、无端口、命令含 `extract-mart`、**不含** `--live-read`、**不挂**凭据/manifest。
 - [x] **Step 3: 注册。** `pipelines.seed.yaml` 增 `extract-mart`（`schedule: 0 4 * * *`，在 `project-mart` 之后）。
 
-## Task 6: `dim_robot_member` 通讯录直连（下一增量）
+## Task 6: `dim_robot_member` 通讯录直连
 
-- [ ] **Step 1: 写失败测试。** 以注入的 gateway 断言：部门子树展开为成员、`region` 归属正确、离职成员被移除（整体替换）、摘要以 `extract` 落库。
-- [ ] **Step 2: 实现 `OrgReadGateway`。** 只读通讯录（`department/listsub` + `user/listid` + `user/get`），凭据仅由 apps 线持有；网关不持有任何写方法。
-- [ ] **Step 3: 接入服务。** `extract_mart` 追加 `dim_robot_member` 整体替换步骤；未配置组织根部门时跳过该步骤（不失败）。
-- [ ] **Step 4: 校验「未填」链路。** `dim_robot_member × 日期范围 LEFT JOIN 事实表` 能求出「未填」组合（口径的放置位置见 spec §9）。
+> **架构修正（实现时落定）**：原计划让网关直接喂 `extract_mart`，但这会让 `extract-mart` 必须持有钉钉凭据、打破 spec §2/§7 的「`extract-mart` 零凭据」容器契约（且有 Compose 合约测试把守）。实际链路按 spec 容器表落定：**通讯录 API →（`sync-dingtalk`，持钉钉凭据）→ `raw_dingtalk.dingtalk_org_member` →（`extract-mart`，零凭据）→ `mart_ops.dim_robot_member`**。区域映射是业务配置、不进 manifest，放版本受控的 `org.seed.json`（非凭据，两线都可读）。
+
+- [x] **Step 1: 写失败测试。** 注入 fake gateway 断言：部门子树展开为成员并去重、区域按**种子顺序**优先归属（other 兜底排最后）、零成员 / 无名成员 / 超深树均显式失败、`listid` 游标分页、异常消息不泄露（`tests/common/test_public_data_org_read.py`，26 例）。
+- [x] **Step 2: 实现 `OrgReadGateway`。** 只读通讯录（`department/listsub` + `user/listid` + `v2/user/get`，均实测 errcode=0），网关不含任何写方法；token 复用 `/v1.0/oauth2/accessToken` 并缓存 100 分钟。
+- [x] **Step 3: 接入同步线。** manifest 新增 `dingtalk.org` 声明（target 固定 `dingtalk_org_member`，与 sheet dataset 互斥）；`sync-dingtalk` 按 `org.seed.json` 展开各区子树 → `OrgRawRepository` 按 user_id upsert（PK 即 user_id，「当前全集」按最新 run 圈定）；声明了但缺网关/缺种子 = `LiveSyncError` 显式失败；`rebuild-projection` 同样覆盖该数据集。
+- [x] **Step 4: 接入提取层。** `extract-mart` 读 raw 最新 run 全员 → **整体替换** `dim_robot_member`（离职成员随之消失）；raw 为空（未同步过）时**跳过**而非清空；摘要以 `source_name='extract'`、dataset=`dim_robot_member` 落库。
+- [x] **Step 5: 「未填 / 达成率」口径单点。** `common/metrics/daily_report.py`（spec §9 的共享 Python 模块，21 例）：纯口径（`achievement_rate`、`elapsed_workdays`、`summarize_people`、`unfilled_members`）与既有三处实现逐位同口径——达成率 = Σ(已过工作日 sales) ÷ **MAX**(月目标)（melt 陷阱测试锁定）、空值 = 未填、单位零换算；结构性补全查询（`fetch_unfilled_members` 的 LEFT JOIN 反连接、`fetch_workdays` / `fetch_month_facts` / `fetch_filled_names`）只读 `mart_ops`。aliases（实名 ≠ 表内用名）走 `unfilled_members(aliases=...)` 而非 SQL 连接键。
+- [ ] **Step 6: 消费方切换（阶段 4）。** `robot` 容器只读 `mart_ops`，remind/check 名单与榜单改调 `common.metrics.daily_report`；届时删除对钉钉 AI 表的直接读取。
 
 ---
 
