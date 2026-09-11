@@ -28,7 +28,7 @@ Nacos（注册/配置中心）与控制面是与三条运行线**正交的基础
 | `sync-dingtalk` | `live-sync-dingtalk` | apps | 钉钉侧只读源（AI 表 / 通讯录）→ `raw_dingtalk`（+mart 摘要） | raw_dingtalk + mart_ops + Nacos | 仅钉钉 |
 | `sync-wdt` | `live-sync-wdt` | apps | WDT API → `raw_wdt`（+mart 摘要） | raw_wdt + mart_ops + Nacos | 仅 WDT |
 | `project-mart` | `project` | apps | raw → `mart_ops` 投影 / `rebuild_projection` | 读 raw_* + 写 mart_ops + Nacos | 无 |
-| `extract-mart` | `extract`（阶段 3） | apps | raw / `payload_json` → 业务 mart 明细 + 维度（`dim_workday` 工作日、`dim_robot_member` 组织成员）（robot 的数据源，故前置） | 读 raw_* + 写业务库 + Nacos | 无 |
+| `extract-mart` | `extract`（阶段 3） | apps | raw / `payload_json` → 业务 mart 明细 + 维度（`dim_calendar` 工作日、`dim_robot_member` 组织成员）（robot 的数据源，故前置） | 读 raw_* + 写业务库 + Nacos | 无 |
 | `dingtalk-gateway` | `dingtalk-gateway`（阶段 4） | apps | 钉钉交互唯一入口：Stream 长连接（按群路由多 region）、报数直接落 `mart_ops`、群消息 / DING 投递；钉钉 AI 表不再作真源、不回写 | 写业务库 + Nacos | 仅钉钉 |
 | `robot` | `robot`（阶段 4） | 业务 | 日报机器人一族：杭州/绍兴/渠道（cron，只读库算提醒/催办名单、榜单、渠道日报内容）；一镜像多子命令，多 region = 多份 Nacos dataId | 只读业务库 + Nacos | 无 |
 | `pages-leaderboard` | `pages`（阶段 4） | 业务 | 榜单页面 | 只读业务库 + Nacos | 无 |
@@ -94,7 +94,9 @@ Nacos 已提供通用 console（配置/发现维护）。`control-api` 只做 **
 
 1. **阶段 1（apps 线拆分）·已完成**：`cli.py` 的 `live-sync` 增加 `--source=dingtalk|wdt`；`live_sync.sync()` 支持单源；compose 增加 `sync-dingtalk`/`sync-wdt`/`project-mart`；run_id 按线独立。
 2. **阶段 2（Nacos 接入）·已完成**：compose 增加 `nacos`（profile `nacos`，standalone）；`pipeline_config.py`（模型+`ConfigSource` 契约+Nacos/File/Static 后端）；`sync-*` 启动读配置做 `enabled` 门控；`publish-pipelines` 种子导入；`nacos-sdk-python==0.1.12`（零依赖）接入。
-3. **阶段 3（提取层，前置）**：`extract-mart`，raw / `payload_json` → 业务 mart 明细 + 维度表（`dim_workday`、`dim_robot_member`）。robot 只读 `mart_ops`，故提取层必须先于业务线落地。前置依赖：通讯录读取权限（**已实测开通**，见 §10）。
+3. **阶段 3（提取层，前置）·进行中**：`extract-mart`，raw / `payload_json` → 业务 mart 明细 + 维度表（`dim_calendar` 工作日、`dim_robot_member` 组织成员）。robot 只读 `mart_ops`，故提取层必须先于业务线落地。前置依赖：通讯录读取权限（**已实测开通**，见 §10）。
+   - **已落地**：`mart_extract_schema.py`（提取层 DDL + 投影**白名单**：作废列 `achievement_rate`、钉钉技术列与 `parent_record_refs` 一律不投影）、`live_migrations` 新增 `mart-extract-v1`（并把 `sync_dataset_summary.source_name` 扩为 `enum('dingtalk','wdt','extract')`，使控制面仍只有一个「线状态」入口）、`extract_mart.py`（`MartExtractService`：全量重放 raw → mart、`ON DUPLICATE KEY UPDATE` 幂等、run_id 按线独立、摘要以 `source_name='extract'` 落库、`dim_calendar` 整体替换）、CLI `extract-mart` + `live_safety.require_extract_run`（写库门控，**不需要 `--live-read`**）、`docker/integration/calendar.seed.json`（版本受控 rule，`restDays` 一律由 `generate_rest_days` 推导）、compose `extract-mart`（profile `extract`，**不挂任何凭据**）、`pipelines.seed.yaml` 新增 `extract-mart`。
+   - **待落地**：`dim_robot_member` 的通讯录直连写入（表已随迁移建好，写入方待交付）。
 4. **阶段 4（钉钉网关 + 业务线容器化）**：`dingtalk-gateway`（Stream 监听 + 报数落库 + 消息/DING，持钉钉凭据）+ `robot`（只读 `mart_ops`，cron 算名单/榜单/渠道内容）+ `pages-leaderboard`；配置存 Nacos、多 region 多 dataId、长驻容器加 Nacos 推送。
 5. **阶段 5（控制面）**：`control-api`（读 Nacos + 读 mart_ops + 审计）+ schema 驱动前端。
 

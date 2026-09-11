@@ -1,0 +1,15 @@
+{
+  "_说明": "版本受控的工作日历种子。只记录规则（rule），restDays 一律由 common.calendar_utils.generate_rest_days 推导，故渲染结果不可能与规则漂移。HR 在国务院公布次年节假日安排后更新 months；跨年未更新应告警。",
+  "version": 1,
+  "source": "local",
+  "months": [
+    {
+      "year": 2026,
+      "month": 9,
+      "bigRestSaturdays": [19],
+      "holidays": [25, 26, 27],
+      "makeupWorkdays": [20],
+      "_说明": "自证：基准周日休 + 大休周六19 + 法定假25-27 − 调休20 ⇒ [6,13,19,25,26,27]，与 spec §10 逐位一致。"
+    }
+  ]
+}

@@ -5,12 +5,12 @@ class LiveRunRejected(RuntimeError):
     pass
 
 
-def require_live_run(settings, *, live_read, confirm_local_test_write, environ=None):
-    values = os.environ if environ is None else environ
-    if live_read is not True:
-        raise LiveRunRejected("--live-read is required")
-    if confirm_local_test_write is not True:
-        raise LiveRunRejected("--confirm-local-test-write is required")
+def _require_local_test_target(settings, values):
+    """Shared target checks: every flag-independent gate lives here.
+
+    Both gates must guarantee the same thing -- that a write can only ever
+    land on the throwaway local test databases.
+    """
     if settings.app_env != "test":
         raise LiveRunRejected("APP_ENV must be test")
     if values.get("INTEGRATION_TEST_RUNNER") != "1":
@@ -27,3 +27,25 @@ def require_live_run(settings, *, live_read, confirm_local_test_write, environ=N
         raise LiveRunRejected(
             "live sync requires raw_dingtalk_test, raw_wdt_test, mart_ops_test"
         )
+
+
+def require_live_run(settings, *, live_read, confirm_local_test_write, environ=None):
+    values = os.environ if environ is None else environ
+    if live_read is not True:
+        raise LiveRunRejected("--live-read is required")
+    if confirm_local_test_write is not True:
+        raise LiveRunRejected("--confirm-local-test-write is required")
+    _require_local_test_target(settings, values)
+
+
+def require_extract_run(settings, *, confirm_local_test_write, environ=None):
+    """Gate for the extraction layer: same guarantees, minus ``--live-read``.
+
+    Extraction reads the local ``raw_*`` databases and never contacts a
+    source, so demanding a live-read acknowledgement would be a false
+    signal; everything that actually protects the target still applies.
+    """
+    values = os.environ if environ is None else environ
+    if confirm_local_test_write is not True:
+        raise LiveRunRejected("--confirm-local-test-write is required")
+    _require_local_test_target(settings, values)

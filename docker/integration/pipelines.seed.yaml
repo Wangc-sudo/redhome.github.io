@@ -27,6 +27,12 @@ project-mart:
   schedule: "0 3 * * *"
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "raw -> mart_ops projection rebuild"
+extract-mart:
+  kind: apps
+  enabled: true
+  schedule: "0 4 * * *"
+  reads: [raw_dingtalk, mart_ops]
+  description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
 sync-runner:
   kind: apps
   enabled: true

@@ -142,6 +142,58 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertNotIn("/run/live-input/source-credentials.json", runner_targets)
         self.assertNotIn("/run/live-input/manifest.json", runner_targets)
 
+    def test_extract_runner_is_opt_in_and_credential_free(self):
+        completed = subprocess.run(
+            [
+                "docker", "compose",
+                "-f", str(COMPOSE_FILE),
+                "--profile", "extract",
+                "config", "--format", "json",
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        configuration = json.loads(completed.stdout)
+        extract = configuration["services"]["extract-mart"]
+
+        # Opt-in via --profile extract, same isolated image, no exposed ports.
+        self.assertEqual(extract.get("profiles"), ["extract"])
+        self.assertEqual(
+            "service_healthy", extract["depends_on"]["mysql"]["condition"]
+        )
+        self.assertEqual(
+            extract["build"]["dockerfile"], "docker/integration/Dockerfile"
+        )
+        self.assertNotIn("ports", extract)
+
+        command = extract.get("command", [])
+        command_parts = command.split() if isinstance(command, str) else list(command)
+        self.assertIn("extract-mart", command_parts)
+        self.assertIn("--confirm-local-test-write", command_parts)
+
+        # The whole point of the extraction layer (spec section 7): it reads
+        # local raw_* only, so it must never demand a live-read
+        # acknowledgement nor be able to hold source credentials.
+        self.assertNotIn("--live-read", command_parts)
+        volumes = extract.get("volumes", [])
+        targets = {
+            v.get("target", "") if isinstance(v, dict) else "" for v in volumes
+        }
+        self.assertNotIn("/run/live-input/source-credentials.json", targets)
+        self.assertNotIn("/run/live-input/manifest.json", targets)
+
+        # The workday calendar comes from the version-controlled seed.
+        environment = extract["environment"]
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_CALENDAR_SEED"),
+            "/app/docker/integration/calendar.seed.json",
+        )
+        self.assertEqual(environment.get("PUBLIC_DATA_SERVICE_ID"), "extract-mart")
+
 
 if __name__ == "__main__":
     unittest.main()

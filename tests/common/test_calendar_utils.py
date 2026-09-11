@@ -1,7 +1,9 @@
 import json
+import os
 import sys
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,9 +21,12 @@ from common.calendar_utils import (  # noqa: E402
     calendar_source,
     check_rule_matches_rest_days,
     generate_rest_days,
+    load_calendar_seed,
+    month_days,
 )
 
 EXAMPLE_CFG = REPO_ROOT / "数字化" / "钉钉" / "杭州日报机器人" / "config.example.json"
+SEED_PATH = REPO_ROOT / "docker" / "integration" / "calendar.seed.json"
 
 
 class TestGenerateRestDays(unittest.TestCase):
@@ -176,6 +181,170 @@ class TestCalendarFromConfig(unittest.TestCase):
         self.assertEqual(cfg.get("source"), SOURCE_LOCAL)
         cal = Calendar.from_config(cfg, now=datetime(2026, 9, 11))
         self.assertEqual(cal.total, 24)
+
+
+class TestMonthDays(unittest.TestCase):
+    """`dim_calendar` 逐日落库需要真实月份长度，不能用 Calendar 的 1~30 口径。"""
+
+    def test_covers_every_day_of_a_30_day_month(self):
+        days = month_days(2026, 9)
+        self.assertEqual(len(days), 30)
+        self.assertEqual(days[0], date(2026, 9, 1))
+        self.assertEqual(days[-1], date(2026, 9, 30))
+
+    def test_covers_a_31_day_month(self):
+        self.assertEqual(len(month_days(2026, 10)), 31)
+
+    def test_covers_a_leap_february(self):
+        self.assertEqual(len(month_days(2024, 2)), 29)
+
+    def test_covers_a_common_february(self):
+        self.assertEqual(len(month_days(2026, 2)), 28)
+
+
+class _SeedFile:
+    """写一份临时种子并登记清理。"""
+
+    def __init__(self, test_case, document):
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        with handle:
+            handle.write(
+                document if isinstance(document, str)
+                else json.dumps(document, ensure_ascii=False)
+            )
+        self.path = handle.name
+        test_case.addCleanup(os.unlink, self.path)
+
+
+class TestShippedCalendarSeed(unittest.TestCase):
+    """真正发版的种子必须能复现 spec §10 的规则。"""
+
+    def test_shipped_seed_reproduces_september_2026_rest_days(self):
+        months = load_calendar_seed(SEED_PATH)
+        self.assertEqual(len(months), 1)
+        year, month, rest_days, source = months[0]
+        self.assertEqual((year, month), (2026, 9))
+        self.assertEqual(rest_days, [6, 13, 19, 25, 26, 27])
+        self.assertEqual(source, SOURCE_LOCAL)
+
+    def test_shipped_seed_never_declares_a_derived_rest_days_list(self):
+        """restDays 必须推导、不得手工列举，否则会漂移。"""
+        document = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+        for month_document in document["months"]:
+            self.assertNotIn("restDays", month_document)
+
+
+class TestLoadCalendarSeed(unittest.TestCase):
+    def test_missing_rule_entries_fall_back_to_sundays_only(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9}],
+        }).path
+        _, _, rest_days, _ = load_calendar_seed(path)[0]
+        self.assertEqual(rest_days, [6, 13, 20, 27])
+
+    def test_source_defaults_to_local(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9}],
+        }).path
+        self.assertEqual(load_calendar_seed(path)[0][3], SOURCE_LOCAL)
+
+    def test_multiple_months_keep_seed_order(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [
+                {"year": 2026, "month": 10, "holidays": [1]},
+                {"year": 2026, "month": 9},
+            ],
+        }).path
+        self.assertEqual(
+            [(year, month) for year, month, _, _ in load_calendar_seed(path)],
+            [(2026, 10), (2026, 9)],
+        )
+
+    def test_rejects_wrong_version(self):
+        path = _SeedFile(
+            self, {"version": 2, "months": [{"year": 2026, "month": 9}]}
+        ).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_yonyou_tplus_source(self):
+        """未接入的来源必须显式失败，绝不静默降级。"""
+        path = _SeedFile(self, {
+            "version": 1,
+            "source": "yonyou_tplus",
+            "months": [{"year": 2026, "month": 9}],
+        }).path
+        with self.assertRaises(CalendarSourceUnavailable):
+            load_calendar_seed(path)
+
+    def test_rejects_unknown_source(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "source": "guesswork",
+            "months": [{"year": 2026, "month": 9}],
+        }).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_empty_month_list(self):
+        path = _SeedFile(self, {"version": 1, "months": []}).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_duplicate_month(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9}, {"year": 2026, "month": 9}],
+        }).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_month_out_of_range(self):
+        path = _SeedFile(
+            self, {"version": 1, "months": [{"year": 2026, "month": 13}]}
+        ).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_non_object_month(self):
+        path = _SeedFile(self, {"version": 1, "months": ["2026-09"]}).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_missing_year_or_month(self):
+        path = _SeedFile(self, {"version": 1, "months": [{"month": 9}]}).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_a_day_outside_the_month(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9, "holidays": [31]}],
+        }).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_a_non_saturday_big_rest_day(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9, "bigRestSaturdays": [16]}],
+        }).path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
+
+    def test_rejects_a_missing_file(self):
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(REPO_ROOT / "docker" / "integration" / "nope.json")
+
+    def test_rejects_malformed_json(self):
+        path = _SeedFile(self, "{not json").path
+        with self.assertRaises(CalendarError):
+            load_calendar_seed(path)
 
 
 if __name__ == "__main__":

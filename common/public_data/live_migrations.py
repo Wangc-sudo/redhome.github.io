@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 
 from common.public_data.finance_schema import all_table_definitions
+from common.public_data.mart_extract_schema import ddl_statements as extract_ddl
 from common.public_data.db import transaction
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -150,11 +151,16 @@ def _build_mart_ddl() -> tuple[str, ...]:
     return (_SYNC_RUNS_DDL, _SYNC_DATASET_SUMMARY_DDL)
 
 
+def _build_mart_extract_ddl() -> tuple[str, ...]:
+    return extract_ddl()
+
+
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
+    ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
 )
 
 

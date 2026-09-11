@@ -33,6 +33,10 @@ class Settings:
     wdt_database: DatabaseSettings
     mart_database: DatabaseSettings
     source_config_path: Path
+    #: Optional version-controlled workday-calendar seed consumed by the
+    #: extraction layer.  Unset means "skip ``dim_calendar``" rather than fail:
+    #: the fact projections stay valid without it.
+    calendar_seed_path: Path | None = None
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -86,6 +90,16 @@ class Settings:
             "user": values["PUBLIC_DATA_RDS_USER"],
             "password": values["PUBLIC_DATA_RDS_PASSWORD"],
         }
+
+        calendar_seed_path = None
+        calendar_seed_value = (environment.get("PUBLIC_DATA_CALENDAR_SEED") or "").strip()
+        if calendar_seed_value:
+            calendar_seed_path = Path(calendar_seed_value)
+            if not calendar_seed_path.is_file():
+                raise ValueError(
+                    "PUBLIC_DATA_CALENDAR_SEED must point to an existing file"
+                )
+
         return cls(
             app_env=app_env,
             dingtalk_database=DatabaseSettings(
@@ -94,4 +108,5 @@ class Settings:
             wdt_database=DatabaseSettings(name=database_names["wdt"], **connection_values),
             mart_database=DatabaseSettings(name=database_names["mart"], **connection_values),
             source_config_path=config_path,
+            calendar_seed_path=calendar_seed_path,
         )

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from common.public_data.cli import load_source_credentials, main
 
@@ -361,6 +361,119 @@ class RebuildProjectionCliTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("trade-window", text)
         self.assertIn("status=completed", text)
+
+
+class ExtractMartCliTests(unittest.TestCase):
+    """The extraction-layer subcommand and its safety/wiring gates."""
+
+    def _patch_common(self, settings):
+        return (
+            patch("common.public_data.cli.load_settings", return_value=settings),
+            patch("common.public_data.cli.require_extract_run"),
+        )
+
+    def test_extract_mart_requires_confirmation_before_any_work(self):
+        with patch("common.public_data.cli.load_settings") as load_settings:
+            with self.assertRaises(SystemExit) as raised:
+                main(["extract-mart"])
+
+        self.assertNotEqual(0, raised.exception.code)
+        load_settings.assert_not_called()
+
+    def test_extract_mart_prints_only_a_safe_summary(self):
+        output = io.StringIO()
+        settings = Mock(calendar_seed_path=None)
+        load_patch, gate_patch = self._patch_common(settings)
+        with load_patch, gate_patch, \
+             patch("common.public_data.cli.build_extract_service") as build_service:
+            build_service.return_value.extract.return_value = {
+                "run_id": "00000000-0000-0000-0000-000000000009",
+                "datasets": [{
+                    "source": "extract",
+                    "dataset": "fact_daily_report_offline",
+                    "records_read": 3,
+                    "raw_records_written": 3,
+                    "record_id_digest": "b" * 64,
+                }],
+            }
+            with redirect_stdout(output):
+                main(["extract-mart", "--confirm-local-test-write"])
+
+        text = output.getvalue()
+        self.assertIn("fact_daily_report_offline", text)
+        self.assertIn("records_read=3", text)
+        self.assertIn("status=completed", text)
+        self.assertNotIn("payload_json", text)
+
+    def test_extract_mart_reads_the_calendar_seed_when_configured(self):
+        settings = Mock(calendar_seed_path=Path("/app/calendar.seed.json"))
+        load_patch, gate_patch = self._patch_common(settings)
+        with load_patch, gate_patch, \
+             patch("common.public_data.cli.load_calendar_seed",
+                   return_value=[(2026, 9, [6, 13, 19], "local")]) as load_seed, \
+             patch("common.public_data.cli.build_extract_service") as build_service:
+            build_service.return_value.extract.return_value = {
+                "run_id": "r", "datasets": [],
+            }
+            main(["extract-mart", "--confirm-local-test-write"])
+
+        load_seed.assert_called_once_with(Path("/app/calendar.seed.json"))
+        self.assertEqual(
+            build_service.call_args.args[1], ((2026, 9, [6, 13, 19], "local"),),
+        )
+
+    def test_extract_mart_skips_the_calendar_step_without_a_seed(self):
+        settings = Mock(calendar_seed_path=None)
+        load_patch, gate_patch = self._patch_common(settings)
+        with load_patch, gate_patch, \
+             patch("common.public_data.cli.load_calendar_seed") as load_seed, \
+             patch("common.public_data.cli.build_extract_service") as build_service:
+            build_service.return_value.extract.return_value = {
+                "run_id": "r", "datasets": [],
+            }
+            main(["extract-mart", "--confirm-local-test-write"])
+
+        load_seed.assert_not_called()
+        self.assertEqual(build_service.call_args.args[1], ())
+
+    def test_extract_mart_failure_is_safe(self):
+        output = io.StringIO()
+        settings = Mock(calendar_seed_path=None)
+        load_patch, gate_patch = self._patch_common(settings)
+        with load_patch, gate_patch, \
+             patch("common.public_data.cli.build_extract_service") as build_service:
+            build_service.return_value.extract.side_effect = RuntimeError("secret-host")
+            with redirect_stdout(output):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["extract-mart", "--confirm-local-test-write"])
+
+        self.assertNotEqual(0, raised.exception.code)
+        text = output.getvalue()
+        self.assertIn("status=failed", text)
+        self.assertNotIn("secret-host", text)
+        self.assertNotIn("Traceback", text)
+
+    def test_extract_mart_skips_when_pipeline_disabled(self):
+        from common.public_data.pipeline_config import StaticConfigSource
+
+        output = io.StringIO()
+        settings = Mock(calendar_seed_path=None)
+        load_patch, gate_patch = self._patch_common(settings)
+        with load_patch, gate_patch, \
+             patch("common.public_data.cli.resolve_service_id",
+                   return_value="extract-mart"), \
+             patch("common.public_data.cli.build_pipeline_config_source") as build_source, \
+             patch("common.public_data.cli.build_extract_service") as build_service:
+            build_source.return_value = StaticConfigSource(
+                {"extract-mart": {"enabled": False}}
+            )
+            with redirect_stdout(output):
+                main(["extract-mart", "--confirm-local-test-write"])
+
+        text = output.getvalue()
+        self.assertIn("service=extract-mart", text)
+        self.assertIn("status=skipped", text)
+        build_service.assert_not_called()
 
 
 if __name__ == "__main__":

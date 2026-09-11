@@ -1,0 +1,324 @@
+"""Tests for the extraction layer (raw_dingtalk -> mart_ops)."""
+
+import unittest
+from datetime import date, datetime, timezone
+from unittest.mock import Mock, patch
+
+from common.public_data.extract_mart import (
+    CALENDAR_DATASET,
+    EXTRACT_SOURCE_NAME,
+    MartExtractRepository,
+    MartExtractService,
+    MartExtractError,
+)
+from common.public_data.mart_extract_schema import (
+    DIM_CALENDAR,
+    EXTRACT_DATASETS,
+    FACT_CHANNEL_DAILY_SALES,
+    FACT_DAILY_REPORT_OFFLINE,
+    dataset_by_name,
+    ddl_statements,
+)
+
+
+_NOW = datetime(2026, 9, 1, tzinfo=timezone.utc)
+_RUN_ID = "00000000-0000-0000-0000-000000000009"
+
+
+class _Ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+class _RecordingCursor:
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+        self.executed = []
+        self.executemany_calls = []
+        self.closed = False
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def executemany(self, sql, sequence):
+        self.executemany_calls.append((sql, list(sequence)))
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeConnection:
+    def __init__(self, rows=()):
+        self.cursor_instance = _RecordingCursor(rows)
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+# ---------------------------------------------------------------------------
+# Schema contract
+# ---------------------------------------------------------------------------
+
+class ExtractSchemaTests(unittest.TestCase):
+
+    def test_registered_datasets_target_the_extract_tables(self):
+        targets = {d.dataset: d.target_table for d in EXTRACT_DATASETS}
+        self.assertEqual(targets["daily_report_offline"], FACT_DAILY_REPORT_OFFLINE)
+        self.assertEqual(targets["channel_daily_sales"], FACT_CHANNEL_DAILY_SALES)
+        self.assertEqual(len(EXTRACT_DATASETS), 2)
+
+    def test_retired_and_technical_columns_are_not_projected(self):
+        """The projection is an allow-list, so dropped columns cannot leak in."""
+        offline = dataset_by_name("daily_report_offline")
+        self.assertNotIn("achievement_rate", offline.target_columns)
+        self.assertNotIn("dingtalk_record_id", offline.target_columns)
+        self.assertNotIn("synced_at", offline.target_columns)
+        self.assertNotIn("sync_run_id", offline.target_columns)
+
+        channel = dataset_by_name("channel_daily_sales")
+        self.assertNotIn("parent_record_refs", channel.target_columns)
+
+    def test_unknown_dataset_is_rejected(self):
+        with self.assertRaises(KeyError):
+            dataset_by_name("not_a_dataset")
+
+    def test_ddl_covers_every_extract_table(self):
+        statements = ddl_statements()
+        joined = "\n".join(statements)
+        for table in (FACT_DAILY_REPORT_OFFLINE, FACT_CHANNEL_DAILY_SALES,
+                      DIM_CALENDAR, "dim_robot_member"):
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS `{table}`", joined)
+        # The extract line brings its own summary value into the shared table.
+        self.assertIn("ENUM('dingtalk','wdt','extract')", joined)
+
+    def test_calendar_ddl_has_no_achievement_rate_leak(self):
+        self.assertNotIn("achievement_rate", "\n".join(ddl_statements()))
+
+
+# ---------------------------------------------------------------------------
+# Repository
+# ---------------------------------------------------------------------------
+
+class MartExtractRepositoryTests(unittest.TestCase):
+
+    def _repo(self, rows=()):
+        self.raw = _FakeConnection(rows)
+        self.mart = _FakeConnection()
+        return MartExtractRepository(self.raw, self.mart)
+
+    def test_read_dataset_selects_only_whitelisted_columns(self):
+        repo = self._repo()
+        repo.read_dataset(dataset_by_name("daily_report_offline"))
+
+        sql, _ = self.raw.cursor_instance.executed[0]
+        self.assertIn("`dingtalk_record_id` AS `source_record_id`", sql)
+        self.assertIn("`region` AS `region`", sql)
+        self.assertNotIn("achievement_rate", sql)
+        self.assertIn("FROM `daily_report_offline`", sql)
+
+    def test_read_dataset_returns_target_keyed_dicts(self):
+        repo = self._repo(rows=[{"source_record_id": "r1", "region": "hangzhou"}])
+        rows = repo.read_dataset(dataset_by_name("daily_report_offline"))
+        self.assertEqual(rows, [{"source_record_id": "r1", "region": "hangzhou"}])
+
+    def test_upsert_fact_is_idempotent_and_ordered(self):
+        repo = self._repo()
+        dataset = dataset_by_name("daily_report_offline")
+        repo.upsert_fact(
+            dataset,
+            [{"source_record_id": "r1", "region": "hangzhou", "note": "n"}],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        sql, params = self.mart.cursor_instance.executed[0]
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+        self.assertNotIn("`source_record_id` = VALUES(`source_record_id`)", sql)
+        self.assertEqual(params[0], "r1")
+        self.assertEqual(params[1], "hangzhou")
+        self.assertEqual(params[-2], _NOW)
+        self.assertEqual(params[-1], _RUN_ID)
+
+    def test_replace_dim_calendar_deletes_then_inserts(self):
+        repo = self._repo()
+        repo.replace_dim_calendar(
+            [(date(2026, 9, 5), 1, "local", None)],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        sql, _ = self.mart.cursor_instance.executed[0]
+        self.assertEqual(sql, f"DELETE FROM `{DIM_CALENDAR}`")
+        insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
+        self.assertIn("INSERT INTO `dim_calendar`", insert_sql)
+        self.assertEqual(sequence, [(date(2026, 9, 5), 1, "local", None, _NOW, _RUN_ID)])
+
+    def test_replace_dim_calendar_skips_insert_when_empty(self):
+        repo = self._repo()
+        repo.replace_dim_calendar([], sync_run_id=_RUN_ID, synced_at=_NOW)
+        self.assertEqual(self.mart.cursor_instance.executemany_calls, [])
+
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+class MartExtractServiceTests(unittest.TestCase):
+
+    def _service(self, *, datasets=None, calendar_months=()):
+        self.repository = Mock()
+        self.repository.read_dataset.return_value = [
+            {"source_record_id": "r1", "region": "hangzhou"},
+        ]
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+
+        kwargs = {} if datasets is None else {"datasets": datasets}
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            calendar_months=calendar_months,
+            **kwargs,
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_extract_runs_every_dataset_then_completes(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        result = service.extract()
+
+        self.assertEqual(result.run_id, _RUN_ID)
+        self.mart_repository.start_run.assert_called_once()
+        self.mart_repository.mark_raw_committed.assert_called_once()
+        self.mart_repository.mark_completed.assert_called_once_with(
+            sync_run_id=_RUN_ID, finished_at=_NOW,
+        )
+        self.mart_repository.mark_failed.assert_not_called()
+        self.assertTrue(self.mart_connection.commits >= 1)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_summaries_are_attributed_to_the_extract_line(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        service.extract()
+
+        kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["source_name"], EXTRACT_SOURCE_NAME)
+        self.assertEqual(kwargs["dataset_name"], "daily_report_offline")
+        self.assertEqual(kwargs["records_read"], 1)
+        self.assertEqual(kwargs["raw_records_written"], 1)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_calendar_is_skipped_without_a_seed(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        service.extract()
+        self.repository.replace_dim_calendar.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_calendar_derives_workdays_from_rest_days(self, _lock, _txn):
+        service = self._service(
+            datasets=(),
+            calendar_months=[(2026, 9, [6, 13, 19, 25, 26, 27], "local")],
+        )
+        service.extract()
+
+        rows = self.repository.replace_dim_calendar.call_args.args[0]
+        self.assertEqual(len(rows), 30)
+        by_day = {business_date.day: is_workday
+                  for business_date, is_workday, _, _ in rows}
+        self.assertEqual(by_day[6], 0)
+        self.assertEqual(by_day[19], 0)
+        self.assertEqual(by_day[5], 1)
+        self.assertEqual(by_day[30], 1)
+        sources = {source for _, _, source, _ in rows}
+        self.assertEqual(sources, {"local"})
+
+        kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["dataset_name"], CALENDAR_DATASET)
+        self.assertEqual(kwargs["records_read"], 30)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_february_uses_the_real_month_length(self, _lock, _txn):
+        service = self._service(
+            datasets=(),
+            calendar_months=[(2024, 2, [], "local")],
+        )
+        service.extract()
+        rows = self.repository.replace_dim_calendar.call_args.args[0]
+        self.assertEqual(len(rows), 29)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_summary_failure_marks_projection_pending(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        self.mart_repository.save_dataset_summary.side_effect = RuntimeError("db")
+
+        with self.assertRaises(RuntimeError):
+            service.extract()
+
+        self.mart_repository.mark_projection_pending.assert_called_once()
+        self.mart_repository.mark_completed.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_read_failure_marks_run_failed(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        self.repository.read_dataset.side_effect = RuntimeError("raw down")
+
+        with self.assertRaises(RuntimeError):
+            service.extract()
+
+        kwargs = self.mart_repository.mark_failed.call_args.kwargs
+        self.assertEqual(kwargs["failure_code"], "extract_failed")
+        self.mart_repository.mark_completed.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_mart_extract_error_supplies_its_own_failure_code(self, _lock, _txn):
+        service = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        self.repository.read_dataset.side_effect = MartExtractError("bad_plan")
+
+        with self.assertRaises(MartExtractError):
+            service.extract()
+
+        self.assertEqual(
+            self.mart_repository.mark_failed.call_args.kwargs["failure_code"],
+            "bad_plan",
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_plan_digest_is_stable_and_covers_the_calendar(self, _lock, _txn):
+        plain = self._service(datasets=[dataset_by_name("daily_report_offline")])
+        self.assertEqual(plain._plan_digest(), plain._plan_digest())
+        self.assertEqual(len(plain._plan_digest()), 64)
+
+        calendar = self._service(
+            datasets=[dataset_by_name("daily_report_offline")],
+            calendar_months=[(2026, 9, [6], "local")],
+        )
+        self.assertNotEqual(plain._plan_digest(), calendar._plan_digest())
+
+
+if __name__ == "__main__":
+    unittest.main()

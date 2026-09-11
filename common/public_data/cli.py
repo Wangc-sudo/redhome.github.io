@@ -32,9 +32,24 @@ def require_live_run(settings, *, live_read, confirm_local_test_write):
     )
 
 
+def require_extract_run(settings, *, confirm_local_test_write):
+    """Raise ``LiveRunRejected`` unless the extract-run safety gates pass."""
+    from common.public_data.live_safety import require_extract_run as _require
+    return _require(
+        settings,
+        confirm_local_test_write=confirm_local_test_write,
+    )
+
+
 def load_manifest(path):
     """Parse and validate the source manifest at *path*."""
     from common.public_data.manifest import load_manifest as _load
+    return _load(path)
+
+
+def load_calendar_seed(path):
+    """Parse the version-controlled workday-calendar seed at *path*."""
+    from common.calendar_utils import load_calendar_seed as _load
     return _load(path)
 
 
@@ -205,6 +220,40 @@ def build_service(settings, credentials, manifest):
     )
 
 
+def build_extract_service(settings, calendar_months=()):
+    """Open connections, run migrations, return a ``MartExtractService``.
+
+    No source credentials are read or mounted: the extraction layer consumes
+    the local ``raw_*`` databases only and never contacts a source
+    (spec section 7).  *calendar_months* comes from the version-controlled
+    seed; an empty tuple simply skips the ``dim_calendar`` step.
+    """
+    from datetime import datetime, timezone
+
+    from common.public_data.db import connect
+    from common.public_data.extract_mart import (
+        MartExtractRepository,
+        MartExtractService,
+    )
+    from common.public_data.live_migrations import apply_live_migrations
+    from common.public_data.mart_repository import MartRepository
+
+    dingtalk_conn = connect(settings.dingtalk_database)
+    wdt_conn = connect(settings.wdt_database)
+    mart_conn = connect(settings.mart_database)
+
+    apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+
+    return MartExtractService(
+        repository=MartExtractRepository(dingtalk_conn, mart_conn),
+        mart_repository=MartRepository(mart_conn),
+        mart_connection=mart_conn,
+        now=lambda: datetime.now(timezone.utc),
+        new_run_id=lambda: str(uuid.uuid4()),
+        calendar_months=calendar_months,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -298,6 +347,37 @@ def _handle_rebuild_projection(args):
         sys.exit(1)
 
 
+def _handle_extract_mart(args):
+    # Safety pre-check: the write-confirmation flag is required BEFORE any work.
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        calendar_months = ()
+        seed_path = getattr(settings, "calendar_seed_path", None)
+        if seed_path:
+            calendar_months = tuple(load_calendar_seed(seed_path))
+
+        service = build_extract_service(settings, calendar_months)
+        result = service.extract()
+        _print_success(result)
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure()
+        sys.exit(1)
+
+
 def _handle_publish_pipelines(args):
     try:
         count = publish_pipeline_seed(args.seed, if_missing=args.if_missing)
@@ -383,6 +463,19 @@ def main(argv=None):
              "(default: $PUBLIC_DATA_SERVICE_ID)",
     )
 
+    # -- extract-mart --------------------------------------------------------
+    extract = subparsers.add_parser(
+        "extract-mart", help="Project raw tables into the mart"
+    )
+    extract.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    extract.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
     # -- publish-pipelines ---------------------------------------------------
     publish = subparsers.add_parser(
         "publish-pipelines", help="Publish the pipeline seed to Nacos"
@@ -399,6 +492,7 @@ def main(argv=None):
     handlers = {
         "live-sync": _handle_live_sync,
         "rebuild-projection": _handle_rebuild_projection,
+        "extract-mart": _handle_extract_mart,
         "publish-pipelines": _handle_publish_pipelines,
         "migrate": _handle_migrate,
         "status": _handle_status,

@@ -42,13 +42,17 @@
     # -> [6, 13, 19, 25, 26, 27]
 """
 import calendar as _pycal
-from datetime import datetime
+import json
+from datetime import date, datetime
+from pathlib import Path
 
 _WEEKDAY_SAT = 5
 _WEEKDAY_SUN = 6
 
 SOURCE_LOCAL = "local"
 SOURCE_YONYOU_TP = "yonyou_tplus"
+
+_CALENDAR_SEED_VERSION = 1
 
 
 class CalendarError(RuntimeError):
@@ -130,6 +134,98 @@ def check_rule_matches_rest_days(cal_cfg, year=None):
         f"calendar.rule 推导 {year}-{int(cal_cfg['month']):02d} 休息日={derived}，"
         f"与 restDays={declared} 不一致"
     ]
+
+
+def month_days(year, month):
+    """返回该年月的全部日期（``datetime.date``，升序）。
+
+    与 :class:`Calendar` 的 1~30 简化口径不同，这里按真实月份长度取数，
+    供 ``dim_calendar`` 这类需要逐日落库的场景使用。
+    """
+    year, month = int(year), int(month)
+    last_day = _pycal.monthrange(year, month)[1]
+    return [date(year, month, day) for day in range(1, last_day + 1)]
+
+
+def load_calendar_seed(path):
+    """解析版本受控的日历种子，返回 ``[(year, month, rest_days, source)]``。
+
+    种子形态::
+
+        {
+          "version": 1,
+          "source": "local",
+          "months": [
+            {"year": 2026, "month": 9,
+             "bigRestSaturdays": [19],
+             "holidays": [25, 26, 27],
+             "makeupWorkdays": [20]}
+          ]
+        }
+
+    ``rest_days`` 一律由 :func:`generate_rest_days` 推导、**不手工列举**，所以
+    种子只记录*意图*（rule），渲染结果不可能与规则漂移。
+
+    ``source`` 缺省 :data:`SOURCE_LOCAL`。用友 T+ 尚未接入，声明它即抛
+    :class:`CalendarSourceUnavailable`——**明确失败，不静默降级**；未知来源
+    抛 :class:`CalendarError`，避免静默走错口径。
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CalendarError("日历种子不是可读的 JSON 文件") from exc
+    if not isinstance(raw, dict):
+        raise CalendarError("日历种子必须是 JSON 对象")
+
+    version = raw.get("version")
+    if version != _CALENDAR_SEED_VERSION:
+        raise CalendarError(
+            f"日历种子 version 必须为 {_CALENDAR_SEED_VERSION}（当前 {version!r}）")
+
+    source = (raw.get("source") or SOURCE_LOCAL).strip()
+    if source == SOURCE_YONYOU_TP:
+        raise CalendarSourceUnavailable(
+            "日历种子暂不支持 source=yonyou_tplus：用友 T+ 排班源尚未接入，"
+            "请保持 source=local，由 rule 推导 restDays。")
+    if source != SOURCE_LOCAL:
+        raise CalendarError(
+            f"未知的 calendar.source={source!r}，"
+            f"仅支持 {SOURCE_LOCAL!r} / {SOURCE_YONYOU_TP!r}")
+
+    months = raw.get("months")
+    if not isinstance(months, list) or not months:
+        raise CalendarError("日历种子 months 必须是非空数组")
+
+    result = []
+    seen = set()
+    for index, item in enumerate(months):
+        label = f"months[{index}]"
+        if not isinstance(item, dict):
+            raise CalendarError(f"日历种子 {label} 必须是对象")
+        try:
+            year = int(item["year"])
+            month = int(item["month"])
+        except (KeyError, TypeError, ValueError):
+            raise CalendarError(f"日历种子 {label} 需要整数 year / month") from None
+        if not 1 <= month <= 12:
+            raise CalendarError(f"日历种子 {label}.month 必须为 1..12")
+        if (year, month) in seen:
+            raise CalendarError(f"日历种子 {label} 重复声明 {year}-{month:02d}")
+        seen.add((year, month))
+
+        result.append((
+            year,
+            month,
+            generate_rest_days(
+                year,
+                month,
+                item.get("bigRestSaturdays", []),
+                item.get("holidays", []),
+                item.get("makeupWorkdays", []),
+            ),
+            source,
+        ))
+    return result
 
 
 class CalendarSource:
