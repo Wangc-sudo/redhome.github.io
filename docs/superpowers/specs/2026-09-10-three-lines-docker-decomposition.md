@@ -96,8 +96,10 @@ Nacos 已提供通用 console（配置/发现维护）。`control-api` 只做 **
 2. **阶段 2（Nacos 接入）·已完成**：compose 增加 `nacos`（profile `nacos`，standalone）；`pipeline_config.py`（模型+`ConfigSource` 契约+Nacos/File/Static 后端）；`sync-*` 启动读配置做 `enabled` 门控；`publish-pipelines` 种子导入；`nacos-sdk-python==0.1.12`（零依赖）接入。
 3. **阶段 3（提取层，前置）·进行中**：`extract-mart`，raw / `payload_json` → 业务 mart 明细 + 维度表（`dim_calendar` 工作日、`dim_robot_member` 组织成员）。robot 只读 `mart_ops`，故提取层必须先于业务线落地。前置依赖：通讯录读取权限（**已实测开通**，见 §10）。
    - **已落地**：`mart_extract_schema.py`（提取层 DDL + 投影**白名单**：作废列 `achievement_rate`、钉钉技术列与 `parent_record_refs` 一律不投影）、`live_migrations` 新增 `mart-extract-v1`（并把 `sync_dataset_summary.source_name` 扩为 `enum('dingtalk','wdt','extract')`，使控制面仍只有一个「线状态」入口）、`extract_mart.py`（`MartExtractService`：全量重放 raw → mart、`ON DUPLICATE KEY UPDATE` 幂等、run_id 按线独立、摘要以 `source_name='extract'` 落库、`dim_calendar` 整体替换）、CLI `extract-mart` + `live_safety.require_extract_run`（写库门控，**不需要 `--live-read`**）、`docker/integration/calendar.seed.json`（版本受控 rule，`restDays` 一律由 `generate_rest_days` 推导）、compose `extract-mart`（profile `extract`，**不挂任何凭据**）、`pipelines.seed.yaml` 新增 `extract-mart`。
-   - **待落地**：`dim_robot_member` 的通讯录直连写入（表已随迁移建好，写入方待交付）。
-4. **阶段 4（钉钉网关 + 业务线容器化）**：`dingtalk-gateway`（Stream 监听 + 报数落库 + 消息/DING，持钉钉凭据）+ `robot`（只读 `mart_ops`，cron 算名单/榜单/渠道内容）+ `pages-leaderboard`；配置存 Nacos、多 region 多 dataId、长驻容器加 Nacos 推送。
+   - **已落地（续）**：`dim_robot_member` 通讯录直连，链路按 §2 容器契约走全纵向——`sync-dingtalk`（持钉钉凭据）按 `org.seed.json`（版本受控「区域 → 顶层部门 ID」，键序即优先级、other 兜底排最后）递归展开子树 → `raw_dingtalk.dingtalk_org_member`（`raw-dingtalk-org-v1` 迁移，PK=user_id，「当前全集」按最新 run 圈定）→ `extract-mart`（零凭据）整体替换 `mart_ops.dim_robot_member`（raw 为空则跳过不清空）。manifest 新增 `dingtalk.org` 声明（与 sheet 模型分离，同考勤排班决策的理由）；声明了但缺网关/缺种子 = 显式失败。
+4. **阶段 4（钉钉网关 + 业务线容器化）·进行中**：`dingtalk-gateway`（Stream 监听 + 报数落库 + 消息/DING，持钉钉凭据）+ `robot`（只读 `mart_ops`，cron 算名单/榜单/渠道内容）+ `pages-leaderboard`；配置存 Nacos、多 region 多 dataId、长驻容器加 Nacos 推送。计划：`docs/superpowers/plans/2026-09-11-stage4-robot-gateway.md`。
+   - **已落地**：投递契约（§9 已定 = `robot_outbox` 表轮询）+ `mart-ops-outbox-v1` 迁移 + `OutboxRepository`（幂等入队 / 待投递 / 状态回写）+ `common/daily_robot/mart_tasks.py`（remind/check 文案逐字复用、名单走 `common.metrics`、幂等由 `region:kind:business_date` 唯一键承载、`stateFile` 职责退役）。
+   - **待落地**：gateway 投递器、robot/gateway 容器与 Nacos region 配置、Stream 报数落库、`pages-leaderboard` 切换、旧路径退役。
 5. **阶段 5（控制面）**：`control-api`（读 Nacos + 读 mart_ops + 审计）+ schema 驱动前端。
 
 每阶段独立可验收。
@@ -110,8 +112,8 @@ Nacos 已提供通用 console（配置/发现维护）。`control-api` 只做 **
 - **控制面审计**：`mart_ops.control_audit` 新表（默认）vs Nacos 配置变更记录 + 仅日志。
 - **robot 的线归属与钉钉边界（已定）**：日报机器人**不再直连钉钉 AI 表、不持钉钉凭据、不写表**；钉钉 AI 表降级为**非真源**（逐步弃用）。链路：钉钉表 →（`sync-dingtalk`）→ `raw_dingtalk` →（`extract-mart`）→ `mart_ops` →（`robot` 只读）；报数 →（`dingtalk-gateway` Stream 收数）→ 直接落 `mart_ops`。
 - **多 region 的 Stream 连接唯一性（已定）**：杭州/绍兴/渠道共用同一钉钉应用，而 Stream 按应用建连——由**单个 `dingtalk-gateway` 进程按群（conversationId）路由多 region**，不可每 region 各起连接（同应用多连接会争抢事件、串错 handler）。绍兴尚未接入（config 仅有 example、只建了组织档案），正是并入窗口。
-- **`robot` → `dingtalk-gateway` 的投递契约**：robot 只算「该发什么」（提醒/催办名单、榜单、渠道日报内容），投递由 gateway 执行——需定接口形态（`mart_ops.robot_outbox` 表轮询 vs gateway 内部 API）。
-- **口径的放置位置（已定）**：DB 侧只做**结构性补全**（`dim_robot_member` × 日期范围 LEFT JOIN 事实表求"未填"组合）；**业务口径放共享 Python 模块**（`common/metrics/daily_report.py`），由 `robot` 与 `pages-leaderboard` 共同 import——口径单点在代码里、可单测、不污染 mart schema，避免"机器人一个数、看板一个数"。
+- **`robot` → `dingtalk-gateway` 的投递契约（已定）**：`mart_ops.robot_outbox` **表轮询**，不选 gateway 内部 API。robot 只算「该发什么」并写 outbox 行（保持「世界 = mart_ops + Nacos」，不引入协议/鉴权耦合）；gateway 轮询 `pending` 投递并回写状态。outbox 行即审计；`dedupe_key = region:kind:business_date` 唯一键承载幂等，现行 `stateFile` 去重职责退役、robot 变无状态；gateway 重启不丢消息、重试上限 DB 可见。实现计划见 `docs/superpowers/plans/2026-09-11-stage4-robot-gateway.md`。
+- **口径的放置位置（已定·模块已落地）**：DB 侧只做**结构性补全**（`dim_robot_member` × 日期范围 LEFT JOIN 事实表求"未填"组合）；**业务口径放共享 Python 模块**（`common/metrics/daily_report.py`），由 `robot` 与 `pages-leaderboard` 共同 import——口径单点在代码里、可单测、不污染 mart schema，避免"机器人一个数、看板一个数"。**已落地（2026-09-11）**：纯口径（`achievement_rate` / `elapsed_workdays` / `summarize_people` / `unfilled_members`，与既有三处实现逐位同口径）+ 结构性补全查询（`fetch_unfilled_members` 反连接等），21 例单测含 melt 陷阱与九月场景自证；消费方切换（robot 改调该模块）属阶段 4。
 - **钉钉考勤排班的层级归属（已定）**：判定标准是「真源 or 校验源」——真源进数据源层（manifest + raw），校验源放 apps 层、不进 manifest。当前事实（业务组拉不到排班、`listbyusers` 已挂）下它是**校验源 → 放 apps 层**。为何不进 manifest、两条约束、以及将来升级为真源的固定改动清单，见 §10。
 
 ## 10. 数据口径与外部依赖（已定）
@@ -248,3 +250,4 @@ Nacos 已提供通用 console（配置/发现维护）。`control-api` 只做 **
 - **改为应用直连通讯录 API**：`DingTalkClient` 增通讯录方法；`org_sync` 的 `inputs`（文件路径）降级为可选，保留作离线/测试兜底。
 - **顺带修正一处隐患**：`config.org.depts` 把**父子部门混列**（如 `1050062512` 与其 3 个子部门并列），且为新设项目部**留了手工维护成本**。直连后应改为「region → 顶层部门 ID」+ **递归取子孙**，新部门自动纳入。实测印证：绍兴销售部直属仅 1 人，16 人分布在两个子部门（项目部 6 / 诸暨 9 + 直属 1）。
 - 产出 `mart_ops.dim_robot_member(region, name, user_id, ...)`。
+- **已落地（2026-09-11，apps 线侧）**：网关 `common/public_data/org_read.py`（仅上述三个只读端点）；链路为 `sync-dingtalk` → `raw_dingtalk.dingtalk_org_member` → `extract-mart` → `mart_ops.dim_robot_member`（extract 保持零凭据）。区域映射落实为 `docker/integration/org.seed.json`（递归取子孙，父子混列隐患随展开去重消除）；区域归属规则是**种子顺序优先**（other 含根部门、展开即全公司，故排最后）。`org_sync.py` 的快照兜底与 `members` 映射改写属业务线侧，随阶段 4 的 `robot` 容器切换。

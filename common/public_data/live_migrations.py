@@ -171,8 +171,35 @@ def _build_wdt_dim_product_ddl() -> tuple[str, ...]:
     return (_DIM_PRODUCT_DDL,)
 
 
+# robot（业务线）入队、gateway（apps 线）轮询投递的消息出站表（spec §9
+# 投递契约：表轮询，已定）。dedupe_key = region:kind:business_date[:suffix]，
+# 唯一键承载幂等——机器人当日内重跑不产生重复消息，stateFile 职责退役。
+_ROBOT_OUTBOX_DDL = (
+    "CREATE TABLE IF NOT EXISTS `robot_outbox` (\n"
+    "  `dedupe_key` VARCHAR(191) NOT NULL,\n"
+    "  `region` VARCHAR(32) NOT NULL,\n"
+    "  `kind` VARCHAR(32) NOT NULL,\n"
+    "  `business_date` DATE NOT NULL,\n"
+    "  `title` VARCHAR(255) NOT NULL,\n"
+    "  `body_md` TEXT NOT NULL,\n"
+    "  `at_user_ids` JSON DEFAULT NULL,\n"
+    "  `status` ENUM('pending', 'delivered', 'failed') NOT NULL DEFAULT 'pending',\n"
+    "  `attempts` INT UNSIGNED NOT NULL DEFAULT 0,\n"
+    "  `created_at` DATETIME(6) NOT NULL,\n"
+    "  `delivered_at` DATETIME(6) NULL,\n"
+    "  `last_error` VARCHAR(255) DEFAULT NULL,\n"
+    "  PRIMARY KEY (`dedupe_key`),\n"
+    "  KEY `idx_status_created` (`status`, `created_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
 def _build_mart_ddl() -> tuple[str, ...]:
     return (_SYNC_RUNS_DDL, _SYNC_DATASET_SUMMARY_DDL)
+
+
+def _build_mart_outbox_ddl() -> tuple[str, ...]:
+    return (_ROBOT_OUTBOX_DDL,)
 
 
 def _build_mart_extract_ddl() -> tuple[str, ...]:
@@ -186,6 +213,7 @@ _MIGRATIONS = (
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
     ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
+    ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
 )
 
 
