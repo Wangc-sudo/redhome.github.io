@@ -83,10 +83,13 @@ def collect(config, include_today=False):
     return now, elapsed, people
 
 
-def build_bc_markdown(config, url=None):
-    region = config["region"]
-    calendar = config["calendar"]
-    now, elapsed, people = collect(config, include_today=False)
+def render_bc_markdown(region, calendar, now, elapsed, people, url=None):
+    """群播报 markdown 的纯展示层。
+
+    与数据源无关：region / calendar 为现行 config.json 同形字典，
+    ``(now, elapsed, people)`` 由调用方采集（钉钉表 ``collect`` 或
+    mart 侧 ``mart_collect``）。输出与历史版本逐字一致。
+    """
     n_elapsed = len(elapsed)
     workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
     n_total = len(workdays)
@@ -135,6 +138,14 @@ def build_bc_markdown(config, url=None):
         lines.append("")
         lines.append(f"📊 [点击查看完整榜单（个人明细）](<{url}>)")
     return "\n".join(lines)
+
+
+def build_bc_markdown(config, url=None):
+    """现行入口（签名不变）：钉钉表采集 + :func:`render_bc_markdown`。"""
+    now, elapsed, people = collect(config, include_today=False)
+    return render_bc_markdown(
+        config["region"], config["calendar"], now, elapsed, people, url=url
+    )
 
 
 def build_html(config, now, elapsed, people):

@@ -68,6 +68,12 @@ class ShippedRegionSeedTests(unittest.TestCase):
             self.assertTrue(cfg["robotCode"].startswith("<"))
             self.assertTrue(cfg["openConversationId"].startswith("<"))
 
+    def test_shipped_seed_carries_leaderboard_fields(self):
+        cfg = load_region_seed(_SEED_PATH)["hangzhou"]
+        self.assertEqual(cfg.dept_order, ("杭中", "滨萧", "余杭"))
+        self.assertEqual(cfg.dept_label, {"杭州运营总监": "运营总监"})
+        self.assertEqual(cfg.broadcast_exclude, ("余发兴",))
+
 
 class LoadRegionSeedTests(unittest.TestCase):
 
@@ -112,6 +118,25 @@ class LoadRegionSeedTests(unittest.TestCase):
         path = _write_seed(self, {"r1": _region_doc(aliases={"a": 1})})
         with self.assertRaises(RegionConfigError):
             load_region_seed(path)
+
+    def test_leaderboard_fields_default_to_empty(self):
+        path = _write_seed(self, {"r1": _region_doc()})
+        cfg = load_region_seed(path)["r1"]
+        self.assertEqual(cfg.dept_order, ())
+        self.assertEqual(cfg.dept_label, {})
+        self.assertEqual(cfg.broadcast_exclude, ())
+        self.assertEqual(cfg.leaderboard_url, "")
+
+    def test_rejects_bad_leaderboard_fields(self):
+        for override in (
+            {"deptOrder": "杭中"},
+            {"deptLabel": ["运营总监"]},
+            {"broadcastExclude": [1]},
+            {"leaderboardUrl": 42},
+        ):
+            path = _write_seed(self, {"r1": _region_doc(**override)})
+            with self.assertRaises(RegionConfigError):
+                load_region_seed(path)
 
 
 class RegionOverlayTests(unittest.TestCase):

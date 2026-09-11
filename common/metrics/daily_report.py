@@ -164,12 +164,16 @@ def fetch_workdays(connection, *, year, month):
 
 
 def fetch_month_facts(connection, *, region, year, month):
-    """返回该区域该年月的事实行（一人多行，每日一行）。"""
+    """返回该区域该年月的事实行（一人多行，每日一行）。
+
+    除达成率三要素外还带 ``department``（榜单的分组维度；纯口径函数
+    会忽略它）。
+    """
     first, last = _month_range(year, month)
     return _fetch_all(
         connection,
-        "SELECT `responsible_person`, `business_date`, `sales_amount`, "
-        "`monthly_target` "
+        "SELECT `responsible_person`, `department`, `business_date`, "
+        "`sales_amount`, `monthly_target` "
         f"FROM `{FACT_TABLE}` "
         "WHERE `region` = %s AND `business_date` BETWEEN %s AND %s",
         (region, first, last),

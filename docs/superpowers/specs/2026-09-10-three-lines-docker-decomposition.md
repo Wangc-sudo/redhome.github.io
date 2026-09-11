@@ -99,7 +99,7 @@ Nacos 已提供通用 console（配置/发现维护）。`control-api` 只做 **
    - **已落地（续）**：`dim_robot_member` 通讯录直连，链路按 §2 容器契约走全纵向——`sync-dingtalk`（持钉钉凭据）按 `org.seed.json`（版本受控「区域 → 顶层部门 ID」，键序即优先级、other 兜底排最后）递归展开子树 → `raw_dingtalk.dingtalk_org_member`（`raw-dingtalk-org-v1` 迁移，PK=user_id，「当前全集」按最新 run 圈定）→ `extract-mart`（零凭据）整体替换 `mart_ops.dim_robot_member`（raw 为空则跳过不清空）。manifest 新增 `dingtalk.org` 声明（与 sheet 模型分离，同考勤排班决策的理由）；声明了但缺网关/缺种子 = 显式失败。
 4. **阶段 4（钉钉网关 + 业务线容器化）·进行中**：`dingtalk-gateway`（Stream 监听 + 报数落库 + 消息/DING，持钉钉凭据）+ `robot`（只读 `mart_ops`，cron 算名单/榜单/渠道内容）+ `pages-leaderboard`；配置存 Nacos、多 region 多 dataId、长驻容器加 Nacos 推送。计划：`docs/superpowers/plans/2026-09-11-stage4-robot-gateway.md`。
    - **已落地**：投递契约（§9 已定 = `robot_outbox` 表轮询）+ `mart-ops-outbox-v1` 迁移 + `OutboxRepository`（幂等入队 / 待投递 / 状态回写）+ `common/daily_robot/mart_tasks.py`（remind/check 文案逐字复用、名单走 `common.metrics`、幂等由 `region:kind:business_date` 唯一键承载、`stateFile` 职责退役）+ `common/gateway/` 投递器（轮询分发、群消息走 `DingTalkClient`、DING 保持 `dws` 命令契约、非泄露错误码回写）+ **容器与配置**：`robot-hangzhou`（profile `robot`，零凭据零外呼，`require_business_run` 门控）、`dingtalk-gateway`（profile `dingtalk-gateway`，仅挂钉钉凭据，`require_gateway_run` 门控——外发须 `--live-send`）、`common/region_config.py` + `regions.seed.json`（区域集合由种子定义、Nacos 只做字段覆盖、group `REGIONS`、fail-open）、`pipelines.seed.yaml` 登记两服务、Compose 合约测试把守凭据边界。
-   - **待落地**：Stream 报数落库、`pages-leaderboard` 切换、Nacos 真实 region 配置发布（占位符替换）、旧路径退役。
+   - **待落地**：Stream 报数落库、cron 切换与旧路径退役、Nacos 真实 region 配置发布（占位符替换）。榜单已改读 `mart_ops`（`mart_leaderboard.py`：`mart_collect` 对拍 `collect`、`render_bc_markdown` 纯展示层、`mart_cli leaderboard` 入 outbox；`build_html` 吃 mart 视图就绪）。
 5. **阶段 5（控制面）**：`control-api`（读 Nacos + 读 mart_ops + 审计）+ schema 驱动前端。
 
 每阶段独立可验收。

@@ -23,6 +23,7 @@ _CFG = RegionConfig(
     cc_user_ids=("cc-1",),
     remind_hour=18,
     check_hour=20,
+    leaderboard_url="https://pages.example/lb",
 )
 
 
@@ -216,6 +217,68 @@ class MartCliTests(unittest.TestCase):
         self.assertIn("status=failed", text)
         self.assertNotIn("secret-host", text)
         self.assertNotIn("Traceback", text)
+
+
+class LeaderboardCliTests(unittest.TestCase):
+    """The leaderboard broadcast subcommand."""
+
+    def test_leaderboard_enqueues_the_broadcast(self):
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        data = LeaderboardData(
+            business_date=date(2026, 9, 11),
+            elapsed=(1, 2, 3),
+            people=({"name": "李四", "dept": "滨萧", "target": 1000,
+                     "completed": 500.0, "unfilled": 8, "rate": 0.5},),
+            workdays=frozenset({date(2026, 9, 10)}),
+        )
+        output = io.StringIO()
+        with patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"hangzhou": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart") as conn, \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.render_bc",
+                   return_value="MD") as render, \
+             patch("common.daily_robot.mart_cli.build_outbox") as build_outbox, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 11, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            build_outbox.return_value.enqueue.return_value = True
+            with redirect_stdout(output):
+                main([
+                    "leaderboard", "--confirm-local-test-write",
+                    "--region", "hangzhou",
+                ])
+
+        kwargs = build_outbox.return_value.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "leaderboard")
+        self.assertEqual(kwargs["region"], "hangzhou")
+        self.assertEqual(kwargs["title"], "销售完成率榜")
+        self.assertEqual(kwargs["body_md"], "MD")
+        self.assertEqual(kwargs["dedupe_suffix"], "0830")
+        self.assertEqual(kwargs["business_date"], date(2026, 9, 11))
+        conn.return_value.commit.assert_called_once()
+        self.assertIn("kind=leaderboard", output.getvalue())
+        self.assertIn("status=enqueued", output.getvalue())
+        self.assertIn("people=1", output.getvalue())
+
+        # 榜单链接来自 region 配置的 leaderboardUrl。
+        self.assertEqual(
+            render.call_args.kwargs["url"], _CFG.leaderboard_url
+        )
+
+    def test_leaderboard_requires_confirmation(self):
+        with patch("common.daily_robot.mart_cli.load_settings") as load_settings:
+            with self.assertRaises(SystemExit) as raised:
+                main(["leaderboard"])
+        self.assertNotEqual(0, raised.exception.code)
+        load_settings.assert_not_called()
 
 
 if __name__ == "__main__":

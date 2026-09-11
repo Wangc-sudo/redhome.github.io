@@ -55,7 +55,7 @@
 
 ## Task 6: 切换与退役
 
-- [ ] **Step 1: `pages-leaderboard`** 改读 `mart_ops`（`common.metrics.daily_report` + 既有 HTML 构建）。
+- [x] **Step 1: 榜单改读 `mart_ops`。** `common/daily_robot/mart_leaderboard.py`：`mart_collect`（`collect` 的 mart 版——跳过合计行、姓名 strip、无部门→未分组、无目标→target 0/rate None、同序排序键，全部对拍锁定）+ `build_leaderboard_view`（`RegionConfig` + `dim_calendar` → 现行 config 同形字典，restDays 由日历反推）。展示层零改动：`leaderboard.py` 提取纯函数 `render_bc_markdown`（`build_bc_markdown` 变为 collect+render 的薄包装，逐字节等价有测试）；`build_html` 直接吃 mart 视图（就绪已证明）。`mart_cli leaderboard` 子命令：采集 → 群播报 markdown → outbox（`kind='leaderboard'`，dedupe 后缀 HHmm，链接取 `leaderboardUrl`）。`RegionConfig` 增 `deptOrder`/`deptLabel`/`broadcastExclude`/`leaderboardUrl`。
 - [ ] **Step 2: cron 切换到容器**；旧路径保留一个回退窗口。
 - [ ] **Step 3: 退役清单。** `recalc_totals`（重算+写回）、`stateFile`、`org_sync` 快照胶水、钉钉 AI 表的真源地位。
 

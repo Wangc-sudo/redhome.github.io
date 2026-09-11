@@ -14,7 +14,7 @@
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -41,6 +41,11 @@ class RegionConfig:
     cc_user_ids: tuple
     remind_hour: int = 18
     check_hour: int = 20
+    #: 榜单相关（复刻现行 config.json 的 region 段）。
+    dept_order: tuple = ()
+    dept_label: dict = field(default_factory=dict)
+    broadcast_exclude: tuple = ()
+    leaderboard_url: str = ""
 
 
 def _require_str(raw, key, label):
@@ -73,6 +78,28 @@ def _parse_region(region, raw, label):
         if not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
             raise RegionConfigError(f"{label}.{name} must be 0..23")
 
+    def _str_list(key):
+        value = raw.get(key, [])
+        if not isinstance(value, list) or any(
+            not isinstance(v, str) or not v for v in value
+        ):
+            raise RegionConfigError(f"{label}.{key} must be a list of strings")
+        return tuple(value)
+
+    dept_order = _str_list("deptOrder")
+    broadcast_exclude = _str_list("broadcastExclude")
+
+    dept_label = raw.get("deptLabel", {})
+    if not isinstance(dept_label, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str)
+        for k, v in dept_label.items()
+    ):
+        raise RegionConfigError(f"{label}.deptLabel must be a string map")
+
+    leaderboard_url = raw.get("leaderboardUrl", "")
+    if not isinstance(leaderboard_url, str):
+        raise RegionConfigError(f"{label}.leaderboardUrl must be a string")
+
     return RegionConfig(
         region=region,
         display=_require_str(raw, "display", label),
@@ -83,6 +110,10 @@ def _parse_region(region, raw, label):
         cc_user_ids=tuple(cc),
         remind_hour=remind_hour,
         check_hour=check_hour,
+        dept_order=dept_order,
+        dept_label=dict(dept_label),
+        broadcast_exclude=broadcast_exclude,
+        leaderboard_url=leaderboard_url,
     )
 
 
@@ -119,6 +150,10 @@ def _to_mapping(cfg):
         "ccUserIds": list(cfg.cc_user_ids),
         "remindHour": cfg.remind_hour,
         "checkHour": cfg.check_hour,
+        "deptOrder": list(cfg.dept_order),
+        "deptLabel": dict(cfg.dept_label),
+        "broadcastExclude": list(cfg.broadcast_exclude),
+        "leaderboardUrl": cfg.leaderboard_url,
     }
 
 

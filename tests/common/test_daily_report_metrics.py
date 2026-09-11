@@ -216,6 +216,7 @@ class FetchTests(unittest.TestCase):
         sql, params = conn.cursor_instance.executed[0]
         self.assertIn("FROM `fact_daily_report_offline`", sql)
         self.assertIn("`monthly_target`", sql)
+        self.assertIn("`department`", sql)
         self.assertEqual(params, ("hangzhou", date(2026, 9, 1), date(2026, 9, 30)))
 
     def test_fetch_month_facts_february_uses_real_month_length(self):

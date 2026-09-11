@@ -75,6 +75,21 @@ def build_outbox(conn):
     return OutboxRepository(conn)
 
 
+def mart_collect_data(conn, *, region, business_date):
+    from common.daily_robot.mart_leaderboard import mart_collect
+    return mart_collect(conn, region=region, business_date=business_date)
+
+
+def build_view(region_cfg, workdays, *, year, month):
+    from common.daily_robot.mart_leaderboard import build_leaderboard_view
+    return build_leaderboard_view(region_cfg, workdays, year=year, month=month)
+
+
+def render_bc(region, calendar, now, elapsed, people, url=None):
+    from common.daily_robot.leaderboard import render_bc_markdown
+    return render_bc_markdown(region, calendar, now, elapsed, people, url=url)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -187,6 +202,77 @@ def _handle(args, kind=None):
         sys.exit(1)
 
 
+def _handle_leaderboard(args):
+    """每日榜单播报：mart 采集 → 群播报 markdown → outbox（kind='leaderboard'）。"""
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        region = _resolve_region(args)
+        if not region:
+            _print_failure("region_required")
+            sys.exit(1)
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+        cfg = configs.get(region)
+        if cfg is None:
+            _print_failure("unknown_region")
+            sys.exit(1)
+
+        now = datetime.now()
+        business_date = (
+            date.fromisoformat(args.date) if getattr(args, "date", None)
+            else now.date()
+        )
+
+        conn = connect_mart(settings)
+        data = mart_collect_data(conn, region=region, business_date=business_date)
+        view = build_view(
+            cfg, data.workdays,
+            year=business_date.year, month=business_date.month,
+        )
+        body = render_bc(
+            view["region"], view["calendar"], now,
+            list(data.elapsed), list(data.people),
+            url=cfg.leaderboard_url or None,
+        )
+
+        outbox = build_outbox(conn)
+        enqueued = outbox.enqueue(
+            region=region,
+            kind="leaderboard",
+            business_date=business_date,
+            title="销售完成率榜",
+            body_md=body,
+            created_at=now,
+            dedupe_suffix=f"{now:%H%M}",
+        )
+        conn.commit()
+        print(
+            f"service={service_id} region={region} kind=leaderboard "
+            f"status={'enqueued' if enqueued else 'already_sent'} "
+            f"people={len(data.people)}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -202,6 +288,7 @@ def main(argv=None):
         ("remind", "Enqueue the 18:30 reminder into robot_outbox"),
         ("check", "Enqueue the 20:00 check + DING into robot_outbox"),
         ("once", "Route to remind/check by the current hour"),
+        ("leaderboard", "Enqueue the daily leaderboard broadcast"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument(
@@ -225,6 +312,10 @@ def main(argv=None):
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "leaderboard":
+        _handle_leaderboard(args)
+        return
 
     _handle(args, kind=None if args.command == "once" else args.command)
 
