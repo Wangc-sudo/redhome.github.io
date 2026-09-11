@@ -8,7 +8,10 @@ from unittest.mock import Mock, patch
 from dingtalk_stream import AckMessage
 
 from common.gateway.report_intake import IntakeOutcome
-from common.gateway.stream_handler import StreamReportHandler
+from common.gateway.stream_handler import (
+    StreamReportHandler,
+    build_stream_client,
+)
 from common.region_config import RegionConfig
 
 
@@ -126,6 +129,27 @@ class StreamHandlerTests(unittest.TestCase):
         self.assertEqual(status, _STATUS_OK)
         conn.commit.assert_called_once()
         self.assertIn("report reply failed", logs)
+
+
+class BuildStreamClientTests(unittest.TestCase):
+
+    def test_registers_the_handler_on_the_chatbot_topic(self):
+        import dingtalk_stream
+
+        handler = Mock()
+        client = Mock()
+        factory = Mock(return_value=client)
+
+        result = build_stream_client("k", "s", handler, client_factory=factory)
+
+        self.assertIs(result, client)
+        credential = factory.call_args.args[0]
+        self.assertIsInstance(credential, dingtalk_stream.Credential)
+        topic, registered = client.register_callback_handler.call_args.args
+        self.assertEqual(
+            topic, dingtalk_stream.chatbot.ChatbotMessage.TOPIC
+        )
+        self.assertIs(registered, handler)
 
 
 if __name__ == "__main__":

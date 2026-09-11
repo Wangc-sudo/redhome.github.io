@@ -24,6 +24,21 @@ from common.gateway.report_intake import (
 )
 
 
+def build_stream_client(app_key, app_secret, handler, *, client_factory=None):
+    """构造**单连接** Stream client 并注册报数 handler（spec §9）。
+
+    与现行 listener 的接法一致（``Credential`` + ``register_callback_handler``
+    + 调用方 ``start_forever``）；*client_factory* 仅供测试注入。
+    """
+    credential = dingtalk_stream.Credential(app_key, app_secret)
+    factory = client_factory or dingtalk_stream.DingTalkStreamClient
+    client = factory(credential)
+    client.register_callback_handler(
+        dingtalk_stream.chatbot.ChatbotMessage.TOPIC, handler
+    )
+    return client
+
+
 class StreamReportHandler(dingtalk_stream.ChatbotHandler):
     """按群路由的报数 handler。所有依赖注入，测试无需 Stream 连接。"""
 

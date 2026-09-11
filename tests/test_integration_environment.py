@@ -251,6 +251,9 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertIn("run", parts)
         self.assertIn("--live-send", parts)
         self.assertIn("--confirm-local-test-write", parts)
+        # One process, both gateway duties (spec section 2): outbox + stream.
+        self.assertIn("--with-stream", parts)
+        self.assertIn("--live-read", parts)
 
         # The only business-related container with DingTalk credentials:
         # the credentials file is mounted, the source manifest is not.

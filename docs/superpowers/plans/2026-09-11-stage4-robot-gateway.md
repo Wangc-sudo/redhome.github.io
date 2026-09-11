@@ -49,15 +49,18 @@
 
 ## Task 5: Stream 报数落库（次后增量）
 
-- [ ] **Step 1: 单连接按群路由多 region**（spec §9：同应用不可多连接）。
-- [ ] **Step 2: 报数解析 → 直接落 `mart_ops` 事实表**（钉钉 AI 表降级为非真源、不回写）。
-- [ ] **Step 3: 实测验证**（需真实凭据，运维窗口执行）。
+- [x] **Step 1: 单连接按群路由多 region**（spec §9：同应用不可多连接）。`common/gateway/stream_handler.py` 的 `StreamReportHandler`：一个进程一条 Stream 连接，所有群消息按 `conversationId` → `region_for_conversation` 路由；未登记群静默 ACK；异常 rollback + 通用回执（不泄露异常原文，**有意改动**：现行 `⚠️ 处理报数时出错：{e}` 会插值异常）。
+- [x] **Step 2: 报数解析 → 直接落 `mart_ops` 事实表。** `common/gateway/report_intake.py`：解析/门禁/回执文案与 `listener.py` 逐字对拍；身份走 `dim_robot_member`（`sender_staff_id` 直查 + region 匹配，替代白名单文件）；**业务键优先写入**（`(region, 表内用名, date)` 有行就地更新、无行插 `stream:` 主键，`STREAM_RUN_ID` 全零标记）；月累计/完成率走共享口径（含当天）。钉钉 AI 表由此降级为非真源、不回写。
+- [x] **Step 3a: Stream 运行时接入。** `build_stream_client`（`Credential` + 单 client + topic 注册，与现行 listener 接法一致）；gateway CLI `run --with-stream --live-read`：单进程双职责（outbox 轮询守护线程 + Stream 主线程 `start_forever`，spec §2 单容器），compose 已切换到该命令；合约测试锁定。
+- [ ] **Step 3b: 真群报数对照**（运维窗口）：执行 `docs/阶段4切换运行手册.md` 第 3 步验收清单。
 
 ## Task 6: 切换与退役
 
 - [x] **Step 1: 榜单改读 `mart_ops`。** `common/daily_robot/mart_leaderboard.py`：`mart_collect`（`collect` 的 mart 版——跳过合计行、姓名 strip、无部门→未分组、无目标→target 0/rate None、同序排序键，全部对拍锁定）+ `build_leaderboard_view`（`RegionConfig` + `dim_calendar` → 现行 config 同形字典，restDays 由日历反推）。展示层零改动：`leaderboard.py` 提取纯函数 `render_bc_markdown`（`build_bc_markdown` 变为 collect+render 的薄包装，逐字节等价有测试）；`build_html` 直接吃 mart 视图（就绪已证明）。`mart_cli leaderboard` 子命令：采集 → 群播报 markdown → outbox（`kind='leaderboard'`，dedupe 后缀 HHmm，链接取 `leaderboardUrl`）。`RegionConfig` 增 `deptOrder`/`deptLabel`/`broadcastExclude`/`leaderboardUrl`。
-- [ ] **Step 2: cron 切换到容器**；旧路径保留一个回退窗口。
-- [ ] **Step 3: 退役清单。** `recalc_totals`（重算+写回）、`stateFile`、`org_sync` 快照胶水、钉钉 AI 表的真源地位。
+- [x] **Step 1b: pages-leaderboard 容器。** `mart_cli leaderboard-html --output ...`（同一镜像的子命令）：采集 → 既有 `build_html` → 写挂载目录；`pages-hangzhou` 服务（profile `pages`，零凭据、唯一挂载 `/output`，`PAGES_OUTPUT_DIR` 可覆盖）+ `pipelines.seed.yaml` 登记（cron `30 8 * * *`）+ 合约测试把守。发布通道（QW Pages）维持现状由运维执行——容器只接管「生成 HTML」这半步。
+- [ ] **Step 2: cron 切换到容器**；旧路径保留一个回退窗口。执行手册：`docs/阶段4切换运行手册.md` 第 4 步（先启新、对照 2 个工作日、再停旧、回退窗口 1 周）。
+- [ ] **Step 3: 退役清单。** `recalc_totals`（重算+写回）、`stateFile`、`org_sync` 快照胶水、钉钉 AI 表的真源地位。执行手册：同文档第 5 步（含「关闭日报表同步」的前置⚠️：目标列当前仍由表同步提供，目标迁移方案需先确认）。
+- [x] **Step 4: Nacos region 发布工具。** `region_config.publish_region_configs` / `publish_regions_from_env`（group `REGIONS`，真值文件仓库外保管，与种子同 schema 校验）+ `gateway.cli publish-regions --source ... [--if-missing]`。
 
 ---
 

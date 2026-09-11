@@ -319,6 +319,8 @@ services:
       - run
       - --live-send
       - --confirm-local-test-write
+      - --with-stream
+      - --live-read
       - --source-credentials
       - /run/live-input/source-credentials.json
     environment:

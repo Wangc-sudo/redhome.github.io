@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from common.region_config import (
     RegionConfig,
@@ -189,6 +189,49 @@ class RegionOverlayTests(unittest.TestCase):
     def test_build_overlay_is_none_without_a_server(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(build_nacos_region_overlay())
+
+
+class PublishRegionConfigsTests(unittest.TestCase):
+
+    def _configs(self):
+        return {
+            "hangzhou": RegionConfig(
+                region="hangzhou", display="杭州",
+                table_url="https://real/table", robot_code="rc-real",
+                open_conversation_id="conv-real", aliases={"张三丰": "老张"},
+                cc_user_ids=("cc-1",),
+            ),
+        }
+
+    def test_publishes_each_region_to_the_regions_group(self):
+        from common.region_config import publish_region_configs
+
+        client = Mock()
+        count = publish_region_configs(client, self._configs())
+
+        self.assertEqual(count, 1)
+        data_id, group, content = client.publish_config.call_args.args[:3]
+        self.assertEqual(data_id, "region-hangzhou.yaml")
+        self.assertEqual(group, "REGIONS")
+        self.assertIn("robotCode: rc-real", content)
+        self.assertIn("张三丰", content)
+
+    def test_if_missing_skips_existing_entries(self):
+        from common.region_config import publish_region_configs
+
+        client = Mock()
+        client.get_config.return_value = "robotCode: rc-old"
+        count = publish_region_configs(client, self._configs(), if_missing=True)
+
+        self.assertEqual(count, 0)
+        client.publish_config.assert_not_called()
+
+    def test_publish_from_env_requires_a_server(self):
+        from common.region_config import publish_regions_from_env
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RegionConfigError):
+                publish_regions_from_env("/ops/regions.json")
 
 
 if __name__ == "__main__":

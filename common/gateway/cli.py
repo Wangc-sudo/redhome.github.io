@@ -20,6 +20,7 @@
 
 import argparse
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -102,6 +103,24 @@ def build_worker(outbox, deliverer):
     )
 
 
+def build_stream_handler(*, region_configs, connection_factory):
+    from common.gateway import StreamReportHandler
+    return StreamReportHandler(
+        region_configs=region_configs,
+        connection_factory=connection_factory,
+    )
+
+
+def build_stream_client(app_key, app_secret, handler):
+    from common.gateway.stream_handler import build_stream_client as _build
+    return _build(app_key, app_secret, handler)
+
+
+def publish_regions(source_path, *, if_missing=False):
+    from common.region_config import publish_regions_from_env
+    return publish_regions_from_env(source_path, if_missing=if_missing)
+
+
 def build_outbox(conn):
     from common.public_data.outbox_repository import OutboxRepository
     return OutboxRepository(conn)
@@ -122,6 +141,9 @@ def _pipeline_enabled(service_id):
 
 def _handle_run(args):
     if not args.live_send or not args.confirm_local_test_write:
+        sys.exit(1)
+    if args.with_stream and not args.live_read:
+        # Stream 是外部读取，须显式确认（与 outbox 的外发确认并列）。
         sys.exit(1)
 
     try:
@@ -149,6 +171,30 @@ def _handle_run(args):
         conn = connect_mart(settings)
         worker = build_worker(build_outbox(conn), deliverer)
 
+        if args.with_stream:
+            # 单进程双职责（spec §2）：outbox 轮询在守护线程，Stream 单连接
+            # 在主线程 start_forever。
+            handler = build_stream_handler(
+                region_configs=region_configs,
+                connection_factory=lambda: connect_mart(settings),
+            )
+            client = build_stream_client(
+                credentials["dingtalk"]["app_key"],
+                credentials["dingtalk"]["app_secret"],
+                handler,
+            )
+            threading.Thread(
+                target=worker.run_forever,
+                kwargs={"interval_seconds": args.interval},
+                daemon=True,
+            ).start()
+            print(
+                f"service={service_id} status=listening "
+                f"mode=outbox+stream regions={len(region_configs)}"
+            )
+            client.start_forever()
+            return
+
         if args.once:
             report = worker.deliver_once()
             conn.commit()
@@ -164,6 +210,17 @@ def _handle_run(args):
         raise
     except Exception:
         print("status=failed code=gateway_error")
+        sys.exit(1)
+
+
+def _handle_publish_regions(args):
+    try:
+        count = publish_regions(args.source, if_missing=args.if_missing)
+        print(f"published={count} regions")
+    except SystemExit:
+        raise
+    except Exception:
+        print("status=failed code=config_error")
         sys.exit(1)
 
 
@@ -197,11 +254,29 @@ def main(argv=None):
         "--interval", type=int, default=30,
         help="poll interval in seconds for the long-running mode",
     )
+    run.add_argument(
+        "--with-stream", action="store_true", default=False,
+        help="also run the Stream report listener in this process "
+             "(requires --live-read)",
+    )
+    run.add_argument("--live-read", action="store_true", default=False)
+
+    # -- publish-regions -------------------------------------------------------
+    publish = subparsers.add_parser(
+        "publish-regions",
+        help="Publish real region configs to Nacos (group REGIONS)",
+    )
+    publish.add_argument("--source", required=True)
+    publish.add_argument("--if-missing", action="store_true", default=False)
 
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "publish-regions":
+        _handle_publish_regions(args)
+        return
 
     _handle_run(args)
 

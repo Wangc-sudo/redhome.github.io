@@ -210,3 +210,55 @@ def build_nacos_region_overlay(environ=None):
         return data
 
     return _overlay
+
+
+# ---------------------------------------------------------------------------
+# 发布（真实 region 配置 → Nacos，替换种子占位符）
+# ---------------------------------------------------------------------------
+
+def publish_region_configs(client, configs, *, if_missing=False, group=REGION_GROUP):
+    """把区域配置逐条发布到 Nacos（dataId ``region-<region>.yaml``）。
+
+    返回发布条数。*configs* 为 ``{region: RegionConfig}``（运维持真值文件，
+    经 :func:`load_region_seed` 解析——与种子同 schema、同校验）。
+    """
+    import yaml
+
+    published = 0
+    for region, cfg in configs.items():
+        data_id = f"region-{region}.yaml"
+        if if_missing and client.get_config(data_id, group):
+            continue
+        client.publish_config(
+            data_id,
+            group,
+            yaml.safe_dump(_to_mapping(cfg), sort_keys=False, allow_unicode=True),
+            config_type="yaml",
+        )
+        published += 1
+    return published
+
+
+def publish_regions_from_env(source_path, *, if_missing=False, environ=None):
+    """从环境构造 Nacos client，把 *source_path* 的真值配置发布出去。
+
+    真值文件与种子同 schema（``regions.seed.json`` 形态），由运维保管在
+    仓库之外——真实 robotCode / conversationId 永不入 git。
+    """
+    env = os.environ if environ is None else environ
+    server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+    if not server:
+        raise RegionConfigError("PUBLIC_DATA_NACOS_SERVER is required to publish")
+    namespace = (env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip()
+    username = (env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None
+    password = (env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None
+
+    from common.public_data.pipeline_config import ensure_namespace
+    ensure_namespace(server, namespace, username=username, password=password)
+
+    from nacos import NacosClient
+    client = NacosClient(server, namespace=namespace,
+                         username=username, password=password)
+    return publish_region_configs(
+        client, load_region_seed(source_path), if_missing=if_missing
+    )
