@@ -191,6 +191,21 @@ def fetch_region_members(connection, *, region):
     )
 
 
+def fetch_member(connection, *, user_id):
+    """按 ``user_id`` 取一名在册成员；不存在返回 ``None``。
+
+    Stream 报数的门禁查询：发送者 ``sender_staff_id`` 直查。
+    """
+    rows = _fetch_all(
+        connection,
+        "SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name` "
+        f"FROM `{MEMBER_TABLE}` "
+        "WHERE `user_id` = %s AND `is_active` = 1",
+        (user_id,),
+    )
+    return rows[0] if rows else None
+
+
 def fetch_filled_names(connection, *, region, business_date):
     """返回该区域当天已有事实行的责任人名集合（**表内用名**）。"""
     rows = _fetch_all(
