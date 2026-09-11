@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock, call, patch
 
-from common.public_data.live_sync import LiveSyncService
+from common.public_data.live_sync import LiveSyncError, LiveSyncService
 from common.public_data.manifest import (
     DingTalkSheet,
     FieldMapping,
@@ -182,6 +182,59 @@ class LiveSyncServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.run_id, _RUN_ID)
         self.assertEqual(len(result.datasets), 2)
+
+    # ------------------------------------------------------------------
+    # Per-source (per-line) sync
+    # ------------------------------------------------------------------
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_sync_source_dingtalk_skips_wdt(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        sheet = _dt_sheet()
+        manifest = _manifest(sheets=[sheet], datasets=[_wdt_dataset()])
+        svc = self._service()
+        self.dingtalk_gateway.read_records.return_value = [
+            {"id": "r1", "fields": {"field_a": "v1"}}
+        ]
+
+        result = svc.sync(manifest, source="dingtalk")
+
+        self.dingtalk_gateway.validate_sheet.assert_called_once_with(sheet)
+        self.wdt_gateway.read_dataset.assert_not_called()
+        self.wdt_repo.upsert_records.assert_not_called()
+        self.assertEqual([d["source"] for d in result.datasets], ["dingtalk"])
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_sync_source_wdt_skips_dingtalk(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        manifest = _manifest(sheets=[_dt_sheet()], datasets=[_wdt_dataset()])
+        svc = self._service()
+        self.wdt_gateway.read_dataset.return_value = [({"trade_no": "T1"}, "T1")]
+
+        result = svc.sync(manifest, source="wdt")
+
+        self.dingtalk_gateway.validate_sheet.assert_not_called()
+        self.dingtalk_gateway.read_records.assert_not_called()
+        self.dingtalk_repo.upsert_records.assert_not_called()
+        self.assertEqual([d["source"] for d in result.datasets], ["wdt"])
+
+    def test_sync_rejects_unknown_source(self):
+        svc = self._service()
+        with self.assertRaises(LiveSyncError):
+            svc.sync(_manifest(), source="bogus")
+
+    def test_sync_requires_gateway_for_source(self):
+        svc = self._service()
+        svc._wdt_gateway = None
+        with self.assertRaisesRegex(LiveSyncError, "wdt gateway"):
+            svc.sync(_manifest(datasets=[_wdt_dataset()]), source="wdt")
+        self.mart_repo.start_run.assert_not_called()
 
     # ------------------------------------------------------------------
     # Failure paths

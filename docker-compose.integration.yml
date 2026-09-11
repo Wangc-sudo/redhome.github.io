@@ -1,5 +1,16 @@
 name: public-data-integration
 
+# Shared Nacos settings for every pipeline service.  The server defaults to
+# the `nacos` service; when it is not running the config client falls back to
+# the version-controlled seed file, so a missing registry never stops a run.
+x-nacos-env: &nacos-env
+  PUBLIC_DATA_NACOS_SERVER: ${PUBLIC_DATA_NACOS_SERVER:-nacos:8848}
+  PUBLIC_DATA_NACOS_NAMESPACE: ${PUBLIC_DATA_NACOS_NAMESPACE:-}
+  PUBLIC_DATA_NACOS_GROUP: PIPELINES
+  PUBLIC_DATA_NACOS_USERNAME: ${PUBLIC_DATA_NACOS_USERNAME:-}
+  PUBLIC_DATA_NACOS_PASSWORD: ${PUBLIC_DATA_NACOS_PASSWORD:-}
+  PUBLIC_DATA_PIPELINE_SEED: /app/docker/integration/pipelines.seed.yaml
+
 services:
   mysql:
     image: mysql:8.4
@@ -16,6 +27,22 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
+
+  # Nacos config centre + registry (spec section 3).  Start explicitly with
+  # `--profile nacos`; standalone mode with embedded storage for dev/test.
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    profiles:
+      - nacos
+    environment:
+      MODE: standalone
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      JVM_XMN: 128m
+    ports:
+      - "8848:8848"
+      - "9848:9848"
 
   test-runner:
     build:
@@ -55,6 +82,7 @@ services:
       - --source-credentials
       - /run/live-input/source-credentials.json
     environment:
+      <<: *nacos-env
       APP_ENV: test
       PUBLIC_DATA_RDS_HOST: mysql
       PUBLIC_DATA_RDS_PORT: "3306"
@@ -64,6 +92,7 @@ services:
       PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
       PUBLIC_DATA_MART_DATABASE: mart_ops_test
       PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_SERVICE_ID: sync-runner
       INTEGRATION_TEST_RUNNER: "1"
     volumes:
       - type: bind
@@ -73,6 +102,133 @@ services:
       - type: bind
         source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
         target: /run/live-input/source-credentials.json
+        read_only: true
+
+  # -- per-line sync runners (apps 线) ---------------------------------------
+  # Each line is its own run with its own sync_run_id; mount only that
+  # line's credentials where possible.  Both share the mysql network only.
+  sync-dingtalk:
+    profiles:
+      - live-sync-dingtalk
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.public_data.cli
+      - live-sync
+      - --live-read
+      - --confirm-local-test-write
+      - --source
+      - dingtalk
+      - --source-credentials
+      - /run/live-input/source-credentials.json
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_SERVICE_ID: sync-dingtalk
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_MANIFEST_PATH:-/dev/null}
+        target: /run/live-input/manifest.json
+        read_only: true
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
+        target: /run/live-input/source-credentials.json
+        read_only: true
+
+  sync-wdt:
+    profiles:
+      - live-sync-wdt
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.public_data.cli
+      - live-sync
+      - --live-read
+      - --confirm-local-test-write
+      - --source
+      - wdt
+      - --source-credentials
+      - /run/live-input/source-credentials.json
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_SERVICE_ID: sync-wdt
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_MANIFEST_PATH:-/dev/null}
+        target: /run/live-input/manifest.json
+        read_only: true
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
+        target: /run/live-input/source-credentials.json
+        read_only: true
+
+  # Rebuilds the mart projection for a single source line from local raw
+  # data only (no source credentials required).  Requires SYNC_RUN_ID and
+  # PROJECT_SOURCE (dingtalk|wdt) in the environment.
+  project-mart:
+    profiles:
+      - project
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["sh", "-c"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # SYNC_RUN_ID / PROJECT_SOURCE are expanded at container start (not at
+    # `docker compose config` time); leave them empty and the CLI rejects.
+    command:
+      - 'python3 -m common.public_data.cli rebuild-projection "$$SYNC_RUN_ID" --confirm-local-test-write --source "$$PROJECT_SOURCE"'
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_SERVICE_ID: project-mart
+      INTEGRATION_TEST_RUNNER: "1"
+      SYNC_RUN_ID: ${SYNC_RUN_ID:-}
+      PROJECT_SOURCE: ${PROJECT_SOURCE:-}
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_MANIFEST_PATH:-/dev/null}
+        target: /run/live-input/manifest.json
         read_only: true
 
 volumes:

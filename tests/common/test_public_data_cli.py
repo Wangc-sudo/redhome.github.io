@@ -96,6 +96,15 @@ class LoadSourceCredentialsTests(unittest.TestCase):
             load_source_credentials(path)
         self.assertIn("invalid source credentials", str(ctx.exception))
 
+    def test_source_filter_requires_only_that_section(self):
+        path = self._write_credentials({
+            "wdt": {"sid": "sid1", "app_key": "k", "app_secret": "s"},
+        })
+        creds = load_source_credentials(path, source="wdt")
+        self.assertEqual(creds["wdt"]["sid"], "sid1")
+        with self.assertRaises(ValueError):
+            load_source_credentials(path, source="dingtalk")
+
 
 class LiveSyncCliTests(unittest.TestCase):
     def test_live_sync_rejects_missing_confirmation_before_credentials_or_gateways(self):
@@ -192,6 +201,131 @@ class LiveSyncCliTests(unittest.TestCase):
         text = output.getvalue()
         self.assertNotIn("Traceback", text)
         self.assertNotIn("secret-info", text)
+
+    def test_live_sync_passes_source_to_credentials_and_sync(self):
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.load_manifest"), \
+             patch("common.public_data.cli.load_source_credentials") as load_credentials, \
+             patch("common.public_data.cli.build_service") as build_service:
+            build_service.return_value.sync.return_value = {
+                "run_id": "00000000-0000-0000-0000-000000000003",
+                "datasets": [],
+            }
+            main([
+                "live-sync", "--live-read", "--confirm-local-test-write",
+                "--source-credentials", "/creds.json", "--source", "wdt",
+            ])
+
+        load_credentials.assert_called_once_with("/creds.json", source="wdt")
+        sync_kwargs = build_service.return_value.sync.call_args.kwargs
+        self.assertEqual(sync_kwargs.get("source"), "wdt")
+
+
+class PipelineGateCliTests(unittest.TestCase):
+    """The registry enable gate around live-sync."""
+
+    def test_live_sync_skips_when_pipeline_disabled(self):
+        from common.public_data.pipeline_config import StaticConfigSource
+
+        output = io.StringIO()
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.resolve_service_id",
+                   return_value="sync-wdt"), \
+             patch("common.public_data.cli.build_pipeline_config_source") as build_source, \
+             patch("common.public_data.cli.load_manifest") as load_manifest, \
+             patch("common.public_data.cli.build_service") as build_service:
+            build_source.return_value = StaticConfigSource({"sync-wdt": {"enabled": False}})
+            with redirect_stdout(output):
+                main([
+                    "live-sync", "--live-read", "--confirm-local-test-write",
+                    "--source-credentials", "/creds.json",
+                ])
+
+        text = output.getvalue()
+        self.assertIn("service=sync-wdt", text)
+        self.assertIn("status=skipped", text)
+        load_manifest.assert_not_called()
+        build_service.assert_not_called()
+
+    def test_live_sync_runs_when_pipeline_enabled(self):
+        from common.public_data.pipeline_config import StaticConfigSource
+
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.resolve_service_id",
+                   return_value="sync-wdt"), \
+             patch("common.public_data.cli.build_pipeline_config_source") as build_source, \
+             patch("common.public_data.cli.load_manifest"), \
+             patch("common.public_data.cli.load_source_credentials"), \
+             patch("common.public_data.cli.build_service") as build_service:
+            build_source.return_value = StaticConfigSource({"sync-wdt": {"enabled": True}})
+            build_service.return_value.sync.return_value = {"run_id": "r", "datasets": []}
+            main([
+                "live-sync", "--live-read", "--confirm-local-test-write",
+                "--source-credentials", "/creds.json",
+            ])
+
+        build_service.return_value.sync.assert_called_once()
+
+    def test_live_sync_fails_open_when_registry_errors(self):
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.resolve_service_id",
+                   return_value="sync-wdt"), \
+             patch("common.public_data.cli.build_pipeline_config_source",
+                   side_effect=RuntimeError("nacos down")), \
+             patch("common.public_data.cli.load_manifest"), \
+             patch("common.public_data.cli.load_source_credentials"), \
+             patch("common.public_data.cli.build_service") as build_service:
+            build_service.return_value.sync.return_value = {"run_id": "r", "datasets": []}
+            main([
+                "live-sync", "--live-read", "--confirm-local-test-write",
+                "--source-credentials", "/creds.json",
+            ])
+
+        build_service.return_value.sync.assert_called_once()
+
+    def test_service_flag_overrides_env(self):
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.resolve_service_id") as resolve, \
+             patch("common.public_data.cli.load_manifest"), \
+             patch("common.public_data.cli.load_source_credentials"), \
+             patch("common.public_data.cli.build_service") as build_service:
+            resolve.return_value = None
+            build_service.return_value.sync.return_value = {"run_id": "r", "datasets": []}
+            main([
+                "live-sync", "--live-read", "--confirm-local-test-write",
+                "--source-credentials", "/creds.json", "--service", "sync-dingtalk",
+            ])
+
+        resolve.assert_called_once_with("sync-dingtalk")
+
+
+class PublishPipelinesCliTests(unittest.TestCase):
+    def test_publish_pipelines_prints_count(self):
+        output = io.StringIO()
+        with patch("common.public_data.cli.publish_pipeline_seed",
+                   return_value=4) as publish:
+            with redirect_stdout(output):
+                main(["publish-pipelines", "--seed", "/seed.yaml"])
+
+        publish.assert_called_once_with("/seed.yaml", if_missing=False)
+        self.assertIn("published=4", output.getvalue())
+
+    def test_publish_pipelines_failure_is_safe(self):
+        output = io.StringIO()
+        with patch("common.public_data.cli.publish_pipeline_seed",
+                   side_effect=RuntimeError("secret-host")):
+            with redirect_stdout(output):
+                with self.assertRaises(SystemExit):
+                    main(["publish-pipelines", "--seed", "/seed.yaml"])
+
+        text = output.getvalue()
+        self.assertIn("status=failed", text)
+        self.assertNotIn("secret-host", text)
 
 
 class RebuildProjectionCliTests(unittest.TestCase):

@@ -22,8 +22,22 @@
   },
   "calendar": {
     "month": 9,
+    "source": "local",
     "restDays": [6, 13, 19, 25, 26, 27],
-    "_说明": "当月休息日列表，依据钉钉考勤核验。每月换表时更新。"
+    "rule": {
+      "year": 2026,
+      "bigRestSaturdays": [19],
+      "holidays": [25, 26, 27],
+      "makeupWorkdays": [20]
+    },
+    "yonyouTplus": {
+      "baseUrl": "",
+      "appKey": "",
+      "appSecret": "",
+      "tenantId": "",
+      "schemeId": ""
+    },
+    "_说明": "source: local=用下发 restDays（现行兜底）/ yonyou_tplus=用友 T+ 排班（占位，未接入）。restDays 由 rule 推导（大小休+法定节假日+调休）：基准每周日休(小休周)，大休周的周六一并休，法定假计入，调休上班剔除；二者不一致应告警。接入 T+ 后填 yonyouTplus 凭据并切换 source。"
   },
   "org": {
     "rootDeptId": 1050135497,

@@ -16,7 +16,7 @@ ALLOWED_WDT_METHODS = frozenset(
     }
 )
 
-_KNOWN_ROW_KEYS = frozenset({"order", "list", "goods_list"})
+_KNOWN_ROW_KEYS = frozenset({"order", "list", "goods_list", "detail_list"})
 
 _TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -84,6 +84,11 @@ class WdtReadGateway:
             raise WdtReadError(
                 f"method {dataset.method!r} is not in the WDT allowlist"
             )
+
+        if not dataset.time_boxed:
+            # Non-time-series pull (e.g. a full catalog): make a single call
+            # without injecting any start/end window.
+            return self._page_window(dataset, dict(dataset.params))
 
         all_records: list[tuple[dict, str]] = []
         windows = _split_windows(
@@ -179,11 +184,24 @@ class WdtReadGateway:
 
     @staticmethod
     def _extract_stable_id(row: dict, dataset: WdtDataset) -> str:
-        """Extract and validate the stable record ID from a row."""
-        value = _extract_nested(row, dataset.record_id_path)
-        if not isinstance(value, str) or not value:
-            raise WdtReadError(
-                f"record_id_path {dataset.record_id_path!r} did not yield a "
-                f"non-empty string in dataset {dataset.dataset!r}"
-            )
-        return value
+        """Extract and validate the stable record ID from a row.
+
+        ``record_id_path`` may be a single dotted path or a comma-separated
+        list of paths (e.g. ``spec_no,warehouse_no``); each part must resolve
+        to a non-empty string (numeric ids such as ``rec_id`` are coerced to
+        ``str``) and the parts are joined into one composite ID.
+        """
+        parts: list[str] = []
+        for path in dataset.record_id_path.split(","):
+            value = _extract_nested(row, path.strip())
+            if isinstance(value, bool):
+                value = None
+            elif isinstance(value, int):
+                value = str(value)
+            if not isinstance(value, str) or not value:
+                raise WdtReadError(
+                    f"record_id_path {dataset.record_id_path!r} did not yield a "
+                    f"non-empty string in dataset {dataset.dataset!r}"
+                )
+            parts.append(value)
+        return "|".join(parts)

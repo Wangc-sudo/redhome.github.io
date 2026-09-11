@@ -82,10 +82,16 @@ class LiveSyncService:
     # Public API
     # ------------------------------------------------------------------
 
-    def sync(self, manifest) -> SyncResult:
+    def sync(self, manifest, source=None) -> SyncResult:
         """Execute a full sync run described by *manifest*.
 
-        Steps for every dataset in the manifest:
+        *source* may be ``"dingtalk"`` or ``"wdt"`` to restrict the run to a
+        single source line (used by the per-line ``sync-dingtalk`` /
+        ``sync-wdt`` runners); ``None`` syncs every dataset in the manifest.
+        Each invocation is its own run with its own ``sync_run_id``, so the
+        two lines fail independently.
+
+        Steps for every selected dataset:
 
         1. (DingTalk only) validate sheet schema against remote.
         2. Acquire a MySQL named lock for the dataset.
@@ -94,10 +100,17 @@ class LiveSyncService:
         5. Mark the run state as ``raw_committed``.
         6. Save a dataset summary in the mart.
 
-        If all datasets succeed the run is marked *completed*.  On any
-        exception the run is marked *failed* with a mapped failure code,
+        If all selected datasets succeed the run is marked *completed*.  On
+        any exception the run is marked *failed* with a mapped failure code,
         or *projection_pending* if only the mart summary step failed.
         """
+        if source not in (None, "dingtalk", "wdt"):
+            raise LiveSyncError(f"unknown source: {source!r}")
+        if source in (None, "dingtalk") and self._dingtalk_gateway is None:
+            raise LiveSyncError("dingtalk gateway is not configured")
+        if source in (None, "wdt") and self._wdt_gateway is None:
+            raise LiveSyncError("wdt gateway is not configured")
+
         run_id = self._new_run_id()
         started_at = self._now()
 
@@ -112,13 +125,15 @@ class LiveSyncService:
         datasets_summary = []
 
         try:
-            for sheet in manifest.dingtalk_sheets:
-                summary = self._sync_dingtalk_sheet(sheet, run_id)
-                datasets_summary.append(summary)
+            if source in (None, "dingtalk"):
+                for sheet in manifest.dingtalk_sheets:
+                    summary = self._sync_dingtalk_sheet(sheet, run_id)
+                    datasets_summary.append(summary)
 
-            for dataset in manifest.wdt_datasets:
-                summary = self._sync_wdt_dataset(dataset, run_id)
-                datasets_summary.append(summary)
+            if source in (None, "wdt"):
+                for dataset in manifest.wdt_datasets:
+                    summary = self._sync_wdt_dataset(dataset, run_id)
+                    datasets_summary.append(summary)
 
             self._mart_repo.mark_completed(
                 sync_run_id=run_id,
@@ -147,59 +162,65 @@ class LiveSyncService:
 
         return SyncResult(run_id=run_id, datasets=datasets_summary)
 
-    def rebuild_projection(self, sync_run_id, manifest) -> SyncResult:
+    def rebuild_projection(self, sync_run_id, manifest, source=None) -> SyncResult:
         """Recover a ``projection_pending`` run without re-reading sources.
 
         Queries the raw repositories for the records already persisted,
         recomputes per-dataset digests, writes mart summaries, and marks
-        the run *completed*.
+        the run *completed*.  *source* restricts the rebuild to a single
+        source line, matching how the run was produced.
 
         No gateway method is invoked — this is a pure raw-to-mart repair.
         """
+        if source not in (None, "dingtalk", "wdt"):
+            raise LiveSyncError(f"unknown source: {source!r}")
+
         self._mart_repo.load_run_status(sync_run_id)
         datasets_summary = []
 
-        for sheet in manifest.dingtalk_sheets:
-            records = self._dingtalk_repo.summary_for_run(
-                sheet.target_table, sync_run_id,
-            )
-            record_ids = [r["source_record_id"] for r in records]
-            digest = self._compute_digest(record_ids)
+        if source in (None, "dingtalk"):
+            for sheet in manifest.dingtalk_sheets:
+                records = self._dingtalk_repo.summary_for_run(
+                    sheet.target_table, sync_run_id,
+                )
+                record_ids = [r["source_record_id"] for r in records]
+                digest = self._compute_digest(record_ids)
 
-            self._mart_repo.save_dataset_summary(
-                sync_run_id=sync_run_id,
-                source_name="dingtalk",
-                dataset_name=sheet.dataset,
-                records_read=len(records),
-                raw_records_written=len(records),
-                record_id_digest=digest,
-                completed_at=self._now(),
-            )
-            datasets_summary.append({
-                "source": "dingtalk",
-                "dataset": sheet.dataset,
-                "records_read": len(records),
-            })
+                self._mart_repo.save_dataset_summary(
+                    sync_run_id=sync_run_id,
+                    source_name="dingtalk",
+                    dataset_name=sheet.dataset,
+                    records_read=len(records),
+                    raw_records_written=len(records),
+                    record_id_digest=digest,
+                    completed_at=self._now(),
+                )
+                datasets_summary.append({
+                    "source": "dingtalk",
+                    "dataset": sheet.dataset,
+                    "records_read": len(records),
+                })
 
-        for dataset in manifest.wdt_datasets:
-            rows = self._wdt_repo.summary_for_run(sync_run_id)
-            stable_ids = [r["source_record_id"] for r in rows]
-            digest = self._compute_digest(stable_ids)
+        if source in (None, "wdt"):
+            for dataset in manifest.wdt_datasets:
+                rows = self._wdt_repo.summary_for_run(sync_run_id)
+                stable_ids = [r["source_record_id"] for r in rows]
+                digest = self._compute_digest(stable_ids)
 
-            self._mart_repo.save_dataset_summary(
-                sync_run_id=sync_run_id,
-                source_name="wdt",
-                dataset_name=dataset.dataset,
-                records_read=len(rows),
-                raw_records_written=len(rows),
-                record_id_digest=digest,
-                completed_at=self._now(),
-            )
-            datasets_summary.append({
-                "source": "wdt",
-                "dataset": dataset.dataset,
-                "records_read": len(rows),
-            })
+                self._mart_repo.save_dataset_summary(
+                    sync_run_id=sync_run_id,
+                    source_name="wdt",
+                    dataset_name=dataset.dataset,
+                    records_read=len(rows),
+                    raw_records_written=len(rows),
+                    record_id_digest=digest,
+                    completed_at=self._now(),
+                )
+                datasets_summary.append({
+                    "source": "wdt",
+                    "dataset": dataset.dataset,
+                    "records_read": len(rows),
+                })
 
         self._mart_repo.mark_completed(
             sync_run_id=sync_run_id,

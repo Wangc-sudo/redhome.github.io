@@ -38,15 +38,51 @@ def load_manifest(path):
     return _load(path)
 
 
-def load_source_credentials(path):
+def build_pipeline_config_source():
+    """Return the configured pipeline-registry config source."""
+    from common.public_data.pipeline_config import build_config_source
+    return build_config_source()
+
+
+def resolve_service_id(override=None):
+    """Return this process's pipeline service id (CLI flag wins over env)."""
+    from common.public_data.pipeline_config import resolve_service_id as _resolve
+    return _resolve(override=override)
+
+
+def publish_pipeline_seed(seed_path, if_missing=False):
+    """Publish the version-controlled pipeline seed into Nacos."""
+    from common.public_data.pipeline_config import publish_seed_from_env
+    return publish_seed_from_env(seed_path, if_missing=if_missing)
+
+
+def _pipeline_enabled(service_id):
+    """True unless the registry explicitly disables *service_id*.
+
+    Fail-open on any registry error so a flaky configuration centre never
+    silently stops reports (spec section 3).
+    """
+    if not service_id:
+        return True
+    try:
+        return build_pipeline_config_source().get_pipeline(service_id).enabled
+    except Exception:
+        return True
+
+
+def load_source_credentials(path, source=None):
     """Read and validate the source-credentials JSON file at *path*.
 
-    The file must contain exactly::
+    The file may contain::
 
         {
           "dingtalk": {"app_key": "...", "app_secret": "...", "operator_id": "..."},
           "wdt":      {"sid": "...",    "app_key": "...",    "app_secret": "..."}
         }
+
+    When *source* is ``"dingtalk"`` or ``"wdt"`` only that section is
+    required (per-line runners mount just their own credentials); when
+    *source* is ``None`` both sections are required.
 
     Raises ``ValueError`` with a message that contains only
     ``"invalid source credentials"`` -- credential values are never
@@ -56,6 +92,10 @@ def load_source_credentials(path):
         "dingtalk": ("app_key", "app_secret", "operator_id"),
         "wdt": ("sid", "app_key", "app_secret"),
     }
+    if source is not None:
+        if source not in required:
+            raise ValueError("invalid source credentials")
+        required = {source: required[source]}
 
     try:
         with open(path, encoding="utf-8") as fh:
@@ -81,23 +121,28 @@ def load_source_credentials(path):
 def build_gateways(credentials, connections):
     """Construct read gateways from *credentials* and DB *connections*.
 
-    Returns a ``(dingtalk_gateway, wdt_gateway)`` tuple.
+    Returns a ``(dingtalk_gateway, wdt_gateway)`` tuple.  A gateway is
+    ``None`` when its credentials section is absent, letting per-line
+    runners carry only their own source's credentials; the sync service
+    validates the gateway for whichever source it actually runs.
     """
     from common.public_data.dingtalk_read import DingTalkReadGateway
     from common.public_data.wdt_read import WdtReadGateway
 
-    dingtalk_creds = credentials["dingtalk"]
-    wdt_creds = credentials.get("wdt", {})
+    dingtalk_gateway = None
+    dingtalk_creds = credentials.get("dingtalk")
+    if dingtalk_creds:
+        dingtalk_gateway = DingTalkReadGateway(
+            app_key=dingtalk_creds["app_key"],
+            app_secret=dingtalk_creds["app_secret"],
+            operator_id=dingtalk_creds["operator_id"],
+        )
 
-    dingtalk_gateway = DingTalkReadGateway(
-        app_key=dingtalk_creds["app_key"],
-        app_secret=dingtalk_creds["app_secret"],
-        operator_id=dingtalk_creds["operator_id"],
-    )
-
-    # WDT gateway: build real client if creds look valid, else stub
-    wdt_call = _build_wdt_call(wdt_creds)
-    wdt_gateway = WdtReadGateway(call=wdt_call)
+    wdt_gateway = None
+    wdt_creds = credentials.get("wdt")
+    if wdt_creds:
+        # Build real client if creds look valid, else a stub that raises.
+        wdt_gateway = WdtReadGateway(call=_build_wdt_call(wdt_creds))
 
     return dingtalk_gateway, wdt_gateway
 
@@ -207,10 +252,16 @@ def _handle_live_sync(args):
             live_read=args.live_read,
             confirm_local_test_write=args.confirm_local_test_write,
         )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
         manifest = load_manifest(settings.source_config_path)
-        credentials = load_source_credentials(args.source_credentials)
+        credentials = load_source_credentials(
+            args.source_credentials, source=args.source
+        )
         service = build_service(settings, credentials, manifest)
-        result = service.sync(manifest)
+        result = service.sync(manifest, source=args.source)
         _print_success(result)
     except SystemExit:
         raise
@@ -230,14 +281,31 @@ def _handle_rebuild_projection(args):
             live_read=False,
             confirm_local_test_write=args.confirm_local_test_write,
         )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
         manifest = load_manifest(settings.source_config_path)
         service = build_service(settings, {}, manifest)
-        result = service.rebuild_projection(args.sync_run_id, manifest)
+        result = service.rebuild_projection(
+            args.sync_run_id, manifest, source=args.source
+        )
         _print_success(result)
     except SystemExit:
         raise
     except Exception:
         _print_failure(run_id=getattr(args, "sync_run_id", "unknown"))
+        sys.exit(1)
+
+
+def _handle_publish_pipelines(args):
+    try:
+        count = publish_pipeline_seed(args.seed, if_missing=args.if_missing)
+        print(f"published={count} pipelines")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="config_error")
         sys.exit(1)
 
 
@@ -287,6 +355,15 @@ def main(argv=None):
         "--confirm-local-test-write", action="store_true", default=False
     )
     live_sync.add_argument("--source-credentials", required=True)
+    live_sync.add_argument(
+        "--source", choices=("dingtalk", "wdt"), default=None,
+        help="restrict the run to a single source line (default: both)",
+    )
+    live_sync.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
 
     # -- rebuild-projection --------------------------------------------------
     rebuild = subparsers.add_parser(
@@ -296,6 +373,22 @@ def main(argv=None):
     rebuild.add_argument(
         "--confirm-local-test-write", action="store_true", default=False
     )
+    rebuild.add_argument(
+        "--source", choices=("dingtalk", "wdt"), default=None,
+        help="restrict the rebuild to a single source line (default: both)",
+    )
+    rebuild.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
+    # -- publish-pipelines ---------------------------------------------------
+    publish = subparsers.add_parser(
+        "publish-pipelines", help="Publish the pipeline seed to Nacos"
+    )
+    publish.add_argument("--seed", required=True)
+    publish.add_argument("--if-missing", action="store_true", default=False)
 
     args = parser.parse_args(argv)
 
@@ -306,6 +399,7 @@ def main(argv=None):
     handlers = {
         "live-sync": _handle_live_sync,
         "rebuild-projection": _handle_rebuild_projection,
+        "publish-pipelines": _handle_publish_pipelines,
         "migrate": _handle_migrate,
         "status": _handle_status,
     }

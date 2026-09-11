@@ -1,5 +1,7 @@
 """Generate manifest.json for the 10-table trial sync."""
+import argparse
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Sheet name lookup from API discovery
@@ -308,28 +310,149 @@ def build_offline_deposit_other_receivables():
     }
 
 
-def main():
-    manifest = {
-        "version": 1,
-        "dingtalk": {
-            "bases": [
-                build_store_commission(),
-                build_tax_declaration(),
-                build_promotion_recharge_balance(),
-                build_platform_deposit(),
-                build_store_funds_balance(),
-                build_billion_subsidy(),
-                build_daily_funds(),
-                build_offline_receivables_aging(),
-                build_prepayment_supplier_invoice(),
-                build_offline_deposit_other_receivables(),
-            ],
-        },
-        "wdt": {"datasets": []},
-    }
+_WDT_CONFIG_PATH = Path(__file__).resolve().parent / "wdt_datasets.json"
 
-    output_path = Path(__file__).resolve().parent.parent / "docker" / "integration" / "source-manifest.json"
-    content = json.dumps(manifest, ensure_ascii=False, indent=2)
+#: Default number of past days each WDT window sweep covers.
+_DEFAULT_LOOKBACK_DAYS = 1
+#: Default slice length (minutes) for time-split WDT datasets.
+_DEFAULT_WINDOW_MINUTES = 50
+
+
+def load_wdt_config(config_path=None):
+    """Read the externalized WDT dataset definitions.
+
+    The configuration lives in ``scripts/wdt_datasets.json`` so the four
+    allowlisted WDT methods (and their pagination / id-path / params) can be
+    tuned without editing Python.  Each entry is one logical dataset;
+    ``build_wdt_datasets`` expands time-split entries into concrete windows.
+    """
+    path = Path(config_path) if config_path else _WDT_CONFIG_PATH
+    with open(path, encoding="utf-8") as fh:
+        config = json.load(fh)
+    if not isinstance(config, dict) or not isinstance(config.get("datasets"), list):
+        raise ValueError(f"WDT config must be an object with a 'datasets' list: {path}")
+    return config
+
+
+def build_wdt_datasets(lookback_days=None, config_path=None):
+    """Expand the externalized WDT definitions into concrete windowed datasets.
+
+    Time-split entries are divided into ``window_minutes`` slices covering the
+    most recent *lookback_days*; ``single`` entries (e.g. ``goods_query``, a
+    full catalog pull) get one minimal window.  Re-run ``build_manifest.py``
+    to shift the windows forward.
+    """
+    config = load_wdt_config(config_path)
+    if lookback_days is None:
+        lookback = int(config.get("lookback_days", _DEFAULT_LOOKBACK_DAYS))
+    else:
+        lookback = lookback_days
+    window_minutes = int(config.get("window_minutes", _DEFAULT_WINDOW_MINUTES))
+
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=lookback)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    step = timedelta(minutes=window_minutes)
+
+    datasets = []
+    for entry in config["datasets"]:
+        base = {
+            "method": entry["method"],
+            "target_table": "wdt_records",
+            "record_id_path": entry["record_id_path"],
+            "page_size": entry["page_size"],
+            "max_pages": entry["max_pages"],
+            "max_window_minutes": window_minutes,
+            "params": entry.get("params", {}),
+        }
+        # Only emitted when False; the manifest reader defaults it to True.
+        if not entry.get("time_boxed", True):
+            base["time_boxed"] = False
+
+        if entry.get("window", "split") == "single":
+            datasets.append({
+                **base,
+                "dataset": entry["dataset"],
+                "window_start": start.strftime(fmt),
+                "window_end": (start + timedelta(minutes=1)).strftime(fmt),
+            })
+            continue
+
+        idx = 0
+        w_start = start
+        while w_start < now:
+            w_end = min(w_start + step, now)
+            datasets.append({
+                **base,
+                "dataset": f"{entry['dataset']}_{idx:04d}",
+                "window_start": w_start.strftime(fmt),
+                "window_end": w_end.strftime(fmt),
+            })
+            w_start = w_end
+            idx += 1
+
+    return datasets
+
+
+def _bootstrap_dingtalk_bases():
+    """The 10-table trial DingTalk bases (used only for a fresh manifest)."""
+    return [
+        build_store_commission(),
+        build_tax_declaration(),
+        build_promotion_recharge_balance(),
+        build_platform_deposit(),
+        build_store_funds_balance(),
+        build_billion_subsidy(),
+        build_daily_funds(),
+        build_offline_receivables_aging(),
+        build_prepayment_supplier_invoice(),
+        build_offline_deposit_other_receivables(),
+    ]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="build_manifest")
+    parser.add_argument(
+        "--lookback-days", type=int, default=None,
+        help="override the WDT lookback window in days (default: config value)",
+    )
+    parser.add_argument(
+        "--output", default=None,
+        help="manifest output path (default: docker/integration/source-manifest.json)",
+    )
+    parser.add_argument(
+        "--wdt-only", action="store_true",
+        help="emit a manifest with only WDT datasets (empty dingtalk.bases)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = Path(__file__).resolve().parent.parent / "docker" / "integration" / "source-manifest.json"
+
+    if args.wdt_only:
+        manifest = {"version": 1, "dingtalk": {"bases": []}, "wdt": {"datasets": []}}
+    elif output_path.exists():
+        # Non-destructive refresh: keep every existing DingTalk sheet (this
+        # builder only knows the 10-table trial subset) and rewrite only the
+        # WDT window block.  Re-running is the supported way to shift windows.
+        manifest = json.loads(output_path.read_text(encoding="utf-8"))
+        preserved = sum(
+            len(base.get("sheets", []))
+            for base in manifest.get("dingtalk", {}).get("bases", [])
+        )
+        print(f"Preserved {preserved} existing DingTalk sheets")
+    else:
+        manifest = {
+            "version": 1,
+            "dingtalk": {"bases": _bootstrap_dingtalk_bases()},
+            "wdt": {"datasets": []},
+        }
+
+    manifest["wdt"] = {"datasets": build_wdt_datasets(lookback_days=args.lookback_days)}
+
+    content = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     output_path.write_text(content, encoding="utf-8")
     print(f"Manifest written to {output_path}")
 
@@ -341,6 +464,8 @@ def main():
     print(f"Validation passed: {len(loaded.dingtalk_sheets)} sheets, {len(loaded.wdt_datasets)} wdt datasets")
     for sheet in loaded.dingtalk_sheets:
         print(f"  {sheet.dataset}: {len(sheet.fields)} fields → {sheet.target_table}")
+    for ds in loaded.wdt_datasets:
+        print(f"  {ds.dataset}: {ds.method} (id={ds.record_id_path}) → {ds.target_table}")
 
 
 if __name__ == "__main__":

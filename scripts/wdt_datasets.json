@@ -1,0 +1,46 @@
+{
+  "lookback_days": 1,
+  "window_minutes": 50,
+  "datasets": [
+    {
+      "dataset": "wdt_trade_detail",
+      "method": "sales.TradeQuery.queryWithDetail",
+      "record_id_path": "trade_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {"time_type": "2"}
+    },
+    {
+      "dataset": "wdt_purchase_orders",
+      "method": "wms.stockin.Purchase.queryWithDetail",
+      "record_id_path": "purchase_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {}
+    },
+    {
+      "dataset": "wdt_stock_specs",
+      "method": "wms.StockSpec.search2",
+      "record_id_path": "rec_id",
+      "page_size": 100,
+      "max_pages": 200,
+      "window": "split",
+      "params": {}
+    }
+  ],
+  "disabled": [
+    {
+      "dataset": "wdt_goods_catalog",
+      "method": "goods_query",
+      "record_id_path": "goods_id",
+      "page_size": 100,
+      "max_pages": 200,
+      "window": "single",
+      "time_boxed": false,
+      "params": {},
+      "_reason": "goods_query returns status=99 (unknown error) on the flagship endpoint for every param combination tried (with/without start_time, any page_size). It IS a valid service entry (not 'Unknown Service Entry'), so the failure is server/permission-side, not a gateway or method-name issue. No working goods_query call exists in the codebase (product_catalog uses the same broken call). Re-enable once the correct params/permissions are confirmed; dim_product sourcing depends on it."
+    }
+  ]
+}

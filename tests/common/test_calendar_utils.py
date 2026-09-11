@@ -1,0 +1,182 @@
+import json
+import sys
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.calendar_utils import (  # noqa: E402
+    SOURCE_LOCAL,
+    SOURCE_YONYOU_TP,
+    Calendar,
+    CalendarError,
+    CalendarSourceUnavailable,
+    LocalRestDays,
+    YonyouTplusSchedule,
+    calendar_source,
+    check_rule_matches_rest_days,
+    generate_rest_days,
+)
+
+EXAMPLE_CFG = REPO_ROOT / "数字化" / "钉钉" / "杭州日报机器人" / "config.example.json"
+
+
+class TestGenerateRestDays(unittest.TestCase):
+    """「大小休 + 法定节假日 + 调休」规则推导。"""
+
+    def test_2026_09_reproduces_current_config(self):
+        """自证：与现行 config 的 restDays 逐位一致。"""
+        self.assertEqual(
+            generate_rest_days(
+                2026, 9,
+                big_rest_saturdays=[19],
+                holidays=[25, 26, 27],
+                makeup_workdays=[20],
+            ),
+            [6, 13, 19, 25, 26, 27],
+        )
+
+    def test_baseline_is_every_sunday(self):
+        """无大休周/节假日/调休时，基准即每周日休（小休周）。"""
+        self.assertEqual(generate_rest_days(2026, 9), [6, 13, 20, 27])
+
+    def test_big_rest_week_adds_saturday(self):
+        self.assertEqual(
+            generate_rest_days(2026, 9, big_rest_saturdays=[26]),
+            [6, 13, 20, 26, 27],
+        )
+
+    def test_holiday_outside_baseline_is_added(self):
+        self.assertEqual(
+            generate_rest_days(2026, 9, holidays=[25]),
+            [6, 13, 20, 25, 27],
+        )
+
+    def test_makeup_workday_removes_rest(self):
+        self.assertEqual(
+            generate_rest_days(2026, 9, makeup_workdays=[20]),
+            [6, 13, 27],
+        )
+
+    def test_handles_31_day_month(self):
+        """10 月有 31 天，不得按 1~30 截断。"""
+        self.assertEqual(generate_rest_days(2026, 10), [4, 11, 18, 25])
+        self.assertEqual(
+            generate_rest_days(2026, 10, holidays=[31]),
+            [4, 11, 18, 25, 31],
+        )
+
+    def test_result_is_sorted_and_deduplicated(self):
+        # 基准 {6,13,20,27} + 节假日 {6,25} - 调休 {13} => {6,20,25,27}
+        self.assertEqual(
+            generate_rest_days(2026, 9, holidays=[6, 6, 25], makeup_workdays=[13, 13]),
+            [6, 20, 25, 27],
+        )
+
+    def test_big_rest_saturday_must_be_saturday(self):
+        with self.assertRaises(CalendarError) as ctx:
+            generate_rest_days(2026, 9, big_rest_saturdays=[20])
+        self.assertIn("不是周六", str(ctx.exception))
+
+    def test_out_of_range_day_raises(self):
+        with self.assertRaises(CalendarError) as ctx:
+            generate_rest_days(2026, 9, holidays=[31])
+        self.assertIn("超出", str(ctx.exception))
+
+    def test_accepts_string_days(self):
+        """config JSON 里数字即 int，但容忍字符串以免上游传参类型不一。"""
+        self.assertEqual(generate_rest_days(2026, 9, holidays=["25"]), [6, 13, 20, 25, 27])
+
+
+class TestCheckRuleMatches(unittest.TestCase):
+    def _cfg(self, rest_days, rule=None):
+        cfg = {"month": 9, "restDays": rest_days}
+        if rule is not None:
+            cfg["rule"] = rule
+        return cfg
+
+    def test_no_rule_returns_empty(self):
+        self.assertEqual(check_rule_matches_rest_days(self._cfg([6, 13])), [])
+
+    def test_matching_rule_returns_empty(self):
+        cfg = self._cfg(
+            [6, 13, 19, 25, 26, 27],
+            {"year": 2026, "bigRestSaturdays": [19], "holidays": [25, 26, 27],
+             "makeupWorkdays": [20]},
+        )
+        self.assertEqual(check_rule_matches_rest_days(cfg), [])
+
+    def test_drift_reports_both_sides(self):
+        cfg = self._cfg(
+            [6, 13, 20, 27],
+            {"year": 2026, "bigRestSaturdays": [19], "holidays": [25, 26, 27],
+             "makeupWorkdays": [20]},
+        )
+        issues = check_rule_matches_rest_days(cfg)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("6, 13, 19, 25, 26, 27", issues[0])
+        self.assertIn("6, 13, 20, 27", issues[0])
+
+
+class TestCalendarSource(unittest.TestCase):
+    def _cfg(self, **kw):
+        cfg = {"month": 9, "restDays": [6, 13, 19, 25, 26, 27]}
+        cfg.update(kw)
+        return cfg
+
+    def test_default_source_is_local(self):
+        src = calendar_source(self._cfg())
+        self.assertIsInstance(src, LocalRestDays)
+        self.assertEqual(src.name, SOURCE_LOCAL)
+        self.assertEqual(src.load(2026, 9), [6, 13, 19, 25, 26, 27])
+
+    def test_explicit_local_source(self):
+        self.assertIsInstance(calendar_source(self._cfg(source=SOURCE_LOCAL)), LocalRestDays)
+
+    def test_yonyou_tplus_is_placeholder_and_fails_loudly(self):
+        src = calendar_source(self._cfg(source=SOURCE_YONYOU_TP, yonyouTplus={"baseUrl": ""}))
+        self.assertIsInstance(src, YonyouTplusSchedule)
+        self.assertEqual(src.name, SOURCE_YONYOU_TP)
+        with self.assertRaises(CalendarSourceUnavailable) as ctx:
+            src.load(2026, 9)
+        self.assertIn("用友 T+", str(ctx.exception))
+
+    def test_unknown_source_raises(self):
+        with self.assertRaises(CalendarError) as ctx:
+            calendar_source(self._cfg(source="dingtalk_schedule"))
+        self.assertIn("未知的 calendar.source", str(ctx.exception))
+
+
+class TestCalendarFromConfig(unittest.TestCase):
+    def test_local_source_builds_calendar(self):
+        cal = Calendar.from_config(
+            {"month": 9, "source": "local", "restDays": [6, 13, 19, 25, 26, 27]},
+            year=2026,
+        )
+        self.assertEqual(cal.total, 24)
+        self.assertTrue(cal.is_rest(6))
+        self.assertFalse(cal.is_rest(5))
+        self.assertEqual(cal.workdays()[0], 1)
+
+    def test_yonyou_tplus_source_fails_loudly(self):
+        with self.assertRaises(CalendarSourceUnavailable):
+            Calendar.from_config({"month": 9, "source": "yonyou_tplus", "restDays": []})
+
+    def test_example_config_rule_is_consistent(self):
+        """模板里的 rule 与 restDays 必须自洽，防止换月时漏改一半。"""
+        cfg = json.loads(EXAMPLE_CFG.read_text(encoding="utf-8"))["calendar"]
+        self.assertEqual(check_rule_matches_rest_days(cfg), [])
+
+    def test_example_config_keeps_local_source(self):
+        """用友 T+ 未接入前必须保持 local，否则机器人起不来。"""
+        cfg = json.loads(EXAMPLE_CFG.read_text(encoding="utf-8"))["calendar"]
+        self.assertEqual(cfg.get("source"), SOURCE_LOCAL)
+        cal = Calendar.from_config(cfg, now=datetime(2026, 9, 11))
+        self.assertEqual(cal.total, 24)
+
+
+if __name__ == "__main__":
+    unittest.main()

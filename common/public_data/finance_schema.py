@@ -311,6 +311,7 @@ _CHANNEL_DAILY_SALES = _t("channel_daily_sales", [
     _c("promotion_cost", "DECIMAL(20,4)", "currency"),
     _c("roi", "DECIMAL(20,4)", "currency"),
     _c("responsible_person", "JSON", "user"),
+    _c("parent_record_refs", "JSON", "unidirectionalLink"),
 ], [
     _idx("idx_channel_date", "channel", "business_date"),
     _idx("idx_date_store", "business_date", "store_name"),

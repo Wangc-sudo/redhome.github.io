@@ -1,0 +1,35 @@
+# Version-controlled seed for the pipeline registry (spec section 3).
+#
+# Publish to Nacos with:
+#   python -m common.public_data.cli publish-pipelines --seed docker/integration/pipelines.seed.yaml
+#
+# After the first publish the Nacos entries are authoritative; this file is
+# (a) the fallback used when Nacos is unreachable and (b) the default for a
+# fresh environment.  Keys are service ids; the data-id is "<key>.yaml" in
+# the "PIPELINES" group under the environment's namespace.
+sync-dingtalk:
+  kind: apps
+  enabled: true
+  sources: [dingtalk]
+  schedule: "0 2 * * *"
+  reads: [raw_dingtalk, mart_ops]
+  description: "DingTalk AI sheets -> raw_dingtalk"
+sync-wdt:
+  kind: apps
+  enabled: true
+  sources: [wdt]
+  schedule: "0 2 * * *"
+  reads: [raw_wdt, mart_ops]
+  description: "WDT read APIs -> raw_wdt"
+project-mart:
+  kind: apps
+  enabled: true
+  schedule: "0 3 * * *"
+  reads: [raw_dingtalk, raw_wdt, mart_ops]
+  description: "raw -> mart_ops projection rebuild"
+sync-runner:
+  kind: apps
+  enabled: true
+  schedule: "0 2 * * *"
+  reads: [raw_dingtalk, raw_wdt, mart_ops]
+  description: "legacy combined sync (both sources)"
