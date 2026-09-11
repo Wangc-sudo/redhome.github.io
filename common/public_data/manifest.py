@@ -81,6 +81,7 @@ class WdtDataset:
     window_end: datetime
     max_window_minutes: int
     params: dict[str, Any]
+    time_boxed: bool = True
 
 
 @dataclass(frozen=True)
@@ -312,7 +313,8 @@ def _load_wdt_datasets(datasets: list) -> tuple[WdtDataset, ...]:
         record_id_path = raw.get("record_id_path")
         if not isinstance(record_id_path, str) or not record_id_path:
             raise ManifestError(f"{prefix}.record_id_path is required")
-        _validate_dotted_id(record_id_path, f"{prefix}.record_id_path")
+        for _id_part in record_id_path.split(","):
+            _validate_dotted_id(_id_part.strip(), f"{prefix}.record_id_path")
 
         page_size = raw.get("page_size")
         if not isinstance(page_size, int) or not (1 <= page_size <= 1000):
@@ -340,6 +342,10 @@ def _load_wdt_datasets(datasets: list) -> tuple[WdtDataset, ...]:
         if params is not None and not isinstance(params, dict):
             raise ManifestError(f"{prefix}.params must be an object")
 
+        time_boxed = raw.get("time_boxed", True)
+        if not isinstance(time_boxed, bool):
+            raise ManifestError(f"{prefix}.time_boxed must be a boolean")
+
         windows = method_windows.setdefault(method, [])
         for existing_start, existing_end in windows:
             if window_start < existing_end and window_end > existing_start:
@@ -357,6 +363,7 @@ def _load_wdt_datasets(datasets: list) -> tuple[WdtDataset, ...]:
             window_end=window_end,
             max_window_minutes=max_window_minutes,
             params=dict(params) if params else {},
+            time_boxed=time_boxed,
         ))
 
     return tuple(result)
