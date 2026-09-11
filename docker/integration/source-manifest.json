@@ -1,6 +1,10 @@
 {
   "version": 1,
   "dingtalk": {
+    "org": {
+      "dataset": "org_directory",
+      "target_table": "dingtalk_org_member"
+    },
     "bases": [
       {
         "base_id": "KGZLxjv9VGjmo2zLuYonDNjOW6EDybno",

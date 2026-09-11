@@ -37,6 +37,10 @@ class Settings:
     #: extraction layer.  Unset means "skip ``dim_calendar``" rather than fail:
     #: the fact projections stay valid without it.
     calendar_seed_path: Path | None = None
+    #: Optional version-controlled "region -> top-level dept ids" seed
+    #: consumed by ``sync-dingtalk`` when the manifest declares the contact
+    #: directory.  Unset + declared = loud failure at sync time.
+    org_seed_path: Path | None = None
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -100,6 +104,15 @@ class Settings:
                     "PUBLIC_DATA_CALENDAR_SEED must point to an existing file"
                 )
 
+        org_seed_path = None
+        org_seed_value = (environment.get("PUBLIC_DATA_ORG_SEED") or "").strip()
+        if org_seed_value:
+            org_seed_path = Path(org_seed_value)
+            if not org_seed_path.is_file():
+                raise ValueError(
+                    "PUBLIC_DATA_ORG_SEED must point to an existing file"
+                )
+
         return cls(
             app_env=app_env,
             dingtalk_database=DatabaseSettings(
@@ -109,4 +122,5 @@ class Settings:
             mart_database=DatabaseSettings(name=database_names["mart"], **connection_values),
             source_config_path=config_path,
             calendar_seed_path=calendar_seed_path,
+            org_seed_path=org_seed_path,
         )

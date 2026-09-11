@@ -410,6 +410,15 @@ def _bootstrap_dingtalk_bases():
     ]
 
 
+def build_org():
+    """Contact-directory declaration: region mapping lives in the org seed,
+    not here -- the manifest only pins the sync contract itself."""
+    return {
+        "dataset": "org_directory",
+        "target_table": "dingtalk_org_member",
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="build_manifest")
     parser.add_argument(
@@ -446,7 +455,10 @@ def main(argv=None):
     else:
         manifest = {
             "version": 1,
-            "dingtalk": {"bases": _bootstrap_dingtalk_bases()},
+            "dingtalk": {
+                "bases": _bootstrap_dingtalk_bases(),
+                "org": build_org(),
+            },
             "wdt": {"datasets": []},
         }
 
@@ -462,6 +474,8 @@ def main(argv=None):
     from common.public_data.manifest import load_manifest
     loaded = load_manifest(output_path)
     print(f"Validation passed: {len(loaded.dingtalk_sheets)} sheets, {len(loaded.wdt_datasets)} wdt datasets")
+    if loaded.dingtalk_org is not None:
+        print(f"  {loaded.dingtalk_org.dataset}: contact directory → {loaded.dingtalk_org.target_table}")
     for sheet in loaded.dingtalk_sheets:
         print(f"  {sheet.dataset}: {len(sheet.fields)} fields → {sheet.target_table}")
     for ds in loaded.wdt_datasets:

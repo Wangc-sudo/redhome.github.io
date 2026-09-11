@@ -44,6 +44,7 @@ _KNOWN_TABLES = frozenset({
     "daily_report_offline",
     "channel_daily_sales",
     "wdt_records",
+    "dingtalk_org_member",
 })
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -85,10 +86,27 @@ class WdtDataset:
 
 
 @dataclass(frozen=True)
+class OrgDataset:
+    """Contact-directory sync declaration (``dingtalk.org``).
+
+    Unlike the AI-table sheets, the directory is a REST surface, so it is
+    declared as its own section instead of being forced into
+    ``dingtalk.bases[].sheets[]`` (same reasoning as the attendance
+    decision in the spec).  The region->dept mapping is *not* part of the
+    manifest -- it is business configuration and lives in the
+    version-controlled org seed.
+    """
+
+    dataset: str
+    target_table: str
+
+
+@dataclass(frozen=True)
 class SourceManifest:
     dingtalk_sheets: tuple[DingTalkSheet, ...]
     wdt_datasets: tuple[WdtDataset, ...]
     sha256: str
+    dingtalk_org: OrgDataset | None = None
 
 
 def _parse_utc(value: str, label: str) -> datetime:
@@ -283,6 +301,21 @@ def _load_dingtalk_bases(bases: list, known_tables: frozenset) -> tuple[DingTalk
     return tuple(sheets)
 
 
+def _load_dingtalk_org(raw) -> OrgDataset | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ManifestError("dingtalk.org must be an object")
+    dataset = raw.get("dataset")
+    if not isinstance(dataset, str) or not dataset:
+        raise ManifestError("dingtalk.org.dataset is required")
+    _validate_identifier(dataset, "dingtalk.org.dataset")
+    target_table = raw.get("target_table")
+    if target_table != "dingtalk_org_member":
+        raise ManifestError("dingtalk.org.target_table must be dingtalk_org_member")
+    return OrgDataset(dataset=dataset, target_table=target_table)
+
+
 def _load_wdt_datasets(datasets: list) -> tuple[WdtDataset, ...]:
     result: list[WdtDataset] = []
     seen_datasets: set[str] = set()
@@ -406,5 +439,14 @@ def load_manifest(path: Path) -> SourceManifest:
 
     sheets = _load_dingtalk_bases(raw_bases, _KNOWN_TABLES)
     wdt_datasets = _load_wdt_datasets(raw_wdt_datasets)
+    org = _load_dingtalk_org(dingtalk.get("org"))
 
-    return SourceManifest(dingtalk_sheets=sheets, wdt_datasets=wdt_datasets, sha256=sha)
+    if org is not None and org.dataset in {sheet.dataset for sheet in sheets}:
+        raise ManifestError(f"duplicate dataset: {org.dataset}")
+
+    return SourceManifest(
+        dingtalk_sheets=sheets,
+        wdt_datasets=wdt_datasets,
+        sha256=sha,
+        dingtalk_org=org,
+    )

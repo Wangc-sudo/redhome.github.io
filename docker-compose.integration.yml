@@ -138,6 +138,7 @@ services:
       PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
       PUBLIC_DATA_MART_DATABASE: mart_ops_test
       PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_ORG_SEED: /app/docker/integration/org.seed.json
       PUBLIC_DATA_SERVICE_ID: sync-dingtalk
       INTEGRATION_TEST_RUNNER: "1"
     volumes:
@@ -232,9 +233,9 @@ services:
         read_only: true
 
   # Extraction layer (apps 线, spec section 8 stage 3): projects local raw_*
-  # tables into mart_ops (facts + dim_calendar).  It reads no source and
-  # mounts no credentials -- that is the whole point of the extract layer,
-  # so unlike the sync runners it needs no live-input mounts at all.
+  # tables into mart_ops (facts + dim_calendar + dim_robot_member).  It reads
+  # no source and mounts no credentials -- that is the whole point of the
+  # extract layer, so unlike the sync runners it needs no live-input mounts.
   extract-mart:
     profiles:
       - extract

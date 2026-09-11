@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from common.public_data.db import named_lock, transaction
 from common.public_data.dingtalk_read import DingTalkReadError
+from common.public_data.org_read import OrgReadError, collect_members
 from common.public_data.transforms import apply_transform
 from common.public_data.wdt_read import PaginationLimitExceeded, WdtReadError
 
@@ -68,6 +69,9 @@ class LiveSyncService:
         connections,
         now,
         new_run_id,
+        org_gateway=None,
+        org_repository=None,
+        org_regions=(),
     ):
         self._dingtalk_gateway = dingtalk_gateway
         self._wdt_gateway = wdt_gateway
@@ -77,6 +81,9 @@ class LiveSyncService:
         self._connections = connections
         self._now = now
         self._new_run_id = new_run_id
+        self._org_gateway = org_gateway
+        self._org_repo = org_repository
+        self._org_regions = tuple(org_regions)
 
     # ------------------------------------------------------------------
     # Public API
@@ -128,6 +135,9 @@ class LiveSyncService:
             if source in (None, "dingtalk"):
                 for sheet in manifest.dingtalk_sheets:
                     summary = self._sync_dingtalk_sheet(sheet, run_id)
+                    datasets_summary.append(summary)
+                if manifest.dingtalk_org is not None:
+                    summary = self._sync_org_dataset(manifest.dingtalk_org, run_id)
                     datasets_summary.append(summary)
 
             if source in (None, "wdt"):
@@ -199,6 +209,26 @@ class LiveSyncService:
                     "source": "dingtalk",
                     "dataset": sheet.dataset,
                     "records_read": len(records),
+                })
+
+            if manifest.dingtalk_org is not None:
+                rows = self._org_repo.summary_for_run(sync_run_id)
+                record_ids = [r["source_record_id"] for r in rows]
+                digest = self._compute_digest(record_ids)
+
+                self._mart_repo.save_dataset_summary(
+                    sync_run_id=sync_run_id,
+                    source_name="dingtalk",
+                    dataset_name=manifest.dingtalk_org.dataset,
+                    records_read=len(rows),
+                    raw_records_written=len(rows),
+                    record_id_digest=digest,
+                    completed_at=self._now(),
+                )
+                datasets_summary.append({
+                    "source": "dingtalk",
+                    "dataset": manifest.dingtalk_org.dataset,
+                    "records_read": len(rows),
                 })
 
         if source in (None, "wdt"):
@@ -303,6 +333,34 @@ class LiveSyncService:
         except Exception as exc:
             raise _ProjectionFailure() from exc
 
+    def _sync_org_dataset(self, org_dataset, run_id):
+        # The manifest declared the directory sync, so a missing gateway or
+        # seed is a misconfiguration — fail loudly, never silently skip.
+        if self._org_gateway is None:
+            raise LiveSyncError("org gateway is not configured")
+        if not self._org_regions:
+            raise LiveSyncError("org regions are not configured")
+
+        conn = self._connections.dingtalk
+        lock_name = f"public-data:dingtalk:{org_dataset.dataset}"
+
+        with named_lock(conn, lock_name):
+            members = collect_members(self._org_gateway, self._org_regions)
+
+        with transaction(conn):
+            self._org_repo.upsert_members(
+                members,
+                sync_run_id=run_id,
+                synced_at=self._now(),
+            )
+
+        self._mart_repo.mark_raw_committed(run_id)
+
+        try:
+            return self._save_org_summary(org_dataset, members, run_id)
+        except Exception as exc:
+            raise _ProjectionFailure() from exc
+
     # ------------------------------------------------------------------
     # Summary helpers
     # ------------------------------------------------------------------
@@ -326,6 +384,27 @@ class LiveSyncService:
             "dataset": sheet.dataset,
             "records_read": len(records),
             "raw_records_written": len(records),
+        }
+
+    def _save_org_summary(self, org_dataset, members, run_id):
+        record_ids = [member.user_id for member in members]
+        digest = self._compute_digest(record_ids)
+
+        self._mart_repo.save_dataset_summary(
+            sync_run_id=run_id,
+            source_name="dingtalk",
+            dataset_name=org_dataset.dataset,
+            records_read=len(members),
+            raw_records_written=len(members),
+            record_id_digest=digest,
+            completed_at=self._now(),
+        )
+
+        return {
+            "source": "dingtalk",
+            "dataset": org_dataset.dataset,
+            "records_read": len(members),
+            "raw_records_written": len(members),
         }
 
     def _save_wdt_summary(self, dataset, records, run_id):
@@ -365,7 +444,7 @@ class LiveSyncService:
             return "schema_drift"
         if isinstance(exc, PaginationLimitExceeded):
             return "pagination_incomplete"
-        if isinstance(exc, WdtReadError):
+        if isinstance(exc, (WdtReadError, OrgReadError)):
             return "source_read_failed"
         if isinstance(exc, LiveSyncError):
             return str(exc)

@@ -139,6 +139,30 @@ _DIM_PRODUCT_DDL = (
 )
 
 
+# 通讯录快照（sync-dingtalk 持凭据写入；extract-mart 读最新 run 投影
+# dim_robot_member）。PK 为 user_id——raw 只保留每名成员的最新状态，
+# 「当前全集」按最近一次 run 的 sync_run_id 圈定，离职成员随之消失。
+_DINGTALK_ORG_MEMBER_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dingtalk_org_member` (\n"
+    "  `user_id` VARCHAR(64) NOT NULL,\n"
+    "  `name` VARCHAR(128) NOT NULL,\n"
+    "  `region` VARCHAR(32) NOT NULL,\n"
+    "  `dept_id` VARCHAR(64) DEFAULT NULL,\n"
+    "  `dept_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `payload_json` JSON NOT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`user_id`),\n"
+    "  KEY `idx_region` (`region`),\n"
+    "  KEY `idx_synced_at` (`synced_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def _build_dingtalk_org_ddl() -> tuple[str, ...]:
+    return (_DINGTALK_ORG_MEMBER_DDL,)
+
+
 def _build_wdt_ddl() -> tuple[str, ...]:
     return (_WDT_RECORDS_DDL,)
 
@@ -157,6 +181,7 @@ def _build_mart_extract_ddl() -> tuple[str, ...]:
 
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
+    ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),

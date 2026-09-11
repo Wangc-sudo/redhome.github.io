@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from common.public_data.live_safety import LiveRunRejected, require_live_run
+from common.public_data.live_safety import (
+    LiveRunRejected,
+    require_extract_run,
+    require_live_run,
+)
 from common.public_data.manifest import ManifestError, load_manifest
 from common.public_data.settings import DatabaseSettings, Settings
 
@@ -147,6 +151,99 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(m1.sha256, m2.sha256)
         self.assertEqual(64, len(m1.sha256))
+
+
+class OrgManifestTests(unittest.TestCase):
+    """``dingtalk.org``: the contact-directory declaration."""
+
+    _SHIPPED = (
+        Path(__file__).resolve().parents[2]
+        / "docker" / "integration" / "source-manifest.json"
+    )
+
+    def _write(self, value):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "manifest.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def test_absent_org_is_none(self):
+        manifest = load_manifest(self._write(_manifest()))
+        self.assertIsNone(manifest.dingtalk_org)
+
+    def test_loads_org_declaration(self):
+        value = _manifest()
+        value["dingtalk"]["org"] = {
+            "dataset": "org_directory",
+            "target_table": "dingtalk_org_member",
+        }
+        manifest = load_manifest(self._write(value))
+        self.assertEqual("org_directory", manifest.dingtalk_org.dataset)
+        self.assertEqual("dingtalk_org_member", manifest.dingtalk_org.target_table)
+
+    def test_rejects_org_with_wrong_target_table(self):
+        value = _manifest()
+        value["dingtalk"]["org"] = {
+            "dataset": "org_directory",
+            "target_table": "fin_store_commission",
+        }
+        with self.assertRaisesRegex(ManifestError, "dingtalk_org_member"):
+            load_manifest(self._write(value))
+
+    def test_rejects_org_dataset_colliding_with_a_sheet(self):
+        value = _manifest()
+        value["dingtalk"]["org"] = {
+            "dataset": "finance_store_commission",
+            "target_table": "dingtalk_org_member",
+        }
+        with self.assertRaisesRegex(ManifestError, "duplicate dataset"):
+            load_manifest(self._write(value))
+
+    def test_rejects_non_object_org(self):
+        value = _manifest()
+        value["dingtalk"]["org"] = ["org_directory"]
+        with self.assertRaisesRegex(ManifestError, "dingtalk.org"):
+            load_manifest(self._write(value))
+
+    def test_rejects_org_without_dataset(self):
+        value = _manifest()
+        value["dingtalk"]["org"] = {"target_table": "dingtalk_org_member"}
+        with self.assertRaisesRegex(ManifestError, "dataset"):
+            load_manifest(self._write(value))
+
+    def test_shipped_manifest_declares_the_org_directory(self):
+        manifest = load_manifest(self._SHIPPED)
+        self.assertIsNotNone(manifest.dingtalk_org)
+        self.assertEqual("org_directory", manifest.dingtalk_org.dataset)
+        self.assertEqual("dingtalk_org_member", manifest.dingtalk_org.target_table)
+
+
+class ExtractSafetyTests(unittest.TestCase):
+    """``require_extract_run``: the extraction layer's write gate."""
+
+    def test_accepts_confirm_and_the_local_test_boundary(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            require_extract_run(settings, confirm_local_test_write=True)
+
+    def test_rejects_missing_confirm_flag(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "--confirm-local-test-write"):
+                require_extract_run(settings, confirm_local_test_write=False)
+
+    def test_rejects_non_mysql_host(self):
+        settings = _settings(PUBLIC_DATA_RDS_HOST="127.0.0.1")
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "PUBLIC_DATA_RDS_HOST"):
+                require_extract_run(settings, confirm_local_test_write=True)
+
+    def test_rejects_wrong_database_name(self):
+        settings = _settings(PUBLIC_DATA_MART_DATABASE="mart_ops_shadow_test")
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "mart_ops_test"):
+                require_extract_run(settings, confirm_local_test_write=True)
 
 
 class LiveSafetyTests(unittest.TestCase):

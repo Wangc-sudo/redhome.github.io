@@ -53,6 +53,12 @@ def load_calendar_seed(path):
     return _load(path)
 
 
+def load_org_seed(path):
+    """Parse the version-controlled region->dept org seed at *path*."""
+    from common.public_data.org_read import load_org_seed as _load
+    return _load(path)
+
+
 def build_pipeline_config_source():
     """Return the configured pipeline-registry config source."""
     from common.public_data.pipeline_config import build_config_source
@@ -162,6 +168,24 @@ def build_gateways(credentials, connections):
     return dingtalk_gateway, wdt_gateway
 
 
+def build_org_gateway(credentials):
+    """Construct the contact-directory gateway from DingTalk credentials.
+
+    Returns ``None`` when the DingTalk section is absent (a wdt-only runner);
+    the sync service fails loudly only if the manifest actually declares the
+    directory dataset.
+    """
+    from common.public_data.org_read import OrgReadGateway
+
+    dingtalk_creds = credentials.get("dingtalk")
+    if not dingtalk_creds:
+        return None
+    return OrgReadGateway(
+        app_key=dingtalk_creds["app_key"],
+        app_secret=dingtalk_creds["app_secret"],
+    )
+
+
 def _build_wdt_call(wdt_creds):
     """Return a WdtClient.call-compatible callable, or a stub if creds are placeholders."""
     sid = wdt_creds.get("sid", "")
@@ -179,11 +203,20 @@ def _build_wdt_call(wdt_creds):
     return client.call
 
 
-def build_service(settings, credentials, manifest):
-    """Open connections, run migrations, build gateways, return a ``LiveSyncService``."""
+def build_service(settings, credentials, manifest, org_regions=()):
+    """Open connections, run migrations, build gateways, return a ``LiveSyncService``.
+
+    *org_regions* comes from the version-controlled org seed (region ->
+    top-level dept ids, priority-ordered); it is only consulted when the
+    manifest declares the contact-directory dataset.
+    """
     from common.public_data.db import connect
     from common.public_data.live_migrations import apply_live_migrations
-    from common.public_data.raw_repository import DingTalkRawRepository, WdtRawRepository
+    from common.public_data.raw_repository import (
+        DingTalkRawRepository,
+        OrgRawRepository,
+        WdtRawRepository,
+    )
     from common.public_data.mart_repository import MartRepository
     from common.public_data.live_sync import LiveSyncService
 
@@ -207,6 +240,12 @@ def build_service(settings, credentials, manifest):
     wdt_repo = WdtRawRepository(wdt_conn)
     mart_repo = MartRepository(mart_conn)
 
+    org_gateway = None
+    org_repo = None
+    if manifest.dingtalk_org is not None:
+        org_gateway = build_org_gateway(credentials)
+        org_repo = OrgRawRepository(dingtalk_conn)
+
     from datetime import datetime, timezone
     return LiveSyncService(
         dingtalk_gateway=dingtalk_gateway,
@@ -217,6 +256,9 @@ def build_service(settings, credentials, manifest):
         connections=conns,
         now=lambda: datetime.now(timezone.utc),
         new_run_id=lambda: str(uuid.uuid4()),
+        org_gateway=org_gateway,
+        org_repository=org_repo,
+        org_regions=org_regions,
     )
 
 
@@ -309,7 +351,11 @@ def _handle_live_sync(args):
         credentials = load_source_credentials(
             args.source_credentials, source=args.source
         )
-        service = build_service(settings, credentials, manifest)
+        org_regions = ()
+        org_seed_path = getattr(settings, "org_seed_path", None)
+        if manifest.dingtalk_org is not None and isinstance(org_seed_path, Path):
+            org_regions = load_org_seed(org_seed_path)
+        service = build_service(settings, credentials, manifest, org_regions)
         result = service.sync(manifest, source=args.source)
         _print_success(result)
     except SystemExit:
@@ -365,7 +411,7 @@ def _handle_extract_mart(args):
 
         calendar_months = ()
         seed_path = getattr(settings, "calendar_seed_path", None)
-        if seed_path:
+        if isinstance(seed_path, Path):
             calendar_months = tuple(load_calendar_seed(seed_path))
 
         service = build_extract_service(settings, calendar_months)

@@ -28,25 +28,38 @@
 ### 受限读取网关（当前状态）
 
 - `common.public_data.dingtalk_read.DingTalkReadGateway` 仅提供钉钉 AI 表的受限读取：OAuth 取 token、表/字段发现、schema 校验与记录分页；它不提供写表、群消息、DING 或 webhook 能力。
-- 单元验证使用注入的假 transport，不会访问真实钉钉或旺店通：`python -m unittest tests.common.test_public_data_dingtalk_read -v`。
+- `common.public_data.org_read.OrgReadGateway` 仅提供钉钉通讯录的受限读取（部门子树 / 成员列表 / 成员详情），不含任何写方法；区域映射来自版本受控的 `docker/integration/org.seed.json`。
+- 单元验证使用注入的假 transport，不会访问真实钉钉或旺店通：`python -m unittest tests.common.test_public_data_dingtalk_read tests.common.test_public_data_org_read -v`。
 - `docker-compose.integration.yml` 只启动本地 Ubuntu 测试容器与本地 MySQL 8.4 测试库；运行 `docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from test-runner` 不会触发真实源同步或外部写入。
-- WDT 受限读取、manifest、raw/mart 迁移、同步编排、真实源验收和业务脚本切换至数据库仍未实施；现有机器人尚未切换运行路径。任何调度切换均须由运维人员另行确认。
+- 已落地：WDT 受限读取、manifest 校验、raw/mart 迁移、按线同步编排（`sync-dingtalk` / `sync-wdt` / `project-mart`）、Nacos 管道注册表、提取层 `extract-mart`（raw → 业务事实表 + `dim_calendar` 工作日 + `dim_robot_member` 组织成员）。三条逻辑线的整体设计与阶段划分见 `docs/superpowers/specs/2026-09-10-three-lines-docker-decomposition.md`。
+- 尚未实施：真实源验收、业务线容器（`dingtalk-gateway` / `robot` / `pages-leaderboard`）与控制面（阶段 4/5）；现有机器人尚未切换运行路径。任何调度切换均须由运维人员另行确认。
 
 ### 受限实时同步验收
 
 - 实时同步命令 `live-sync` 只能由运维人员在 Docker 宿主机上手动执行，不会随 `docker compose up` 自动启动。
 - 只写入本地测试数据库（`raw_dingtalk_test`、`raw_wdt_test`、`mart_ops_test`），不对外部系统做任何写入。
 - manifest 文件和凭据文件必须存放在仓库目录之外；凭据模板见 `docker/integration/live-source-credentials.example.json`。
-- 命令格式：
+- 命令格式（按线运行：各线独立 run_id、独立成败，`sync-dingtalk` 只挂钉钉凭据、`sync-wdt` 只挂 WDT 凭据）：
 
 ```bash
 PUBLIC_DATA_LIVE_MANIFEST_PATH=/absolute/path/manifest.json \
 PUBLIC_DATA_LIVE_CREDENTIALS_PATH=/absolute/path/source-credentials.json \
-docker compose -f docker-compose.integration.yml --profile live-sync run --rm sync-runner
+docker compose -f docker-compose.integration.yml --profile live-sync-dingtalk run --rm sync-dingtalk
+
+PUBLIC_DATA_LIVE_MANIFEST_PATH=/absolute/path/manifest.json \
+PUBLIC_DATA_LIVE_CREDENTIALS_PATH=/absolute/path/source-credentials.json \
+docker compose -f docker-compose.integration.yml --profile live-sync-wdt run --rm sync-wdt
 ```
 
-- 验收标准：连续两次执行上述命令，各数据集的 `record_id_digest` 与 raw 表主键行数保持一致。
+- 提取层（不读源、不挂凭据，把本地 raw 全量重放为业务表）：
+
+```bash
+docker compose -f docker-compose.integration.yml --profile extract run --rm extract-mart
+```
+
+- 验收标准：连续两次执行上述命令，各数据集的 `record_id_digest` 与 raw 表主键行数保持一致；`extract-mart` 重放结果一致。
 - 任何 `failed` 或 `projection_pending` 状态的 sync run 均视为验收失败，须排查后重试。
+- 管道注册表（关停 / 扩线）由 Nacos 承载（`--profile nacos` 启动），版本受控种子为 `docker/integration/pipelines.seed.yaml`；注册表不可用时按 fail-open 放行，绝不静默停摆。
 
 ## 分支与变更流程
 

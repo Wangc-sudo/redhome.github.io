@@ -179,11 +179,13 @@ class MartExtractRepositoryTests(unittest.TestCase):
 
 class MartExtractServiceTests(unittest.TestCase):
 
-    def _service(self, *, datasets=None, calendar_months=()):
+    def _service(self, *, datasets=None, calendar_months=(), org_rows=()):
         self.repository = Mock()
         self.repository.read_dataset.return_value = [
             {"source_record_id": "r1", "region": "hangzhou"},
         ]
+        # 默认「从未同步过通讯录」：返回空列表，跳过 dim_robot_member 步骤。
+        self.repository.read_org_members.return_value = list(org_rows)
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()
 
@@ -318,6 +320,110 @@ class MartExtractServiceTests(unittest.TestCase):
             calendar_months=[(2026, 9, [6], "local")],
         )
         self.assertNotEqual(plain._plan_digest(), calendar._plan_digest())
+
+
+class OrgMemberRepositoryTests(unittest.TestCase):
+
+    def _repo(self, rows=()):
+        self.raw = _FakeConnection(rows)
+        self.mart = _FakeConnection()
+        return MartExtractRepository(self.raw, self.mart)
+
+    def test_read_org_members_scopes_to_the_latest_run(self):
+        repo = self._repo()
+        repo.read_org_members()
+
+        sql, _ = self.raw.cursor_instance.executed[0]
+        self.assertIn("FROM `dingtalk_org_member`", sql)
+        self.assertIn("ORDER BY `synced_at` DESC LIMIT 1", sql)
+        self.assertIn("`sync_run_id` = (", sql)
+
+    def test_replace_dim_robot_member_deletes_then_inserts_active_rows(self):
+        repo = self._repo()
+        repo.replace_dim_robot_member(
+            [{
+                "user_id": "u1",
+                "name": "张三",
+                "region": "hangzhou",
+                "dept_id": "1049728636",
+                "dept_name": "杭中",
+            }],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        sql, _ = self.mart.cursor_instance.executed[0]
+        self.assertEqual(sql, "DELETE FROM `dim_robot_member`")
+        insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
+        self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
+        self.assertEqual(sequence, [(
+            "u1", "张三", "hangzhou", "1049728636", "杭中", 1, _NOW, _RUN_ID,
+        )])
+
+
+class OrgMemberExtractTests(unittest.TestCase):
+
+    def _service(self, org_rows):
+        self.repository = Mock()
+        self.repository.read_org_members.return_value = list(org_rows)
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(),
+            calendar_months=(),
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_org_snapshot_is_projected_and_summarised(self, _lock, _txn):
+        service = self._service([{
+            "user_id": "u1",
+            "name": "张三",
+            "region": "hangzhou",
+            "dept_id": "1049728636",
+            "dept_name": "杭中",
+        }])
+        result = service.extract()
+
+        self.repository.replace_dim_robot_member.assert_called_once()
+        rows = self.repository.replace_dim_robot_member.call_args.args[0]
+        self.assertEqual(rows[0]["region"], "hangzhou")
+
+        kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["source_name"], EXTRACT_SOURCE_NAME)
+        self.assertEqual(kwargs["dataset_name"], "dim_robot_member")
+        self.assertEqual(kwargs["records_read"], 1)
+        self.assertEqual(len(result.datasets), 1)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_empty_raw_skips_the_dim_instead_of_wiping_it(self, _lock, _txn):
+        service = self._service([])
+        result = service.extract()
+
+        self.repository.replace_dim_robot_member.assert_not_called()
+        self.mart_repository.save_dataset_summary.assert_not_called()
+        self.mart_repository.mark_completed.assert_called_once()
+        self.assertEqual(result.datasets, [])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_org_summary_failure_marks_projection_pending(self, _lock, _txn):
+        service = self._service([{
+            "user_id": "u1", "name": "张三", "region": "hangzhou",
+        }])
+        self.mart_repository.save_dataset_summary.side_effect = RuntimeError("db")
+
+        with self.assertRaises(RuntimeError):
+            service.extract()
+
+        self.mart_repository.mark_projection_pending.assert_called_once()
+        self.mart_repository.mark_completed.assert_not_called()
 
 
 if __name__ == "__main__":

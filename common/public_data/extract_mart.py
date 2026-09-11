@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 
 from common.calendar_utils import month_days
 from common.public_data.db import named_lock, transaction
-from common.public_data.mart_extract_schema import DIM_CALENDAR, EXTRACT_DATASETS
+from common.public_data.mart_extract_schema import (
+    DIM_CALENDAR,
+    DIM_ROBOT_MEMBER,
+    EXTRACT_DATASETS,
+)
 
 
 EXTRACT_SOURCE_NAME = "extract"
@@ -114,6 +118,55 @@ class MartExtractRepository:
                     ],
                 )
 
+    def read_org_members(self):
+        """读取 raw 通讯录快照中**最近一次 run** 的全员。
+
+        raw 按 user_id upsert，离职成员的旧行仍在表里；「当前全集」由最新
+        ``synced_at`` 的 ``sync_run_id`` 圈定。从未同步过时返回空列表——
+        调用方据此**跳过**投影，而不是把维度清成空表。
+        """
+        sql = (
+            "SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name` "
+            "FROM `dingtalk_org_member` "
+            "WHERE `sync_run_id` = ("
+            "  SELECT `sync_run_id` FROM `dingtalk_org_member` "
+            "  ORDER BY `synced_at` DESC LIMIT 1"
+            ")"
+        )
+        with contextlib.closing(self._raw.cursor()) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_dim_robot_member(self, rows, *, sync_run_id, synced_at):
+        """用 *rows* **整体替换** ``dim_robot_member``。
+
+        与 ``dim_calendar`` 同理：成员维度由提取层完全拥有，离职成员必须
+        随之消失——替换而非 upsert。
+        """
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(f"DELETE FROM `{DIM_ROBOT_MEMBER}`")
+            if rows:
+                cursor.executemany(
+                    "INSERT INTO `dim_robot_member` "
+                    "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, "
+                    "`is_active`, `synced_at`, `sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    [
+                        (
+                            row["user_id"],
+                            row["name"],
+                            row["region"],
+                            row.get("dept_id"),
+                            row.get("dept_name"),
+                            1,
+                            synced_at,
+                            sync_run_id,
+                        )
+                        for row in rows
+                    ],
+                )
+
 
 class MartExtractService:
     """把 raw 钉钉表投影到 ``mart_ops``，并物化工作日历维度。
@@ -179,6 +232,10 @@ class MartExtractService:
                 datasets_summary.append(
                     self._extract_calendar(run_id, synced_at)
                 )
+
+            org_summary = self._extract_org_members(run_id, synced_at)
+            if org_summary is not None:
+                datasets_summary.append(org_summary)
 
             self._mart_repository.mark_completed(
                 sync_run_id=run_id,
@@ -256,6 +313,34 @@ class MartExtractService:
             return self._save_summary(
                 dataset=CALENDAR_DATASET,
                 record_ids=[business_date.isoformat() for business_date, *_ in rows],
+                records_read=len(rows),
+                run_id=run_id,
+            )
+        except Exception as exc:
+            raise _ProjectionFailure() from exc
+
+    def _extract_org_members(self, run_id, synced_at):
+        """把最新通讯录快照投影为 ``dim_robot_member``。
+
+        raw 为空（``sync-dingtalk`` 尚未同步过通讯录）时**跳过**并返回
+        ``None``——不把维度清成空表；这对应「未配置组织同步」的环境，
+        提取层的事实表与日历仍然有效。
+        """
+        rows = self._repository.read_org_members()
+        if not rows:
+            return None
+
+        with transaction(self._mart_connection):
+            self._repository.replace_dim_robot_member(
+                rows, sync_run_id=run_id, synced_at=synced_at
+            )
+
+        self._mart_repository.mark_raw_committed(run_id)
+
+        try:
+            return self._save_summary(
+                dataset=DIM_ROBOT_MEMBER,
+                record_ids=[row["user_id"] for row in rows],
                 records_read=len(rows),
                 run_id=run_id,
             )

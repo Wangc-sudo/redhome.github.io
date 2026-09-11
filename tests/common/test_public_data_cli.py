@@ -222,6 +222,54 @@ class LiveSyncCliTests(unittest.TestCase):
         self.assertEqual(sync_kwargs.get("source"), "wdt")
 
 
+class LiveSyncOrgCliTests(unittest.TestCase):
+    """Org-seed wiring of the live-sync subcommand."""
+
+    def _run(self, *, settings, manifest_org):
+        with patch("common.public_data.cli.load_settings", return_value=settings), \
+             patch("common.public_data.cli.require_live_run"), \
+             patch("common.public_data.cli.load_manifest") as load_manifest, \
+             patch("common.public_data.cli.load_source_credentials"), \
+             patch("common.public_data.cli.load_org_seed") as load_org, \
+             patch("common.public_data.cli.build_service") as build_service:
+            load_manifest.return_value.dingtalk_org = manifest_org
+            load_org.return_value = (("hangzhou", (1049728636,)),)
+            build_service.return_value.sync.return_value = {
+                "run_id": "r", "datasets": [],
+            }
+            main([
+                "live-sync", "--live-read", "--confirm-local-test-write",
+                "--source-credentials", "/creds.json",
+            ])
+        return load_org, build_service
+
+    def test_declared_and_seeded_passes_regions_to_the_service(self):
+        load_org, build_service = self._run(
+            settings=Mock(org_seed_path=Path("/app/org.seed.json")),
+            manifest_org=Mock(),
+        )
+        load_org.assert_called_once_with(Path("/app/org.seed.json"))
+        self.assertEqual(
+            build_service.call_args.args[3], (("hangzhou", (1049728636,)),),
+        )
+
+    def test_declared_without_a_seed_passes_empty_regions(self):
+        load_org, build_service = self._run(
+            settings=Mock(org_seed_path=None),
+            manifest_org=Mock(),
+        )
+        load_org.assert_not_called()
+        self.assertEqual(build_service.call_args.args[3], ())
+
+    def test_undeclared_org_never_reads_the_seed(self):
+        load_org, build_service = self._run(
+            settings=Mock(org_seed_path=Path("/app/org.seed.json")),
+            manifest_org=None,
+        )
+        load_org.assert_not_called()
+        self.assertEqual(build_service.call_args.args[3], ())
+
+
 class PipelineGateCliTests(unittest.TestCase):
     """The registry enable gate around live-sync."""
 

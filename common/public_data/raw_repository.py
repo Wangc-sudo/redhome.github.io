@@ -158,6 +158,61 @@ class DingTalkRawRepository:
             return cursor.fetchall()
 
 
+class OrgRawRepository:
+    """Persists contact-directory snapshots into ``dingtalk_org_member``.
+
+    The primary key is ``user_id``: each sync upserts the full directory,
+    so the table always holds the latest state per member.  The "current
+    full set" is delimited by the most recent run's ``sync_run_id`` —
+    members absent from it (departures) simply stop being selected.
+    """
+
+    TABLE = "dingtalk_org_member"
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def upsert_members(self, members, *, sync_run_id, synced_at):
+        """Upsert :class:`OrgMemberRecord` rows by ``user_id``."""
+        sql = (
+            "INSERT INTO `dingtalk_org_member` "
+            "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, "
+            "`payload_json`, `synced_at`, `sync_run_id`) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE "
+            "`name` = VALUES(`name`), "
+            "`region` = VALUES(`region`), "
+            "`dept_id` = VALUES(`dept_id`), "
+            "`dept_name` = VALUES(`dept_name`), "
+            "`payload_json` = VALUES(`payload_json`), "
+            "`synced_at` = VALUES(`synced_at`), "
+            "`sync_run_id` = VALUES(`sync_run_id`)"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            for member in members:
+                cursor.execute(sql, (
+                    member.user_id,
+                    member.name,
+                    member.region,
+                    str(member.dept_id) if member.dept_id is not None else None,
+                    member.dept_name,
+                    _canonical_json(member.payload),
+                    synced_at,
+                    sync_run_id,
+                ))
+
+    def summary_for_run(self, sync_run_id):
+        """Row-level summary for *sync_run_id* (used by rebuild-projection)."""
+        sql = (
+            "SELECT `user_id` AS `source_record_id`, `sync_run_id` "
+            "FROM `dingtalk_org_member` "
+            "WHERE `sync_run_id` = %s"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.execute(sql, (sync_run_id,))
+            return cursor.fetchall()
+
+
 class WdtRawRepository:
     """Persists WDT gateway records into ``wdt_records``."""
 

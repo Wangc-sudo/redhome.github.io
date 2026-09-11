@@ -8,6 +8,7 @@ from common.public_data.live_sync import LiveSyncError, LiveSyncService
 from common.public_data.manifest import (
     DingTalkSheet,
     FieldMapping,
+    OrgDataset,
     SourceManifest,
     WdtDataset,
 )
@@ -357,6 +358,170 @@ class LiveSyncServiceTests(unittest.TestCase):
 
         self.assertEqual(result.run_id, _RUN_ID)
         self.assertEqual(len(result.datasets), 2)
+
+
+class _FakeOrgGateway:
+    """In-memory directory for exercising the real ``collect_members``."""
+
+    def list_sub_departments(self, dept_id):
+        return []
+
+    def list_user_ids(self, dept_id):
+        return ["u1"]
+
+    def get_user(self, user_id):
+        return {"userid": user_id, "name": "张三"}
+
+
+class OrgSyncTests(unittest.TestCase):
+    """The contact-directory branch of the dingtalk line."""
+
+    def _org_manifest(self):
+        return SourceManifest(
+            dingtalk_sheets=(),
+            wdt_datasets=(),
+            sha256="a" * 64,
+            dingtalk_org=OrgDataset(
+                dataset="org_directory",
+                target_table="dingtalk_org_member",
+            ),
+        )
+
+    def _service(self, *, org_gateway=None, org_regions=()):
+        self.dingtalk_gateway = Mock()
+        self.wdt_gateway = Mock()
+        self.dingtalk_repo = Mock()
+        self.wdt_repo = Mock()
+        self.mart_repo = Mock()
+        self.org_repo = Mock()
+        self.org_gateway = org_gateway
+        self.connections = Mock()
+        return LiveSyncService(
+            dingtalk_gateway=self.dingtalk_gateway,
+            wdt_gateway=self.wdt_gateway,
+            dingtalk_repository=self.dingtalk_repo,
+            wdt_repository=self.wdt_repo,
+            mart_repository=self.mart_repo,
+            connections=self.connections,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            org_gateway=org_gateway,
+            org_repository=self.org_repo,
+            org_regions=org_regions,
+        )
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_declared_org_dataset_syncs_members(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        svc = self._service(
+            org_gateway=_FakeOrgGateway(),
+            org_regions=(("hangzhou", (1,)),),
+        )
+        result = svc.sync(self._org_manifest(), source="dingtalk")
+
+        mock_lock.assert_called_once_with(
+            self.connections.dingtalk, "public-data:dingtalk:org_directory",
+        )
+        members = self.org_repo.upsert_members.call_args.args[0]
+        self.assertEqual([(m.user_id, m.name, m.region) for m in members],
+                         [("u1", "张三", "hangzhou")])
+
+        kwargs = self.mart_repo.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["source_name"], "dingtalk")
+        self.assertEqual(kwargs["dataset_name"], "org_directory")
+        self.assertEqual(kwargs["records_read"], 1)
+        self.assertEqual(kwargs["raw_records_written"], 1)
+        self.mart_repo.mark_completed.assert_called_once()
+        self.assertEqual(len(result.datasets), 1)
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_declared_org_without_gateway_fails_loudly(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        svc = self._service(org_gateway=None, org_regions=(("hangzhou", (1,)),))
+        with self.assertRaisesRegex(LiveSyncError, "org gateway"):
+            svc.sync(self._org_manifest(), source="dingtalk")
+
+        self.mart_repo.mark_failed.assert_called_once()
+        self.assertEqual(
+            self.mart_repo.mark_failed.call_args.kwargs["failure_code"],
+            "org gateway is not configured",
+        )
+        self.mart_repo.mark_completed.assert_not_called()
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_declared_org_without_regions_fails_loudly(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        svc = self._service(org_gateway=_FakeOrgGateway(), org_regions=())
+        with self.assertRaisesRegex(LiveSyncError, "org regions"):
+            svc.sync(self._org_manifest(), source="dingtalk")
+
+        self.org_repo.upsert_members.assert_not_called()
+        self.mart_repo.mark_failed.assert_called_once()
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_undeclared_org_never_touches_the_gateway(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        org_gateway = Mock()
+        svc = self._service(org_gateway=org_gateway,
+                            org_regions=(("hangzhou", (1,)),))
+        svc.sync(_manifest(), source="dingtalk")
+
+        org_gateway.list_sub_departments.assert_not_called()
+        self.org_repo.upsert_members.assert_not_called()
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_wdt_line_skips_org(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        org_gateway = Mock()
+        svc = self._service(org_gateway=org_gateway,
+                            org_regions=(("hangzhou", (1,)),))
+        manifest = SourceManifest(
+            dingtalk_sheets=(),
+            wdt_datasets=(_wdt_dataset(),),
+            sha256="a" * 64,
+            dingtalk_org=OrgDataset(
+                dataset="org_directory",
+                target_table="dingtalk_org_member",
+            ),
+        )
+        self.wdt_gateway.read_dataset.return_value = [({"trade_no": "T1"}, "T1")]
+
+        svc.sync(manifest, source="wdt")
+
+        org_gateway.list_sub_departments.assert_not_called()
+        self.org_repo.upsert_members.assert_not_called()
+
+    def test_rebuild_includes_the_org_summary(self):
+        svc = self._service(org_gateway=_FakeOrgGateway(),
+                            org_regions=(("hangzhou", (1,)),))
+        self.org_repo.summary_for_run.return_value = [
+            {"source_record_id": "u1"},
+        ]
+
+        result = svc.rebuild_projection(_RUN_ID, self._org_manifest())
+
+        self.mart_repo.save_dataset_summary.assert_called_once()
+        kwargs = self.mart_repo.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["source_name"], "dingtalk")
+        self.assertEqual(kwargs["dataset_name"], "org_directory")
+        self.assertEqual(kwargs["records_read"], 1)
+        self.mart_repo.mark_completed.assert_called_once()
+        self.assertEqual(len(result.datasets), 1)
 
 
 # -----------------------------------------------------------------------
