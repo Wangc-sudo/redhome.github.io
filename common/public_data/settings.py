@@ -41,6 +41,10 @@ class Settings:
     #: consumed by ``sync-dingtalk`` when the manifest declares the contact
     #: directory.  Unset + declared = loud failure at sync time.
     org_seed_path: Path | None = None
+    #: Optional version-controlled business-region seed consumed by the
+    #: ``robot`` / ``dingtalk-gateway`` containers (stage 4).  Unset means
+    #: those commands cannot resolve any region config and fail loudly.
+    region_seed_path: Path | None = None
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -113,6 +117,15 @@ class Settings:
                     "PUBLIC_DATA_ORG_SEED must point to an existing file"
                 )
 
+        region_seed_path = None
+        region_seed_value = (environment.get("PUBLIC_DATA_REGION_SEED") or "").strip()
+        if region_seed_value:
+            region_seed_path = Path(region_seed_value)
+            if not region_seed_path.is_file():
+                raise ValueError(
+                    "PUBLIC_DATA_REGION_SEED must point to an existing file"
+                )
+
         return cls(
             app_env=app_env,
             dingtalk_database=DatabaseSettings(
@@ -123,4 +136,5 @@ class Settings:
             source_config_path=config_path,
             calendar_seed_path=calendar_seed_path,
             org_seed_path=org_seed_path,
+            region_seed_path=region_seed_path,
         )

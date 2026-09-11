@@ -33,6 +33,17 @@ extract-mart:
   schedule: "0 4 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
+robot-hangzhou:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "hangzhou daily-report robot (mart_ops -> robot_outbox)"
+dingtalk-gateway:
+  kind: apps
+  enabled: true
+  reads: [mart_ops]
+  description: "robot_outbox delivery + DingTalk interaction gateway"
 sync-runner:
   kind: apps
   enabled: true

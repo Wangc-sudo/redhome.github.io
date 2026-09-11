@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 from common.public_data.live_safety import (
     LiveRunRejected,
+    require_business_run,
     require_extract_run,
+    require_gateway_run,
     require_live_run,
 )
 from common.public_data.manifest import ManifestError, load_manifest
@@ -244,6 +246,56 @@ class ExtractSafetyTests(unittest.TestCase):
         with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
             with self.assertRaisesRegex(LiveRunRejected, "mart_ops_test"):
                 require_extract_run(settings, confirm_local_test_write=True)
+
+
+class BusinessSafetyTests(unittest.TestCase):
+    """``require_business_run``: the robot's write gate (no external calls)."""
+
+    def test_accepts_confirm_and_the_local_test_boundary(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            require_business_run(settings, confirm_local_test_write=True)
+
+    def test_rejects_missing_confirm_flag(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "--confirm-local-test-write"):
+                require_business_run(settings, confirm_local_test_write=False)
+
+
+class GatewaySafetyTests(unittest.TestCase):
+    """``require_gateway_run``: external sends need ``--live-send``."""
+
+    def test_accepts_both_flags_and_the_local_test_boundary(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            require_gateway_run(
+                settings, live_send=True, confirm_local_test_write=True
+            )
+
+    def test_rejects_missing_live_send_flag(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "--live-send"):
+                require_gateway_run(
+                    settings, live_send=False, confirm_local_test_write=True
+                )
+
+    def test_rejects_missing_confirm_flag(self):
+        settings = _settings()
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "--confirm-local-test-write"):
+                require_gateway_run(
+                    settings, live_send=True, confirm_local_test_write=False
+                )
+
+    def test_rejects_non_mysql_host(self):
+        settings = _settings(PUBLIC_DATA_RDS_HOST="127.0.0.1")
+        with patch.dict(os.environ, {"INTEGRATION_TEST_RUNNER": "1"}, clear=True):
+            with self.assertRaisesRegex(LiveRunRejected, "PUBLIC_DATA_RDS_HOST"):
+                require_gateway_run(
+                    settings, live_send=True, confirm_local_test_write=True
+                )
 
 
 class LiveSafetyTests(unittest.TestCase):

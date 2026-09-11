@@ -33,17 +33,19 @@
 - [x] **Step 2: 任务规划。** `run_remind` / `run_check`：`dim_calendar` 判工作日（当月无日历行 = 显式失败，替代现行月份校验）、`common.metrics.daily_report` 求未填（aliases 支持）、`enqueue` 幂等（重复 → `already_sent`）、全员已填 → 不入队。check 额外入队 `kind='ding'`（@人 + cc）。
 - [x] **Step 3: 行为变化点（有意）**：`missing`（表内有人但通讯录无映射）在 mart 世界恒为空——未填名单本就出自 `dim_robot_member`，人人有 user_id。
 
-## Task 3: gateway 投递器（下一增量）
+## Task 3: gateway 投递器
 
-- [ ] **Step 1: 轮询循环。** `fetch_pending` → 按 `kind` 分发：`remind/check/leaderboard` → 群 Markdown（`DingTalkClient.send_group_markdown`，robotCode/conversationId 来自 Nacos region dataId）；`ding` → 保持现行 `dws ding` 命令契约或工作通知 API（实测后定）。
-- [ ] **Step 2: 状态回写。** 成功 `mark_delivered`；异常 `register_failure`（非泄露错误码）；达上限留 `failed` 供控制面告警。
-- [ ] **Step 3: 测试。** fake client + fake repo：分发路由、@人透传、失败重试、上限转 failed。
+- [x] **Step 1: 轮询与分发。** `common/gateway/delivery.py` 的 `OutboxDeliveryWorker`：`fetch_pending` → 按 `kind` 分发（`remind/check/leaderboard` → 群 Markdown；`ding` → DING）；未登记 kind 记失败（达上限自然转 `failed`，不卡死队列）；单行失败不中断批次。投递语义**至少一次**（与现行 stateFile 同语义，已文档化）。
+- [x] **Step 2: 真实投递器。** `common/gateway/dingtalk_deliverer.py`：群消息走 `DingTalkClient.send_group_markdown`（与现行机器人同一路径，@人透传、空 @ 列表转 None）；region 配置（robotCode/conversationId）字典注入，容器化后由 Nacos 提供（Task 4）。DING 保持现行 `dws ding` 命令契约（`DwsCommandDingSender`，契约文本逐字对拍），切换工作通知 API 的点收敛在 `ding_sender` 一个参数。
+- [x] **Step 3: 状态回写。** 成功 `mark_delivered(delivered_at)`；异常 `register_failure`（每 kind 一个非泄露错误码：`group_send_failed` / `ding_send_failed` / `unknown_outbox_kind`）。
+- [x] **Step 4: 测试。** `tests/common/test_gateway_delivery.py` 14 例：分发路由、@人透传、失败续批、上限转 failed、dws 契约逐字、region 配置查找。
 
 ## Task 4: 容器与配置
 
-- [ ] **Step 1: `robot` 容器**（profile `robot`，cron 触发 `--once` 按小时分流 remind/check）；region 配置（displayName、tableUrl、aliases、robotCode、conversationId、cc）入 Nacos 多 dataId，种子兜底。
-- [ ] **Step 2: `dingtalk-gateway` 容器**（profile `dingtalk-gateway`，长驻；挂钉钉凭据）。
-- [ ] **Step 3: Compose 合约测试。** robot 零凭据零外呼；gateway 仅钉钉凭据。
+- [x] **Step 1: 区域配置通道（`common/region_config.py` + `regions.seed.json`）。** 区域**集合**由版本受控种子定义（新增区域须先进种子、代码评审）；Nacos 只做**字段覆盖**（group `REGIONS`、dataId `region-<region>.yaml`、缺失/不可达 fail-open 回种子）。robotCode / conversationId / tableUrl 在种子里是占位符，真实值由运维发布到 Nacos、不入 git。
+- [x] **Step 2: `robot` 容器**（profile `robot`，`robot-hangzhou`；`python -m common.daily_robot.mart_cli once --confirm-local-test-write`，按 `remindHour`/`checkHour` 分流）。零凭据、零挂载、零 `--live-*` 旗标；门控 `require_business_run`（与提取层同保证，无外部调用）。
+- [x] **Step 3: `dingtalk-gateway` 容器**（profile `dingtalk-gateway`；`python -m common.gateway.cli run --live-send ...`，长驻轮询、`--once` 单轮可验收）。只挂钉钉凭据文件（不挂 manifest）；门控 `require_gateway_run`——外发属**外部写入**，须显式 `--live-send`（区别于 `--live-read`）。
+- [x] **Step 4: 注册与合约测试。** `pipelines.seed.yaml` 增 `robot-hangzhou`（kind=business，cron `0 18,20 * * *`）与 `dingtalk-gateway`（kind=apps，长驻无 schedule）；合约测试把守「robot 零凭据零外呼 / gateway 仅钉钉凭据」。
 
 ## Task 5: Stream 报数落库（次后增量）
 

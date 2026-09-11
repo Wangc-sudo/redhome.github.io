@@ -49,3 +49,32 @@ def require_extract_run(settings, *, confirm_local_test_write, environ=None):
     if confirm_local_test_write is not True:
         raise LiveRunRejected("--confirm-local-test-write is required")
     _require_local_test_target(settings, values)
+
+
+def require_business_run(settings, *, confirm_local_test_write, environ=None):
+    """Gate for business-line tasks (robot): same guarantees as extraction.
+
+    The robot reads ``mart_ops`` and writes ``robot_outbox`` only -- it
+    makes no external calls at all, so no live-read acknowledgement exists
+    to demand; everything that protects the target still applies.
+    """
+    values = os.environ if environ is None else environ
+    if confirm_local_test_write is not True:
+        raise LiveRunRejected("--confirm-local-test-write is required")
+    _require_local_test_target(settings, values)
+
+
+def require_gateway_run(settings, *, live_send, confirm_local_test_write, environ=None):
+    """Gate for the delivery gateway: external *sends* need their own flag.
+
+    The gateway does not read sources, but it **writes to an external
+    system** (group messages / DING) -- the dangerous direction -- so it
+    demands an explicit ``--live-send`` acknowledgement instead of
+    ``--live-read``.
+    """
+    values = os.environ if environ is None else environ
+    if live_send is not True:
+        raise LiveRunRejected("--live-send is required")
+    if confirm_local_test_write is not True:
+        raise LiveRunRejected("--confirm-local-test-write is required")
+    _require_local_test_target(settings, values)

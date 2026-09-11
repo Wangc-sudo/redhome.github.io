@@ -1,0 +1,16 @@
+{
+  "_说明": "版本受控的区域配置种子。区域集合以此为准（新增区域必须先进本文件，代码评审）；robotCode / openConversationId / tableUrl 为占位符，真实值由运维发布到 Nacos（group=REGIONS，dataId=region-<region>.yaml，字段覆盖），不入 git。aliases 为「通讯录实名 → 表内用名」；ccUserIds 为 20:00 催办群消息固定追加@的人。",
+  "version": 1,
+  "regions": {
+    "hangzhou": {
+      "display": "杭州",
+      "tableUrl": "<日报表访问地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20
+    }
+  }
+}

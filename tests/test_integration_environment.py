@@ -194,6 +194,82 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         )
         self.assertEqual(environment.get("PUBLIC_DATA_SERVICE_ID"), "extract-mart")
 
+    def _compose_config(self, *profiles):
+        command = ["docker", "compose", "-f", str(COMPOSE_FILE)]
+        for profile in profiles:
+            command += ["--profile", profile]
+        command += ["config", "--format", "json"]
+        completed = subprocess.run(
+            command, cwd=REPOSITORY_ROOT,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def test_robot_runner_is_opt_in_and_credential_free(self):
+        configuration = self._compose_config("robot")
+        robot = configuration["services"]["robot-hangzhou"]
+
+        self.assertEqual(robot.get("profiles"), ["robot"])
+        self.assertEqual(
+            "service_healthy", robot["depends_on"]["mysql"]["condition"]
+        )
+        self.assertNotIn("ports", robot)
+
+        command = robot.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertIn("common.daily_robot.mart_cli", parts)
+        self.assertIn("once", parts)
+        self.assertIn("--confirm-local-test-write", parts)
+
+        # Business line (spec section 7): no source credentials, no external
+        # calls -- no live flags, no mounts at all.
+        self.assertNotIn("--live-read", parts)
+        self.assertNotIn("--live-send", parts)
+        self.assertFalse(robot.get("volumes"))
+
+        environment = robot["environment"]
+        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_SERVICE_ID"), "robot-hangzhou"
+        )
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_REGION_SEED"),
+            "/app/docker/integration/regions.seed.json",
+        )
+
+    def test_gateway_runner_mounts_only_dingtalk_credentials(self):
+        configuration = self._compose_config("dingtalk-gateway")
+        gateway = configuration["services"]["dingtalk-gateway"]
+
+        self.assertEqual(gateway.get("profiles"), ["dingtalk-gateway"])
+        self.assertNotIn("ports", gateway)
+
+        command = gateway.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertIn("common.gateway.cli", parts)
+        self.assertIn("run", parts)
+        self.assertIn("--live-send", parts)
+        self.assertIn("--confirm-local-test-write", parts)
+
+        # The only business-related container with DingTalk credentials:
+        # the credentials file is mounted, the source manifest is not.
+        targets = {
+            v.get("target", "") if isinstance(v, dict) else ""
+            for v in gateway.get("volumes", [])
+        }
+        self.assertIn("/run/live-input/source-credentials.json", targets)
+        self.assertNotIn("/run/live-input/manifest.json", targets)
+
+        environment = gateway["environment"]
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_SERVICE_ID"), "dingtalk-gateway"
+        )
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_REGION_SEED"),
+            "/app/docker/integration/regions.seed.json",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -266,6 +266,82 @@ services:
       PUBLIC_DATA_SERVICE_ID: extract-mart
       INTEGRATION_TEST_RUNNER: "1"
 
+  # 业务线 robot（阶段 4）：只读 mart_ops + 写 robot_outbox。零凭据、零外呼
+  # ——它不挂任何 live-input，命令里也没有 --live-* 旗标，由合约测试把守。
+  # 一镜像多区域：复制本服务改 ROBOT_REGION / PUBLIC_DATA_SERVICE_ID 即可。
+  robot-hangzhou:
+    profiles:
+      - robot
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.daily_robot.mart_cli
+      - once
+      - --confirm-local-test-write
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: robot-hangzhou
+      ROBOT_REGION: hangzhou
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+
+  # apps 线 dingtalk-gateway（阶段 4）：轮询 robot_outbox 并投递到钉钉。
+  # 唯一持钉钉凭据的业务相关容器；region 配置走种子 + Nacos 覆盖。
+  dingtalk-gateway:
+    profiles:
+      - dingtalk-gateway
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.gateway.cli
+      - run
+      - --live-send
+      - --confirm-local-test-write
+      - --source-credentials
+      - /run/live-input/source-credentials.json
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: dingtalk-gateway
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
+        target: /run/live-input/source-credentials.json
+        read_only: true
+
 volumes:
   public-data-mysql-data:
     name: public-data-mysql-data
