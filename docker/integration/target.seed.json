@@ -1,0 +1,9 @@
+{
+  "_说明": "版本受控的年度目标种子。annual_target 单位为元，由万元口径换算：线下 21041 万 / 电商 54980 万 / 餐厅 930 万。改目标 = 改本文件 + 重跑 load-target（整体重放）。scope=line 对应业务线；餐厅首批无事实表、不计入进度卡分母。",
+  "version": 1,
+  "targets": [
+    {"scope": "line", "scope_key": "offline", "year": 2026, "annual_target": 210410000, "note": "线下 21041 万"},
+    {"scope": "line", "scope_key": "channel", "year": 2026, "annual_target": 549800000, "note": "电商 54980 万"},
+    {"scope": "line", "scope_key": "restaurant", "year": 2026, "annual_target": 9300000, "note": "餐厅 930 万（无事实表，首批不计入进度卡）"}
+  ]
+}

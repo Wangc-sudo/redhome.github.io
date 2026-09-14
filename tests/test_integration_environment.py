@@ -32,7 +32,12 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         mysql = services["mysql"]
         runner = services["test-runner"]
 
-        self.assertNotIn("ports", mysql)
+        # MySQL is reachable from the host (Metabase, local clients) but only
+        # via loopback -- never on the LAN.
+        (port_mapping,) = mysql["ports"]
+        self.assertEqual("127.0.0.1", port_mapping["host_ip"])
+        self.assertEqual(3306, port_mapping["target"])
+        self.assertEqual("13306", port_mapping["published"])
         self.assertTrue(
             any(
                 volume["type"] == "volume"
@@ -46,6 +51,11 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(
             "service_healthy", runner["depends_on"]["mysql"]["condition"]
         )
+        # CURDATE() drives every month window; the DB clock must share the
+        # business timezone (Asia/Shanghai) that bi-web / the robots use,
+        # or the Python default month and the SQL current month split at
+        # each month boundary.
+        self.assertEqual("Asia/Shanghai", mysql["environment"]["TZ"])
         self.assertTrue(DOCKERFILE.is_file())
         self.assertTrue(DOCKERFILE.read_text(encoding="utf-8").startswith("FROM ubuntu:24.04"))
 
@@ -304,6 +314,51 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(
             environment.get("PUBLIC_DATA_SERVICE_ID"), "pages-hangzhou"
         )
+
+    def test_bi_web_is_opt_in_and_read_only(self):
+        configuration = self._compose_config("bi-web")
+        bi_web = configuration["services"]["bi-web"]
+
+        # Opt-in via --profile bi-web: the cockpit never starts by accident.
+        self.assertEqual(bi_web.get("profiles"), ["bi-web"])
+
+        # Depends on healthy mysql.
+        self.assertEqual(
+            "service_healthy", bi_web["depends_on"]["mysql"]["condition"]
+        )
+
+        # 零挂载 (spec section 9): a read-only mart consumer mounts nothing --
+        # no credentials, no live-input, no output directories.
+        self.assertFalse(bi_web.get("volumes"))
+
+        # The command runs the app module and never carries a --live-* flag.
+        command = bi_web.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertEqual(["-m", "common.bi_web.app"], parts)
+        self.assertFalse(any(part.startswith("--live") for part in parts))
+
+        # Loopback-only port, the same rule as mysql 13306 -- the cockpit is
+        # for the operator's browser, never for the LAN.
+        (port_mapping,) = bi_web["ports"]
+        self.assertEqual("127.0.0.1", port_mapping["host_ip"])
+        self.assertEqual(8080, port_mapping["target"])
+        self.assertEqual("18080", port_mapping["published"])
+
+        environment = bi_web["environment"]
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_CONFIG"),
+            "/app/docker/integration/public-data-test-config.json",
+        )
+        # bi-web writes nowhere at all, so it never needs the runner's
+        # write-gate acknowledgement.
+        self.assertNotIn("INTEGRATION_TEST_RUNNER", environment)
+        # Deliberate deviation from spec section 9 (recorded in the plan):
+        # the spec also asks for "no raw-database environment variable
+        # references" here, but Settings.from_environment requires all nine
+        # variables (including the raw dingtalk/wdt database names), so a
+        # compose service without them could never boot.  The zero-raw rule
+        # is enforced at the code level instead: the default db_connector
+        # only ever passes settings.mart_database to connect().
 
 
 if __name__ == "__main__":

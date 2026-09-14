@@ -202,6 +202,24 @@ def _build_mart_outbox_ddl() -> tuple[str, ...]:
     return (_ROBOT_OUTBOX_DDL,)
 
 
+# 年度目标维度（版本受控种子 docker/integration/target.seed.json 整体重放：
+# load-target 先 DELETE 全表再 INSERT，表内容永远与种子一致）。
+_DIM_TARGET_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_target` (\n"
+    "  `scope` VARCHAR(32) NOT NULL,\n"
+    "  `scope_key` VARCHAR(64) NOT NULL,\n"
+    "  `year` SMALLINT UNSIGNED NOT NULL,\n"
+    "  `annual_target` DECIMAL(20,4) NOT NULL,\n"
+    "  `note` VARCHAR(255) NULL,\n"
+    "  PRIMARY KEY (`scope`, `scope_key`, `year`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def _build_mart_dim_target_ddl() -> tuple[str, ...]:
+    return (_DIM_TARGET_DDL,)
+
+
 def _build_mart_extract_ddl() -> tuple[str, ...]:
     return extract_ddl()
 
@@ -214,6 +232,7 @@ _MIGRATIONS = (
     ("mart-ops-v1", "mart", _build_mart_ddl()),
     ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
     ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
+    ("mart-ops-dim-target-v1", "mart", _build_mart_dim_target_ddl()),
 )
 
 

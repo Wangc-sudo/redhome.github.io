@@ -1,0 +1,91 @@
+# 看板编排种子：卡片口径在 common/bi_web/cards.py（代码评审）；本文件只回答
+# 「哪个页面摆哪些卡、什么标题、什么布局、是否启用」。发布进 Nacos group=BI。
+# 阶段 B：nav_order 驱动顶部导航；filters 驱动筛选条；on_click 驱动 bar 下钻。
+l1-cockpit:
+  title: "首页驾驶舱"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 0
+  cards:
+    - card: kpi_offline_dod
+      title: "线下日环比"
+      span: 6
+    - card: kpi_channel_dod
+      title: "电商渠道日环比"
+      span: 6
+    - card: kpi_offline_mtd
+      title: "线下本月累计销售"
+      span: 4
+    - card: kpi_channel_mtd
+      title: "电商渠道本月累计销售"
+      span: 4
+    - card: kpi_annual_progress
+      title: "年度目标达成进度"
+      span: 4
+    - card: trend_region_daily
+      title: "区域日销趋势"
+      span: 8
+    - card: bar_channel_mtd
+      title: "渠道本月排行"
+      span: 4
+l2-region:
+  title: "区域下钻"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 10
+  filters:
+    - {param: region, source: regions, label: "区域"}
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: kpi_region_mtd
+      title: "区域本月累计销售"
+      span: 4
+    - card: trend_region_daily
+      title: "区域日销趋势"
+      span: 8
+    - card: bar_department_mtd
+      title: "部门本月排行"
+      span: 12
+l2-channel:
+  title: "渠道明细"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 20
+  filters:
+    - {param: channel, source: channels, label: "渠道"}
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: bar_channel_mtd
+      title: "渠道本月排行"
+      span: 4
+      on_click: {param: channel}
+    - card: trend_channel_daily
+      title: "渠道日销趋势"
+      span: 8
+    - card: table_channel_mtd
+      title: "渠道本月对比"
+      span: 6
+    - card: table_store_mtd
+      title: "店铺本月排行"
+      span: 6
+l2-people:
+  title: "人员榜"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 30
+  filters:
+    - {param: region, source: regions, label: "区域"}
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: kpi_people_count
+      title: "参与人数"
+      span: 4
+    - card: kpi_people_completed
+      title: "本月完成额"
+      span: 4
+    - card: kpi_people_rate
+      title: "总达成率"
+      span: 4
+    - card: table_people_leaderboard
+      title: "人员销售榜"
+      span: 12

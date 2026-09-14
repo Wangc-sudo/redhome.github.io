@@ -16,6 +16,12 @@ services:
     image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: local-integration-root
+      # CURDATE() 驱动全部月份窗口，须与 bi-web/robot 服务同一业务时区，
+      # 否则 Python 默认月与 SQL 当月在每月 1 日 0-8 点（CST）互相矛盾
+      TZ: Asia/Shanghai
+    ports:
+      # 仅绑定回环地址：供本机 BI 工具/调试客户端连接，不对局域网暴露
+      - "127.0.0.1:13306:3306"
     volumes:
       - public-data-mysql-data:/var/lib/mysql
       - ./docker/integration/mysql-init:/docker-entrypoint-initdb.d:ro
@@ -383,6 +389,40 @@ services:
       - type: bind
         source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
         target: /output
+
+  # 业务线 bi-web（阶段 A）：只读 mart_ops 的 L1 驾驶舱。零凭据、零挂载、
+  # 零 --live-*；注册表请求级门控（Nacos 关 bi-web 即全站 503）。
+  # 端口仅回环，与 mysql 13306 同约定。
+  bi-web:
+    profiles:
+      - bi-web
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.bi_web.app
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_SERVICE_ID: bi-web
+      PUBLIC_DATA_BI_SEED: /app/docker/integration/bi.seed.yaml
+      BI_WEB_TOKEN: ${BI_WEB_TOKEN:-}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:18080:8080"
 
 volumes:
   public-data-mysql-data:

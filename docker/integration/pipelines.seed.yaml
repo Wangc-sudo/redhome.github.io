@@ -56,3 +56,8 @@ sync-runner:
   schedule: "0 2 * * *"
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "legacy combined sync (both sources)"
+bi-web:
+  kind: business
+  enabled: true
+  reads: [mart_ops]
+  description: "BI dashboards (L1/L2), read-only on mart_ops"

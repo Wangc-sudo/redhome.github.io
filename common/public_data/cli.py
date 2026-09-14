@@ -59,6 +59,24 @@ def load_org_seed(path):
     return _load(path)
 
 
+def connect(database_settings):
+    """Open a connection to one of the public-data databases."""
+    from common.public_data.db import connect as _connect
+    return _connect(database_settings)
+
+
+def load_target_seed(path):
+    """Parse the version-controlled annual-target seed at *path*."""
+    from common.public_data.target_seed import load_target_seed as _load
+    return _load(path)
+
+
+def replace_dim_target(connection, rows):
+    """Replay *rows* into ``dim_target`` inside one transaction."""
+    from common.public_data.target_seed import replace_dim_target as _replace
+    return _replace(connection, rows)
+
+
 def build_pipeline_config_source():
     """Return the configured pipeline-registry config source."""
     from common.public_data.pipeline_config import build_config_source
@@ -75,6 +93,12 @@ def publish_pipeline_seed(seed_path, if_missing=False):
     """Publish the version-controlled pipeline seed into Nacos."""
     from common.public_data.pipeline_config import publish_seed_from_env
     return publish_seed_from_env(seed_path, if_missing=if_missing)
+
+
+def publish_bi_seed(seed_path, if_missing=False):
+    """Publish the version-controlled dashboard seed into Nacos."""
+    from common.bi_web.config import publish_bi_seed_from_env
+    return publish_bi_seed_from_env(seed_path, if_missing=if_missing)
 
 
 def _pipeline_enabled(service_id):
@@ -435,6 +459,17 @@ def _handle_publish_pipelines(args):
         sys.exit(1)
 
 
+def _handle_publish_bi(args):
+    try:
+        count = publish_bi_seed(args.seed, if_missing=args.if_missing)
+        print(f"published={count} dashboards")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="config_error")
+        sys.exit(1)
+
+
 def _handle_migrate(args):
     try:
         settings = load_settings()
@@ -450,6 +485,34 @@ def _handle_migrate(args):
         raise
     except Exception:
         _print_failure(code="migration_error")
+        sys.exit(1)
+
+
+def _handle_load_target(args):
+    # Safety pre-check: the write-confirmation flag is required BEFORE any work.
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        # Fail fast on a bad seed before any connection is opened.
+        rows = load_target_seed(args.seed)
+        from common.public_data.live_migrations import apply_live_migrations
+
+        dingtalk_conn = connect(settings.dingtalk_database)
+        wdt_conn = connect(settings.wdt_database)
+        mart_conn = connect(settings.mart_database)
+        apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+        written = replace_dim_target(mart_conn, rows)
+        print(f"targets_written={written} status=completed")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="target_seed_error")
         sys.exit(1)
 
 
@@ -529,6 +592,28 @@ def main(argv=None):
     publish.add_argument("--seed", required=True)
     publish.add_argument("--if-missing", action="store_true", default=False)
 
+    # -- publish-bi -----------------------------------------------------------
+    publish_bi = subparsers.add_parser(
+        "publish-bi", help="Publish the dashboard seed to Nacos"
+    )
+    publish_bi.add_argument(
+        "--seed", default="docker/integration/bi.seed.yaml",
+        help="version-controlled dashboard seed file",
+    )
+    publish_bi.add_argument("--if-missing", action="store_true", default=False)
+
+    # -- load-target ----------------------------------------------------------
+    load_target = subparsers.add_parser(
+        "load-target", help="Replay the annual-target seed into dim_target"
+    )
+    load_target.add_argument(
+        "--seed", default="docker/integration/target.seed.json",
+        help="version-controlled annual-target seed file",
+    )
+    load_target.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -540,7 +625,9 @@ def main(argv=None):
         "rebuild-projection": _handle_rebuild_projection,
         "extract-mart": _handle_extract_mart,
         "publish-pipelines": _handle_publish_pipelines,
+        "publish-bi": _handle_publish_bi,
         "migrate": _handle_migrate,
+        "load-target": _handle_load_target,
         "status": _handle_status,
     }
 
