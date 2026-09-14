@@ -33,14 +33,13 @@
   "disabled": [
     {
       "dataset": "wdt_goods_catalog",
-      "method": "goods_query",
+      "method": "goods.Goods.queryWithSpec",
       "record_id_path": "goods_id",
       "page_size": 100,
       "max_pages": 200,
-      "window": "single",
-      "time_boxed": false,
-      "params": {},
-      "_reason": "goods_query returns status=99 (unknown error) on the flagship endpoint for every param combination tried (with/without start_time, any page_size). It IS a valid service entry (not 'Unknown Service Entry'), so the failure is server/permission-side, not a gateway or method-name issue. No working goods_query call exists in the codebase (product_catalog uses the same broken call). Re-enable once the correct params/permissions are confirmed; dim_product sourcing depends on it."
+      "window": "split",
+      "params": {"hide_deleted": 1},
+      "_reason": "Root cause of the old status=99 failures found 2026-09-12: 'goods_query' is the qyb (enterprise) edition method name; our WdtClient hits the qjb (flagship) gateway. Correct flagship method is goods.Goods.queryWithSpec. Live probe also showed the method REQUIRES start_time/end_time params with windows of at most 30 days (empty params -> status 100), so time_boxed must stay true. Kept disabled: dim_product is sourced directly by common/public_data/product_catalog.py, and this generic pipeline splits windows by the global 50-minute window_minutes, which is a poor fit for a rarely-changing catalog; re-enable only if the goods catalog also needs to land in wdt_records."
     }
   ]
 }

@@ -338,7 +338,7 @@ def build_wdt_datasets(lookback_days=None, config_path=None):
     """Expand the externalized WDT definitions into concrete windowed datasets.
 
     Time-split entries are divided into ``window_minutes`` slices covering the
-    most recent *lookback_days*; ``single`` entries (e.g. ``goods_query``, a
+    most recent *lookback_days*; ``single`` entries (e.g. ``goods.Goods.queryWithSpec``, a
     full catalog pull) get one minimal window.  Re-run ``build_manifest.py``
     to shift the windows forward.
     """

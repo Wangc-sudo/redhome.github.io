@@ -12,7 +12,7 @@ ALLOWED_WDT_METHODS = frozenset(
         "sales.TradeQuery.queryWithDetail",
         "wms.stockin.Purchase.queryWithDetail",
         "wms.StockSpec.search2",
-        "goods_query",
+        "goods.Goods.queryWithSpec",
     }
 )
 

@@ -1,6 +1,6 @@
 """WDT 商品目录同步 → dim_product 维度表
 ==========================================
-从旺店通 goods_query 拉取全量商品档案，解析品牌/系列归属，
+从旺店通 goods.Goods.queryWithSpec 拉取全量商品档案，解析品牌/系列归属，
 写入 dim_product 维度表（品牌→系列→SKU 三级结构）。
 
 系列分类逻辑：
@@ -14,7 +14,8 @@
 
 import json
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from common.public_data.db import connect, transaction
 from common.public_data.settings import Settings
-from common.wdt.client import WdtClient
+from common.wdt.client import WdtClient, WdtError
 
 SERIES_RULES = {
     "习酒": [
@@ -117,10 +118,50 @@ _UPSERT_SQL = (
 
 _BATCH_SIZE = 200
 
+_GOODS_CATALOG_METHOD = "goods.Goods.queryWithSpec"
+# 旗舰版接口强制起止时间且单窗 ≤30 天；全量回填从固定起点按修改时间扫掠。
+_SWEEP_START = datetime(2015, 1, 1)
+_BEIJING = timezone(timedelta(hours=8))
+_WINDOW_DAYS = 30
+_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+# 回填连发百余个窗口调用会撞每分钟频率限制：限流错误按递增延迟重试，其余错误立即透传。
+_RATE_LIMIT_MARKER = "频率"
+_RATE_LIMIT_RETRIES = 8
+_RETRY_SECONDS = 3
 
-def _fetch_all_goods(wdt_client):
-    """分页拉取全量商品目录。"""
-    return wdt_client.call_paged("goods_query", {}, page_size=100, max_pages=200)
+
+def _call_goods_window(wdt_client, params):
+    for attempt in range(_RATE_LIMIT_RETRIES):
+        try:
+            return wdt_client.call_paged(
+                _GOODS_CATALOG_METHOD, params, page_size=100, max_pages=200
+            )
+        except WdtError as error:
+            if _RATE_LIMIT_MARKER not in str(error) or attempt == _RATE_LIMIT_RETRIES - 1:
+                raise
+            time.sleep(_RETRY_SECONDS * (attempt + 1))
+
+
+def _fetch_all_goods(wdt_client, end=None):
+    """分窗+分页拉取全量商品目录，同一 goods_id 保留最新窗口的快照。"""
+    if end is None:
+        end = datetime.now(_BEIJING).replace(tzinfo=None)
+    latest_by_goods_id = {}
+    cursor = _SWEEP_START
+    while cursor < end:
+        window_end = min(cursor + timedelta(days=_WINDOW_DAYS), end)
+        params = {
+            "start_time": cursor.strftime(_TIME_FMT),
+            "end_time": window_end.strftime(_TIME_FMT),
+            "hide_deleted": 1,
+        }
+        for goods in _call_goods_window(wdt_client, params):
+            goods_id = goods.get("goods_id")
+            if goods_id is None:
+                continue
+            latest_by_goods_id[goods_id] = goods
+        cursor = window_end
+    return list(latest_by_goods_id.values())
 
 
 def sync_product_catalog(wdt_client, db_settings):

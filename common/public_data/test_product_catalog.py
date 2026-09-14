@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.wdt.client import WdtClient
-from common.public_data.product_catalog import classify_series
+from common.public_data.product_catalog import _fetch_all_goods, classify_series
 
 WDT_CREDS = REPO_ROOT / "数字化" / "钉钉" / "渠道日报机器人" / "wdt_credentials.json"
 
@@ -21,7 +21,7 @@ def main():
     wdt = WdtClient(creds["sid"], creds["appkey"], creds["appsecret"])
 
     print("正在拉取商品目录...")
-    goods_list = wdt.call_paged("goods_query", {}, page_size=100, max_pages=200)
+    goods_list = _fetch_all_goods(wdt)
     print(f"共 {len(goods_list)} 个商品（货品）")
 
     specs = []

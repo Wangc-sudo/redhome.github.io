@@ -107,7 +107,7 @@ class WdtReadGatewayTests(unittest.TestCase):
     def test_time_boxed_false_makes_single_call_without_window_params(self):
         calls = []
         dataset = self._dataset(
-            method="goods_query",
+            method="goods.Goods.queryWithSpec",
             record_id_path="goods_id",
             time_boxed=False,
             params={},
