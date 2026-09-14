@@ -10,20 +10,31 @@ carrying the exception class name only -- enough for an operator to tell
 "SQL failed" from "config corrupt" without approaching the leak boundary
 (``str(exc)`` and tracebacks are never logged).
 
-Routing (spec section 6):
+Routing (spec section 6; API-first per the 2026-09-14 separation spec):
 
 * ``GET /``   -- redirect to the default dashboard (``l1-cockpit``);
-* ``GET /d/{dashboard_id}`` -- server-rendered shell, one placeholder per
-  placed card, polling at ``refresh_seconds``; the shell context also
-  carries the top navigation (every enabled dashboard by ``nav_order``),
-  the page's filter dropdowns (options loaded from the mart, TTL-cached)
-  and each card's whitelisted param names;
-* ``GET /api/d/{dashboard_id}/cards/{card_id}`` -- card JSON with
+* ``GET /d/{dashboard_id}`` -- the static shell ``web/index.html`` (no
+  data in it; the client routes on ``location.pathname``), still behind
+  the shared resolve chain so a missing/disabled dashboard 404s and a
+  corrupt one 503s -- bookmarkable URLs keep their old semantics;
+* ``GET /api/v1/dashboards`` -- navigation list (enabled, by nav_order);
+* ``GET /api/v1/dashboards/{dashboard_id}`` -- the definition the shell
+  renders from: title, ``refresh_seconds``, filters, and each card's
+  span/title/param whitelist/on_click;
+* ``GET /api/v1/options/{source}`` -- one filter's option set (unknown
+  source -> 404, a failed dimension query -> 503, mirroring the old
+  page-local filter 503);
+* ``GET /api/d/{dashboard_id}/cards/{card_id}`` and its versioned alias
+  ``GET /api/v1/d/{dashboard_id}/cards/{card_id}`` -- card JSON with
   ``Cache-Control: no-store``; URL parameters are whitelisted against
   ``Card.params_schema`` and their values validated against the
   dimension option sets (TTL-cached, fail-open on a failed lookup -- a
   bad value can only ever surface as an empty card, never a 5xx); the
-  SQL itself is fully static;
+  SQL itself is fully static.  The ``run`` result is served through
+  the stage-2 card cache (:mod:`common.bi_web.cache`): read-through
+  with hot/cold TTLs, fail-open to a direct mart read, one compute per
+  key under concurrency -- the ``no-store`` header stays, caching only
+  ever lives server-side;
 * ``GET /healthz`` -- liveness + mart connectivity (``SELECT 1``).
 
 Two guards run per request on ``/d/`` and ``/api/`` only:
@@ -46,15 +57,14 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from common.bi_web import queries
+from common.bi_web.cache import build_card_cache, card_cache_key
 from common.bi_web.cards import REGISTRY, CardConfigError, validate_dashboard_config
 from common.bi_web.config import DashboardConfigError, load_seed, parse_dashboard_config
 
@@ -69,10 +79,11 @@ _GATE_TTL_SECONDS = 30.0
 #: source per window, mirroring the gate TTL).
 _FILTER_TTL_SECONDS = 30.0
 
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
-_STATIC_DIR = Path(__file__).parent / "static"
-
-_TEMPLATES = Jinja2Templates(directory=_TEMPLATES_DIR)
+#: The API-first static frontend (2026-09-14 separation spec): index.html
+#: is the data-free shell served at ``/d/{id}``; dashboard.js builds the
+#: navigation, filters, and cards entirely from ``/api/v1/``.  The Jinja2
+#: rendering path is retired and the dependency unpinned.
+_WEB_DIR = Path(__file__).parent / "web"
 
 #: Module logger -- the repo's first logging module, so the pattern is set
 #: here: one module-level logger per module, 5xx paths log exactly one
@@ -333,28 +344,32 @@ def _nav_entries(dashboard_source):
     )
 
 
-def _filter_views(dashboard, option_sets):
-    """One render-ready view per page filter; 503 when options fail."""
-    views = []
-    for spec in dashboard.filters:
-        options = option_sets.options(spec.source)
-        if options is None:
-            raise HTTPException(status_code=503, detail="unavailable")
-        views.append(
-            SimpleNamespace(param=spec.param, label=spec.label, options=options)
-        )
-    return tuple(views)
+def _dashboard_definition(dashboard, registry):
+    """The ``/api/v1/dashboards/{id}`` payload the static shell renders from.
 
-
-def _card_params(dashboard, registry):
-    """card_id -> its whitelisted param names, for the page's JS wiring.
-
-    The frontend intersects page URL params with this per-card list, so
-    a page-level param never 400s a card that does not declare it.
+    Each card entry carries its placement (span/title/on_click) plus the
+    registry's param whitelist, so the client intersects page URL params
+    per card exactly like the retired server-rendered shell did -- a
+    page-level param never 400s a card that does not declare it.
     """
     return {
-        placement.card: tuple(registry[placement.card].params_schema)
-        for placement in dashboard.cards
+        "id": dashboard.dashboard_id,
+        "title": dashboard.title,
+        "refresh_seconds": dashboard.refresh_seconds,
+        "filters": [
+            {"param": spec.param, "source": spec.source, "label": spec.label}
+            for spec in dashboard.filters
+        ],
+        "cards": [
+            {
+                "card": placement.card,
+                "title": placement.title,
+                "span": placement.span,
+                "on_click": placement.on_click,
+                "params": list(registry[placement.card].params_schema),
+            }
+            for placement in dashboard.cards
+        ],
     }
 
 
@@ -364,13 +379,15 @@ def _card_params(dashboard, registry):
 
 def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
-               seed_path=None) -> FastAPI:
+               seed_path=None, card_cache=None) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
     dashboard source, registry, token, gate, connector, and seed are
     explicit so tests -- and Task 6's compose wiring -- never need a real
-    Nacos or RDS to exercise routing, auth, or gating.
+    Nacos or RDS to exercise routing, auth, or gating.  ``card_cache``
+    defaults to :func:`build_card_cache` (Redis when configured, else
+    in-process); it lives exactly as long as the app instance.
     """
     if seed_path is not None:
         validate_seed_file(seed_path, registry)
@@ -378,11 +395,13 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         db_connector = _mart_connector(settings)
     if gate is None:
         gate = _TTLGate()
+    if card_cache is None:
+        card_cache = build_card_cache()
     option_sets = _TTLOptionSets(db_connector)
     require_bearer = _build_bearer_dependency(token)
 
     app = FastAPI(title="bi-web")
-    app.mount("/static", StaticFiles(directory=_STATIC_DIR, check_dir=False))
+    app.mount("/web", StaticFiles(directory=_WEB_DIR, check_dir=False))
 
     @app.get("/")
     def root():
@@ -406,21 +425,55 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         return JSONResponse({"status": "ok", "database": "ok"})
 
     @app.get("/d/{dashboard_id}", dependencies=[Depends(require_bearer)])
-    def dashboard_page(dashboard_id: str, request: Request):
-        dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
-        return _TEMPLATES.TemplateResponse(
-            request,
-            "dashboard.html",
+    def dashboard_page(dashboard_id: str):
+        # The shell carries no data -- the same resolve chain as the APIs
+        # still guards the URL (404 missing/disabled, 503 corrupt), and
+        # the client fetches everything else from /api/v1/.
+        _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        return FileResponse(_WEB_DIR / "index.html")
+
+    @app.get("/api/v1/dashboards", dependencies=[Depends(require_bearer)])
+    def dashboard_list():
+        if not gate():
+            raise HTTPException(status_code=503, detail="unavailable")
+        # Enumeration failures already degrade to "no navigation" inside
+        # _nav_entries (fail-open, never a 5xx).
+        return JSONResponse(
             {
-                "dashboard": dashboard,
-                "nav": _nav_entries(dashboard_source),
-                "filters": _filter_views(dashboard, option_sets),
-                "card_params": _card_params(dashboard, registry),
-            },
+                "dashboards": [
+                    {"id": dashboard_id, "title": title}
+                    for dashboard_id, title in _nav_entries(dashboard_source)
+                ]
+            }
         )
 
     @app.get(
+        "/api/v1/dashboards/{dashboard_id}",
+        dependencies=[Depends(require_bearer)],
+    )
+    def dashboard_definition(dashboard_id: str):
+        dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        return JSONResponse(_dashboard_definition(dashboard, registry))
+
+    @app.get("/api/v1/options/{source}", dependencies=[Depends(require_bearer)])
+    def filter_options(source: str):
+        if not gate():
+            raise HTTPException(status_code=503, detail="unavailable")
+        if source not in _FILTER_SOURCE_QUERIES:
+            raise HTTPException(status_code=404, detail="not_found")
+        options = option_sets.options(source)
+        if options is None:
+            # Same mapping the retired shell had: a failed dimension
+            # query is a local 503, never a 5xx escape.
+            raise HTTPException(status_code=503, detail="unavailable")
+        return JSONResponse({"source": source, "options": list(options)})
+
+    @app.get(
         "/api/d/{dashboard_id}/cards/{card_id}",
+        dependencies=[Depends(require_bearer)],
+    )
+    @app.get(
+        "/api/v1/d/{dashboard_id}/cards/{card_id}",
         dependencies=[Depends(require_bearer)],
     )
     def card_data(dashboard_id: str, card_id: str, request: Request):
@@ -439,9 +492,17 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         for key, value in params.items():
             if not option_sets.contains(card.params_schema[key], value):
                 raise HTTPException(status_code=400, detail="bad_request")
-        try:
+        def compute():
             with db_connector() as connection:
-                payload = card.run(connection, params)
+                return card.run(connection, params)
+
+        try:
+            # Read-through (stage-2 cache): hot/cold TTL by period class,
+            # one compute per key under concurrency, backend failures are
+            # misses -- never 5xx.  Bad values (a raising run) are never
+            # cached, and the key is only built past every gate above.
+            key, ttl = card_cache_key(card_id, params)
+            payload = card_cache.get_or_compute(key, ttl, compute)
             # Constructed inside the try: a payload Starlette cannot
             # JSON-encode must land in the designed 500 card_error mapping,
             # not escape as an unhandled TypeError (bare 500).

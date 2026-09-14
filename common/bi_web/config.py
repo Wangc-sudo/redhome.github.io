@@ -23,11 +23,18 @@ consumers.
 """
 
 import os
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 
 BI_GROUP = "BI"
+
+#: How long a resolved dashboard config stays cached before the next
+#: Nacos read (2026-09-14 cache spec; the same staleness budget as the
+#: app's 30 s pipeline gate).
+_DEFAULT_CACHE_TTL_SECONDS = 30.0
 
 DEFAULT_REFRESH_SECONDS = 300
 MIN_REFRESH_SECONDS = 60
@@ -361,10 +368,21 @@ class NacosDashboardSource(DashboardConfigSource):
     built-in minimal default, when the entry is missing or Nacos is
     unreachable -- the cockpit should not blank out just because the
     registry is momentarily down.
+
+    Resolved configs are cached for ``ttl_seconds`` (2026-09-14 cache spec):
+    without it, every page render pays one Nacos read for the page itself
+    plus one per navigation entry (the ``_nav_entries`` N+1), which is a
+    ~4 s penalty per read when the registry is unreachable.  The TTL is
+    the same staleness budget as the app's pipeline gate.  A resolution
+    reached through the fallback (unreachable client or empty content)
+    IS cached -- that dead-registry penalty is exactly what the cache
+    exists to bound; only a corrupt entry (a parse error, answered 503
+    per request) is never cached, so the next call retries the read.
     """
 
     def __init__(self, *, server, namespace="", group=BI_GROUP,
-                 username=None, password=None, fallback=None, client=None):
+                 username=None, password=None, fallback=None, client=None,
+                 ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS, monotonic=None):
         self._server = server
         self._namespace = namespace or ""
         self._group = group or BI_GROUP
@@ -372,6 +390,11 @@ class NacosDashboardSource(DashboardConfigSource):
         self._password = password
         self._fallback = fallback
         self._client = client  # injectable for tests
+        self._ttl_seconds = ttl_seconds
+        self._monotonic = time.monotonic if monotonic is None else monotonic
+        self._lock = threading.Lock()
+        self._cache = {}
+        self._ids_cache = None
 
     def _nacos(self):
         if self._client is None:
@@ -384,7 +407,7 @@ class NacosDashboardSource(DashboardConfigSource):
             )
         return self._client
 
-    def get_dashboard(self, dashboard_id):
+    def _fetch(self, dashboard_id):
         data_id = f"{dashboard_id}.yaml"
         try:
             content = self._nacos().get_config(data_id, self._group)
@@ -398,10 +421,28 @@ class NacosDashboardSource(DashboardConfigSource):
             dashboard_id, _load_yaml(content, f"nacos config {data_id}")
         )
 
+    def get_dashboard(self, dashboard_id):
+        # The lock covers the fetch (same semantics as app._TTLGate):
+        # concurrent first reads of one key collapse to a single fetch.
+        with self._lock:
+            now = self._monotonic()
+            cached = self._cache.get(dashboard_id)
+            if cached is not None and now - cached[0] < self._ttl_seconds:
+                return cached[1]
+            dashboard = self._fetch(dashboard_id)
+            self._cache[dashboard_id] = (now, dashboard)
+            return dashboard
+
     def dashboard_ids(self):
-        if self._fallback is not None:
-            return self._fallback.dashboard_ids()
-        return ()
+        with self._lock:
+            now = self._monotonic()
+            if (self._ids_cache is not None
+                    and now - self._ids_cache[0] < self._ttl_seconds):
+                return self._ids_cache[1]
+            ids = (self._fallback.dashboard_ids()
+                   if self._fallback is not None else ())
+            self._ids_cache = (now, ids)
+            return ids
 
 
 def build_dashboard_config_source(environ=None):

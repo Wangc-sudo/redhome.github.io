@@ -1,10 +1,15 @@
-/* bi-web 看板前端（阶段 B）：原生 JS，无框架、无构建。
+/* bi-web 看板前端（API-first，2026-09-14 前后端分离规格）：原生 JS，
+ * 无框架、无构建。页面骨架（导航/筛选/卡片）全部由客户端按
+ * /api/v1/ 动态构建，服务端只返回数据 JSON 与这份静态壳：
  *
- * 阶段 A 行为全部保留：每张 .card 按 data-api 拉取（no-store），按
- * payload.chart 分派渲染，拉取/渲染失败一律展示 .error「加载失败」，
- * 轮询间隔取 <main data-refresh-seconds>（缺省 300 秒），窗口 resize
- * 同步图表实例。字段口径见 common/bi_web/queries.py。
- * 阶段 B 新增：
+ *   - 启动：location.pathname 解析看板 id → GET /api/v1/dashboards
+ *     构建顶部导航 → GET /api/v1/dashboards/{id} 取看板定义 →
+ *     按 filters 并行 GET /api/v1/options/{source} 构建下拉 → 按
+ *     cards 构建占位卡（data-api=/api/v1/d/{id}/cards/{card}）。
+ *   - 每张 .card 按 data-api 拉取（no-store），按 payload.chart 分派
+ *     渲染，拉取/渲染失败一律展示 .error「加载失败」；轮询间隔取看板
+ *     定义的 refresh_seconds（缺省 300 秒），窗口 resize 同步图表。
+ *     字段口径见 common/bi_web/queries.py。
  *   - 筛选下拉（.filters select[data-param]）变更 → URL replaceState
  *     不刷页 → 全部卡片带参重拉；参数按卡各自 data-params 白名单做
  *     交集，页面级参数不会 400 未声明它的兄弟卡；轮询沿用当前 URL。
@@ -15,7 +20,10 @@
  *     空结果显示「暂无数据」占位行。
  *   - data-onclick-param 的 bar 卡：点击系列 → 设该参数（同步下拉）→
  *     replaceState → 全卡重拉。
- * ECharts 由 base.html 在浏览器侧从 CDN 加载，服务端零出网；全局
+ *   - 页面级失败（定义 401/404/503 或筛选选项拉取失败，对齐旧服务端
+ *     渲染的 503 语义）→ 整页 .page-error「加载失败」，不构建卡片。
+ *
+ * ECharts 由 index.html 在浏览器侧从 CDN 加载，服务端零出网；全局
  * echarts 只在数据回调里触碰（CDN 未就绪时页面安静降级为错误态）。
  */
 (() => {
@@ -25,6 +33,7 @@
   const ERROR_TEXT = "加载失败";
   const EMPTY_TEXT = "暂无数据";
   const PLACEHOLDER = "—";
+  const ALL_TEXT = "全部";
 
   /* ---- 单位感知格式化 ---------------------------------------------------- */
 
@@ -374,15 +383,117 @@
     });
   };
 
-  /* ---- 启动与轮询 ---------------------------------------------------------- */
+  /* ---- 页面骨架构建（API-first）-------------------------------------------- */
 
-  const refreshSeconds = () => {
-    const raw = parseInt(
-      document.querySelector("[data-refresh-seconds]")?.dataset.refreshSeconds,
-      10,
-    );
-    return Number.isFinite(raw) ? raw : DEFAULT_REFRESH_SECONDS;
+  /* 解析 /d/{dashboard_id}；服务端已把本壳限定在该路径下提供。 */
+  const dashboardId = () => {
+    const match = window.location.pathname.match(/^\/d\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
   };
+
+  const fetchJson = (url) =>
+    fetch(url, { cache: "no-store" }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    });
+
+  /* 页面级失败态：整行横跨的「加载失败」（对齐旧服务端渲染的 503 页）。 */
+  const showPageError = () => {
+    const main = document.getElementById("dashboard");
+    main.textContent = "";
+    const box = document.createElement("div");
+    box.className = "page-error";
+    box.textContent = ERROR_TEXT;
+    main.appendChild(box);
+  };
+
+  /* 顶部导航：/api/v1/dashboards 列表 → 链接；当前页高亮。
+   * 失败静默（无导航可用页，与旧服务端渲染的 fail-open 语义一致）。 */
+  const buildNav = (currentId) =>
+    fetchJson("/api/v1/dashboards")
+      .then((payload) => {
+        const entries = payload.dashboards || [];
+        if (!entries.length) return;
+        const nav = document.getElementById("topnav");
+        entries.forEach((entry) => {
+          const link = document.createElement("a");
+          link.className =
+            "topnav-link" + (entry.id === currentId ? " current" : "");
+          link.href = `/d/${encodeURIComponent(entry.id)}`;
+          link.textContent = entry.title || entry.id;
+          nav.appendChild(link);
+        });
+        nav.hidden = false;
+      })
+      .catch(() => {});
+
+  /* 一个筛选下拉：label + select（首项「全部」），选项来自
+   * /api/v1/options/{source}。任一来源失败 → 页面级失败（对齐旧语义）。 */
+  const buildFilters = (filters) => {
+    if (!filters.length) return Promise.resolve();
+    const container = document.getElementById("filters");
+    return Promise.all(
+      filters.map((spec) =>
+        fetchJson(`/api/v1/options/${encodeURIComponent(spec.source)}`).then(
+          (payload) => {
+            const wrapper = document.createElement("div");
+            wrapper.className = "filter";
+
+            const label = document.createElement("span");
+            label.className = "filter-label";
+            label.textContent = spec.label || spec.param;
+            wrapper.appendChild(label);
+
+            const select = document.createElement("select");
+            select.dataset.param = spec.param;
+            const all = document.createElement("option");
+            all.value = "";
+            all.textContent = ALL_TEXT;
+            select.appendChild(all);
+            (payload.options || []).forEach((optionValue) => {
+              const option = document.createElement("option");
+              option.value = optionValue;
+              option.textContent = optionValue;
+              select.appendChild(option);
+            });
+            wrapper.appendChild(select);
+            container.appendChild(wrapper);
+          }
+        )
+      )
+    ).then(() => {
+      container.hidden = false;
+    });
+  };
+
+  /* 一张占位卡：结构与旧模板一致（.card span-N + h2 + .card-body），
+   * data-api 指向 v1 卡片别名，data-params 为该卡白名单。 */
+  const buildCards = (currentId, cards) => {
+    const main = document.getElementById("dashboard");
+    cards.forEach((placement) => {
+      const section = document.createElement("section");
+      section.className = `card span-${placement.span}`;
+      section.dataset.api = `/api/v1/d/${encodeURIComponent(currentId)}/cards/${encodeURIComponent(placement.card)}`;
+      if (placement.params && placement.params.length) {
+        section.dataset.params = placement.params.join(" ");
+      }
+      if (placement.on_click) {
+        section.dataset.onclickParam = placement.on_click;
+      }
+
+      const title = document.createElement("h2");
+      title.textContent = placement.title || placement.card;
+      section.appendChild(title);
+
+      const body = document.createElement("div");
+      body.className = "card-body";
+      section.appendChild(body);
+
+      main.appendChild(section);
+    });
+  };
+
+  /* ---- 启动与轮询 ---------------------------------------------------------- */
 
   /* 窗口尺寸变化（含加载后跨 900px 断点）时把在用图表实例同步到新画布
    * 尺寸——卡体图表与 .trend7 迷你趋势都要同步。echarts 实例不会自动
@@ -396,12 +507,32 @@
   };
 
   const start = () => {
-    wireFilters();
-    syncSelects();
-    const cards = Array.from(document.querySelectorAll(".card"));
-    cards.forEach(loadCard);
-    setInterval(() => cards.forEach(loadCard), refreshSeconds() * 1000);
-    window.addEventListener("resize", resizeCharts);
+    const currentId = dashboardId();
+    if (!currentId) {
+      showPageError(); // 壳只在 /d/{id} 下提供；防御未知路径直接打开。
+      return;
+    }
+    buildNav(currentId);
+    fetchJson(`/api/v1/dashboards/${encodeURIComponent(currentId)}`)
+      .then((definition) =>
+        buildFilters(definition.filters || []).then(() => definition)
+      )
+      .then((definition) => {
+        if (definition.title) document.title = definition.title;
+        buildCards(currentId, definition.cards || []);
+        wireFilters();
+        syncSelects();
+        const cards = Array.from(document.querySelectorAll(".card"));
+        cards.forEach(loadCard);
+        const seconds = Number.isFinite(definition.refresh_seconds)
+          ? definition.refresh_seconds
+          : DEFAULT_REFRESH_SECONDS;
+        setInterval(() => cards.forEach(loadCard), seconds * 1000);
+        window.addEventListener("resize", resizeCharts);
+      })
+      .catch(() => {
+        showPageError();
+      });
   };
 
   if (document.readyState === "loading") {

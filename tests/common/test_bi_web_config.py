@@ -657,6 +657,85 @@ class NacosDashboardSourceTests(unittest.TestCase):
 
         self.assertFalse(source.get_dashboard("l1-cockpit").enabled)
 
+    def test_get_dashboard_is_cached_within_the_ttl(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, len(client.requests))
+
+    def test_get_dashboard_refetches_after_the_ttl(self):
+        now = [0.0]
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(
+            server="nacos:8848", client=client,
+            ttl_seconds=30.0, monotonic=lambda: now[0],
+        )
+
+        source.get_dashboard("l1-cockpit")
+        now[0] = 31.0
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_fallback_resolution_after_a_failed_read_is_cached(self):
+        # Nacos down -> the fallback/minimal default resolution IS cached
+        # within the TTL: a dead registry must cost its connection penalty
+        # at most once per window (that penalty is the 2026-09-14 20s bug).
+        class _FlakyClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_config(self, data_id, group):
+                self.calls += 1
+                raise RuntimeError("connection refused")
+
+        client = _FlakyClient()
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, client.calls)
+
+    def test_parse_errors_are_never_cached(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): "cards: [unbalanced\n"}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        for _ in range(2):
+            with self.assertRaises(DashboardConfigError):
+                source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_dashboard_ids_are_cached(self):
+        class _CountingSource(StaticDashboardSource):
+            def __init__(self, mapping):
+                super().__init__(mapping)
+                self.calls = 0
+
+            def dashboard_ids(self):
+                self.calls += 1
+                return super().dashboard_ids()
+
+        fallback = _CountingSource({"l1-cockpit": {}})
+        source = NacosDashboardSource(
+            server="nacos:8848", client=_FakeNacosClient(), fallback=fallback
+        )
+
+        source.dashboard_ids()
+        source.dashboard_ids()
+
+        self.assertEqual(1, fallback.calls)
+
     def test_minimal_default_when_missing_empty_or_unreachable(self):
         clients = (
             _FakeNacosClient(),  # entry missing

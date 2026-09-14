@@ -1,7 +1,7 @@
-/* bi-web L1 驾驶舱样式（阶段 A）。
+/* bi-web 看板样式（API-first 前端，2026-09-14 分离规格）。
  *
  * 12 栅格 + 白底卡片；纯静态文件，服务端不做任何处理（无构建、无预处理）。
- * 配合 templates/base.html 与 static/dashboard.js 使用；金额单位「万」由
+ * 配合 web/index.html 与 web/dashboard.js 使用；金额单位「万」由
  * dashboard.js 负责格式化，这里只管布局与状态样式。
  */
 
@@ -133,7 +133,16 @@ body {
   font-size: 14px;
 }
 
-/* ---- 阶段 B：导航 / 筛选 / 表格 / 环比 / 迷你趋势 -------------------- */
+/* 页面级失败态（看板定义/筛选选项拉取失败）：整行横跨。 */
+.page-error {
+  grid-column: span 12;
+  padding: 48px 0;
+  text-align: center;
+  color: var(--error-fg);
+  font-size: 14px;
+}
+
+/* ---- 导航 / 筛选 / 表格 / 环比 / 迷你趋势 --------------------------- */
 
 .topnav {
   display: flex;

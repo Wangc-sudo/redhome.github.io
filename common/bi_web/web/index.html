@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<!--
+  bi-web 静态壳（2026-09-14 前后端分离规格）：本文件零数据。
+  dashboard.js 按 location.pathname 解析看板 id，经 /api/v1/ 拉取
+  导航、看板定义与筛选选项，再动态构建卡片并轮询 /api/v1/d/...。
+  服务端对 /d/{id} 仍跑完整解析链（404/503 语义不变），这里只管渲染。
+-->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bi-web</title>
+<link rel="stylesheet" href="/web/style.css">
+<!-- ECharts 走公网 CDN（服务端零出网）；defer 保证 dashboard.js 的非
+     defer 执行早于它，而全局 echarts 只在数据回调里被触碰。 -->
+<script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+</head>
+<body>
+<nav class="topnav" id="topnav" hidden></nav>
+<div class="filters" id="filters" hidden></div>
+<main class="dashboard" id="dashboard"></main>
+<script src="/web/dashboard.js"></script>
+</body>
+</html>

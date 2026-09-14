@@ -352,6 +352,31 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # bi-web writes nowhere at all, so it never needs the runner's
         # write-gate acknowledgement.
         self.assertNotIn("INTEGRATION_TEST_RUNNER", environment)
+
+    def test_bi_web_redis_cache_is_opt_in_and_fail_open(self):
+        # 阶段 2 (2026-09-14 cache spec): Redis 是可选增强，不是硬依赖。
+        # 默认编排里没有它 —— 不配 profile 时 bi-web 用进程内缓存兜底。
+        default_services = self._compose_config()["services"]
+        self.assertNotIn("redis", default_services)
+
+        configuration = self._compose_config("bi-web", "bi-web-redis")
+        redis = configuration["services"]["redis"]
+        bi_web = configuration["services"]["bi-web"]
+
+        # Opt-in via --profile bi-web-redis, pinned image.
+        self.assertEqual(["bi-web-redis"], redis.get("profiles"))
+        self.assertEqual("redis:7-alpine", redis["image"])
+
+        # Loopback-only port, the same rule as mysql 13306 / bi-web 18080.
+        (port_mapping,) = redis["ports"]
+        self.assertEqual("127.0.0.1", port_mapping["host_ip"])
+        self.assertEqual(6379, port_mapping["target"])
+        self.assertEqual("16379", port_mapping["published"])
+
+        # 缓存挂 != 看板挂：bi-web 绝不 depends_on redis（fail-open，
+        # miss 即 mart 直查）；URL 旋钮已注入，空串缺省 = 进程内后端。
+        self.assertNotIn("redis", bi_web.get("depends_on", {}))
+        self.assertIn("PUBLIC_DATA_REDIS_URL", bi_web["environment"])
         # Deliberate deviation from spec section 9 (recorded in the plan):
         # the spec also asks for "no raw-database environment variable
         # references" here, but Settings.from_environment requires all nine

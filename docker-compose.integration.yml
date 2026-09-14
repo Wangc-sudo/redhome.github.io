@@ -420,9 +420,23 @@ services:
       PUBLIC_DATA_SERVICE_ID: bi-web
       PUBLIC_DATA_BI_SEED: /app/docker/integration/bi.seed.yaml
       BI_WEB_TOKEN: ${BI_WEB_TOKEN:-}
+      # 阶段 2 卡片缓存开关：空 = 进程内缓存兜底；指向 redis 服务则启用
+      # Redis 后端。bi-web 对 redis 零 depends_on —— 缓存挂 ≠ 看板挂
+      # （fail-open，miss 即 mart 直查），见 cache.py。
+      PUBLIC_DATA_REDIS_URL: ${PUBLIC_DATA_REDIS_URL:-}
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:18080:8080"
+
+  # 可选增强（阶段 2）：Redis 卡片缓存后端。显式 `--profile bi-web-redis`
+  # 才启动；不设 PUBLIC_DATA_REDIS_URL=redis://redis:6379/0 时 bi-web
+  # 根本不连它。端口仅回环，与 mysql 13306 同约定。
+  redis:
+    image: redis:7-alpine
+    profiles:
+      - bi-web-redis
+    ports:
+      - "127.0.0.1:16379:6379"
 
 volumes:
   public-data-mysql-data:
