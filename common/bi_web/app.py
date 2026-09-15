@@ -98,6 +98,8 @@ _FILTER_SOURCE_QUERIES = {
     "regions": queries.region_options,
     "channels": queries.channel_options,
     "months": queries.month_options,
+    "brands": queries.brand_options,
+    "sku_channels": queries.sku_channel_options,
 }
 
 

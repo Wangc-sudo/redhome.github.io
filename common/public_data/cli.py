@@ -311,7 +311,7 @@ def build_extract_service(settings, calendar_months=()):
     apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
 
     return MartExtractService(
-        repository=MartExtractRepository(dingtalk_conn, mart_conn),
+        repository=MartExtractRepository(dingtalk_conn, mart_conn, wdt_connection=wdt_conn),
         mart_repository=MartRepository(mart_conn),
         mart_connection=mart_conn,
         now=lambda: datetime.now(timezone.utc),

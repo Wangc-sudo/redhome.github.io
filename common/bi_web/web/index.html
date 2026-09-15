@@ -17,6 +17,18 @@
 </head>
 <body>
 <nav class="topnav" id="topnav" hidden></nav>
+<!-- 页头：看板标题 + 统计范围 + 数据截至/读取时间。范围随筛选变化，
+     数据截至取各卡 payload 的 as_of/date，与页面读取时间分开显示。 -->
+<header class="page-head" id="pagehead" hidden>
+  <div>
+    <h1 id="page-title">—</h1>
+    <p id="page-scope">—</p>
+  </div>
+  <div class="page-actions">
+    <span id="page-updated">—</span>
+    <button id="page-refresh" type="button">刷新</button>
+  </div>
+</header>
 <div class="filters" id="filters" hidden></div>
 <main class="dashboard" id="dashboard"></main>
 <script src="/web/dashboard.js"></script>

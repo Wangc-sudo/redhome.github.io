@@ -16,6 +16,11 @@ from common.public_data.mart_extract_schema import (
     EXTRACT_DATASETS,
     FACT_CHANNEL_DAILY_SALES,
     FACT_DAILY_REPORT_OFFLINE,
+    FACT_FIN_OFFLINE_DEPOSIT,
+    FACT_FIN_PLATFORM_DEPOSIT,
+    FACT_FIN_PREPAYMENT_INVOICE,
+    FACT_FIN_RECEIVABLES_AGING,
+    FACT_FIN_STORE_FUNDS,
     dataset_by_name,
     ddl_statements,
 )
@@ -75,11 +80,47 @@ class _FakeConnection:
 
 class ExtractSchemaTests(unittest.TestCase):
 
-    def test_registered_datasets_target_the_extract_tables(self):
+    def test_registered_datasets_match_stage_b1_scope(self):
         targets = {d.dataset: d.target_table for d in EXTRACT_DATASETS}
-        self.assertEqual(targets["daily_report_offline"], FACT_DAILY_REPORT_OFFLINE)
-        self.assertEqual(targets["channel_daily_sales"], FACT_CHANNEL_DAILY_SALES)
-        self.assertEqual(len(EXTRACT_DATASETS), 2)
+        self.assertEqual(targets, {
+            "daily_report_offline": FACT_DAILY_REPORT_OFFLINE,
+            "channel_daily_sales": FACT_CHANNEL_DAILY_SALES,
+            "fin_offline_receivables_aging": FACT_FIN_RECEIVABLES_AGING,
+            "fin_ecommerce_prepayment_supplier_invoice": FACT_FIN_PREPAYMENT_INVOICE,
+            "fin_offline_deposit_other_receivables": FACT_FIN_OFFLINE_DEPOSIT,
+            "fin_ecommerce_platform_deposit": FACT_FIN_PLATFORM_DEPOSIT,
+            "fin_ecommerce_store_funds_balance": FACT_FIN_STORE_FUNDS,
+            "wdt_dim_product_mirror": "dim_product",
+            "wdt_order_line_fact": "fact_order_line",
+        })
+
+        self.assertEqual(dataset_by_name("daily_report_offline").kind, "fact")
+        self.assertEqual(dataset_by_name("daily_report_offline").source, "dingtalk")
+        for name in (
+            "fin_offline_receivables_aging",
+            "fin_ecommerce_prepayment_supplier_invoice",
+            "fin_offline_deposit_other_receivables",
+            "fin_ecommerce_platform_deposit",
+        ):
+            self.assertEqual(dataset_by_name(name).kind, "snapshot")
+        self.assertEqual(
+            dataset_by_name("fin_ecommerce_store_funds_balance").kind,
+            "melt_store_funds",
+        )
+        dim_mirror = dataset_by_name("wdt_dim_product_mirror")
+        self.assertEqual(dim_mirror.kind, "dim_mirror")
+        self.assertEqual(dim_mirror.source, "wdt")
+        self.assertEqual(dim_mirror.source_table, "dim_product")
+        order_line = dataset_by_name("wdt_order_line_fact")
+        self.assertEqual(order_line.kind, "order_line_expand")
+        self.assertEqual(order_line.source, "wdt")
+        self.assertEqual(order_line.source_table, "wdt_records")
+        # 注册顺序即执行顺序：镜像必须先于订单行展开（品牌反查依赖）。
+        names = [d.dataset for d in EXTRACT_DATASETS]
+        self.assertLess(
+            names.index("wdt_dim_product_mirror"),
+            names.index("wdt_order_line_fact"),
+        )
 
     def test_retired_and_technical_columns_are_not_projected(self):
         """The projection is an allow-list, so dropped columns cannot leak in."""
@@ -99,9 +140,54 @@ class ExtractSchemaTests(unittest.TestCase):
     def test_ddl_covers_every_extract_table(self):
         statements = ddl_statements()
         joined = "\n".join(statements)
-        for table in (FACT_DAILY_REPORT_OFFLINE, FACT_CHANNEL_DAILY_SALES,
-                      DIM_CALENDAR, "dim_robot_member"):
+        for table in (
+            FACT_DAILY_REPORT_OFFLINE,
+            FACT_CHANNEL_DAILY_SALES,
+            FACT_FIN_RECEIVABLES_AGING,
+            FACT_FIN_PREPAYMENT_INVOICE,
+            FACT_FIN_OFFLINE_DEPOSIT,
+            FACT_FIN_PLATFORM_DEPOSIT,
+            FACT_FIN_STORE_FUNDS,
+            DIM_CALENDAR,
+            "dim_robot_member",
+            "dim_product",
+            "fact_order_line",
+        ):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS `{table}`", joined)
+        for column in (
+            "ending_balance",
+            "ap_estimated_amount",
+            "uninvoiced_amount",
+            "statement_date",
+            "month",
+            "paid_amount",
+            "platform_subsidy",
+            "shop_subsidy",
+            "line_no",
+            "brand_name",
+        ):
+            self.assertIn(f"`{column}`", joined)
+        projection_tables = (
+            FACT_FIN_RECEIVABLES_AGING,
+            FACT_FIN_PREPAYMENT_INVOICE,
+            FACT_FIN_OFFLINE_DEPOSIT,
+            FACT_FIN_PLATFORM_DEPOSIT,
+            FACT_FIN_STORE_FUNDS,
+            "dim_product",
+            "fact_order_line",
+        )
+        for table in projection_tables:
+            ddl = next(
+                statement for statement in statements
+                if f"CREATE TABLE IF NOT EXISTS `{table}`" in statement
+            )
+            self.assertIn("`synced_at`", ddl)
+            self.assertIn("`sync_run_id`", ddl)
+        order_line_ddl = next(
+            statement for statement in statements
+            if "CREATE TABLE IF NOT EXISTS `fact_order_line`" in statement
+        )
+        self.assertIn("PRIMARY KEY (`trade_no`, `line_no`)", order_line_ddl)
         # The extract line brings its own summary value into the shared table.
         self.assertIn("ENUM('dingtalk','wdt','extract')", joined)
 

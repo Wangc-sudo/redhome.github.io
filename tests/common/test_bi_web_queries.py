@@ -16,13 +16,14 @@ import os
 import threading
 import time
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from common.bi_web import queries as bi_web_queries
 from common.bi_web.queries import (
     annual_target_total,
+    brand_options,
     channel_annual_total,
     channel_dod,
     channel_month_daily_series,
@@ -43,6 +44,10 @@ from common.bi_web.queries import (
     region_mtd_total,
     region_options,
     run_bar_channel_mtd,
+    run_kpi_sku_mtd,
+    run_table_sku_hot_brand,
+    run_table_sku_hot_channel,
+    run_table_sku_hot_total,
     run_bar_department_mtd,
     run_kpi_annual_progress,
     run_kpi_channel_dod,
@@ -53,11 +58,14 @@ from common.bi_web.queries import (
     run_kpi_people_count,
     run_kpi_people_rate,
     run_kpi_region_mtd,
+    run_pie_sku_mtd,
     run_table_channel_mtd,
     run_table_people_leaderboard,
     run_table_store_mtd,
     run_trend_channel_daily,
     run_trend_region_daily,
+    sku_channel_options,
+    sku_mtd_distribution,
     store_mtd_ranking,
 )
 from common.daily_robot.mart_leaderboard import mart_collect
@@ -114,6 +122,7 @@ class FakeConnection:
     _TABLES = (
         "fact_daily_report_offline",
         "fact_channel_daily_sales",
+        "fact_order_line",
         "dim_target",
         "months",  # 伪表键：month_options 的 UNION 查询横跨两张事实表
         "dim_calendar",  # l2-people: fetch_workdays 的日历查询
@@ -268,6 +277,7 @@ class StaticSqlTests(unittest.TestCase):
         annual_target_total,
         region_daily_series,
         channel_mtd_ranking,
+        sku_mtd_distribution,
     )
 
     def test_every_query_executes_static_sql_without_parameters(self):
@@ -359,6 +369,298 @@ class ChannelMtdRankingTests(unittest.TestCase):
             {"categories": ["天猫", "京东"], "values": [Decimal("300"), Decimal("100")]},
             result,
         )
+
+
+class SkuMtdDistributionTests(SqlShapeTestCase):
+    """SKU 当月分布：trade_time 月内截断 + spec 聚合 + 名称回退。"""
+
+    def test_sku_mtd_distribution_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_order_line": []})
+
+        sku_mtd_distribution(connection)
+
+        sql = self.sole_static_sql(connection)
+        self.assertIn("FROM fact_order_line", sql)
+        # DATETIME 口径：月首起、「< 明天」截断（「<= 今天」会漏当日行）。
+        self.assertIn(
+            "trade_time >= DATE_FORMAT(CURDATE(), '%Y-%m-01')", sql
+        )
+        self.assertIn("trade_time < DATE_ADD(CURDATE(), INTERVAL 1 DAY)", sql)
+        self.assertIn("GROUP BY spec_no, goods_name", sql)
+        self.assertIn("ORDER BY total DESC", sql)
+
+    def test_distribution_shapes_names_and_decimal_values(self):
+        rows = [
+            {
+                "spec_no": "SKU-1",
+                "goods_name": "冻干草莓",
+                "total": Decimal("300"),
+            },
+            {"spec_no": "SKU-2", "goods_name": "黄桃罐头", "total": Decimal("100")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        self.assertEqual(
+            [
+                {"name": "冻干草莓", "value": Decimal("300")},
+                {"name": "黄桃罐头", "value": Decimal("100")},
+            ],
+            sku_mtd_distribution(connection),
+        )
+
+    def test_name_falls_back_to_spec_no_when_goods_name_missing(self):
+        rows = [
+            {"spec_no": "SKU-9", "goods_name": None, "total": Decimal("7")},
+            {"spec_no": "SKU-8", "goods_name": "  ", "total": Decimal("5")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        self.assertEqual(
+            [
+                {"name": "SKU-9", "value": Decimal("7")},
+                {"name": "SKU-8", "value": Decimal("5")},
+            ],
+            sku_mtd_distribution(connection),
+        )
+
+
+class FakeSkuConnection(FakeConnection):
+    """商品动销的脚本化连接：同一张事实表上的三次查询分开喂数。
+
+    数据截至日（``MAX(DATE(trade_time))``）走 fetchone，月内日汇总与
+    商品聚合走 fetchall——按 SQL 特征区分，与调用顺序无关。
+    """
+
+    def __init__(self, as_of=None, rollup_rows=None, trend_rows=None):
+        super().__init__(rowsets={"fact_order_line": rollup_rows or []})
+        self.as_of = as_of
+        self.trend_rows = trend_rows or []
+
+    def scripted_fetchone(self, sql):
+        if "MAX(DATE(trade_time))" in sql:
+            return {"d": self.as_of}
+        return super().scripted_fetchone(sql)
+
+    def scripted_fetchall(self, sql):
+        if "GROUP BY DATE(trade_time)" in sql:
+            return [dict(row) for row in self.trend_rows]
+        return super().scripted_fetchall(sql)
+
+
+class SkuHotRankingTests(unittest.TestCase):
+    """商品动销（l2-product）：总榜 / 分品牌 / 分渠道榜单 + KPI。"""
+
+    _AS_OF = date(2026, 9, 14)
+
+    @staticmethod
+    def _row(spec_no, goods, brand, mtd, qty, latest, prev):
+        return {
+            "spec_no": spec_no,
+            "goods_name": goods,
+            "brand_name": brand,
+            "channel_name": "抖音",
+            "mtd_amount": Decimal(str(mtd)),
+            "mtd_qty": Decimal(str(qty)),
+            "latest_amount": Decimal(str(latest)),
+            "prev_amount": Decimal(str(prev)),
+        }
+
+    def test_total_ranking_shapes_rows_with_share_qty_and_delta(self):
+        rows = [
+            self._row("S1", "冻干草莓", "良品铺子", 300, 30, 120, 100),
+            self._row("S2", "黄桃罐头", "良品铺子", 100, 10, 50, 0),
+        ]
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("2026-09-14", payload["as_of"])
+        self.assertEqual(
+            ["排名", "商品", "品牌", "累计销售额", "销售占比", "累计销量",
+             "昨日销售额", "环比"],
+            [column["title"] for column in payload["columns"]],
+        )
+        first, second = payload["rows"]
+        self.assertEqual(
+            (1, "冻干草莓", "良品铺子"),
+            (first["rank"], first["goods"], first["brand"]),
+        )
+        self.assertEqual(300.0, first["sales"])
+        self.assertEqual(0.75, first["share"])
+        self.assertEqual(30.0, first["qty"])
+        self.assertEqual(120.0, first["latest"])
+        self.assertAlmostEqual(0.2, first["delta_pct"])
+        # 前一日为 0 → 环比不可算，给 null 而不是 0%（前端显示「—」）。
+        self.assertIsNone(second["delta_pct"])
+        self.assertEqual(0.25, second["share"])
+
+    def test_rollup_binds_month_and_day_windows_as_parameters(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        latest_sql, latest_params = connection.executed[0]
+        self.assertIn("MAX(DATE(trade_time))", latest_sql)
+        self.assertEqual((date(2026, 9, 1), date(2026, 10, 1)), latest_params)
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("FROM fact_order_line", rollup_sql)
+        self.assertIn("GROUP BY brand_name, spec_no, goods_name", rollup_sql)
+        # 月累计 / 月销量 / 数据日 / 前一日 / 扫描窗口，十个绑定值。
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 10, 1),
+             date(2026, 9, 1), date(2026, 10, 1),
+             date(2026, 9, 14), date(2026, 9, 15),
+             date(2026, 9, 13), date(2026, 9, 14),
+             date(2026, 9, 1), date(2026, 10, 1)),
+            rollup_params,
+        )
+
+    def test_prev_day_before_month_start_widens_the_scan_window(self):
+        # 数据截至 9/1 → 前一日是 8/31，扫描窗口必须跨到上月才取得到。
+        connection = FakeSkuConnection(as_of=date(2026, 9, 1))
+
+        run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        _, rollup_params = connection.executed[1]
+        self.assertEqual(date(2026, 8, 31), rollup_params[-2])
+        self.assertEqual(date(2026, 10, 1), rollup_params[-1])
+
+    def test_empty_month_yields_empty_rows_and_no_as_of(self):
+        connection = FakeSkuConnection(as_of=None)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        self.assertEqual([], payload["rows"])
+        self.assertIsNone(payload["as_of"])
+
+    def test_brand_ranking_keeps_top_five_per_brand(self):
+        rows = [
+            self._row(f"S{index}", f"商品{index}", "A", 100 - index, 1, 10, 5)
+            for index in range(7)
+        ]
+        rows.append(self._row("T1", "黄桃罐头", "B", 50, 1, 5, 4))
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_brand(connection, {"month": "2026-09"})
+
+        self.assertEqual(
+            ["品牌", "组内排名", "商品", "累计销售额", "昨日销售额", "环比"],
+            [column["title"] for column in payload["columns"]],
+        )
+        # A 组 7 个截断到 5，B 组 1 个全留。
+        self.assertEqual(6, len(payload["rows"]))
+        self.assertEqual(
+            [1, 2, 3, 4, 5],
+            [row["rank"] for row in payload["rows"] if row["brand_name"] == "A"],
+        )
+        self.assertEqual(
+            [1], [row["rank"] for row in payload["rows"] if row["brand_name"] == "B"]
+        )
+        self.assertEqual("B", payload["rows"][-1]["brand_name"])
+
+    def test_brand_ranking_binds_the_selected_brand(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_brand(
+            connection, {"month": "2026-09", "brand": "良品铺子"}
+        )
+
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("AND brand_name = %s", rollup_sql)
+        self.assertIn("GROUP BY brand_name, spec_no, goods_name", rollup_sql)
+        self.assertEqual("良品铺子", rollup_params[-1])
+
+    def test_total_share_uses_the_whole_month_as_denominator(self):
+        # 榜只展示前 N 名，但占比分母是全部商品，否则「占比」合计会超过 100%。
+        rows = [
+            self._row(f"S{index}", f"商品{index}", "A", 100 - index, 1, 10, 5)
+            for index in range(60)
+        ]
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        # 60 个商品销售额 100..41，合计 4230；榜上前 50 的占比仍以此为分母。
+        self.assertEqual(50, len(payload["rows"]))
+        self.assertAlmostEqual(100 / 4230, payload["rows"][0]["share"], places=6)
+
+    def test_channel_ranking_binds_the_selected_channel(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_channel(connection, {"month": "2026-09", "channel": "抖音"})
+
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("AND channel_name = %s", rollup_sql)
+        self.assertIn("GROUP BY channel_name, spec_no, goods_name", rollup_sql)
+        self.assertEqual("抖音", rollup_params[-1])
+
+    def test_kpi_sku_mtd_sums_month_and_day_windows(self):
+        rows = [
+            self._row("S1", "冻干草莓", "A", 300, 30, 120, 100),
+            self._row("S2", "黄桃罐头", "A", 100, 10, 30, 50),
+        ]
+        connection = FakeSkuConnection(
+            as_of=self._AS_OF,
+            rollup_rows=rows,
+            trend_rows=[
+                {"d": date(2026, 9, 13), "total": Decimal("100")},
+                {"d": date(2026, 9, 14), "total": Decimal("150")},
+            ],
+        )
+
+        payload = run_kpi_sku_mtd(connection, {"month": "2026-09"})
+
+        self.assertEqual("scalar", payload["chart"])
+        self.assertEqual(400.0, payload["value"])
+        self.assertEqual("2026-09-14", payload["date"])
+        self.assertEqual(150.0, payload["prev"])
+        self.assertAlmostEqual(0.0, payload["delta_pct"])
+        self.assertEqual(2, payload["sku_count"])
+        self.assertEqual(2, payload["active_sku_count"])
+        # 趋势固定 7 天，缺数日为 null（前端断线而不是连到 0）。
+        self.assertEqual(7, len(payload["trend7"]))
+        self.assertEqual("2026-09-08", payload["trend7"][0]["date"])
+        self.assertIsNone(payload["trend7"][0]["value"])
+        self.assertEqual(150.0, payload["trend7"][-1]["value"])
+
+    def test_kpi_sku_mtd_without_data_stays_zero(self):
+        connection = FakeSkuConnection(as_of=None)
+
+        payload = run_kpi_sku_mtd(connection, {"month": "2026-09"})
+
+        self.assertEqual(0.0, payload["value"])
+        self.assertIsNone(payload["date"])
+        self.assertIsNone(payload["prev"])
+        self.assertIsNone(payload["delta_pct"])
+        self.assertEqual([], payload["trend7"])
+        self.assertEqual(0, payload["sku_count"])
+
+    def test_brand_options_drop_nulls(self):
+        connection = FakeConnection(
+            rowsets={"fact_order_line": [
+                {"brand_name": "良品铺子"}, {"brand_name": None},
+            ]}
+        )
+
+        self.assertEqual(["良品铺子"], brand_options(connection))
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT brand_name FROM fact_order_line", sql)
+        self.assertIn("ORDER BY brand_name", sql)
+        self.assertIsNone(parameters)
+
+    def test_sku_channel_options_drop_nulls(self):
+        connection = FakeConnection(
+            rowsets={"fact_order_line": [
+                {"channel_name": "抖音"}, {"channel_name": ""},
+            ]}
+        )
+
+        self.assertEqual(["抖音"], sku_channel_options(connection))
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT channel_name FROM fact_order_line", sql)
+        self.assertIn("ORDER BY channel_name", sql)
+        self.assertIsNone(parameters)
 
 
 class DimensionOptionsTests(unittest.TestCase):
@@ -526,6 +828,62 @@ class RunPayloadTests(unittest.TestCase):
             },
             payload,
         )
+
+    def test_run_pie_sku_mtd_payload(self):
+        rows = [
+            {"spec_no": "SKU-1", "goods_name": "冻干草莓", "total": Decimal("300")},
+            {"spec_no": "SKU-2", "goods_name": "黄桃罐头", "total": Decimal("100")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        self.assertEqual(
+            {
+                "chart": "pie",
+                "items": [
+                    {"name": "冻干草莓", "value": 300.0},
+                    {"name": "黄桃罐头", "value": 100.0},
+                ],
+                "unit": "元",
+            },
+            payload,
+        )
+
+    def test_run_pie_sku_mtd_merges_tail_into_others(self):
+        rows = [
+            {"spec_no": f"SKU-{index}", "goods_name": f"商品{index}",
+             "total": Decimal(1000 - index)}
+            for index in range(10)
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        # 头部 8 片单列，第 9、10 名合并「其他」且排在最后。
+        self.assertEqual(9, len(payload["items"]))
+        self.assertEqual(
+            [f"商品{index}" for index in range(8)] + ["其他"],
+            [item["name"] for item in payload["items"]],
+        )
+        self.assertEqual(
+            float(Decimal(1000 - 8) + Decimal(1000 - 9)),
+            payload["items"][-1]["value"],
+        )
+        self.assertTrue(
+            all(isinstance(item["value"], float) for item in payload["items"])
+        )
+
+    def test_run_pie_sku_mtd_without_tail_has_no_others_slice(self):
+        rows = [
+            {"spec_no": "SKU-1", "goods_name": "冻干草莓", "total": Decimal("300")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        self.assertEqual(1, len(payload["items"]))
+        self.assertNotIn("其他", [item["name"] for item in payload["items"]])
 
 
 class ParameterizedSqlShapeTests(unittest.TestCase):
@@ -1525,6 +1883,21 @@ _CHANNEL_CLEANUP_SQL = (
     "OR `channel` = 'biweb测试渠道'"
 )
 
+_ORDER_LINE_INSERT_SQL = (
+    "INSERT INTO `fact_order_line` "
+    "(`trade_no`, `line_no`, `trade_time`, `trade_status`, `spec_no`, "
+    "`goods_name`, `brand_name`, `quantity`, `paid_amount`, "
+    "`platform_subsidy`, `shop_subsidy`, `raw_json`, `synced_at`, "
+    "`sync_run_id`) "
+    "VALUES (%s, 1, %s, '110', %s, %s, 'biweb测试品牌', 1, %s, 0, 0, "
+    "'{}', NOW(6), %s)"
+)
+
+_ORDER_LINE_CLEANUP_SQL = (
+    "DELETE FROM `fact_order_line` "
+    "WHERE `trade_no` LIKE 'biweb-test:%' OR `brand_name` = 'biweb测试品牌'"
+)
+
 
 @unittest.skipUnless(
     os.environ.get("INTEGRATION_TEST_RUNNER") == "1",
@@ -1565,6 +1938,7 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
             with self.mart_connection.cursor() as cursor:
                 cursor.execute(_OFFLINE_CLEANUP_SQL)
                 cursor.execute(_CHANNEL_CLEANUP_SQL)
+                cursor.execute(_ORDER_LINE_CLEANUP_SQL)
         # dim_target always ends up mirroring the version-controlled seed.
         replace_dim_target(
             self.mart_connection, load_target_seed(REPO_SEED_PATH)
@@ -1661,6 +2035,31 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
                     ],
                 )
 
+    def _insert_order_line_rows(self, rows):
+        """rows: (suffix, spec_no, goods_name, trade_time, paid_amount)。"""
+        with transaction(self.mart_connection):
+            with self.mart_connection.cursor() as cursor:
+                cursor.executemany(
+                    _ORDER_LINE_INSERT_SQL,
+                    [
+                        (
+                            _FIXTURE_PREFIX + suffix,
+                            trade_time,
+                            spec_no,
+                            goods_name,
+                            paid_amount,
+                            _SYNC_RUN_ID,
+                        )
+                        for (
+                            suffix,
+                            spec_no,
+                            goods_name,
+                            trade_time,
+                            paid_amount,
+                        ) in rows
+                    ],
+                )
+
     def _current_month_bounds(self):
         """服务器时钟的当前月 → (month 串, (月首, 月末))。"""
         month = self._server_month_start().strftime("%Y-%m")
@@ -1736,6 +2135,64 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
         self.assertEqual(
             payload["values"], sorted(payload["values"], reverse=True)
         )
+
+    def test_sku_mtd_distribution_and_pie_payload(self):
+        """DATETIME 截断口径：今日计入、明日与上月排除（差值法）。"""
+        today = self._server_today()
+        tomorrow = today + timedelta(days=1)
+        last_month = self._server_month_start() - timedelta(days=1)
+        noon = datetime.combine(today, datetime.min.time()).replace(hour=12)
+        before = {
+            item["name"]: item["value"]
+            for item in sku_mtd_distribution(self.mart_connection)
+        }
+        prior = before.get("biweb测试商品", Decimal("0"))
+
+        self._insert_order_line_rows(
+            [
+                ("sku-a", "biweb-spec-a", "biweb测试商品", noon, Decimal("100")),
+                ("sku-b", "biweb-spec-a", "biweb测试商品", noon, Decimal("23")),
+                (
+                    "sku-future",
+                    "biweb-spec-a",
+                    "biweb测试商品",
+                    datetime.combine(tomorrow, datetime.min.time()),
+                    Decimal("888"),
+                ),
+                (
+                    "sku-last-month",
+                    "biweb-spec-a",
+                    "biweb测试商品",
+                    datetime.combine(last_month, datetime.min.time()),
+                    Decimal("777"),
+                ),
+            ]
+        )
+
+        distribution = sku_mtd_distribution(self.mart_connection)
+        names = [item["name"] for item in distribution]
+        self.assertIn("biweb测试商品", names)
+        values = [item["value"] for item in distribution]
+        self.assertEqual(values, sorted(values, reverse=True))
+        after = dict(zip(names, values))
+        # 同 spec 两行聚合为一片；明日/上月行不得改变差值。
+        self.assertEqual(Decimal("123"), after["biweb测试商品"] - prior)
+
+        payload = run_pie_sku_mtd(self.mart_connection, {})
+        self.assertEqual("pie", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertLessEqual(len(payload["items"]), 9)
+        self.assertTrue(
+            all(
+                isinstance(item["name"], str)
+                and isinstance(item["value"], float)
+                for item in payload["items"]
+            )
+        )
+        payload_values = [item["value"] for item in payload["items"][:-1]]
+        self.assertEqual(payload_values, sorted(payload_values, reverse=True))
+        if len(payload["items"]) == 9:
+            self.assertEqual("其他", payload["items"][-1]["name"])
 
     def test_run_kpi_annual_progress_two_line_numerator_and_rate(self):
         replace_dim_target(

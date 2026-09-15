@@ -160,6 +160,8 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
         region=region_cfg.region,
         member=member,
         table_name=table_name,
+        # 无 AI 表区域的月目标快照（有表区域为 None，目标由表行携带）。
+        monthly_target=region_cfg.monthly_targets.get(table_name),
         business_date=business_date,
         value=value,
         now=now,
@@ -202,7 +204,7 @@ def _fetch_one(connection, sql, params):
 
 
 def _write_report(connection, *, region, member, table_name,
-                  business_date, value, now):
+                  monthly_target, business_date, value, now):
     """业务键优先写入。返回旧值（无旧行或旧值为空 → None）。"""
     existing = _fetch_one(
         connection,
@@ -226,9 +228,9 @@ def _write_report(connection, *, region, member, table_name,
         cursor.execute(
             "INSERT INTO `fact_daily_report_offline` "
             "(`source_record_id`, `region`, `responsible_person`, "
-            "`department`, `business_date`, `sales_amount`, "
+            "`department`, `business_date`, `sales_amount`, `monthly_target`, "
             "`synced_at`, `sync_run_id`) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 f"stream:{region}:{member['user_id']}:{business_date.isoformat()}",
                 region,
@@ -236,6 +238,7 @@ def _write_report(connection, *, region, member, table_name,
                 member.get("dept_name"),
                 business_date,
                 value,
+                monthly_target,
                 now,
                 STREAM_RUN_ID,
             ),

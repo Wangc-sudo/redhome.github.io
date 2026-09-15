@@ -502,7 +502,9 @@ class BiSeedFileTests(unittest.TestCase):
         mapping = load_seed(_REPO_BI_SEED_PATH)
 
         self.assertEqual(
-            {"l1-cockpit", "l2-region", "l2-channel", "l2-people"}, set(mapping)
+            {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
+             "l2-people"},
+            set(mapping),
         )
         configs = {
             dashboard_id: parse_dashboard_config(dashboard_id, mapping[dashboard_id])
@@ -516,15 +518,16 @@ class BiSeedFileTests(unittest.TestCase):
         l1 = configs["l1-cockpit"]
         self.assertEqual(0, l1.nav_order)
         self.assertEqual((), l1.filters)
-        self.assertEqual(7, len(l1.cards))
+        # 结果 → 变化 → 风险：本月累计与目标在前，日环比降为条线辅助。
+        self.assertEqual(9, len(l1.cards))
         self.assertEqual(
-            ("kpi_offline_dod", "kpi_channel_dod", "kpi_offline_mtd",
-             "kpi_channel_mtd", "kpi_annual_progress", "trend_region_daily",
-             "bar_channel_mtd"),
+            ("kpi_offline_mtd", "kpi_channel_mtd", "kpi_annual_progress",
+             "trend_region_daily", "bar_channel_mtd", "table_channel_mtd",
+             "pie_sku_mtd", "kpi_offline_dod", "kpi_channel_dod"),
             tuple(placement.card for placement in l1.cards),
         )
         self.assertEqual(
-            (6, 6, 4, 4, 4, 8, 4),
+            (4, 4, 4, 8, 4, 12, 6, 3, 3),
             tuple(placement.span for placement in l1.cards),
         )
 
@@ -561,6 +564,24 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertIsNone(channel.cards[1].on_click)
         self.assertEqual(
             (4, 8, 6, 6), tuple(placement.span for placement in channel.cards)
+        )
+
+        product = configs["l2-product"]
+        self.assertEqual(25, product.nav_order)
+        self.assertEqual(
+            (("month", "months", "月份"), ("brand", "brands", "品牌"),
+             ("channel", "sku_channels", "渠道")),
+            tuple(
+                (spec.param, spec.source, spec.label) for spec in product.filters
+            ),
+        )
+        self.assertEqual(
+            ("kpi_sku_mtd", "table_sku_hot_total", "table_sku_hot_brand",
+             "table_sku_hot_channel"),
+            tuple(placement.card for placement in product.cards),
+        )
+        self.assertEqual(
+            (4, 8, 6, 6), tuple(placement.span for placement in product.cards)
         )
 
         people = configs["l2-people"]

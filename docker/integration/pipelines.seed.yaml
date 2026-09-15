@@ -45,6 +45,18 @@ pages-hangzhou:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "hangzhou leaderboard HTML page generation"
+robot-vanke:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "vanke daily-report robot (mart_ops -> robot_outbox)"
+pages-vanke:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "vanke leaderboard HTML page generation"
 dingtalk-gateway:
   kind: apps
   enabled: true

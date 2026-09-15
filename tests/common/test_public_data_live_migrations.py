@@ -1,7 +1,9 @@
+import re
 import unittest
 
 from common.public_data.finance_schema import table_definition
 from common.public_data.live_migrations import LiveMigrationError, apply_live_migrations
+from common.public_data.mart_extract_schema import order_line_channel_ddl_statements
 
 
 class FakeCursor:
@@ -89,6 +91,20 @@ class FinanceSchemaTests(unittest.TestCase):
 
 
 class LiveMigrationTests(unittest.TestCase):
+    def test_existing_extract_v1_upgrades_without_checksum_drift(self):
+        from common.public_data.live_migrations import _MIGRATIONS, _combined_checksum
+
+        original_checksum = "2b1ddff896128c831c055c8af666f390eaf0e645e7e6e15deab6ca5b44ade9d7"
+        legacy = next(sql for version, _, sql in _MIGRATIONS if version == "mart-extract-v1")
+        self.assertEqual(_combined_checksum(legacy), original_checksum)
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+        apply_live_migrations(dingtalk, wdt, mart, applied_checksums={"mart-extract-v1": original_checksum})
+        executed = mart.cursor_instance.executed
+        sql = "\n".join(query for query, _ in executed)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS `fact_daily_report_offline`", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS `fact_fin_receivables_aging`", sql)
+        self.assertTrue(any(params and params[0] == "mart-extract-finance-v1" for _, params in executed))
+
     def test_migrations_use_only_registered_identifiers_and_record_checksums(self):
         dingtalk = FakeConnection()
         wdt = FakeConnection()
@@ -139,3 +155,80 @@ class LiveMigrationTests(unittest.TestCase):
         self.assertNotIn("dingtalk_org_member", wdt_sql)
         self.assertNotIn("dingtalk_org_member", mart_sql)
         self.assertIn("sync_runs", mart_sql)
+
+
+class OrderLineChannelMigrationTests(unittest.TestCase):
+    """fact_order_line 的店铺/渠道维度（迁移 mart-extract-order-line-v2）。
+
+    表结构与投影列白名单是同一份契约：迁移少建（或多建）一列，投影写入
+    就会在 ``replace_table`` 的列校验处失败，所以两边钉在一起测。
+    """
+
+    _COLUMN_RE = re.compile(r"^\s*`([a-z_]+)`\s+[A-Z]", re.MULTILINE)
+    _ADD_COLUMN_RE = re.compile(r"ADD COLUMN `([a-z_]+)`")
+
+    def test_channel_migration_is_registered_after_the_table(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-extract-order-line-v2", versions)
+        self.assertLess(
+            versions.index("mart-extract-order-line-v1"),
+            versions.index("mart-extract-order-line-v2"),
+        )
+
+    def test_channel_migration_only_adds_the_two_columns(self):
+        statements = order_line_channel_ddl_statements()
+
+        self.assertEqual(1, len(statements))
+        sql = statements[0]
+        self.assertTrue(sql.startswith("ALTER TABLE `fact_order_line`"))
+        self.assertIn("ADD COLUMN `shop_name`", sql)
+        self.assertIn("ADD COLUMN `channel_name`", sql)
+        self.assertIn("ADD KEY `idx_order_line_channel` (`channel_name`)", sql)
+        # 只补列不重建表：v1 的 CREATE 文本一旦改动就会被判成校验和漂移。
+        self.assertNotIn("CREATE TABLE", sql)
+
+    def test_fresh_database_records_the_channel_migration(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        recorded = [
+            params[0] for _, params in mart.cursor_instance.executed if params
+        ]
+        self.assertIn("mart-extract-order-line-v1", recorded)
+        self.assertIn("mart-extract-order-line-v2", recorded)
+
+    def test_applied_channel_migration_is_not_replayed(self):
+        # ALTER 没有 IF NOT EXISTS：已应用版本必须按校验和跳过，重跑会因
+        # 列已存在而失败。
+        from common.public_data.live_migrations import (
+            _MIGRATIONS,
+            _combined_checksum,
+        )
+
+        applied = {
+            version: _combined_checksum(statements)
+            for version, _, statements in _MIGRATIONS
+        }
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart, applied_checksums=applied)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertNotIn("ALTER TABLE `fact_order_line`", mart_sql)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS `fact_order_line`", mart_sql)
+
+    def test_table_columns_match_the_projection_whitelist(self):
+        from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
+        from common.public_data.mart_extract_schema import order_line_ddl_statements
+
+        _, fact_order_line = order_line_ddl_statements()
+        columns = set(self._COLUMN_RE.findall(fact_order_line))
+        for statement in order_line_channel_ddl_statements():
+            columns |= set(self._ADD_COLUMN_RE.findall(statement))
+
+        self.assertEqual(
+            set(_ORDER_LINE_COLUMNS) | {"synced_at", "sync_run_id"}, columns
+        )

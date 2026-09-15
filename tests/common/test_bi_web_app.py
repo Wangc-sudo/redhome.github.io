@@ -1444,6 +1444,7 @@ _STAGE_B_L1_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
     "kpi_annual_progress",
+    "pie_sku_mtd",
     "trend_region_daily",
     "bar_channel_mtd",
 )
@@ -1566,12 +1567,12 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual({"status": "ok", "database": "ok"}, response.json())
 
-    def test_l1_cockpit_definition_places_the_seven_cards(self):
+    def test_l1_cockpit_definition_places_the_eight_cards(self):
         response = self.client.get("/api/v1/dashboards/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
-        self.assertEqual(7, len(payload["cards"]))
+        self.assertEqual(8, len(payload["cards"]))
         self.assertEqual(
             set(_STAGE_B_L1_CARD_IDS),
             {card["card"] for card in payload["cards"]},
@@ -1598,10 +1599,11 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "kpi_offline_mtd": "scalar",
             "kpi_channel_mtd": "scalar",
             "kpi_annual_progress": "scalar",
+            "pie_sku_mtd": "pie",
             "trend_region_daily": "line",
             "bar_channel_mtd": "bar",
         }
-        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举七卡，
+        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举八卡，
         # 漂移（加卡只改一处）在此立刻红，而不是静默漏测。
         self.assertEqual(set(_STAGE_B_L1_CARD_IDS), set(charts))
         for card_id, chart in charts.items():
@@ -1878,6 +1880,12 @@ class BiWebAppIntegrationTests(unittest.TestCase):
                 self.assertIn("key", column)
                 self.assertIn("title", column)
             self.assertIsInstance(payload["rows"], list)
+        elif card_id == "pie_sku_mtd":
+            self.assertIsInstance(payload["items"], list)
+            for item in payload["items"]:
+                self.assertIsInstance(item["name"], str)
+                self.assertIsInstance(item["value"], float)
+            self.assertEqual("元", payload["unit"])
         else:
             self.fail(f"payload structure not asserted for {card_id}")
 

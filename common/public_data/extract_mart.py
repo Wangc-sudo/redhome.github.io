@@ -54,9 +54,90 @@ class ExtractResult:
 class MartExtractRepository:
     """读取 raw 表，并把事实投影与维度写入 mart。"""
 
-    def __init__(self, raw_connection, mart_connection):
+    def __init__(self, raw_connection, mart_connection, wdt_connection=None):
         self._raw = raw_connection
         self._mart = mart_connection
+        self._wdt = wdt_connection
+
+    @property
+    def wdt_connection(self):
+        if self._wdt is None:
+            raise MartExtractError("wdt source connection is not configured")
+        return self._wdt
+
+    def read_table(self, table):
+        if table not in {d.source_table for d in EXTRACT_DATASETS if d.source == "dingtalk"}:
+            raise MartExtractError("unregistered source table")
+        with contextlib.closing(self._raw.cursor()) as cursor:
+            cursor.execute(f"SELECT * FROM `{table}`")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def read_wdt_table(self, table):
+        """读取 raw_wdt 侧已注册的维表（当前仅 ``dim_product``）。"""
+
+        if table not in {
+            d.source_table
+            for d in EXTRACT_DATASETS
+            if d.source == "wdt" and d.kind == "dim_mirror"
+        }:
+            raise MartExtractError("unregistered wdt source table")
+        with contextlib.closing(self.wdt_connection.cursor()) as cursor:
+            cursor.execute(f"SELECT * FROM `{table}`")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def read_wdt_trades(self, source_method):
+        """按接口方法读取 raw_wdt.wdt_records 的全部 payload。"""
+
+        if not source_method:
+            raise MartExtractError("missing wdt source method")
+        sql = (
+            "SELECT `source_record_id`, `payload_json` FROM `wdt_records` "
+            "WHERE `source_method` = %s"
+        )
+        with contextlib.closing(self.wdt_connection.cursor()) as cursor:
+            cursor.execute(sql, (source_method,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def read_mart_table(self, table):
+        """读取 mart 侧已注册的镜像目标表（当前仅 dim_product，供品牌反查）。"""
+
+        if table not in {
+            d.target_table for d in EXTRACT_DATASETS if d.kind == "dim_mirror"
+        }:
+            raise MartExtractError("unregistered mart table")
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(f"SELECT * FROM `{table}`")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def replace_table(self, target_table, columns, rows):
+        dataset = next((d for d in EXTRACT_DATASETS if d.target_table == target_table), None)
+        replace_kinds = ("snapshot", "melt_store_funds", "dim_mirror", "order_line_expand")
+        if dataset is None or dataset.kind not in replace_kinds:
+            raise MartExtractError("unregistered snapshot table")
+        allowed = set(dataset.target_columns) | {"synced_at", "sync_run_id"}
+        if dataset.kind == "melt_store_funds":
+            allowed |= {"store_name", "channel", "company_entity", "month", "balance"}
+        if target_table == "fact_fin_prepayment_invoice":
+            allowed.add("statement_date")
+        if dataset.kind == "dim_mirror":
+            from common.public_data.extract_order_line import _DIM_PRODUCT_MIRROR_COLUMNS
+            allowed |= set(_DIM_PRODUCT_MIRROR_COLUMNS)
+        if dataset.kind == "order_line_expand":
+            from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
+            allowed |= set(_ORDER_LINE_COLUMNS)
+        if not columns or len(set(columns)) != len(columns) or set(columns) != allowed:
+            raise MartExtractError("invalid snapshot columns")
+        params = [tuple(row.get(name) for name in columns) for row in rows]
+        with transaction(self._mart):
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"DELETE FROM `{target_table}`")
+                if params:
+                    col_sql = ", ".join(f"`{name}`" for name in columns)
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    cursor.executemany(
+                        f"INSERT INTO `{target_table}` ({col_sql}) VALUES ({placeholders})", params,
+                    )
+        return len(rows)
 
     def read_dataset(self, dataset):
         """按列白名单读取 ``dataset.source_table`` 的全部行。
@@ -168,6 +249,30 @@ class MartExtractRepository:
                 )
 
 
+def _projector_for_kind(kind):
+    """按 kind 惰性解析投影器，避免 extract_mart 与投影模块的硬依赖。"""
+
+    if kind in ("snapshot", "melt_store_funds"):
+        from common.public_data.extract_finance import (
+            project_snapshot,
+            project_store_funds_melt,
+        )
+        return {
+            "snapshot": project_snapshot,
+            "melt_store_funds": project_store_funds_melt,
+        }[kind]
+    if kind in ("dim_mirror", "order_line_expand"):
+        from common.public_data.extract_order_line import (
+            project_dim_product_mirror,
+            project_order_lines,
+        )
+        return {
+            "dim_mirror": project_dim_product_mirror,
+            "order_line_expand": project_order_lines,
+        }[kind]
+    return None
+
+
 class MartExtractService:
     """把 raw 钉钉表投影到 ``mart_ops``，并物化工作日历维度。
 
@@ -269,15 +374,19 @@ class MartExtractService:
     # ------------------------------------------------------------------
 
     def _extract_dataset(self, dataset, run_id, synced_at):
+        if dataset.kind != "fact":
+            return self._extract_projection(dataset, run_id, synced_at)
+        if dataset.source != "dingtalk":
+            raise MartExtractError("unsupported extract source")
         with named_lock(
             self._mart_connection, f"public-data:extract:{dataset.dataset}"
         ):
             rows = self._repository.read_dataset(dataset)
 
-        with transaction(self._mart_connection):
-            self._repository.upsert_fact(
-                dataset, rows, sync_run_id=run_id, synced_at=synced_at
-            )
+            with transaction(self._mart_connection):
+                self._repository.upsert_fact(
+                    dataset, rows, sync_run_id=run_id, synced_at=synced_at
+                )
 
         # raw 侧在提取层之前就已物化，所以这一步的含义是「首个产出已提交」；
         # 复用 sync_runs 既有状态机（started -> raw_committed -> completed）。
@@ -292,6 +401,23 @@ class MartExtractService:
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc
+
+    def _extract_projection(self, dataset, run_id, synced_at):
+        projector = _projector_for_kind(dataset.kind)
+        if projector is None:
+            raise MartExtractError("unknown extract kind")
+        with named_lock(self._mart_connection, f"public-data:extract:{dataset.dataset}"):
+            result = projector(self._repository, dataset, run_id, synced_at)
+        try:
+            self._mart_repository.mark_raw_committed(run_id)
+            summary = self._save_summary(
+                dataset=dataset.dataset, record_ids=result.pop("_record_ids"),
+                records_read=result["records_read"], records_written=result["records_new"],
+                run_id=run_id,
+            )
+        except Exception as exc:
+            raise _ProjectionFailure() from exc
+        return {**summary, **result, "target_table": dataset.target_table}
 
     def _extract_calendar(self, run_id, synced_at):
         rows = []
@@ -351,14 +477,16 @@ class MartExtractService:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _save_summary(self, *, dataset, record_ids, records_read, run_id):
+    def _save_summary(self, *, dataset, record_ids, records_read, run_id, records_written=None):
+        if records_written is None:
+            records_written = records_read
         digest = self._compute_digest(record_ids)
         self._mart_repository.save_dataset_summary(
             sync_run_id=run_id,
             source_name=EXTRACT_SOURCE_NAME,
             dataset_name=dataset,
             records_read=records_read,
-            raw_records_written=records_read,
+            raw_records_written=records_written,
             record_id_digest=digest,
             completed_at=self._now(),
         )
@@ -366,13 +494,13 @@ class MartExtractService:
             "source": EXTRACT_SOURCE_NAME,
             "dataset": dataset,
             "records_read": records_read,
-            "raw_records_written": records_read,
+            "raw_records_written": records_written,
             "record_id_digest": digest,
         }
 
     def _plan_digest(self) -> str:
         parts = [
-            f"{dataset.dataset}:{dataset.source_table}->{dataset.target_table}"
+            f"{dataset.dataset}:{dataset.source}:{dataset.kind}:{dataset.source_table}->{dataset.target_table}:{dataset.columns!r}"
             for dataset in self._datasets
         ]
         parts += [

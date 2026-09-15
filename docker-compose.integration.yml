@@ -307,6 +307,40 @@ services:
       TZ: Asia/Shanghai
       INTEGRATION_TEST_RUNNER: "1"
 
+  # 万科&大莲花&团购（无 AI 日报表区域）：报数直接 Stream 落库，月目标
+  # 由 Nacos region-vanke.yaml 的 monthlyTargets 承载。
+  robot-vanke:
+    profiles:
+      - robot
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.daily_robot.mart_cli
+      - once
+      - --confirm-local-test-write
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: robot-vanke
+      ROBOT_REGION: vanke
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+
   # apps 线 dingtalk-gateway（阶段 4）：轮询 robot_outbox 并投递到钉钉。
   # 唯一持钉钉凭据的业务相关容器；region 配置走种子 + Nacos 覆盖。
   dingtalk-gateway:
@@ -383,6 +417,44 @@ services:
       PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
       PUBLIC_DATA_SERVICE_ID: pages-hangzhou
       ROBOT_REGION: hangzhou
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
+        target: /output
+
+  pages-vanke:
+    profiles:
+      - pages
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.daily_robot.mart_cli
+      - leaderboard-html
+      - --confirm-local-test-write
+      - --output
+      - /output/vanke.html
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: pages-vanke
+      ROBOT_REGION: vanke
       TZ: Asia/Shanghai
       INTEGRATION_TEST_RUNNER: "1"
     volumes:

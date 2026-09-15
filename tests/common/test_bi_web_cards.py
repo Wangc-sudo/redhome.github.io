@@ -1,10 +1,10 @@
 """Tests for the bi-web card registry (plan Task 3 / stage B Task 7).
 
 The registry is the code-owned half of the ``SQL lives in code, layout
-lives in Nacos`` split: sixteen stage-B cards, each bound to a ``run``
+lives in Nacos`` split: seventeen cards, each bound to a ``run``
 function from ``common.bi_web.queries``, each with a known chart kind
 and a URL-parameter whitelist mapping param name -> filter source (empty
-for the five L1 scalar cards).
+for the parameter-less L1 cards).
 
 ``validate_dashboard_config`` closes the loop with Task 2's
 ``DashboardConfig``: a dashboard that references a card id missing from
@@ -29,7 +29,8 @@ from common.bi_web.config import (
     DashboardConfig,
 )
 
-#: The stage-B card ids: five stage-A cards plus eleven new ones (16 in all).
+#: The registry card ids: seventeen stage-B cards (含 SKU 环形图) 加四张
+#: 商品动销卡（2026-09-15 商渠明细），共 21 张。
 STAGE_B_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
@@ -47,15 +48,21 @@ STAGE_B_CARD_IDS = (
     "kpi_people_completed",
     "kpi_people_rate",
     "table_people_leaderboard",
+    "pie_sku_mtd",
+    "kpi_sku_mtd",
+    "table_sku_hot_total",
+    "table_sku_hot_brand",
+    "table_sku_hot_channel",
 )
 
-#: The five scalar cards the L1 cockpit places without any URL parameter.
+#: The cards the L1 cockpit places without any URL parameter.
 L1_PARAMLESS_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
     "kpi_annual_progress",
     "kpi_offline_dod",
     "kpi_channel_dod",
+    "pie_sku_mtd",
 )
 
 #: card_id -> expected chart kind.
@@ -76,6 +83,11 @@ EXPECTED_CHARTS = {
     "kpi_people_completed": "scalar",
     "kpi_people_rate": "scalar",
     "table_people_leaderboard": "table",
+    "pie_sku_mtd": "pie",
+    "kpi_sku_mtd": "scalar",
+    "table_sku_hot_total": "table",
+    "table_sku_hot_brand": "table",
+    "table_sku_hot_channel": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -96,6 +108,11 @@ EXPECTED_RUN_FUNCTIONS = {
     "kpi_people_completed": queries.run_kpi_people_completed,
     "kpi_people_rate": queries.run_kpi_people_rate,
     "table_people_leaderboard": queries.run_table_people_leaderboard,
+    "pie_sku_mtd": queries.run_pie_sku_mtd,
+    "kpi_sku_mtd": queries.run_kpi_sku_mtd,
+    "table_sku_hot_total": queries.run_table_sku_hot_total,
+    "table_sku_hot_brand": queries.run_table_sku_hot_brand,
+    "table_sku_hot_channel": queries.run_table_sku_hot_channel,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -116,17 +133,23 @@ EXPECTED_PARAMS_SCHEMA = {
     "kpi_people_completed": {"region": "regions", "month": "months"},
     "kpi_people_rate": {"region": "regions", "month": "months"},
     "table_people_leaderboard": {"region": "regions", "month": "months"},
+    "pie_sku_mtd": {},
+    "kpi_sku_mtd": {"month": "months"},
+    "table_sku_hot_total": {"month": "months"},
+    "table_sku_hot_brand": {"brand": "brands", "month": "months"},
+    "table_sku_hot_channel": {"channel": "sku_channels", "month": "months"},
 }
 
 
 def _l1_cockpit():
-    """A valid dashboard placing the seven L1 cockpit cards (Task 10 seed)."""
+    """A valid dashboard placing the eight L1 cockpit cards (Task 10 seed)."""
     l1_card_ids = (
         "kpi_offline_dod",
         "kpi_channel_dod",
         "kpi_offline_mtd",
         "kpi_channel_mtd",
         "kpi_annual_progress",
+        "pie_sku_mtd",
         "trend_region_daily",
         "bar_channel_mtd",
     )
@@ -145,7 +168,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(16, len(REGISTRY))
+        self.assertEqual(21, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 
@@ -195,8 +218,8 @@ class RegistryTests(unittest.TestCase):
                     EXPECTED_RUN_FUNCTIONS[card_id], REGISTRY[card_id].run
                 )
 
-    def test_known_charts_are_the_four_supported_kinds(self):
-        self.assertEqual(("scalar", "line", "bar", "table"), KNOWN_CHARTS)
+    def test_known_charts_are_the_five_supported_kinds(self):
+        self.assertEqual(("scalar", "line", "bar", "table", "pie"), KNOWN_CHARTS)
 
 
 class ValidateDashboardConfigTests(unittest.TestCase):

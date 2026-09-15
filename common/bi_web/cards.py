@@ -5,7 +5,11 @@ split: each card id binds a chart kind, the ``run`` function from
 :mod:`common.bi_web.queries` and the URL-parameter whitelist.  Stage A
 placed five parameter-less cards; stage B reuses two of them with
 parameters (``trend_region_daily`` region+month, ``bar_channel_mtd``
-month) and adds eleven cards -- sixteen in all.
+month) and adds eleven cards; the SKU cockpit donut
+(``pie_sku_mtd``, parameter-less) brings the total to seventeen; the
+product-movement board (``l2-product``) adds four more (``kpi_sku_mtd``
+plus the total / per-brand / per-channel hot-SKU tables) for
+twenty-one in all.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -24,7 +28,7 @@ from common.bi_web import queries
 from common.bi_web.config import KNOWN_FILTER_SOURCES
 
 #: The chart kinds the front end can render (stage A uses scalar/line/bar).
-KNOWN_CHARTS = ("scalar", "line", "bar", "table")
+KNOWN_CHARTS = ("scalar", "line", "bar", "table", "pie")
 
 
 class CardConfigError(ValueError):
@@ -111,6 +115,23 @@ _CARDS = (
         "table_people_leaderboard", "table",
         queries.run_table_people_leaderboard,
         {"region": "regions", "month": "months"},
+    ),
+    _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
+    _card(
+        "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
+        {"month": "months"},
+    ),
+    _card(
+        "table_sku_hot_total", "table", queries.run_table_sku_hot_total,
+        {"month": "months"},
+    ),
+    _card(
+        "table_sku_hot_brand", "table", queries.run_table_sku_hot_brand,
+        {"brand": "brands", "month": "months"},
+    ),
+    _card(
+        "table_sku_hot_channel", "table", queries.run_table_sku_hot_channel,
+        {"channel": "sku_channels", "month": "months"},
     ),
 )
 

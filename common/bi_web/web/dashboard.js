@@ -15,9 +15,18 @@
  *     交集，页面级参数不会 400 未声明它的兄弟卡；轮询沿用当前 URL。
  *   - scalar 按 unit 分派格式化：元 → 万；人 → 原样千分位。
  *   - 日环比 scalar 扩展字段 date/prev/delta_pct/trend7：次行
- *     「前一日 X · 环比 ±X%」（升绿降红）+ 卡内迷你趋势（缺数日断线）。
- *   - table 渲染：columns[].format ∈ wan/percent/ratio，null → 「—」，
- *     空结果显示「暂无数据」占位行。
+ *     「昨日 X · 环比 ±X%」（升绿降红）+ 卡内迷你趋势（缺数日断线）；
+ *     主值是当日销售额的卡没有 latest，此时仍显示「前一日」。
+ *   - 页头：看板标题 + 统计范围（当前筛选值，未选即「全部」）+ 数据
+ *     截至（各卡 payload 的 as_of/date 最大值）与页面读取时间——两者
+ *     分开显示，避免把刷新时刻误读成数据进度。
+ *   - table 渲染：columns[].format ∈ wan/percent/ratio/number/delta，
+ *     null → 「—」，空结果显示「暂无数据」占位行；表体自带工具条
+ *     （数据截至 + 搜索）、可点表头排序（数值/中文，空值沉底）、
+ *     固定表头与合计行，排序与搜索词随卡体存活（轮询重渲染不丢）。
+ *   - pie 渲染：空心环形 + 右侧纵向图例（长名截断）；悬停 tooltip
+ *     显示名称/销售额(万)/占比；头部 SKU 单列、长尾「其他」由服务端
+ *     聚合；空数据显示「暂无数据」。
  *   - data-onclick-param 的 bar 卡：点击系列 → 设该参数（同步下拉）→
  *     replaceState → 全卡重拉。
  *   - 页面级失败（定义 401/404/503 或筛选选项拉取失败，对齐旧服务端
@@ -34,6 +43,9 @@
   const EMPTY_TEXT = "暂无数据";
   const PLACEHOLDER = "—";
   const ALL_TEXT = "全部";
+
+  /* 当前看板定义：页头的统计范围由 filters + 当前 URL 参数推导。 */
+  let currentDefinition = null;
 
   /* ---- 单位感知格式化 ---------------------------------------------------- */
 
@@ -53,14 +65,19 @@
   };
 
   /* 表格单元格：null/undefined → 「—」；wan → 元转万；percent → 比率
-   * 转百分比（1 位小数）；ratio → 2 位小数；缺省 → 原样字符串。 */
+   * 转百分比（1 位小数）；ratio → 2 位小数；number → 千分位整数；
+   * delta → 环比（±x.x%，正绿负红）；缺省 → 原样字符串。 */
   const formatCell = (value, format) => {
     if (value === null || value === undefined) return PLACEHOLDER;
     if (format === "wan") return formatWan(value);
     if (format === "percent") return (value * 100).toFixed(1) + "%";
     if (format === "ratio") return Number(value).toFixed(2);
+    if (format === "number") return Number(value).toLocaleString("zh-CN");
+    if (format === "delta") return deltaText(value);
     return String(value);
   };
+
+
 
   /* 达成率 → 进度条百分比；rate 为 null（目标为 0）时返回 null，调用方展示「—」。 */
   const progressPercent = (rate) => {
@@ -80,6 +97,19 @@
       up: rounded > 0,
       down: rounded < 0,
     };
+  };
+
+  /* 表格里的环比：文本与配色沿用 deltaPercent 的取整/符号规则，
+   * 与 KPI 卡的升绿降红保持一致（null → 「—」且不着色）。 */
+  const deltaText = (value) => {
+    const delta = deltaPercent(value);
+    return delta === null ? PLACEHOLDER : delta.text;
+  };
+
+  const deltaClass = (value) => {
+    const delta = deltaPercent(value);
+    if (delta === null) return "flat";
+    return delta.up ? "up" : delta.down ? "down" : "flat";
   };
 
   /* ---- echarts 封装 ------------------------------------------------------- */
@@ -110,17 +140,21 @@
 
   /* ---- 标量 KPI ---------------------------------------------------------- */
 
-  /* 日环比次行：前一日 X · 环比 ±X%（升绿降红）· 数据日，下挂 7 日
-   * 迷你趋势（connectNulls:false——缺数日断线，null = 无数）。 */
+  /* 日环比次行：昨日 X · 环比 ±X%（升绿降红）· 数据日，下挂 7 日
+   * 迷你趋势（connectNulls:false——缺数日断线，null = 无数）。
+   * 主值是当日销售额的卡（线下/渠道日环比）没有 latest，此时退回显示
+   * 前一日；商品动销卡主值是月累计，故显式给出「昨日」销售额。 */
   const renderDodSub = (body, payload) => {
     const sub = document.createElement("div");
     sub.className = "kpi-sub";
 
-    const prevText = payload.prev === null || payload.prev === undefined
+    const reference = payload.latest === undefined ? payload.prev : payload.latest;
+    const label = payload.latest === undefined ? "前一日" : "昨日";
+    const prevText = reference === null || reference === undefined
       ? PLACEHOLDER
-      : formatWan(payload.prev);
+      : formatWan(reference);
     const prev = document.createElement("span");
-    prev.textContent = `前一日 ${prevText}`;
+    prev.textContent = `${label} ${prevText}`;
     sub.appendChild(prev);
 
     const delta = deltaPercent(payload.delta_pct);
@@ -173,6 +207,7 @@
   const renderScalar = (body, payload) => {
     disposeChart(body);
     body.textContent = "";
+    body.classList.add("kpi"); // 紧凑保底高度（见 style.css .card-body.kpi）
 
     const value = document.createElement("div");
     value.className = "kpi-value";
@@ -245,48 +280,197 @@
     wireDrill(card, body);
   };
 
+  /* ---- 环形图（SKU 销售占比） ---------------------------------------------- */
+
+  /* 空心环形：右侧纵向图例承载切片名（长名截断，悬停 tooltip 有全名），
+   * tooltip 显示名称/销售额(万)/占比——占比用 ECharts 内建 percent
+   *（分母即 items 合计，与服务端口径一致）。 */
+  const renderPie = (body, payload) => {
+    const items = payload.items || [];
+    if (!items.length) {
+      disposeChart(body);
+      body.textContent = "";
+      const empty = document.createElement("div");
+      empty.className = "empty-cell";
+      empty.textContent = EMPTY_TEXT;
+      body.appendChild(empty);
+      return;
+    }
+    ensureChart(body).setOption({
+      tooltip: {
+        trigger: "item",
+        formatter: (params) =>
+          `${params.marker} ${params.name}<br/>销售额 ${formatWan(params.value)} · 占比 ${Number(params.percent).toFixed(1)}%`,
+      },
+      legend: {
+        orient: "vertical",
+        right: 8,
+        top: "middle",
+        formatter: (name) => (name.length > 12 ? `${name.slice(0, 12)}…` : name),
+      },
+      series: [
+        {
+          type: "pie",
+          radius: ["42%", "68%"],
+          center: ["38%", "50%"],
+          label: { show: false },
+          itemStyle: { borderColor: "#ffffff", borderWidth: 2 },
+          data: items,
+        },
+      ],
+    }, true);
+  };
+
   /* ---- 表格 ---------------------------------------------------------------- */
+
+  /* 每张表的交互状态（排序列/方向/搜索词）：随卡体存活，轮询重渲染后
+   * 用户的排序与搜索词不丢。 */
+  const tableState = new WeakMap();
+
+  /* 排序：数值列比大小，文本列按中文排序；空值永远沉底。 */
+  const sortRows = (rows, key, desc) => {
+    if (!key) return rows;
+    return [...rows].sort((left, right) => {
+      const a = left[key];
+      const b = right[key];
+      if (a === null || a === undefined) return 1;
+      if (b === null || b === undefined) return -1;
+      const diff =
+        typeof a === "number" && typeof b === "number"
+          ? a - b
+          : String(a).localeCompare(String(b), "zh-CN");
+      return diff * (desc ? -1 : 1);
+    });
+  };
+
+  /* 搜索：任意列命中即保留（大小写不敏感）。 */
+  const filterRows = (rows, columns, query) => {
+    const needle = (query || "").trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter((row) =>
+      columns.some((column) =>
+        String(row[column.key] ?? "").toLowerCase().includes(needle)
+      )
+    );
+  };
 
   const renderTable = (body, payload) => {
     disposeChart(body);
     body.textContent = "";
 
     const columns = payload.columns || [];
+    const rows = payload.rows || [];
+    const state = tableState.get(body) || { sort: null, desc: true, query: "" };
+    tableState.set(body, state);
+    if (payload.as_of) showAsOf(payload.as_of);
+
+    /* 工具条：数据截至（来自 payload.as_of）+ 搜索框；与表格分开重建，
+     * 输入时不重建工具条本身，避免输入框失焦。 */
+    const tools = document.createElement("div");
+    tools.className = "table-tools";
+    const asOf = document.createElement("span");
+    asOf.className = "table-asof";
+    asOf.textContent = payload.as_of ? `数据截至 ${payload.as_of}` : "";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "table-search";
+    search.placeholder = "搜索";
+    search.setAttribute("aria-label", "搜索表格内容");
+    search.value = state.query;
+    tools.append(asOf, search);
+    body.appendChild(tools);
+
+    const scroll = document.createElement("div");
+    scroll.className = "table-scroll";
     const table = document.createElement("table");
     table.className = "data-table";
-
     const thead = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    columns.forEach((column) => {
-      const th = document.createElement("th");
-      th.textContent = column.title;
-      headRow.appendChild(th);
-    });
-    thead.appendChild(headRow);
-    table.appendChild(thead);
-
     const tbody = document.createElement("tbody");
-    if (payload.rows && payload.rows.length) {
-      payload.rows.forEach((row) => {
-        const tr = document.createElement("tr");
-        columns.forEach((column) => {
-          const td = document.createElement("td");
-          td.textContent = formatCell(row[column.key], column.format);
-          tr.appendChild(td);
+    const tfoot = document.createElement("tfoot");
+    table.append(thead, tbody, tfoot);
+    scroll.appendChild(table);
+    body.appendChild(scroll);
+
+    const paint = () => {
+      const visible = sortRows(
+        filterRows(rows, columns, state.query),
+        state.sort,
+        state.desc
+      );
+
+      thead.textContent = "";
+      const headRow = document.createElement("tr");
+      columns.forEach((column) => {
+        const th = document.createElement("th");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "th-sort";
+        const active = state.sort === column.key;
+        if (active) button.classList.add("active");
+        button.textContent =
+          column.title + (active ? (state.desc ? " ↓" : " ↑") : "");
+        button.addEventListener("click", () => {
+          state.desc = active ? !state.desc : true;
+          state.sort = column.key;
+          paint();
         });
-        tbody.appendChild(tr);
+        th.appendChild(button);
+        headRow.appendChild(th);
       });
-    } else {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.className = "empty-cell";
-      td.colSpan = columns.length;
-      td.textContent = EMPTY_TEXT;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    body.appendChild(table);
+      thead.appendChild(headRow);
+
+      tbody.textContent = "";
+      if (visible.length) {
+        visible.forEach((row) => {
+          const tr = document.createElement("tr");
+          columns.forEach((column) => {
+            const td = document.createElement("td");
+            td.className = column.format === "delta" ? "delta-cell" : "";
+            if (column.format === "delta") {
+              td.classList.add(deltaClass(row[column.key]));
+            }
+            if (column.key === "goods") td.classList.add("text-cell");
+            td.textContent = formatCell(row[column.key], column.format);
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      } else {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.className = "empty-cell";
+        td.colSpan = columns.length || 1;
+        td.textContent = state.query ? "没有匹配记录" : EMPTY_TEXT;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+
+      /* 合计行：金额/数量列求和（null 计 0），始终贴在表尾可见。 */
+      tfoot.textContent = "";
+      if (visible.length) {
+        const footRow = document.createElement("tr");
+        columns.forEach((column, index) => {
+          const td = document.createElement("td");
+          if (index === 0) {
+            td.textContent = `合计 ${visible.length} 条`;
+          } else if (column.format === "wan" || column.format === "number") {
+            const total = visible.reduce(
+              (sum, row) => sum + (Number(row[column.key]) || 0),
+              0
+            );
+            td.textContent = formatCell(total, column.format);
+          }
+          footRow.appendChild(td);
+        });
+        tfoot.appendChild(footRow);
+      }
+    };
+
+    search.addEventListener("input", () => {
+      state.query = search.value;
+      paint();
+    });
+    paint();
   };
 
   /* ---- 分派与失败态 -------------------------------------------------------- */
@@ -304,8 +488,9 @@
     if (payload && payload.chart === "scalar") return renderScalar(body, payload);
     if (payload && payload.chart === "line") return renderLine(body, payload);
     if (payload && payload.chart === "bar") return renderBar(card, body, payload);
+    if (payload && payload.chart === "pie") return renderPie(body, payload);
     if (payload && payload.chart === "table") return renderTable(body, payload);
-    showError(body); // 未知 chart 类型（前端只实现 scalar/line/bar/table）
+    showError(body); // 未知 chart 类型（前端只实现 scalar/line/bar/pie/table）
   };
 
   /* ---- URL 参数与取数 ------------------------------------------------------ */
@@ -373,6 +558,7 @@
     );
     document.querySelectorAll(".card").forEach(loadCard);
     syncSelects();
+    renderScope();
   };
 
   const wireFilters = () => {
@@ -493,6 +679,48 @@
     });
   };
 
+  /* ---- 页头：标题 / 统计范围 / 数据截至 · 读取时间 ------------------------- */
+
+  /* 数据截至：取各卡 payload 的 as_of/date 最大值。与「读取时间」分开显示，
+   * 避免把刷新时刻误当成数据进度（财务 Mart 空表时尤其要能看出差别）。 */
+  let asOfSeen = "";
+  const showAsOf = (value) => {
+    if (!value) return;
+    const text = String(value);
+    if (text <= asOfSeen) return;
+    asOfSeen = text;
+    renderUpdated();
+  };
+
+  const renderUpdated = () => {
+    const node = document.getElementById("page-updated");
+    if (!node) return;
+    const readAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    node.textContent = asOfSeen
+      ? `数据截至 ${asOfSeen} · 读取于 ${readAt}`
+      : `读取于 ${readAt}`;
+  };
+
+  /* 统计范围：当前生效的筛选值，未选即「全部」。 */
+  const renderScope = () => {
+    const node = document.getElementById("page-scope");
+    if (!node || !currentDefinition) return;
+    const params = pageParams();
+    const parts = (currentDefinition.filters || []).map((spec) => {
+      const value = params.get(spec.param);
+      return `${spec.label || spec.param}：${value || ALL_TEXT}`;
+    });
+    node.textContent = parts.length ? parts.join(" · ") : "全部范围";
+    renderUpdated();
+  };
+
+  const renderHead = (definition) => {
+    currentDefinition = definition;
+    document.getElementById("page-title").textContent = definition.title || "";
+    document.getElementById("pagehead").hidden = false;
+    renderScope();
+  };
+
   /* ---- 启动与轮询 ---------------------------------------------------------- */
 
   /* 窗口尺寸变化（含加载后跨 900px 断点）时把在用图表实例同步到新画布
@@ -519,10 +747,18 @@
       )
       .then((definition) => {
         if (definition.title) document.title = definition.title;
+        renderHead(definition);
         buildCards(currentId, definition.cards || []);
         wireFilters();
         syncSelects();
         const cards = Array.from(document.querySelectorAll(".card"));
+        /* 手动刷新：重拉全部卡片并刷新读取时间（轮询之外的即时入口）。 */
+        document
+          .getElementById("page-refresh")
+          .addEventListener("click", () => {
+            cards.forEach(loadCard);
+            renderUpdated();
+          });
         cards.forEach(loadCard);
         const seconds = Number.isFinite(definition.refresh_seconds)
           ? definition.refresh_seconds

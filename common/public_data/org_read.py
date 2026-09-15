@@ -1,8 +1,9 @@
 """钉钉通讯录只读网关（spec §10「组织成员：走 API 直连（B 方案）」）。
 
-只读三个**已实测开通**的接口，网关不含任何写方法：
+只读四个**已实测开通**的接口，网关不含任何写方法：
 
 * ``topapi/v2/department/listsub`` —— 某部门的直接子部门
+* ``topapi/v2/department/get``     —— 单个部门详情（用于根部门命名）
 * ``topapi/user/listid``          —— 某部门直属成员的 userId（cursor 分页）
 * ``topapi/v2/user/get``          —— 单个成员的姓名等详情
 
@@ -23,6 +24,7 @@ _TOKEN_CACHE_SECONDS = 100 * 60
 
 _OAPI_BASE = "https://oapi.dingtalk.com"
 _LISTSUB_PATH = "/topapi/v2/department/listsub"
+_DEPT_GET_PATH = "/topapi/v2/department/get"
 _LISTID_PATH = "/topapi/user/listid"
 _USER_GET_PATH = "/topapi/v2/user/get"
 
@@ -69,7 +71,7 @@ class OrgReadGateway:
         self._token_timestamp = 0.0
 
     # ------------------------------------------------------------------
-    # Public API surface（只读，三个端点一一对应）
+    # Public API surface（只读，四个端点一一对应）
     # ------------------------------------------------------------------
 
     def list_sub_departments(self, dept_id):
@@ -109,7 +111,11 @@ class OrgReadGateway:
             )
             if not isinstance(result, Mapping):
                 raise OrgReadError("org read failed")
-            batch = result.get("list")
+            # 实测钉钉返回 ``userid_list`` 全量（无分页字段）；文档形态的
+            # ``list`` + has_more/next_cursor 游标分页也兼容。
+            batch = result.get("userid_list")
+            if batch is None:
+                batch = result.get("list")
             if not isinstance(batch, list):
                 raise OrgReadError("org read failed")
             for user_id in batch:
@@ -125,6 +131,18 @@ class OrgReadGateway:
             if not isinstance(next_cursor, int) or isinstance(next_cursor, bool):
                 raise OrgReadError("org read failed")
             cursor = next_cursor
+
+    def get_department_name(self, dept_id):
+        """返回 *dept_id* 的部门名（用于给区域种子的根部门命名）。"""
+        result = self._oapi_result(
+            _DEPT_GET_PATH, {"dept_id": self._validate_dept_id(dept_id)}
+        )
+        if not isinstance(result, Mapping):
+            raise OrgReadError("org read failed")
+        name = result.get("name")
+        if not isinstance(name, str) or not name:
+            raise OrgReadError("org read failed")
+        return name
 
     def get_user(self, user_id):
         """返回 *user_id* 的详情字典（含 ``name``）。"""
@@ -284,6 +302,9 @@ def collect_members(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
                 if dept_id in seen_depts:
                     continue
                 seen_depts.add(dept_id)
+                if known_name is None:
+                    # 区域种子的根部门没有 listsub 带来的名字，单独解析一次。
+                    known_name = gateway.get_department_name(dept_id)
                 dept_name = known_name or dept_names.get(dept_id)
 
                 for user_id in gateway.list_user_ids(dept_id):

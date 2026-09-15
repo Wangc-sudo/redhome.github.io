@@ -53,7 +53,11 @@ _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 
 #: 筛选器 ``source`` 可指向的维表查询名；与 ``app._FILTER_SOURCE_QUERIES``
 #: 的键集合由测试对拍保持一致（漂移=红构建，而非运行期 KeyError）。
-KNOWN_FILTER_SOURCES = frozenset({"regions", "channels", "months"})
+#: 商品口径的品牌/渠道来自 fact_order_line（店铺渠道），与
+#: ``channels``（fact_channel_daily_sales 的业务渠道）是两套维度，故分开。
+KNOWN_FILTER_SOURCES = frozenset(
+    {"regions", "channels", "months", "brands", "sku_channels"}
+)
 
 
 class DashboardConfigError(ValueError):
