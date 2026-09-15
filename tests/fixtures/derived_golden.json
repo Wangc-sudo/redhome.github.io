@@ -1,0 +1,282 @@
+{
+  "meta": {
+    "contract": "frontend/bi-ui/CubeSchema.md",
+    "contract_is_input_only": true,
+    "purpose": "Python（common/bi_web/derived.py）与前端 TS（临时 derive.ts）共用同一份 golden 夹具做逐位对拍；两边都绿才算口径统一。",
+    "expectations_are_hand_written": true,
+    "tolerance": "浮点按 1e-9 绝对误差比较；expect 里的数字是手写推算值，不是实现输出后回填的。",
+    "unit": "金额单位统一为元（原始单位），换算万由前端按 card.unit 决定；本夹具不含任何换算。",
+    "input_contract": {
+      "counts_instead_of_calendar": "cases 直接给 total/elapsed/remaining_workdays 三个整数，规避双端对 dim_calendar 理解的差异；日历派生另由 calendar_cases 覆盖。",
+      "null": "JSON null 即 Python None（不可算，前端渲染「—」）。",
+      "mom": "只有带 current/prev 的用例才断言 mom；current 视为独立入参（与 done 是否同源由调用方决定）。",
+      "row_cases": "行级组装用例（queries.shortfall_rows）：喂一条事实行 dict，断言整行输出（含 has_fact）。它与 cases 的区别是——cases 钉纯函数，row_cases 钉「组装层护栏」：has_fact 是纯诊断字段（False=本月截至今日无销单），不得改变任何派生值，挂零仍挂零。"
+    },
+    "case_fields": {
+      "name": "唯一标识（测试用 subTest 逐条报名字）",
+      "source": "对应 CubeSchema.md 的条款编号，口径变更时据此定位要改哪几条",
+      "note": "人话说明这条在钉什么边界"
+    }
+  },
+
+  "cases": [
+    {
+      "name": "p0_guard_elapsed_one_workday_is_not_p0",
+      "source": "§2.3 p0（done == 0 且已过 ≥ 2 个工作日）",
+      "note": "只过 1 个工作日时零产出不判 p0：旧口径（只判 done === 0）会第 1 天全员标红。此处由 p1 产能规则兜底（阈值 114）。",
+      "inputs": {"target": 240.0, "done": 0.0, "total_workdays": 20, "elapsed_workdays": 1, "remaining_workdays": 19},
+      "expect": {"shortfall": 240.0, "rate": 0.0, "required_daily": 12.0, "severity": "p1", "p1_threshold": 114.0}
+    },
+    {
+      "name": "p0_zero_done_after_two_workdays",
+      "source": "§2.3 p0（且 p0 优先于 p1）",
+      "note": "第 2 个工作日零产出 → p0；此例同时满足 p1（240 ≥ 108），验证「取最高」时 p0 压过 p1。",
+      "inputs": {"target": 240.0, "done": 0.0, "total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18},
+      "expect": {"shortfall": 240.0, "rate": 0.0, "required_daily": 12.0, "severity": "p0", "p1_threshold": 108.0}
+    },
+    {
+      "name": "nonzero_done_is_never_p0",
+      "source": "§2.3 p0（done == 0 是硬条件）",
+      "note": "有进度的人走缺口分级（216 ≥ 108 → p1），不会因「今日未开单」被当成 p0。",
+      "inputs": {"target": 240.0, "done": 24.0, "total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18},
+      "expect": {"shortfall": 216.0, "rate": 0.1, "required_daily": 12.0, "severity": "p1", "p1_threshold": 108.0}
+    },
+    {
+      "name": "p1_exactly_at_half_capacity_threshold",
+      "source": "§2.3 p1（shortfall ≥ required_daily × remaining × 0.5）",
+      "note": "日均 12、剩余 10 天 → 阈值 60；缺口恰好等于 60 → 取等号判 p1。",
+      "inputs": {"target": 240.0, "done": 180.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10},
+      "expect": {"shortfall": 60.0, "rate": 0.75, "required_daily": 12.0, "severity": "p1", "p1_threshold": 60.0}
+    },
+    {
+      "name": "p1_just_above_threshold",
+      "source": "§2.3 p1（0.5 系数）",
+      "note": "剩余 11 天 → 阈值 66；缺口 72 只比阈值高一个所需日均，钉住系数是 0.5 而非别的值。",
+      "inputs": {"target": 240.0, "done": 168.0, "total_workdays": 20, "elapsed_workdays": 9, "remaining_workdays": 11},
+      "expect": {"shortfall": 72.0, "rate": 0.7, "required_daily": 12.0, "severity": "p1", "p1_threshold": 66.0}
+    },
+    {
+      "name": "p2_just_below_threshold",
+      "source": "§2.3 p2（未达 p0/p1）",
+      "note": "与上条同一 remaining（阈值 66），只差 12 元：缺口 60 < 66 → p2。两条构成阈值两侧的夹逼。",
+      "inputs": {"target": 240.0, "done": 180.0, "total_workdays": 20, "elapsed_workdays": 9, "remaining_workdays": 11},
+      "expect": {"shortfall": 60.0, "rate": 0.75, "required_daily": 12.0, "severity": "p2", "p1_threshold": 66.0}
+    },
+    {
+      "name": "p2_small_gap_late_in_month",
+      "source": "§2.3 p2",
+      "note": "月尾只剩 5 个工作日，阈值降到 30，但缺口仅 12 → 仍是 p2。",
+      "inputs": {"target": 240.0, "done": 228.0, "total_workdays": 20, "elapsed_workdays": 15, "remaining_workdays": 5},
+      "expect": {"shortfall": 12.0, "rate": 0.95, "required_daily": 12.0, "severity": "p2", "p1_threshold": 30.0}
+    },
+    {
+      "name": "ok_exactly_at_target",
+      "source": "§2.3 ok（shortfall ≤ 0）",
+      "note": "缺口为 0（恰好完成）算 ok，取等号。",
+      "inputs": {"target": 240.0, "done": 240.0, "total_workdays": 20, "elapsed_workdays": 12, "remaining_workdays": 8},
+      "expect": {"shortfall": 0.0, "rate": 1.0, "required_daily": 12.0, "severity": "ok"}
+    },
+    {
+      "name": "ok_overachieved",
+      "source": "§2.3 ok（shortfall ≤ 0）",
+      "note": "超额时缺口为负，不截断、不当成 0。",
+      "inputs": {"target": 240.0, "done": 264.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10},
+      "expect": {"shortfall": -24.0, "rate": 1.1, "required_daily": 12.0, "severity": "ok"}
+    },
+    {
+      "name": "missing_target_everything_none",
+      "source": "§2.1 + §5（无月目标的数据缺陷显式化）",
+      "note": "无目标时 shortfall/rate/required_daily/severity 全部 None（前端「—」），绝不静默补 0，也绝不当 ok。",
+      "inputs": {"target": null, "done": 12.0, "total_workdays": 20, "elapsed_workdays": 3, "remaining_workdays": 17},
+      "expect": {"shortfall": null, "rate": null, "required_daily": null, "severity": null, "p1_threshold": null}
+    },
+    {
+      "name": "missing_done_counts_as_no_sales",
+      "source": "§2.1 + §5（无事实行 = 未开单）",
+      "note": "done 缺失按 0 计（事实侧已 LEFT JOIN），完成率 0%、已过 2 个工作日 → p0。",
+      "inputs": {"target": 240.0, "done": null, "total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18},
+      "expect": {"shortfall": 240.0, "rate": 0.0, "required_daily": 12.0, "severity": "p0", "p1_threshold": 108.0}
+    },
+    {
+      "name": "zero_target_rate_none_but_shortfall_ok",
+      "source": "§2.2 rate（target ≤ 0 不除）+ §2.3 required_daily（分母是工作日）",
+      "note": "rate 与 required_daily 的不可算条件不同：目标 0 → rate None，但日均 0.0 可算。",
+      "inputs": {"target": 0.0, "done": 10.0, "total_workdays": 20, "elapsed_workdays": 3, "remaining_workdays": 17},
+      "expect": {"shortfall": -10.0, "rate": null, "required_daily": 0.0, "severity": "ok", "p1_threshold": 0.0}
+    },
+    {
+      "name": "missing_calendar_p1_undecidable_falls_to_p2",
+      "source": "§5（日历缺失 → 数据缺陷）+ §2.3",
+      "note": "total/elapsed/remaining 全缺 → 日均与阈值都不可算 → p1 不可判退到 p2，不因数据缺陷把人标橙。",
+      "inputs": {"target": 240.0, "done": 48.0, "total_workdays": null, "elapsed_workdays": null, "remaining_workdays": null},
+      "expect": {"shortfall": 192.0, "rate": 0.2, "required_daily": null, "severity": "p2", "p1_threshold": null}
+    },
+    {
+      "name": "missing_remaining_workdays_degrades_to_p2",
+      "source": "§5（剩余工作日不可得）+ §2.3",
+      "note": "日均算得出（12）但剩余不可得 → 阈值 None → p2；即「闭月」路径：查历史月时不应把上月全员标 p1。",
+      "inputs": {"target": 240.0, "done": 48.0, "total_workdays": 20, "elapsed_workdays": 3, "remaining_workdays": null},
+      "expect": {"shortfall": 192.0, "rate": 0.2, "required_daily": 12.0, "severity": "p2", "p1_threshold": null}
+    },
+    {
+      "name": "mom_up",
+      "source": "§2.4 mom（(current − prev) ÷ |prev|）",
+      "note": "同期 100 → 120：+0.2 且 direction=up（方向与数值同源，前端不二次判断）。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10, "current": 120.0, "prev": 100.0},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "mom": {"value": 0.2, "direction": "up"}}
+    },
+    {
+      "name": "mom_down",
+      "source": "§2.4 mom",
+      "note": "同期 200 → 120：−0.4 且 direction=down。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10, "current": 120.0, "prev": 200.0},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "mom": {"value": -0.4, "direction": "down"}}
+    },
+    {
+      "name": "mom_flat",
+      "source": "§2.4 mom",
+      "note": "同期持平：value 0.0 且 direction=flat（不是 up）。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10, "current": 120.0, "prev": 120.0},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "mom": {"value": 0.0, "direction": "flat"}}
+    },
+    {
+      "name": "mom_prev_zero_is_none",
+      "source": "§2.4 mom（prev 缺失或 0 → None）+ §5",
+      "note": "上期为 0 不除：返回 None（前端「—」），不用 ±∞ 或 0 假装环比。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10, "current": 120.0, "prev": 0.0},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "mom": null}
+    },
+    {
+      "name": "mom_prev_missing_is_none",
+      "source": "§2.4 mom（prev 缺失 → None）+ §5",
+      "note": "本期无基数（新店/新 SKU 上月）→ None。顺带验证分级不受影响（本例 p2）。",
+      "inputs": {"target": 240.0, "done": 228.0, "total_workdays": 20, "elapsed_workdays": 15, "remaining_workdays": 5, "current": 228.0, "prev": null},
+      "expect": {"shortfall": 12.0, "rate": 0.95, "required_daily": 12.0, "severity": "p2", "mom": null}
+    },
+    {
+      "name": "mom_prev_negative_uses_absolute_denominator",
+      "source": "§2.4 mom（分母取 |prev|）",
+      "note": "上期为负（−40）时按绝对值做分母：(120 − (−40)) ÷ 40 = 4.0 且 direction=up。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 10, "remaining_workdays": 10, "current": 120.0, "prev": -40.0},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "mom": {"value": 4.0, "direction": "up"}}
+    },
+    {
+      "name": "regression_month_start_p1",
+      "source": "§2.1（缺口是绝对口径，不乘时间进度）",
+      "note": "回归：目标 240 / 已完成 120 在月初（elapsed 2，阈值 108）判 p1 —— 月中必须是同一级别。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "p1_threshold": 108.0}
+    },
+    {
+      "name": "regression_mid_month_p1",
+      "source": "§2.1（绝对口径）",
+      "note": "回归：与 regression_month_start_p1 同一组数据，月中（elapsed 11，阈值 54）仍是 p1，未因日期推移改变级别。",
+      "inputs": {"target": 240.0, "done": 120.0, "total_workdays": 20, "elapsed_workdays": 11, "remaining_workdays": 9},
+      "expect": {"shortfall": 120.0, "rate": 0.5, "required_daily": 12.0, "severity": "p1", "p1_threshold": 54.0}
+    },
+    {
+      "name": "regression_month_start_p2",
+      "source": "§2.1（绝对口径）",
+      "note": "回归：缺口 24 在月初（阈值 108）为 p2 —— 月中不得自动升级。",
+      "inputs": {"target": 240.0, "done": 216.0, "total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18},
+      "expect": {"shortfall": 24.0, "rate": 0.9, "required_daily": 12.0, "severity": "p2", "p1_threshold": 108.0}
+    },
+    {
+      "name": "regression_mid_month_p2",
+      "source": "§2.1（绝对口径）",
+      "note": "回归：与 regression_month_start_p2 同一组数据，月中（阈值 54）仍是 p2。旧口径 gap = rate − 时间进度会随时间机械升级，此例即防它回来。",
+      "inputs": {"target": 240.0, "done": 216.0, "total_workdays": 20, "elapsed_workdays": 11, "remaining_workdays": 9},
+      "expect": {"shortfall": 24.0, "rate": 0.9, "required_daily": 12.0, "severity": "p2", "p1_threshold": 54.0}
+    }
+  ],
+
+  "calendar_cases": [
+    {
+      "name": "calendar_plain_workday_dates",
+      "source": "§2.3 required_daily（分母）/ remaining_workdays",
+      "note": "字符串条目 = 工作日（周末由上游 dim_calendar 已剔除）；锚点日 09-15 计入已过。",
+      "inputs": {
+        "calendar": [
+          "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-07",
+          "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-14",
+          "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-21",
+          "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28",
+          "2026-09-29", "2026-09-30"
+        ],
+        "as_of": "2026-09-15"
+      },
+      "expect": {"total_workdays": 22, "elapsed_workdays": 11, "remaining_workdays": 11}
+    },
+    {
+      "name": "calendar_rows_with_restday_flags",
+      "source": "§2.3 required_daily（分母）/ remaining_workdays",
+      "note": "带 is_workday 标记的行形态：is_workday=0 的行不计入分母；周末权重必须来自日历，不靠猜 5/7。",
+      "inputs": {
+        "calendar": [
+          {"date": "2026-09-01", "is_workday": 1},
+          {"date": "2026-09-02", "is_workday": 1},
+          {"date": "2026-09-03", "is_workday": 0},
+          {"date": "2026-09-04", "is_workday": 1},
+          {"date": "2026-09-07", "is_workday": 1}
+        ],
+        "as_of": "2026-09-04"
+      },
+      "expect": {"total_workdays": 4, "elapsed_workdays": 3, "remaining_workdays": 1}
+    },
+    {
+      "name": "calendar_unknown_rows_are_skipped",
+      "source": "§5（日历缺行不可判）",
+      "note": "date 缺失或 is_workday 缺失的行直接跳过，不算工作日、也不抛错（否则缺失日历会把日均放大）。",
+      "inputs": {
+        "calendar": [
+          {"date": "2026-09-01", "is_workday": 1},
+          {"date": null, "is_workday": 1},
+          {"date": "2026-09-08", "is_workday": null},
+          {"date": "2026-09-09", "is_workday": 1}
+        ],
+        "as_of": "2026-09-08"
+      },
+      "expect": {"total_workdays": 2, "elapsed_workdays": 1, "remaining_workdays": 1}
+    },
+    {
+      "name": "calendar_real_dim_calendar_2026_09",
+      "source": "§2.3 required_daily（分母）/ remaining_workdays",
+      "note": "真机护栏：直接抄自 mart_ops_test.dim_calendar（is_workday=1 的 24 天，休息日 6/13/19/25/26/27）。本业务是大小休——9/5、9/12 周六上班、9/20 周日因中秋调休上班、9/25-27 中秋假 —— 所以是 24 不是周一至周五的 22。谁把它「修正」成 22 必须在这里被拦下。",
+      "inputs": {
+        "calendar": [
+          "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05",
+          "2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11",
+          "2026-09-12", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17",
+          "2026-09-18", "2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23",
+          "2026-09-24", "2026-09-28", "2026-09-29", "2026-09-30"
+        ],
+        "as_of": "2026-09-15"
+      },
+      "expect": {"total_workdays": 24, "elapsed_workdays": 13, "remaining_workdays": 11}
+    }
+  ],
+
+  "row_cases": [
+    {
+      "name": "row_has_fact_done_zero_is_p0",
+      "source": "§2.3 p0（真挂零必须告警）",
+      "note": "基准：has_fact=true 且 done=0 且已过 2 个工作日 ⇒ p0。target 240 ÷ 20 工作日 = 12。",
+      "inputs": {"fact": {"name": "挂零人", "target": 240.0, "done": 0.0, "has_fact": true}, "calendar": {"total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18}},
+      "expect": {"name": "挂零人", "target": 240.0, "done": 0.0, "shortfall": 240.0, "rate": 0.0, "required_daily": 12.0, "severity": "p0", "has_fact": true, "remaining_workdays": 18, "elapsed_workdays": 2}
+    },
+    {
+      "name": "row_no_fact_with_target_is_also_p0",
+      "source": "§2.3 p0（挂零不因 has_fact=false 而降级）",
+      "note": "护栏：expect 与 row_has_fact_done_zero_is_p0 **逐位相同**（只 has_fact 不同）—— LEFT JOIN 右表为空 = 有目标但本月截至今日无销单 = 挂零的另一名字，必须同样判 p0。若有人把它改成「—」，这两条会同时失败。",
+      "inputs": {"fact": {"name": "无销单人", "target": 240.0, "done": 0, "has_fact": false}, "calendar": {"total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18}},
+      "expect": {"name": "无销单人", "target": 240.0, "done": 0.0, "shortfall": 240.0, "rate": 0.0, "required_daily": 12.0, "severity": "p0", "has_fact": false, "remaining_workdays": 18, "elapsed_workdays": 2}
+    },
+    {
+      "name": "row_no_target_is_all_none_regardless_of_has_fact",
+      "source": "§2.1（无目标 → 缺口不可算）+ §5",
+      "note": "数据缺陷的真形态：target 缺失 ⇒ 派生列全 None（前端「—」+ 缺陷角标），与 has_fact 无关；has_fact 只是诊断字段，原值透传不参与判定。",
+      "inputs": {"fact": {"name": "无目标人", "dept": "示例部", "target": null, "done": 0, "has_fact": false}, "calendar": {"total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18}},
+      "expect": {"name": "无目标人", "dept": "示例部", "target": null, "done": 0.0, "shortfall": null, "rate": null, "required_daily": null, "severity": null, "has_fact": false, "remaining_workdays": 18, "elapsed_workdays": 2}
+    }
+  ]
+}
