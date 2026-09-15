@@ -1,0 +1,301 @@
+/* ============================================================================
+ * bi-ui · components.css (组件层)
+ * 卡片/KPI/进度条/表格/导航/告警/结论条/图表容器/状态态。
+ * 依赖顺序：tokens.css → base.css → components.css。
+ * 组件均「哑渲染」：数据来自后端 CubeSchema，前端不计算派生指标。
+ * ========================================================================== */
+
+/* ===========================================================================
+ * 1. 卡片 Card
+ * ======================================================================== */
+.card {
+  min-width: 0;                       /* 栅格内长内容不撑破列宽 */
+  padding: var(--sp-4) 20px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.card > h2,
+.card-title {
+  margin: 0 0 var(--sp-3);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.card-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* 仅标量 KPI 保底高度（V1:89 注释：比 140px 紧凑，避免趋势/明细被挤出首屏） */
+.card-body.kpi   { min-height: 96px; }
+.card-body.chart { height: 280px; min-height: 280px; justify-content: flex-start; }
+
+/* ===========================================================================
+ * 2. KPI 标量卡
+ * ======================================================================== */
+.kpi-value {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub   { margin-top: var(--sp-2); font-size: 13px; color: var(--text-muted); }
+.kpi-date  { margin-left: var(--sp-2); color: var(--text-muted); }
+.metric-foot { min-height: 20px; }
+
+/* 涨跌方向（涨红跌绿） */
+.delta        { margin-left: var(--sp-2); font-variant-numeric: tabular-nums; }
+.delta.up     { color: var(--up); }      /* 涨 = 红 */
+.delta.down   { color: var(--down); }    /* 跌 = 绿 */
+.delta.flat   { color: var(--text-muted); }
+
+/* ===========================================================================
+ * 3. 进度条 Progress
+ * ======================================================================== */
+.progress {
+  margin-top: var(--sp-3);
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--track-bg);
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+
+/* ===========================================================================
+ * 4. 导航 / 侧边栏 / 面包屑 / 顶部栏
+ *    侧边栏 chrome 取自 V2，配色改引用 token
+ * ======================================================================== */
+.sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 210px;
+  background: color-mix(in srgb, var(--page-bg) 60%, #fff);
+  border-right: 1px solid var(--line);
+  padding: 28px 18px;
+  display: flex;
+  flex-direction: column;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14px; }
+.brand small { display: block; font-size: 11px; font-weight: 400; color: var(--text-muted); margin-top: 3px; }
+.brand-mark {
+  background: #283d3c; color: #fff; width: 34px; height: 38px;
+  display: grid; place-items: center; border-radius: var(--radius-sm);
+}
+.brand-mark svg { width: 24px; height: 24px; }
+
+.nav-caption { margin: 46px 12px 12px; color: var(--text-muted); font-size: 11px; }
+.sidebar nav { display: flex; flex-direction: column; gap: 8px; }
+.sidebar nav a {
+  height: 43px; display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; font-size: 13px; border-radius: var(--radius-sm); color: var(--text-muted);
+}
+.sidebar nav a:hover { background: var(--track-bg); }
+.sidebar nav a.active { background: color-mix(in srgb, var(--primary) 12%, #fff); color: var(--primary); font-weight: 600; }
+.nav-dot { margin-left: auto; width: 5px; height: 5px; border-radius: 50%; background: var(--primary); }
+.nav-dot.hidden, .sidebar nav a:not(.active) .nav-dot { display: none; }
+.external { width: 13px !important; margin-left: auto; color: var(--text-muted); }
+.sidebar-bottom { margin-top: auto; border-top: 1px solid var(--line); padding: 20px 5px 0; display: flex; gap: 10px; align-items: center; font-size: 12px; }
+.sidebar-bottom small { display: block; font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+.db-icon { color: var(--secondary); background: color-mix(in srgb, var(--secondary) 12%, #fff); padding: 8px; border-radius: var(--radius-sm); display: flex; }
+
+/* 顶部栏 + 面包屑（V2 .topbar 提炼） */
+.topbar, .breadcrumb {
+  height: 64px; border-bottom: 1px solid var(--line);
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0 36px; font-size: 12px; color: var(--text-muted);
+}
+.breadcrumb a:hover { color: var(--primary); }
+.breadcrumb .sep { margin: 0 8px; color: var(--line); }
+
+/* 顶部胶囊导航（V1 .topnav，门户页也可用） */
+.topnav { display: flex; flex-wrap: wrap; gap: var(--sp-1); padding: 10px 16px; background: var(--card-bg); border-bottom: 1px solid var(--card-border); }
+.topnav-link { padding: 6px 14px; border-radius: var(--radius-pill); color: var(--text-muted); font-size: 14px; }
+.topnav-link:hover { color: var(--primary); }
+.topnav-link.current { background: var(--primary); color: #fff; }
+
+/* ===========================================================================
+ * 5. 页头 / 操作区
+ * ======================================================================== */
+.page-head { display: flex; flex-wrap: wrap; gap: 8px var(--sp-4); align-items: flex-end; justify-content: space-between; padding: 20px 16px 0; max-width: var(--container-max); margin: 0 auto; }
+.page-head h1 { font-size: 23px; font-weight: 600; letter-spacing: 0.3px; }
+.page-head p { margin-top: 4px; font-size: 13px; color: var(--text-muted); }
+.page-actions { display: flex; gap: var(--sp-3); align-items: center; font-size: 13px; color: var(--text-muted); }
+.page-actions button { padding: 5px 14px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--card-bg); color: var(--text); cursor: pointer; }
+.page-actions button:hover { border-color: var(--primary); color: var(--primary); }
+
+/* ===========================================================================
+ * 6. 筛选 Filters
+ * ======================================================================== */
+.filters, .filter-band {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center;
+  padding: 12px 16px 0; max-width: var(--container-max); margin: 0 auto;
+}
+.filter { display: inline-flex; align-items: center; gap: 6px; }
+.filter-label { font-size: 13px; color: var(--text-muted); }
+.filter select, #page-filters select {
+  font: inherit; min-width: 132px; max-width: 230px; height: 34px;
+  padding: 0 30px 0 10px; background: var(--card-bg);
+  border: 1px solid var(--card-border); border-radius: var(--radius-sm); color: var(--text);
+}
+.filter select:focus, #page-filters select:focus { outline: none; border-color: var(--primary); }
+.filter-band > span { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+
+/* ===========================================================================
+ * 7. 数据表（吸顶 / 排序 / 合计 / 文本列 / delta 列 / 空态）
+ * ======================================================================== */
+.table-tools { display: flex; gap: var(--sp-3); align-items: center; justify-content: space-between; margin-bottom: var(--sp-2); }
+.table-asof { font-size: 13px; color: var(--text-muted); }
+.table-search { width: 140px; padding: 4px 8px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--card-bg); color: var(--text); }
+.table-search:focus { outline: none; border-color: var(--primary); }
+
+.table-scroll { max-height: 420px; overflow: auto; }
+.detail-section .table-scroll { max-height: 560px; }
+
+.data-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.data-table th, .data-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--card-border); white-space: nowrap; }
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table th { color: var(--text-muted); font-weight: 600; }
+.data-table th[scope="col"] { text-align: right; }
+.data-table th[scope="col"]:first-child { text-align: left; }
+
+/* 吸顶表头 */
+.table-scroll thead th, #detail-head th { position: sticky; top: 0; z-index: var(--z-sticky); background: var(--card-bg); }
+
+/* 排序按钮（无边框朴素按钮，选中列加蓝） */
+.th-sort { padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; cursor: pointer; }
+.th-sort:hover, .th-sort.active { color: var(--primary); }
+
+/* 合计行常驻表尾 */
+.data-table tfoot td { position: sticky; bottom: 0; background: #fafbfc; font-weight: 600; border-top: 1px solid var(--card-border); border-bottom: 0; }
+
+.data-table td.text-cell { text-align: left; white-space: normal; min-width: 180px; overflow-wrap: anywhere; }
+.data-table td.delta-cell { font-variant-numeric: tabular-nums; }
+.data-table td.delta-cell.up   { color: var(--up); }
+.data-table td.delta-cell.down { color: var(--down); }
+.data-table td.delta-cell.flat { color: var(--text-muted); }
+.empty-cell { text-align: center !important; color: var(--text-muted); padding: 24px 0; }
+.table-footer { padding: 14px; text-align: right; font-size: 11px; color: var(--text-muted); background: color-mix(in srgb, var(--page-bg) 50%, #fff); }
+.table-footer:empty { display: none; }
+
+/* 段控标签页（V2 .table-tabs） */
+.table-tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+.table-tabs:empty { display: none; }
+.table-tabs button { padding: 0 0 10px; background: none; border: 0; border-bottom: 2px solid transparent; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+.table-tabs .selected { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* ===========================================================================
+ * 8. 四级告警 chip / badge（异常驱动 §3.1，强制 文字+图标，色盲友好）
+ * ======================================================================== */
+.alert-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: var(--radius-sm);
+  font-size: 12px; font-weight: 600; line-height: 1.6;
+}
+.alert-chip .ico { width: 14px; height: 14px; stroke-width: 2; }
+.alert-chip.p0 { background: var(--severity-p0); color: #fff; }
+.alert-chip.p1 { background: color-mix(in srgb, var(--severity-p1) 14%, #fff); color: var(--severity-p1); }
+.alert-chip.p2 { background: color-mix(in srgb, var(--severity-p2) 14%, #fff); color: var(--severity-p2); }
+.alert-chip.ok { background: color-mix(in srgb, var(--severity-ok) 14%, #fff); color: var(--severity-ok); }
+
+/* 仅色块（用于图例小圆点） */
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.dot.p0 { background: var(--severity-p0); }
+.dot.p1 { background: var(--severity-p1); }
+.dot.p2 { background: var(--severity-p2); }
+.dot.ok { background: var(--severity-ok); }
+
+/* ===========================================================================
+ * 9. 结论条 + 异常清单（异常驱动 §2.1 ① ③）
+ * ======================================================================== */
+.conclusion-bar {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6); align-items: center;
+  padding: var(--sp-4);
+  background: color-mix(in srgb, var(--severity-p0) 6%, #fff);
+  border: 1px solid color-mix(in srgb, var(--severity-p0) 24%, #fff);
+  border-left: 4px solid var(--severity-p0);
+  border-radius: var(--radius);
+}
+.conclusion-bar .lead { font-size: 16px; font-weight: 600; }
+.conclusion-bar .metric { font-variant-numeric: tabular-nums; }
+.conclusion-bar .metric strong { color: var(--severity-p0); }
+
+.anomaly-list { display: grid; gap: var(--sp-3); }
+@media (min-width: 1024px) { .anomaly-list.cols-2 { grid-template-columns: 1fr 1fr; } }
+.anomaly-card {
+  display: flex; gap: var(--sp-3); align-items: flex-start;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.anomaly-card .who { font-weight: 600; }
+.anomaly-card .action { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+.anomaly-card.p0 { border-left: 4px solid var(--severity-p0); }
+.anomaly-card.p1 { border-left: 4px solid var(--severity-p1); }
+
+/* ===========================================================================
+ * 10. 图表容器 / 饼图 / 迷你趋势
+ * ======================================================================== */
+.chart-large { height: 310px; overflow: hidden; }
+@media (max-width: 850px) { .chart-large { height: 280px; } }
+.chart-error { font-size: 12px; color: var(--text-muted); }
+
+.trend7 { margin-top: 8px; height: 56px; }   /* echarts init 前高度须确定 */
+
+.sales-mix { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); min-height: 64px; }
+#sales-donut, .sales-donut { width: 64px; height: 64px; flex-shrink: 0; }
+.sales-legend { font-size: 11px; min-width: 0; }
+.sales-legend > div { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: nowrap; }
+.sales-legend strong { font-weight: 600; font-variant-numeric: tabular-nums; margin-left: 4px; }
+
+/* ===========================================================================
+ * 11. 状态态：加载 / 错误 / 空（V1 全套，覆盖异常驱动缺失的 error/empty）
+ * ======================================================================== */
+[aria-busy="true"] .page-analysis,
+[aria-busy="true"] .detail-section { opacity: 0.55; }
+
+.loading { padding: 32px 0; text-align: center; color: var(--text-muted); font-size: 14px; }
+.error { padding: 32px 0; text-align: center; color: var(--severity-p0); font-size: 14px; }
+.page-error { grid-column: span 12; padding: 48px 0; text-align: center; color: var(--severity-p0); font-size: 14px; }
+.empty { padding: 48px 0; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+/* 数据缺陷显式化标记（异常驱动 §2.4） */
+.badge-defect {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: 11px; font-weight: 600;
+  background: color-mix(in srgb, var(--text-muted) 12%, #fff); color: var(--text-muted);
+}
+.badge-lowconf { background: color-mix(in srgb, var(--severity-p2) 14%, #fff); color: var(--severity-p2); }
+.badge-tobefilled { background: color-mix(in srgb, var(--severity-p1) 14%, #fff); color: var(--severity-p1); }
+
+/* 响应式：KPI 堆叠 / 表格横滚（异常驱动 §3.5 补充） */
+@media (max-width: 640px) {
+  .kpi-value { font-size: 28px; }
+  .data-table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+@media (max-width: 850px) {
+  .filter-band { flex-wrap: wrap; }
+  .filter-band > span { margin-left: 0; width: 100%; }
+  #page-filters { gap: 12px; }
+  #page-filters select { min-width: 110px; max-width: 170px; }
+}
+@media (max-width: 480px) {
+  #page-filters label { gap: 5px; }
+  #page-filters select { min-width: 88px; max-width: 124px; padding-left: 6px; padding-right: 10px; }
+  .filter-band { gap: 8px; }
+  .filter-band > span { font-size: 10px; }
+  .text-cell { min-width: 80px; }
+  .table-tools input { width: 70px; }
+}

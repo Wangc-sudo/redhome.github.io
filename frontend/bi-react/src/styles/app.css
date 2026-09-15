@@ -1,0 +1,91 @@
+/* ============================================================================
+ * bi-react · app.css（仅应用外壳布局）
+ * 设计系统（token / 卡片 / 表格 / 告警）一律来自 ./bi-ui/*，本文件不重复定义。
+ * ========================================================================== */
+
+.app-shell {
+  min-height: 100vh;
+}
+
+/* 侧边栏 fixed 210px（components.css .sidebar），主区让位 */
+.app-main {
+  margin-left: 210px;
+  min-width: 0;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: 20px 16px 0;
+  max-width: var(--container-max);
+  margin: 0 auto;
+}
+.app-header h1 {
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.app-header .breadcrumb {
+  height: auto;
+  border: 0;
+  padding: 0;
+  gap: 0 var(--sp-2);
+}
+
+/* ---- react-grid-layout 容器/卡片 ---------------------------------------- */
+.dashboard-grid {
+  padding: var(--sp-4);
+  max-width: var(--container-max);
+  margin: 0 auto;
+}
+
+.widget {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.widget > .card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.widget__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.widget__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.widget__drag {
+  margin-left: auto;
+  cursor: move;
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+/* 栅格占位（拖动时的背景块） */
+.react-grid-item.react-grid-placeholder {
+  background: var(--primary);
+  opacity: 0.12;
+  border-radius: var(--radius);
+}
+
+/* 滚动区域（表格吸顶需要确定高度容器） */
+.table-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .app-main {
+    margin-left: 0;
+  }
+}
