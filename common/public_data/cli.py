@@ -286,6 +286,59 @@ def build_service(settings, credentials, manifest, org_regions=()):
     )
 
 
+def load_manual_template(name, directory=None):
+    """Parse and validate the version-controlled manual-import template."""
+    from common.public_data.manual_import.template import (
+        load_template_by_name as _load,
+    )
+    return _load(name, directory)
+
+
+def load_manual_table(path):
+    """Read a manual report file (CSV/XLSX) into source rows."""
+    from common.public_data.manual_import.loader import load_table as _load
+    return _load(path)
+
+
+def validate_manual_table(table, template, period):
+    """Validate *table* against *template*; returns a structured report."""
+    from common.public_data.manual_import.validate import validate_table as _validate
+    return _validate(table, template, period)
+
+
+def build_manual_import_service(settings=None):
+    """Build the manual-import service.
+
+    *settings* is ``None`` for a dry run: no connection is opened, no byte is
+    written.  Otherwise the ``raw_manual`` + ``mart_ops`` connections are
+    opened, the channel's migrations applied, and a writing service returned.
+    """
+    from datetime import datetime, timezone
+
+    from common.public_data.manual_import.projector import ManualProjector
+    from common.public_data.manual_import.repository import ManualImportRepository
+    from common.public_data.manual_import.service import ManualImportService
+
+    if settings is None:
+        return ManualImportService(
+            now=lambda: datetime.now(timezone.utc),
+            new_run_id=lambda: str(uuid.uuid4()),
+        )
+
+    from common.public_data.db import connect
+    from common.public_data.live_migrations import apply_manual_migrations
+
+    manual_conn = connect(settings.manual_database)
+    mart_conn = connect(settings.mart_database)
+    apply_manual_migrations(manual_conn, mart_conn)
+    return ManualImportService(
+        repository=ManualImportRepository(manual_conn),
+        projector=ManualProjector(mart_conn),
+        now=lambda: datetime.now(timezone.utc),
+        new_run_id=lambda: str(uuid.uuid4()),
+    )
+
+
 def build_extract_service(settings, calendar_months=()):
     """Open connections, run migrations, return a ``MartExtractService``.
 
@@ -479,7 +532,14 @@ def _handle_migrate(args):
         dingtalk_conn = connect(settings.dingtalk_database)
         wdt_conn = connect(settings.wdt_database)
         mart_conn = connect(settings.mart_database)
-        apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+        manual_conn = (
+            connect(settings.manual_database)
+            if settings.manual_database is not None
+            else None
+        )
+        apply_live_migrations(
+            dingtalk_conn, wdt_conn, mart_conn, manual_connection=manual_conn
+        )
         print("migrations applied")
     except SystemExit:
         raise
@@ -513,6 +573,36 @@ def _handle_load_target(args):
         raise
     except Exception:
         _print_failure(code="target_seed_error")
+        sys.exit(1)
+
+
+def _handle_import_manual(args):
+    """人工报表导入：默认 dry-run 只打印校验报告，``--apply`` 才落库。"""
+    try:
+        template = load_manual_template(args.template, args.templates_dir)
+        table = load_manual_table(args.file)
+        settings = load_settings() if args.apply else None
+        service = build_manual_import_service(settings)
+        if args.apply:
+            result = service.apply(
+                template, table, args.period, imported_by=args.imported_by
+            )
+        else:
+            result = service.dry_run(template, table, args.period)
+
+        for line in result.report.summary_lines():
+            print(line)
+        print(
+            f"run_id={result.run_id} dataset={result.dataset}"
+            f" period={result.period} rows_ok={result.rows_ok}"
+            f" rows_bad={result.rows_bad} status={result.status}"
+        )
+        if not result.report.ok:
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="manual_import_error")
         sys.exit(1)
 
 
@@ -614,6 +704,29 @@ def main(argv=None):
         "--confirm-local-test-write", action="store_true", default=False
     )
 
+    # -- import-manual -------------------------------------------------------
+    import_manual = subparsers.add_parser(
+        "import-manual", help="Validate and import a manual report file"
+    )
+    import_manual.add_argument(
+        "--template", required=True,
+        help="template name under docker/integration/manual-import-templates",
+    )
+    import_manual.add_argument("--file", required=True, help="CSV or XLSX report file")
+    import_manual.add_argument(
+        "--period", required=True,
+        help="period matching the template: YYYY-MM / YYYY-Qn / YYYY",
+    )
+    import_manual.add_argument(
+        "--apply", action="store_true", default=False,
+        help="write to raw_manual + mart_ops (default: dry-run report only)",
+    )
+    import_manual.add_argument("--imported-by", default="cli")
+    import_manual.add_argument(
+        "--templates-dir", default=None,
+        help="template directory (default: docker/integration/manual-import-templates)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -628,6 +741,7 @@ def main(argv=None):
         "publish-bi": _handle_publish_bi,
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
+        "import-manual": _handle_import_manual,
         "status": _handle_status,
     }
 

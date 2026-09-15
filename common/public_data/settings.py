@@ -33,6 +33,10 @@ class Settings:
     wdt_database: DatabaseSettings
     mart_database: DatabaseSettings
     source_config_path: Path
+    #: 人工报表导入通道的 raw 库（C 类数据源）。可选环境变量
+    #: ``PUBLIC_DATA_MANUAL_DATABASE``；不配时按
+    #: ``raw_manual`` + 环境后缀推导，既有部署无需改配置即可建表。
+    manual_database: DatabaseSettings | None = None
     #: Optional version-controlled workday-calendar seed consumed by the
     #: extraction layer.  Unset means "skip ``dim_calendar``" rather than fail:
     #: the fact projections stay valid without it.
@@ -76,6 +80,16 @@ class Settings:
             "wdt": values["PUBLIC_DATA_WDT_DATABASE"],
             "mart": values["PUBLIC_DATA_MART_DATABASE"],
         }
+        # 人工报表库可选：不配时按环境推导，保证「测试环境强制 *_test」
+        # 这条铁律对新增库同样成立。
+        manual_name = (environment.get("PUBLIC_DATA_MANUAL_DATABASE") or "").strip()
+        if manual_name:
+            database_names["manual"] = manual_name
+        else:
+            database_names["manual"] = (
+                "raw_manual_test" if app_env == "test" else "raw_manual"
+            )
+
         for database_name in database_names.values():
             is_test_database = database_name.endswith("_test")
             if app_env == "test" and not is_test_database:
@@ -133,6 +147,9 @@ class Settings:
             ),
             wdt_database=DatabaseSettings(name=database_names["wdt"], **connection_values),
             mart_database=DatabaseSettings(name=database_names["mart"], **connection_values),
+            manual_database=DatabaseSettings(
+                name=database_names["manual"], **connection_values
+            ),
             source_config_path=config_path,
             calendar_seed_path=calendar_seed_path,
             org_seed_path=org_seed_path,

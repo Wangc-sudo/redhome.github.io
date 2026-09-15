@@ -30,7 +30,8 @@ from common.bi_web.config import (
 )
 
 #: The registry card ids: seventeen stage-B cards (含 SKU 环形图) 加四张
-#: 商品动销卡（2026-09-15 商渠明细），共 21 张。
+#: 商品动销卡（2026-09-15 商渠明细），再加两张派生口径卡（CubeSchema §2
+#: 的缺口/告警与缺口 TOP），共 23 张。
 STAGE_B_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
@@ -53,6 +54,8 @@ STAGE_B_CARD_IDS = (
     "table_sku_hot_total",
     "table_sku_hot_brand",
     "table_sku_hot_channel",
+    "kpi_shortfall",
+    "anomaly_top",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -88,6 +91,8 @@ EXPECTED_CHARTS = {
     "table_sku_hot_total": "table",
     "table_sku_hot_brand": "table",
     "table_sku_hot_channel": "table",
+    "kpi_shortfall": "table",
+    "anomaly_top": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -113,6 +118,8 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_sku_hot_total": queries.run_table_sku_hot_total,
     "table_sku_hot_brand": queries.run_table_sku_hot_brand,
     "table_sku_hot_channel": queries.run_table_sku_hot_channel,
+    "kpi_shortfall": queries.run_kpi_shortfall,
+    "anomaly_top": queries.run_anomaly_top,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -138,6 +145,8 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_sku_hot_total": {"month": "months"},
     "table_sku_hot_brand": {"brand": "brands", "month": "months"},
     "table_sku_hot_channel": {"channel": "sku_channels", "month": "months"},
+    "kpi_shortfall": {"region": "regions", "month": "months"},
+    "anomaly_top": {"month": "months"},
 }
 
 
@@ -168,7 +177,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(21, len(REGISTRY))
+        self.assertEqual(23, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

@@ -30,6 +30,13 @@ l1-cockpit:
     - card: pie_sku_mtd
       title: "电商 SKU 本月销售占比"
       span: 6
+    # 派生口径（CubeSchema §2）由后端算：缺口/所需日均/四级告警，前端只渲染。
+    - card: anomaly_top
+      title: "今日跟进（缺口 TOP10）"
+      span: 6
+    - card: kpi_shortfall
+      title: "目标缺口与告警"
+      span: 6
     - card: kpi_offline_dod
       title: "线下日环比"
       span: 3

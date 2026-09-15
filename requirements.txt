@@ -9,3 +9,6 @@ httpx==0.28.1
 # bi-web 阶段 2 卡片缓存的 Redis 后端（可选增强；不配置
 # PUBLIC_DATA_REDIS_URL 时惰性到永不导入）。
 redis==5.2.1
+# 人工报表导入通道读 XLSX（CSV 不需要；仍为惰性导入，
+# 见 docs/manual-import-channel.md）。
+openpyxl==3.1.5

@@ -518,16 +518,18 @@ class BiSeedFileTests(unittest.TestCase):
         l1 = configs["l1-cockpit"]
         self.assertEqual(0, l1.nav_order)
         self.assertEqual((), l1.filters)
-        # 结果 → 变化 → 风险：本月累计与目标在前，日环比降为条线辅助。
-        self.assertEqual(9, len(l1.cards))
+        # 结果 → 变化 → 风险：本月累计与目标在前，缺口/告警（派生口径）
+        # 紧跟其后，日环比降为条线辅助。
+        self.assertEqual(11, len(l1.cards))
         self.assertEqual(
             ("kpi_offline_mtd", "kpi_channel_mtd", "kpi_annual_progress",
              "trend_region_daily", "bar_channel_mtd", "table_channel_mtd",
-             "pie_sku_mtd", "kpi_offline_dod", "kpi_channel_dod"),
+             "pie_sku_mtd", "anomaly_top", "kpi_shortfall",
+             "kpi_offline_dod", "kpi_channel_dod"),
             tuple(placement.card for placement in l1.cards),
         )
         self.assertEqual(
-            (4, 4, 4, 8, 4, 12, 6, 3, 3),
+            (4, 4, 4, 8, 4, 12, 6, 6, 6, 3, 3),
             tuple(placement.span for placement in l1.cards),
         )
 

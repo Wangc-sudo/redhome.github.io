@@ -9,7 +9,9 @@ month) and adds eleven cards; the SKU cockpit donut
 (``pie_sku_mtd``, parameter-less) brings the total to seventeen; the
 product-movement board (``l2-product``) adds four more (``kpi_sku_mtd``
 plus the total / per-brand / per-channel hot-SKU tables) for
-twenty-one in all.
+twenty-one in all; the derived-metric half of the CubeSchema brings two
+more (``kpi_shortfall`` with the region/month whitelist and the
+parameter-light ``anomaly_top``) for twenty-three.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -132,6 +134,14 @@ _CARDS = (
     _card(
         "table_sku_hot_channel", "table", queries.run_table_sku_hot_channel,
         {"channel": "sku_channels", "month": "months"},
+    ),
+    _card(
+        "kpi_shortfall", "table", queries.run_kpi_shortfall,
+        {"region": "regions", "month": "months"},
+    ),
+    _card(
+        "anomaly_top", "table", queries.run_anomaly_top,
+        {"month": "months"},
     ),
 )
 

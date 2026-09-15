@@ -3,6 +3,10 @@ import re
 from datetime import datetime, timezone
 
 from common.public_data.finance_schema import all_table_definitions
+from common.public_data.manual_import.schema import (
+    mart_manual_ddl_statements,
+    raw_manual_ddl_statements,
+)
 from common.public_data.mart_extract_schema import (
     legacy_ddl_statements as extract_ddl,
     finance_ddl_statements,
@@ -225,6 +229,16 @@ def _build_mart_dim_target_ddl() -> tuple[str, ...]:
     return (_DIM_TARGET_DDL,)
 
 
+def _build_raw_manual_ddl() -> tuple[str, ...]:
+    """人工报表导入通道的 raw 表（C 类数据源，见 docs/manual-import-channel.md）。"""
+    return raw_manual_ddl_statements()
+
+
+def _build_mart_manual_ddl() -> tuple[str, ...]:
+    """人工报表的 mart 窄表 ``fact_manual_report``（bi-web 只读本表）。"""
+    return mart_manual_ddl_statements()
+
+
 def _build_mart_extract_ddl() -> tuple[str, ...]:
     return extract_ddl()
 
@@ -241,6 +255,8 @@ _MIGRATIONS = (
     ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
     ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
     ("mart-ops-dim-target-v1", "mart", _build_mart_dim_target_ddl()),
+    ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
+    ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
 )
 
 
@@ -298,18 +314,51 @@ def _apply_to_connection(connection, version_statements, applied_checksums):
         cursor.close()
 
 
+#: 人工报表通道在 mart 侧的版本（与 raw 侧配套，见 _MIGRATIONS）。
+_MANUAL_MART_VERSIONS = ("mart-ops-manual-report-v1",)
+
+
+def apply_manual_migrations(manual_connection, mart_connection, applied_checksums=None):
+    """只应用人工报表导入通道的迁移。
+
+    sync / extract 热路径从不碰 ``raw_manual``，不必为它多开一条连接；
+    通道自己跑（``migrate`` 或 ``import-manual``）时才建表。
+    """
+    manual_versions = [
+        (v, stmts) for v, t, stmts in _MIGRATIONS if t == "manual"
+    ]
+    mart_versions = [
+        (v, stmts) for v, _, stmts in _MIGRATIONS if v in _MANUAL_MART_VERSIONS
+    ]
+    _apply_to_connection(manual_connection, manual_versions, applied_checksums)
+    _apply_to_connection(mart_connection, mart_versions, applied_checksums)
+
+
 def apply_live_migrations(
     dingtalk_connection,
     wdt_connection,
     mart_connection,
     applied_checksums=None,
+    *,
+    manual_connection=None,
 ):
+    """Apply every registered migration to its own database.
+
+    *manual_connection* is the optional ``raw_manual`` database for the
+    manual-report import channel.  It is keyword-only and optional so the
+    pre-existing callers (sync / extract, which never touch ``raw_manual``)
+    keep their three-connection signature -- the manual tables are built by
+    ``migrate`` and by ``import-manual``, not by the sync hot path.
+    """
     dingtalk_versions = [
         (v, stmts) for v, t, stmts in _MIGRATIONS if t == "dingtalk"
     ]
     wdt_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "wdt"]
     mart_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "mart"]
+    manual_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "manual"]
 
     _apply_to_connection(dingtalk_connection, dingtalk_versions, applied_checksums)
     _apply_to_connection(wdt_connection, wdt_versions, applied_checksums)
     _apply_to_connection(mart_connection, mart_versions, applied_checksums)
+    if manual_connection is not None:
+        _apply_to_connection(manual_connection, manual_versions, applied_checksums)
