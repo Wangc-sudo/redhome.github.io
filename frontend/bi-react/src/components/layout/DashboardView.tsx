@@ -1,3 +1,14 @@
+/**
+ * 单个看板视图：取后端定义 → 生成栅格 → 每张卡独立取数。
+ *
+ * 数据流：
+ *   /api/v1/dashboards/{id} → useDashboardDef → def.cards[]
+ *   → GridItem[]（每张卡包装成 WidgetCard）
+ *   → DashboardGrid（拖拽布局）
+ *
+ * 切看板即重置筛选/下钻（避免上一张板的 region 串到新板）
+ * 卡片高度按 chart 给默认值（rowHeight=64），后端若补 min_h 再改成透传
+ */
 import { useEffect, useMemo } from 'react';
 import { useDashboardDef } from '../../data/useDashboard';
 import { useDrill } from '../../hooks/useDrill';
@@ -6,8 +17,6 @@ import { EmptyState, ErrorState, LoadingState } from '../common/States';
 import { DashboardGrid, type GridItem } from './DashboardGrid';
 import { FilterBar } from './FilterBar';
 import { WidgetCard } from './WidgetCard';
-
-// 单个看板视图：取后端定义 → 生成栅格 → 每张卡独立取数。
 // 卡片高度按 chart 给默认值（rowHeight=64），后端若补 min_h 再改成透传。
 const HEIGHT: Record<ChartKind, number> = { scalar: 2, line: 5, bar: 5, pie: 5, table: 7 };
 

@@ -91,9 +91,9 @@
 - [ ] 指标 owner 落位（现为 `@TODO-OWNER` 占位）
 
 ### P3 · 产品
-- [ ] `derive.ts` 整文件删除（后端补齐后置 `VITE_DERIVE=0`）
+- [ ] `derive.ts` 整文件删除（后端派生口径已就绪 ✅，等待前端确认可关闭）
 - [ ] 下钻/联动（待后端支持 grain 参数）
-- [ ] `ConclusionBar` / `AnomalyList` 接线（组件已实现，后端暂无对应卡）
+- [ ] `ConclusionBar` / `AnomalyList` 接线（组件已实现，待后端补 `conclusion`/`anomaly` 卡）
 
 ---
 
@@ -102,6 +102,6 @@
 | 风险 | 影响 | 处置 |
 |---|---|---|
 | 日历仅覆盖 2026-09 | 季度/同比模块上线即失效 | 单独立项，已知且已文档化 |
-| `bi-react` 此前无任何 CI 门禁 | 回归无人拦截 | 已补 typecheck/build/vitest 三道 |
+| `bi-react` 此前无任何 CI 门禁 | 回归无人拦截 | ✅ 已补 typecheck/build/vitest 三道 |
 | 人工报表依赖业务给表头 | 阻塞五个需求页 | 通道已就绪，等输入即可 |
-| 派生口径双端实现（临时） | 漂移风险 | golden 夹具 + 守卫断言，删除前须对拍一致 |
+| 派生口径双端实现（临时） | 漂移风险 | ✅ golden 夹具对拍一致，可安全删除前端临时实现 |

@@ -82,8 +82,15 @@ class OutboxRepository:
     # gateway 侧
     # ------------------------------------------------------------------
 
-    def fetch_pending(self, *, limit=100, max_attempts=DEFAULT_MAX_ATTEMPTS):
-        """取待投递行（最老优先）；``at_user_ids`` 已解析为 list。"""
+    def fetch_pending(
+        self, *, limit=100, max_attempts=DEFAULT_MAX_ATTEMPTS, skip_locked=True
+    ):
+        """取待投递行（最老优先）；``at_user_ids`` 已解析为 list。
+
+        *skip_locked*（默认开）追加 ``FOR UPDATE SKIP LOCKED``：并发 gateway
+        实例在事务内各领各行，不重复投递；锁随调用方批次提交释放。目标库
+        为 MySQL 8.0+（集成环境 8.4）；旧内核可显式传 ``False`` 退化。
+        """
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise OutboxError("fetch_pending limit must be 1..1000")
         sql = (
@@ -93,6 +100,8 @@ class OutboxRepository:
             "WHERE `status` = 'pending' AND `attempts` < %s "
             "ORDER BY `created_at` LIMIT %s"
         )
+        if skip_locked:
+            sql += " FOR UPDATE SKIP LOCKED"
         with contextlib.closing(self._connection.cursor()) as cursor:
             cursor.execute(sql, (max_attempts, limit))
             rows = [dict(row) for row in cursor.fetchall()]
@@ -141,3 +150,40 @@ class OutboxRepository:
             return None
         status = row["status"] if isinstance(row, dict) else row[0]
         return status == "failed"
+
+    # ------------------------------------------------------------------
+    # 控制面（死信观测与重投）
+    # ------------------------------------------------------------------
+
+    def list_failed(self, *, limit=100):
+        """死信（``failed``）行查询：dedupe_key、重试次数与**错误码**。
+
+        只返回可观测字段，不含 ``body_md`` 等载荷，供控制面/CLI 安全输出。
+        """
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise OutboxError("list_failed limit must be 1..1000")
+        sql = (
+            "SELECT `dedupe_key`, `region`, `kind`, `business_date`, "
+            "`attempts`, `last_error`, `created_at` "
+            "FROM `robot_outbox` "
+            "WHERE `status` = 'failed' "
+            "ORDER BY `created_at` LIMIT %s"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.execute(sql, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def requeue(self, dedupe_key):
+        """死信重投：``failed`` → ``pending``，attempts 清零、错误码清空。
+
+        带状态守卫：只命中 ``failed`` 行，返回是否实际重置（幂等——重复
+        重投同一 key 第二次返回 ``False``，不影响在途投递）。
+        """
+        sql = (
+            "UPDATE `robot_outbox` "
+            "SET `status` = 'pending', `attempts` = 0, `last_error` = NULL "
+            "WHERE `dedupe_key` = %s AND `status` = 'failed'"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.execute(sql, (dedupe_key,))
+            return cursor.rowcount == 1

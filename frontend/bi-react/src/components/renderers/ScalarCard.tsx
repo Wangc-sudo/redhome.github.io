@@ -1,7 +1,18 @@
+/**
+ * KPI 卡：吃标量 CubeSchema（rows[0] + derived），只渲染不算。
+ *
+ * 数据流：
+ *   CardPayload.scalar → cardToCube(fromScalar) → CubeSchema{chart:'scalar'}
+ *   → derived['card_id'] = { target, done, progressRate, delta, missing }
+ *
+ * 展示规则：
+ *   - value == null → 显示「—」
+ *   - progressRate → 进度条（封顶 100%，原值保留用于告警）
+ *   - delta → 环比方向色（涨红跌绿）
+ *   - confidence:'low' → 低置信标注
+ */
 import type { CubeSchema } from '../../types/cube';
 import { deltaClass, formatDelta, formatPct, scaleMoney } from '../../utils/format';
-
-// KPI 卡：吃标量 CubeSchema（rows[0] + derived），只渲染不算。
 // 缺失 → 显示「—」且不渲染数字；环比方向色由 .delta.up/.down 决定（涨红跌绿）。
 export function ScalarCard({ cube }: { cube: CubeSchema }) {
   const key = cube.rowKeys?.[0];

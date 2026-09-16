@@ -1,9 +1,15 @@
+/**
+ * 异常清单：缺口 TOP N（降序），直接回答「今天该跟进谁」。
+ *
+ * 数据流：
+ *   后端 kpi_shortfall/anomaly_top 卡 → CubeSchema{derived.shortfall, derived.alert}
+ *   → 本渲染器按 shortfall 降序取 topN
+ *
+ * 排序键 = derived.shortfall（CubeSchema §2.1 的绝对缺口），missing 不参与排序
+ * ⚠️ 本渲染器只**读取**派生结果，不含任何缺口算式（算式在后端 derived.py）
+ */
 import type { CubeSchema } from '../../types/cube';
 import { AlertChip } from './AlertChip';
-
-// 异常清单：缺口 TOP N（降序），直接回答「今天该跟进谁」。
-// 排序键 = derived.shortfall（CubeSchema §2.1 的绝对缺口），missing 不参与。
-// ⚠️ 本渲染器只**读取**派生结果，不含任何缺口算式（算式在 data/derive.ts）。
 interface Props {
   cube: CubeSchema;
   topN?: number;

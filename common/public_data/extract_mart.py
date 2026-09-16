@@ -8,12 +8,17 @@
 入口（spec §4）；摘要以 ``source_name='extract'`` 落库，与
 ``sync-dingtalk`` / ``sync-wdt`` 的摘要区分开。
 
-投影是**全量**的：raw 是唯一可重放层（spec §6），所以提取层从本地 raw 重建
-整张 mart 表、绝不重读源；``ON DUPLICATE KEY UPDATE`` 保证幂等。
+投影只从本地 raw 重建、绝不重读源（spec §6：raw 是唯一可重放层）。默认
+**增量**：有水位列（``synced_at``）的源表按上次成功运行的水位窗口过滤，
+内容 digest 未变化的数据集整体跳过写入；``ON DUPLICATE KEY UPDATE``
+保证任意窗口都可安全重放。构造开关 ``incremental=False`` /
+``full_rebuild=True`` 可一键回退到全量替换语义。
 """
 
 import contextlib
 import hashlib
+import logging
+import textwrap
 from dataclasses import dataclass, field
 
 from common.calendar_utils import month_days
@@ -29,6 +34,28 @@ EXTRACT_SOURCE_NAME = "extract"
 
 #: ``sync_dataset_summary`` 里工作日历那一条的数据集名。
 CALENDAR_DATASET = "dim_calendar"
+
+logger = logging.getLogger(__name__)
+
+#: 窗口过滤使用的源侧水位列。raw 钉钉表统一带有 ``synced_at`` 技术列
+#: （DATETIME(6)，含索引）；业务列 ``updated_at`` 多为 DATE 粒度，作水位
+#: 会整天重放，故不采用。
+WINDOW_WATERMARK_COLUMN = "synced_at"
+
+_WINDOWED_TABLES_CACHE = None
+
+
+def _windowed_source_tables():
+    """返回拥有水位列、可窗口过滤的 raw 源表集合（惰性加载并缓存）。"""
+
+    global _WINDOWED_TABLES_CACHE
+    if _WINDOWED_TABLES_CACHE is None:
+        from common.public_data.finance_schema import all_table_definitions
+
+        _WINDOWED_TABLES_CACHE = frozenset(
+            table.name for table in all_table_definitions()
+        )
+    return _WINDOWED_TABLES_CACHE
 
 
 class MartExtractError(RuntimeError):
@@ -58,6 +85,7 @@ class MartExtractRepository:
         self._raw = raw_connection
         self._mart = mart_connection
         self._wdt = wdt_connection
+        self._has_skipped_column = None
 
     @property
     def wdt_connection(self):
@@ -139,19 +167,27 @@ class MartExtractRepository:
                     )
         return len(rows)
 
-    def read_dataset(self, dataset):
-        """按列白名单读取 ``dataset.source_table`` 的全部行。
+    def read_dataset(self, dataset, since=None):
+        """按列白名单读取 ``dataset.source_table`` 的行。
 
         返回字典的键即**目标列名**，所以投影只搬运被显式登记的列——
         作废列与钉钉技术列在 SQL 层就已排除，而非读出来再丢弃。
+
+        *since* 非空时只读 ``synced_at`` 在该水位之后（含）的行：raw 侧
+        upsert 会刷新 ``synced_at``，窗口内的行集恰好覆盖「上次提取以来
+        变化过」的记录；闭区间 + mart 侧幂等 upsert，窗口可安全重放。
         """
         projections = ["`dingtalk_record_id` AS `source_record_id`"]
         projections += [
             f"`{source}` AS `{target}`" for source, target in dataset.columns
         ]
         sql = f"SELECT {', '.join(projections)} FROM `{dataset.source_table}`"
+        params = None
+        if since is not None:
+            sql += f" WHERE `{WINDOW_WATERMARK_COLUMN}` >= %s"
+            params = (since,)
         with contextlib.closing(self._raw.cursor()) as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -206,13 +242,14 @@ class MartExtractRepository:
         ``synced_at`` 的 ``sync_run_id`` 圈定。从未同步过时返回空列表——
         调用方据此**跳过**投影，而不是把维度清成空表。
         """
-        sql = (
-            "SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name` "
-            "FROM `dingtalk_org_member` "
-            "WHERE `sync_run_id` = ("
-            "  SELECT `sync_run_id` FROM `dingtalk_org_member` "
-            "  ORDER BY `synced_at` DESC LIMIT 1"
-            ")"
+        sql = textwrap.dedent(
+            """\
+            SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name`
+            FROM `dingtalk_org_member`
+            WHERE `sync_run_id` = (
+              SELECT `sync_run_id` FROM `dingtalk_org_member`
+              ORDER BY `synced_at` DESC LIMIT 1
+            )"""
         )
         with contextlib.closing(self._raw.cursor()) as cursor:
             cursor.execute(sql)
@@ -247,6 +284,185 @@ class MartExtractRepository:
                         for row in rows
                     ],
                 )
+
+
+    # ------------------------------------------------------------------
+    # Incremental extraction
+    # ------------------------------------------------------------------
+
+    def upsert_dim_calendar(self, rows, *, sync_run_id, synced_at):
+        """以 upsert 语义写入 ``dim_calendar``（增量默认路径）。
+
+        效果与 ``replace_dim_calendar`` 等价（种子中消失的日期随之删除），
+        但只写变化的行：命中主键原地更新，不在本次集合内的日期按行删除。
+        整体在调用方事务内执行，重跑安全。
+        """
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            if not rows:
+                cursor.execute(f"DELETE FROM `{DIM_CALENDAR}`")
+                return
+            cursor.executemany(
+                textwrap.dedent(
+                    """\
+                    INSERT INTO `dim_calendar`
+                    (`business_date`, `is_workday`, `source`, `note`,
+                     `synced_at`, `sync_run_id`)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      `is_workday` = VALUES(`is_workday`),
+                      `source` = VALUES(`source`),
+                      `note` = VALUES(`note`),
+                      `synced_at` = VALUES(`synced_at`),
+                      `sync_run_id` = VALUES(`sync_run_id`)"""
+                ),
+                [
+                    (business_date, is_workday, source, note,
+                     synced_at, sync_run_id)
+                    for business_date, is_workday, source, note in rows
+                ],
+            )
+            placeholders = ", ".join(["%s"] * len(rows))
+            cursor.execute(
+                f"DELETE FROM `{DIM_CALENDAR}` "
+                f"WHERE `business_date` NOT IN ({placeholders})",
+                tuple(business_date for business_date, *_ in rows),
+            )
+
+    def upsert_dim_robot_member(self, rows, *, sync_run_id, synced_at):
+        """以 upsert 语义写入 ``dim_robot_member``（增量默认路径）。
+
+        与 ``replace_dim_robot_member`` 等价：离职成员（不在本次集合内）
+        随之删除，在职成员原地更新。
+        """
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            if not rows:
+                cursor.execute(f"DELETE FROM `{DIM_ROBOT_MEMBER}`")
+                return
+            cursor.executemany(
+                textwrap.dedent(
+                    """\
+                    INSERT INTO `dim_robot_member`
+                    (`user_id`, `name`, `region`, `dept_id`, `dept_name`,
+                     `is_active`, `synced_at`, `sync_run_id`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      `name` = VALUES(`name`),
+                      `region` = VALUES(`region`),
+                      `dept_id` = VALUES(`dept_id`),
+                      `dept_name` = VALUES(`dept_name`),
+                      `is_active` = VALUES(`is_active`),
+                      `synced_at` = VALUES(`synced_at`),
+                      `sync_run_id` = VALUES(`sync_run_id`)"""
+                ),
+                [
+                    (
+                        row["user_id"],
+                        row["name"],
+                        row["region"],
+                        row.get("dept_id"),
+                        row.get("dept_name"),
+                        1,
+                        synced_at,
+                        sync_run_id,
+                    )
+                    for row in rows
+                ],
+            )
+            placeholders = ", ".join(["%s"] * len(rows))
+            cursor.execute(
+                f"DELETE FROM `{DIM_ROBOT_MEMBER}` "
+                f"WHERE `user_id` NOT IN ({placeholders})",
+                tuple(row["user_id"] for row in rows),
+            )
+
+    def last_extract_started_at(self, dataset_name):
+        """最近一次为该数据集写过摘要的 extract run 的 ``started_at``。
+
+        作为窗口水位：摘要在该数据集数据提交之后才落库，所以该水位不会
+        越过「已入库」边界；用 ``started_at`` 而非 ``completed_at``，避免
+        漏掉「提取运行期间 raw 侧新写入」的行。从未写过摘要时返回
+        ``None``（首次运行，调用方走全量）。
+        """
+        sql = textwrap.dedent(
+            """\
+            SELECT r.`started_at`
+            FROM `sync_runs` r
+            JOIN `sync_dataset_summary` s ON s.`sync_run_id` = r.`sync_run_id`
+            WHERE s.`source_name` = %s AND s.`dataset_name` = %s
+            ORDER BY r.`started_at` DESC
+            LIMIT 1"""
+        )
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(sql, (EXTRACT_SOURCE_NAME, dataset_name))
+            rows = cursor.fetchall()
+        return rows[0]["started_at"] if rows else None
+
+    def last_summary_digest(self, dataset_name):
+        """该数据集最近一次摘要的 ``record_id_digest``；无历史返回 ``None``。"""
+
+        sql = textwrap.dedent(
+            """\
+            SELECT `record_id_digest`
+            FROM `sync_dataset_summary`
+            WHERE `source_name` = %s AND `dataset_name` = %s
+            ORDER BY `completed_at` DESC
+            LIMIT 1"""
+        )
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(sql, (EXTRACT_SOURCE_NAME, dataset_name))
+            rows = cursor.fetchall()
+        return rows[0]["record_id_digest"] if rows else None
+
+    def has_skipped_column(self):
+        """探测 ``sync_dataset_summary.skipped`` 列是否已迁移（fail-open）。
+
+        迁移未应用（或探测失败）时返回 ``False``，调用方降级为普通摘要
+        并记录日志——绝不因缺列而中断提取。
+        """
+        if self._has_skipped_column is None:
+            try:
+                sql = textwrap.dedent(
+                    """\
+                    SELECT COUNT(*) AS `n`
+                    FROM `information_schema`.`COLUMNS`
+                    WHERE `TABLE_SCHEMA` = DATABASE()
+                      AND `TABLE_NAME` = 'sync_dataset_summary'
+                      AND `COLUMN_NAME` = 'skipped'"""
+                )
+                with contextlib.closing(self._mart.cursor()) as cursor:
+                    cursor.execute(sql)
+                    rows = cursor.fetchall()
+                self._has_skipped_column = bool(
+                    rows and next(iter(rows[0].values()))
+                )
+            except Exception:
+                logger.warning(
+                    "检测 sync_dataset_summary.skipped 列失败，按未迁移处理",
+                    exc_info=True,
+                )
+                self._has_skipped_column = False
+        return self._has_skipped_column
+
+    def save_skipped_summary(
+        self, *, sync_run_id, dataset_name, records_read,
+        record_id_digest, completed_at,
+    ):
+        """写入「跳过」摘要：``raw_records_written=0``、``skipped=1``。"""
+
+        sql = textwrap.dedent(
+            """\
+            INSERT INTO `sync_dataset_summary`
+            (`sync_run_id`, `source_name`, `dataset_name`,
+             `records_read`, `raw_records_written`,
+             `record_id_digest`, `completed_at`, `skipped`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+        )
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(
+                sql,
+                (sync_run_id, EXTRACT_SOURCE_NAME, dataset_name,
+                 records_read, 0, record_id_digest, completed_at, 1),
+            )
 
 
 def _projector_for_kind(kind):
@@ -289,6 +505,8 @@ class MartExtractService:
         new_run_id,
         datasets=EXTRACT_DATASETS,
         calendar_months=(),
+        incremental=True,
+        full_rebuild=False,
     ):
         self._repository = repository
         self._mart_repository = mart_repository
@@ -297,6 +515,10 @@ class MartExtractService:
         self._new_run_id = new_run_id
         self._datasets = tuple(datasets)
         self._calendar_months = tuple(calendar_months)
+        # 一键回退开关：incremental=False 关闭窗口过滤与 digest 跳过；
+        # full_rebuild=True 进一步把 dim 写回「整表替换」旧语义。
+        self._incremental = incremental
+        self._full_rebuild = full_rebuild
 
     # ------------------------------------------------------------------
     # Public API
@@ -381,12 +603,25 @@ class MartExtractService:
         with named_lock(
             self._mart_connection, f"public-data:extract:{dataset.dataset}"
         ):
-            rows = self._repository.read_dataset(dataset)
-
-            with transaction(self._mart_connection):
-                self._repository.upsert_fact(
-                    dataset, rows, sync_run_id=run_id, synced_at=synced_at
+            since, degrade_reason = self._read_window(dataset)
+            if degrade_reason:
+                logger.warning("dataset=%s %s", dataset.dataset, degrade_reason)
+            rows = self._repository.read_dataset(dataset, since=since)
+            record_ids = [row.get("source_record_id") for row in rows]
+            digest = self._compute_digest(record_ids)
+            skipped = self._should_skip_dataset(
+                dataset.dataset, rows, digest, since
+            )
+            if skipped:
+                logger.info(
+                    "dataset=%s 无变化，跳过写入（records_read=%d）",
+                    dataset.dataset, len(rows),
                 )
+            else:
+                with transaction(self._mart_connection):
+                    self._repository.upsert_fact(
+                        dataset, rows, sync_run_id=run_id, synced_at=synced_at
+                    )
 
         # raw 侧在提取层之前就已物化，所以这一步的含义是「首个产出已提交」；
         # 复用 sync_runs 既有状态机（started -> raw_committed -> completed）。
@@ -395,12 +630,47 @@ class MartExtractService:
         try:
             return self._save_summary(
                 dataset=dataset.dataset,
-                record_ids=[row.get("source_record_id") for row in rows],
+                record_ids=record_ids,
                 records_read=len(rows),
+                records_written=0 if skipped else len(rows),
                 run_id=run_id,
+                skipped=skipped,
+                digest=digest,
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc
+
+    def _read_window(self, dataset):
+        """返回 ``(since, degrade_reason)``；``since=None`` 表示全量读取。
+
+        无水位列的数据集**显式降级**为全量并给出原因（调用方记 WARNING），
+        绝不静默；首次运行（无历史水位）记 INFO 后同样全量。
+        """
+        if not self._incremental or self._full_rebuild:
+            return None, None
+        if dataset.source_table not in _windowed_source_tables():
+            return None, (
+                f"源表 {dataset.source_table} 未登记 "
+                f"{WINDOW_WATERMARK_COLUMN} 水位列，显式降级为全量扫描"
+            )
+        since = self._repository.last_extract_started_at(dataset.dataset)
+        if since is None:
+            logger.info(
+                "dataset=%s 首次运行，无历史水位，全量扫描", dataset.dataset
+            )
+        return since, None
+
+    def _should_skip_dataset(self, dataset_name, rows, digest, since):
+        """窗口为空或（全量读取时）digest 命中历史摘要 → 跳过写入。"""
+        if not rows:
+            return True
+        if not self._incremental or self._full_rebuild:
+            return False
+        if since is not None:
+            # 窗口内是增量子集，与历史全量 digest 口径不同，不做比较。
+            return False
+        previous = self._repository.last_summary_digest(dataset_name)
+        return previous is not None and previous == digest
 
     def _extract_projection(self, dataset, run_id, synced_at):
         projector = _projector_for_kind(dataset.kind)
@@ -428,10 +698,29 @@ class MartExtractService:
                 for day in month_days(year, month)
             )
 
-        with transaction(self._mart_connection):
-            self._repository.replace_dim_calendar(
-                rows, sync_run_id=run_id, synced_at=synced_at
-            )
+        # 跳过判定的 digest 覆盖整行内容（含 is_workday/source），而非只
+        # 覆盖日期——休息日规则调整也必须触发重写。
+        digest = self._content_digest(
+            f"{business_date.isoformat()}|{is_workday}|{source}|{note or ''}"
+            for business_date, is_workday, source, note in rows
+        )
+        skipped = (
+            self._incremental
+            and not self._full_rebuild
+            and self._repository.last_summary_digest(CALENDAR_DATASET) == digest
+        )
+        if skipped:
+            logger.info("dataset=%s 内容 digest 未变化，跳过写入", CALENDAR_DATASET)
+        else:
+            with transaction(self._mart_connection):
+                if self._full_rebuild:
+                    self._repository.replace_dim_calendar(
+                        rows, sync_run_id=run_id, synced_at=synced_at
+                    )
+                else:
+                    self._repository.upsert_dim_calendar(
+                        rows, sync_run_id=run_id, synced_at=synced_at
+                    )
 
         self._mart_repository.mark_raw_committed(run_id)
 
@@ -440,7 +729,10 @@ class MartExtractService:
                 dataset=CALENDAR_DATASET,
                 record_ids=[business_date.isoformat() for business_date, *_ in rows],
                 records_read=len(rows),
+                records_written=0 if skipped else len(rows),
                 run_id=run_id,
+                skipped=skipped,
+                digest=digest,
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc
@@ -456,10 +748,30 @@ class MartExtractService:
         if not rows:
             return None
 
-        with transaction(self._mart_connection):
-            self._repository.replace_dim_robot_member(
-                rows, sync_run_id=run_id, synced_at=synced_at
+        digest = self._content_digest(
+            "{}|{}|{}|{}|{}".format(
+                row["user_id"], row["name"], row["region"],
+                row.get("dept_id") or "", row.get("dept_name") or "",
             )
+            for row in rows
+        )
+        skipped = (
+            self._incremental
+            and not self._full_rebuild
+            and self._repository.last_summary_digest(DIM_ROBOT_MEMBER) == digest
+        )
+        if skipped:
+            logger.info("dataset=%s 内容 digest 未变化，跳过写入", DIM_ROBOT_MEMBER)
+        else:
+            with transaction(self._mart_connection):
+                if self._full_rebuild:
+                    self._repository.replace_dim_robot_member(
+                        rows, sync_run_id=run_id, synced_at=synced_at
+                    )
+                else:
+                    self._repository.upsert_dim_robot_member(
+                        rows, sync_run_id=run_id, synced_at=synced_at
+                    )
 
         self._mart_repository.mark_raw_committed(run_id)
 
@@ -468,7 +780,10 @@ class MartExtractService:
                 dataset=DIM_ROBOT_MEMBER,
                 record_ids=[row["user_id"] for row in rows],
                 records_read=len(rows),
+                records_written=0 if skipped else len(rows),
                 run_id=run_id,
+                skipped=skipped,
+                digest=digest,
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc
@@ -477,26 +792,64 @@ class MartExtractService:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _save_summary(self, *, dataset, record_ids, records_read, run_id, records_written=None):
+    def _save_summary(
+        self, *, dataset, record_ids, records_read, run_id,
+        records_written=None, skipped=False, digest=None,
+    ):
         if records_written is None:
             records_written = records_read
-        digest = self._compute_digest(record_ids)
-        self._mart_repository.save_dataset_summary(
-            sync_run_id=run_id,
-            source_name=EXTRACT_SOURCE_NAME,
-            dataset_name=dataset,
-            records_read=records_read,
-            raw_records_written=records_written,
-            record_id_digest=digest,
-            completed_at=self._now(),
-        )
+        if digest is None:
+            digest = self._compute_digest(record_ids)
+        if skipped:
+            self._save_skipped_summary(
+                dataset=dataset, records_read=records_read,
+                digest=digest, run_id=run_id,
+            )
+        else:
+            self._mart_repository.save_dataset_summary(
+                sync_run_id=run_id,
+                source_name=EXTRACT_SOURCE_NAME,
+                dataset_name=dataset,
+                records_read=records_read,
+                raw_records_written=records_written,
+                record_id_digest=digest,
+                completed_at=self._now(),
+            )
         return {
             "source": EXTRACT_SOURCE_NAME,
             "dataset": dataset,
             "records_read": records_read,
             "raw_records_written": records_written,
             "record_id_digest": digest,
+            "skipped": skipped,
         }
+
+    def _save_skipped_summary(self, *, dataset, records_read, digest, run_id):
+        """写「跳过」摘要；skipped 列未迁移时降级为普通摘要 + WARNING。"""
+
+        if self._repository.has_skipped_column():
+            self._repository.save_skipped_summary(
+                sync_run_id=run_id,
+                dataset_name=dataset,
+                records_read=records_read,
+                record_id_digest=digest,
+                completed_at=self._now(),
+            )
+            return
+        logger.warning(
+            "sync_dataset_summary 缺少 skipped 列（迁移未应用），"
+            "dataset=%s 的跳过标记降级为普通摘要（raw_records_written=0）",
+            dataset,
+        )
+        self._mart_repository.save_dataset_summary(
+            sync_run_id=run_id,
+            source_name=EXTRACT_SOURCE_NAME,
+            dataset_name=dataset,
+            records_read=records_read,
+            raw_records_written=0,
+            record_id_digest=digest,
+            completed_at=self._now(),
+        )
 
     def _plan_digest(self) -> str:
         parts = [
@@ -515,6 +868,14 @@ class MartExtractService:
     def _compute_digest(ids) -> str:
         return hashlib.sha256(
             "\n".join(str(value) for value in sorted(ids)).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _content_digest(parts) -> str:
+        """对任意字符串片段集合求稳定 digest（用于维度内容跳过判定）。"""
+
+        return hashlib.sha256(
+            "\n".join(sorted(parts)).encode("utf-8")
         ).hexdigest()
 
     @staticmethod

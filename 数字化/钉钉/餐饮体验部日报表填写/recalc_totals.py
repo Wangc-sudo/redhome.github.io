@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+"""餐饮部门&体验部 - 合计自动维护（薄包装，逐群重算本群合计行）"""
+import json
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
+REPO_ROOT = BASE_DIR.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from common.daily_robot import recalc_totals, iter_groups
+
+CONFIG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
+
+if __name__ == "__main__":
+    for g in iter_groups(CONFIG):
+        print(f"===== {g.get('name')} =====")
+        recalc_totals(CONFIG, group=g)

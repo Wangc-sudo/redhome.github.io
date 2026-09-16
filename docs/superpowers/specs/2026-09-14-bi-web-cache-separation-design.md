@@ -26,9 +26,12 @@
 
 ## 3. 决策与假设（记录在案）
 
+> ⚠️ **更新（2026-09-15）**：D3 已变更。前端技术栈已从纯静态 JS 改为 **React + Vite + TypeScript**，
+> 详见 `frontend/bi-react/ARCHITECTURE.md`。以下记录原设计，供参考。
+
 - **D1 冷热分离 = 缓存分层，不是存储分层**。窗口含当天（`business_date <= CURDATE()` 仍开放，随 extract 同步在变）= **热**，短 TTL；已封月（参数 month < 当前月，未来行截断后不再变）= **冷**，长 TTL。存储层冷热（拆表/归档）归 extract-mart，不在本范围。
 - **D2 Redis 是可选增强，不是硬依赖**。`PUBLIC_DATA_REDIS_URL` 缺省为空 → 进程内缓存兜底（语义等价现状的单容器部署）；配置了才连。compose 中 redis 走 opt-in profile，bi-web **不 `depends_on` redis**（否则 redis 挂 = bi-web 挂，违反 fail-open）。
-- **D3 前后端分离 = API-first，不上 SPA 框架**。后端停止渲染数据相关 HTML，全部走 `/api/v1/`；前端为纯静态（index.html + dashboard.js + style.css）经 StaticFiles 提供，客户端路由。**不上 React/Vue/Vite**：现状「浏览器无法自带 Authorization 头」（token 面向 API 消费）、「服务端零出网」两条约束不允许引入构建链与 CORS。
+- **D3 ~~前后端分离 = API-first，不上 SPA 框架~~ → 已变更**。实际采用 React + Vite + TypeScript，通过 Vite 代理解决 Authorization 头问题（`loadEnv` 注入 `VITE_BI_WEB_TOKEN`）。详见 `frontend/bi-react/ARCHITECTURE.md`。
 - **D4 人员榜快照**（`queries._people_snapshot` 60s 进程内缓存）不进 Redis：数据经 `mart_collect` 多步聚合、口径已被测试锁定，进程内缓存足够；Redis 只缓存**卡片 JSON 载荷**。
 - **D5 键与周期**：缓存键 = `biweb:card:{card_id}:{规范化参数}:{周期类别}`；周期类别 `cur`（热，键随日翻转）或 `YYYY-MM`（冷，键随月翻转）。参数规范化 = 按名排序拼接，杜绝键爆炸。
 

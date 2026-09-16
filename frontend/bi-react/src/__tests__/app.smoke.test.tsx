@@ -65,8 +65,9 @@ describe('App 冒烟（mock 后端）', () => {
     await waitFor(() => expect(screen.getByText('人员销售榜')).toBeTruthy(), { timeout: 3000 });
     await waitFor(() => expect(screen.getByText('张伟')).toBeTruthy(), { timeout: 3000 });
 
-    // 后端 table_people_leaderboard 没有 severity 列；derive.ts 的告警分支已按裁决删除，
-    // 所以这里**不能**出现任何告警 chip —— 出现即说明有人把前端判定加回来了。
+    // 后端 table_people_leaderboard 没有 severity 列；前端已无任何派生/告警实现
+    // （derive.ts 已整文件删除），所以这里**不能**出现任何告警 chip —— 出现即说明
+    // 有人把前端判定加回来了。
     expect(screen.queryAllByText(/今日跟进|缺口超半月产能|有缺口，持续观察|P0|P1|P2/)).toHaveLength(0);
   });
 });

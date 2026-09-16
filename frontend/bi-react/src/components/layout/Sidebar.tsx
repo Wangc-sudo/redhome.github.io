@@ -1,6 +1,10 @@
+/**
+ * V2 DIGITAL OPS 门户 chrome：侧边栏导航。
+ *
+ * 导航项来自 useDashboardList，返回 {id, title, icon} 列表
+ * 用真实 <a href="#/d/{id}">：URL 可分享、可刷新还原，不再靠内存状态切页
+ */
 import { hrefFor } from '../../router/useHashRoute';
-
-// V2 DIGITAL OPS 门户 chrome：侧边栏导航。
 // 用真实 <a href="#/d/{id}">：URL 可分享、可刷新还原，不再靠内存状态切页。
 export interface NavItem {
   id: string;

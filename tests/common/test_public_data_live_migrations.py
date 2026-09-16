@@ -157,6 +157,55 @@ class LiveMigrationTests(unittest.TestCase):
         self.assertIn("sync_runs", mart_sql)
 
 
+class SummarySkippedMigrationTests(unittest.TestCase):
+    """sync_dataset_summary.skipped 列（mart-ops-summary-skipped-v1）。
+
+    提取层增量化用该列显式标记「跳过」摘要；列是纯追加、带默认值，
+    未迁移时提取代码降级为普通摘要（fail-open）。
+    """
+
+    def test_skipped_migration_is_registered_after_mart_ops_v1(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-ops-summary-skipped-v1", versions)
+        self.assertLess(
+            versions.index("mart-ops-v1"),
+            versions.index("mart-ops-summary-skipped-v1"),
+        )
+
+    def test_fresh_database_adds_the_skipped_column(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn("ALTER TABLE `sync_dataset_summary`", mart_sql)
+        self.assertIn("ADD COLUMN `skipped` TINYINT(1) NOT NULL DEFAULT 0", mart_sql)
+        recorded = [
+            params[0] for _, params in mart.cursor_instance.executed if params
+        ]
+        self.assertIn("mart-ops-summary-skipped-v1", recorded)
+
+    def test_applied_skipped_migration_is_not_replayed(self):
+        # ALTER 没有 IF NOT EXISTS：已应用版本必须按校验和跳过。
+        from common.public_data.live_migrations import (
+            _MIGRATIONS,
+            _combined_checksum,
+        )
+
+        applied = {
+            version: _combined_checksum(statements)
+            for version, _, statements in _MIGRATIONS
+        }
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart, applied_checksums=applied)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertNotIn("ADD COLUMN `skipped`", mart_sql)
+
+
 class OrderLineChannelMigrationTests(unittest.TestCase):
     """fact_order_line 的店铺/渠道维度（迁移 mart-extract-order-line-v2）。
 

@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """dingtalk-gateway（apps 线）：钉钉交互唯一入口。"""
-from .delivery import DeliveryError, DeliverReport, OutboxDeliveryWorker
+from .delivery import (
+    DeliveryError,
+    DeliveryErrorCode,
+    DeliverReport,
+    OutboxDeliveryWorker,
+)
 from .dingtalk_deliverer import DingTalkDeliverer, DwsCommandDingSender
 from .report_intake import (
     IntakeOutcome,
@@ -12,6 +17,7 @@ from .stream_handler import StreamReportHandler
 
 __all__ = [
     "DeliveryError",
+    "DeliveryErrorCode",
     "DeliverReport",
     "OutboxDeliveryWorker",
     "DingTalkDeliverer",

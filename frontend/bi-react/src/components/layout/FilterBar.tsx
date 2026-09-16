@@ -1,7 +1,14 @@
+/**
+ * 筛选条：筛选项与候选值都来自后端（dashboard.filters + /api/v1/options/{source}）。
+ *
+ * 数据流：
+ *   看板定义 def.filters → FilterBar
+ *   → 每个 FilterSelect 独立调 useFilterOptions(source) → /api/v1/options/{source}
+ *
+ * 规则：每个 select 独立订阅共享缓存，避免在父组件循环调 hook（违反 Rule of Hooks）
+ */
 import { useFilterOptions } from '../../data/useDashboard';
 import type { FilterDef } from '../../data/types';
-
-// 筛选条：筛选项与候选值都来自后端（dashboard.filters + /api/v1/options/{source}）。
 // 每个 select 独立订阅共享缓存，避免在父组件循环调 hook。
 function FilterSelect({
   filter,

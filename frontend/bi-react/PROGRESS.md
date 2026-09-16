@@ -159,6 +159,38 @@
 
 ---
 
+## 0.6 收尾批（2026-09-16）：has_fact 诊断角标上线 + derive.ts 整文件删除
+
+| 项 | 结果 |
+|---|---|
+| `npm run typecheck` | ✅ 0 error（前置修复 2 处既有损坏：`useDashboard.ts` 注释块外残留 2 行、`States.tsx` 重复 import） |
+| `npm run build` | ✅ 成功；主包 26.08 → **25.44 kB**（gzip 10.12，derive.ts 移除）；echarts vendor 告警照旧（策略不变） |
+| `npx vitest run` | ✅ **39 passed / 4 skipped**（adapter 12 + 派生卡 12 + golden 守卫 8 + 角标 4 + App 冒烟 3；skip 仍为原 4 条日历用例，无新增） |
+
+### A. has_fact 诊断角标（roadmap P0 最后一项，仅渲染不参与判定）
+- `TableCard.tsx`：行内 `has_fact === false` → 在 name 列（无 name 列退回首列，anomaly_top 首列是 rank 也挂对人）
+  渲染中性「挂零」角标，复用 bi-ui `.badge-defect`；title 注明「不影响告警判定与数值」。**告警 chip 与数值零改动。**
+- `fixtures.ts`：kpi_shortfall / anomaly_top 行补真机字段 `has_fact`（真机 42 人全 true）；
+  另加 1 条「演示·挂零」行（has_fact=false + 后端 p0，形状按 golden `row_no_fact_with_target_is_also_p0`，注释标明非真机）。
+- 新增 `TableCard.hasFact.test.tsx`（4 例）：只挂 false 行 / p0 chip 色·文案原样 / 无 severity 列只挂角标不造 chip / rank 首列时角标仍挂 name 列。
+
+### B. derive.ts 整文件删除（roadmap P3；删除条件已满足）
+- 条件核验：后端 `common/bi_web/derived.py` 就绪且 golden 对拍一致（§0 既有结论）；
+  `VITE_DERIVE=0` 实测：仅 8 条「断言前端补派生」用例失败（即删除对象），后端透传 / golden / 冒烟全绿 ⇒ 关闭路径可行。
+- 删除：`src/data/derive.ts`、`src/data/derive.test.ts`；`VITE_DERIVE` 从 `vite-env.d.ts` / `.env.example` 一并移除。
+- `cardToCube.ts`：摘掉 `deriveCube` 注入；`backendDerivedOf` 语义改为「无 severity = 该行无派生，前端不补」。
+- 测试改造（防回归语义保持）：
+  - `deriveGolden.test.ts` → **文件级守卫**：① derive.ts/.test.ts 不存在；② src 无任何文件 import derive 模块（含动态）；
+    ③ src 无任何文件重新导出 `workdaysInMonth/elapsedWorkdays/remainingWorkdays/severityOf/P1_COEFF/P0_MIN_ELAPSED_WORKDAYS/shortfallOf/rateOf/requiredDaily/deriveRow/deriveCube/momOf`（裁决 #3/#5 钉死清单全覆盖）；
+    ④ golden 夹具完整（24 派生 + ≥3 日历 + severity/mom 期望仍在，逐位对拍职责移交 Python 侧）。日历 skip 组保留（仍 4 条，无新增 skip）。
+  - `derivedCards.test.ts`：「后端 p2 / 前端 p0 以后端为准」反例**保持绿**；has_fact ② 与回归组改写为
+    「无 severity ⇒ 前端零补算，渲染「—」+ 挂零角标」；矛盾待裁决的旧注释按 roadmap 作废声明更新。
+  - `cardToCube.test.ts`：派生注入用例改写为「无 severity ⇒ 无 derived，行字段原样透传」。
+- 行为影响面核验：生产卡片无一受影响 —— kpi_shortfall / anomaly_top 逐行带 severity（后端透传不变）；
+  table_people_leaderboard（completed 列）与 table_channel_mtd（无 target）在 derive.ts 时代本就不产派生。
+
+---
+
 ## 1. 已修开工必修缺陷
 
 | # | 位置 | 问题 | 处理 |
@@ -213,6 +245,7 @@ src/__tests__/app.smoke.test.tsx           App 渲染冒烟（2，走 mock 后�
 
 - `src/components/layout/renderWidget.tsx` —— hook 违规，已被 `WidgetCard` 取代
 - `src/data/cubeClient.ts` —— 按**不存在的契约** `/api/v1/d/{path}` 实现，留着必被误用
+- `src/data/derive.ts` + `src/data/derive.test.ts` —— 过渡派生层（2026-09-16 按路线图 P3 删除；后端 derived.py 为唯一真相源，防回归守卫见 deriveGolden.test.ts）
 
 ---
 
@@ -224,7 +257,7 @@ src/__tests__/app.smoke.test.tsx           App 渲染冒烟（2，走 mock 后�
 | D2 | 后端以 `cards[]` 驱动看板，原 `registry.ts` 静态 widget 定义会与之打架 | `registry.ts` 收敛为**导航兜底**，布局/卡片/筛选一律取后端 `cards[]` | — |
 | D3 | 后端无 `overview` 看板（只有 l1-cockpit / l2-region / l2-channel / l2-product / l2-people） | 默认路由 = 列表第一个（l1-cockpit）；V2 门户页归属待产品确认 | 需要门户页则补一个 dashboard id |
 | D4 | 卡片 payload 是**可视化结构**（`dates/series`、`categories/values`、`items`），不是二维表 | adapter 归一：line→(date, series…)、bar→(category, value)、table→(columns, rows)、pie→(name, value)、scalar→单行+derived | — |
-| D5 | 后端**不产出** CubeSchema §2 的派生指标（shortfall / severity / required_daily / 工作日口径） | `data/derive.ts` 过渡补齐，`VITE_DERIVE=0` 可关；渲染器零算式 | 后端补口径后：置 `VITE_DERIVE=0` → 整文件删除 |
+| D5 | ~~后端**不产出** CubeSchema §2 的派生指标~~ **已闭合（2026-09-16）**：后端 `derived.py` 产出 shortfall / severity / required_daily / 工作日口径 | ~~`data/derive.ts` 过渡补齐~~ derive.ts 已整文件删除；前端零算式，`backendDerivedOf` 只做字段搬运 | — |
 | D6 | 后端卡**不带高度**，只有 `span`（12 栅格宽） | 前端按 chart 给默认高度（scalar 2 / line·bar·pie 5 / table 7，rowHeight 64） | 建议补 `min_h`/`h`，前端即透传 |
 | D7 | `scalar` 卡的 `target/rate` 只有部分卡有；日环比卡给 `prev/delta_pct/trend7` | adapter 有则透传进 `derived`，没有就不臆造 | — |
 | D8 | 筛选项候选值走 `/api/v1/options/{source}`，卡的 `params` 之外的键一律 400 | `pickParams()` 只带声明过的键；FilterBar 每个 select 独立取 options | — |
@@ -235,8 +268,7 @@ src/__tests__/app.smoke.test.tsx           App 渲染冒烟（2，走 mock 后�
 
 ## 6. 剩余 TODO
 
-1. **后端补派生口径**（依赖 B 线）→ 置 `VITE_DERIVE=0` → 删除 `src/data/derive.ts` 与 `derive.test.ts`。
-   （`severity` 分支已先行删除；剩余三项 shortfall/rate/required_daily 的删除条件不变。）
+1. ~~**后端补派生口径** → 置 `VITE_DERIVE=0` → 删除 `src/data/derive.ts` 与 `derive.test.ts`~~：**已完成（2026-09-16，见 §0.6-B）**。
 2. **结论条 / 异常清单接线**：后端给出 `conclusion` / `anomaly` 型卡后，在 `WidgetCard` 的 switch 里接上（组件已就绪）。
 3. ~~**echarts 分包**~~：**已完成**（2026-09-15）。`vite.config.ts` 的 `build.rollupOptions.output.manualChunks`
    把 `react/react-dom`、`echarts/echarts-for-react`、`react-grid-layout/react-resizable` 切成三块，
@@ -257,6 +289,6 @@ src/__tests__/app.smoke.test.tsx           App 渲染冒烟（2，走 mock 后�
 ## 7. 纪律自检
 
 - ✅ 未改 `common/**`、`docker/**`、`tests/**`、`frontend/bi-ui/**`（bi-ui 三件套为**拷贝进** `src/styles/bi-ui/`，源文件零改动）
-- ✅ 渲染器内无 `shortfall / severity / required_daily / 环比` 任何算式（唯一例外是登记的 `src/data/derive.ts`，文件头已写明删除条件；该文件 2026-09-15 起**只含 shortfall/rate/required_daily 三项**，`severity` 已移交后端 `derived.py`）
+- ✅ 渲染器内无 `shortfall / severity / required_daily / 环比` 任何算式（过渡例外 `src/data/derive.ts` 已于 2026-09-16 整文件删除；前端**零**派生实现，`severity.ts` 仅为 code→chip 查表）
 - ✅ 组件不直接 `fetch`，一律经 `data/biWebClient.ts`
 - ✅ 未改任何后端 Python；契约不符一律前端适配并记入 §5

@@ -8,13 +8,14 @@ from .core import (
     org_sync,
     recalc_totals,
     check_data,
+    iter_groups,
 )
 from .leaderboard import collect, build_bc_markdown, build_html
 from .listener import ReportHandler
 
 __all__ = [
     "today_info", "fetch_status", "send_group", "do_remind", "do_check",
-    "org_sync", "recalc_totals", "check_data",
+    "org_sync", "recalc_totals", "check_data", "iter_groups",
     "collect", "build_bc_markdown", "build_html",
     "ReportHandler",
 ]

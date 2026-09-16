@@ -23,7 +23,6 @@ import type {
   TablePayload,
 } from '../types';
 import type { CubeRow, CubeSchema, DataType, DerivedMetric, FieldDef, Severity } from '../../types/cube';
-import { deriveCube } from '../derive';
 import { alertOf } from '../severity';
 
 export interface CardToCubeOptions {
@@ -94,7 +93,7 @@ function fromScalar(card: CardDef, p: ScalarPayload, opts: CardToCubeOptions): C
   const key = card.card;
   const derivedMetric = {
     target: p.target ?? undefined,
-    // 有 target 时把 value 视作 done，交 derive.ts 统一算缺口/告警
+    // 有 target 时把 value 视作 done（只做字段搬运；缺口/告警一律后端算，前端不补）
     done: p.target != null ? (p.value ?? undefined) : undefined,
     progressRate: p.rate ?? undefined,
     delta: p.delta_pct ?? undefined,
@@ -171,11 +170,11 @@ function fromBar(card: CardDef, p: BarPayload, opts: CardToCubeOptions): CubeSch
  * required_daily/severity 全在行里）→ DerivedMetric。
  *
  * ⚠️ 这里只做字段搬运，**不重算**：原样透传后端值，severity 仅查表装饰成
- * alert-chip。有了它派生层 deriveCube 会跳过这些行（按 rowKey 已存在即跳过），
+ * alert-chip。前端已无任何派生实现（derive.ts 已按路线图 P3 删除），
  * 因此不会出现「后端给 p2、前端再算成 p0」的口径打架。
  */
 function backendDerivedOf(row: CubeRow): DerivedMetric | null {
-  if (row['severity'] == null) return null; // 后端没给 severity = 没算，交给 derive.ts
+  if (row['severity'] == null) return null; // 后端没给 severity = 该行无派生，前端不补（派生一律后端算）
   const target = toNumber(row['target']);
   const done = toNumber(row['done']);
   return {
@@ -255,7 +254,7 @@ function fromPie(card: CardDef, p: PiePayload, opts: CardToCubeOptions): CubeSch
 
 /* ---------------------------------------------------------------------- 出口 */
 
-/** 卡片 payload → CubeSchema（含过渡派生层注入）。 */
+/** 卡片 payload → CubeSchema（纯归一 + 后端派生字段透传，前端零算式）。 */
 export function cardToCube(
   card: CardDef,
   payload: CardPayload | null | undefined,
@@ -267,13 +266,13 @@ export function cardToCube(
 
   switch (chart) {
     case 'scalar':
-      return deriveCube(fromScalar(card, payload as ScalarPayload, opts));
+      return fromScalar(card, payload as ScalarPayload, opts);
     case 'line':
       return fromLine(card, payload as LinePayload, opts);
     case 'bar':
       return fromBar(card, payload as BarPayload, opts);
     case 'table':
-      return deriveCube(fromTable(card, payload as TablePayload, opts));
+      return fromTable(card, payload as TablePayload, opts);
     case 'pie':
       return fromPie(card, payload as PiePayload, opts);
     default:

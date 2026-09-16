@@ -64,7 +64,7 @@ raw_dingtalk / raw_wdt            ← 原始层：来源原样落库，stable_id
 mart_ops                          ← 投影层：fact_* 事实表 + dim_* 维表 + sync_runs 审计
         │  bi-web 只读本库
         ▼
-bi-web（FastAPI + Jinja2 + ECharts）← 展示层：SQL 在代码、编排在 Nacos
+bi-web（FastAPI 后端） + bi-react（React 前端）← 展示层：SQL 在代码、编排在 Nacos
 ```
 
 ### 2.2 核心架构原则（不可违背）
@@ -81,7 +81,8 @@ bi-web（FastAPI + Jinja2 + ECharts）← 展示层：SQL 在代码、编排在 
 |---|---|---|
 | `sync-dingtalk` / `sync-wdt` | apps | 源 → raw 采集（凭据在仓库外挂载） |
 | `extract-mart` | apps | raw → mart 投影、dim_calendar/dim_target 种子 |
-| `bi-web` | 业务 | 看板展示（长驻，18080 仅回环） |
+| `bi-web` | 业务 | 看板后端 API（FastAPI，18080 仅回环） |
+| `bi-react` | 业务 | 看板前端（React + Vite + TypeScript，18090 端口） |
 | `robot-*` | 业务 | 日报/榜单机器人（共享口径） |
 
 ---
@@ -212,12 +213,114 @@ seed 增加 dashboard 条目（`title/enabled/nav_order/filters/cards`）→ 发
 
 ---
 
-## 8. 文档索引
+## 8. 架构评估与优化建议（2026-09-15）
+
+### 8.1 当前架构评估
+
+#### ✅ 做得好的地方
+
+| 方面 | 评价 |
+|---|---|
+| **零凭据泄露设计** | 优秀——错误响应泛化，凭据分层隔离 |
+| **只读 mart_ops 规则** | 业务服务不碰 raw_*，防止数据污染 |
+| **Profile 组合** | Docker profile 切分灵活，按需启动 |
+| **幂等写入** | `ON DUPLICATE KEY UPDATE` 保证可重跑 |
+| **SQL 在代码、编排在 Nacos** | 口径可评审、可单测，配置与代码职责分离 |
+
+#### ⚠️ 架构问题
+
+| # | 问题 | 影响 |
+|---|---|---|
+| 1 | **mart_ops 承担过多职责** | 业务事实 + 维度 + 日历 + 目标 + 投递队列表混在一起，难以独立扩缩容 |
+| 2 | **extract-mart 全量重建** | 每次运行重写 dim_calendar/dim_target，增量数据也要全量扫描 raw_* |
+| 3 | **dingtalk-gateway 耦合投递和消费** | 投递逻辑和状态机混在一起，失败重试难以独立测试 |
+| 4 | **bi-web 无 API 版本管理** | 前端版本切换时，后端无法渐进灰度 |
+| 5 | **Redis 缓存缺乏可观测性** | fail-open 但无命中率指标，无法评估缓存价值 |
+
+### 8.2 目标架构（优化后）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         数据层（分层清晰）                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │  raw_*      │───▶│  stage_*    │───▶│  mart_*     │         │
+│  │  (原始数据)  │    │  (中间层)    │    │  (业务汇总)  │         │
+│  │             │    │  清洗/标准化  │    │  只读视图    │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│                                                                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │  queue_*    │    │  config_*   │    │  metrics_*  │         │
+│  │  (投递队列)  │    │  (种子配置)  │    │  (可观测)    │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 优化建议与优先级
+
+| 优先级 | # | 优化项 | 当前 | 优化后 | 收益 | 风险 | 状态（2026-09-16 勘） |
+|---|---|---|---|---|---|---|---|
+| 🔴 P0 | 1 | **extract-mart 增量写入** | 全量覆盖 | upsert 只写变化行 + 定期快照 | 同步时间 10min→1min | 高（涉数据迁移） | 🟡 进行中：fact 已 upsert（`extract_mart.py` `upsert_fact`，ON DUPLICATE KEY UPDATE）+ digest 审计链已建；`read_dataset` 全表扫描与 dim_calendar/dim_robot_member 写路径「upsert + 剪枝」等价增量改造中（pipe-agent；删除语义不变，full-rebuild 开关保留回退） |
+| 🔴 P0 | 2 | **投递状态机拆分** | gateway 单体 | stream-handler 独立状态机 + dingtalk-deliverer 封装 | 可独立测试失败重试 | 中（接口不变） | ✅ 已完成（收尾中）：`outbox_repository.py` 已有 enqueue/fetch_pending/mark_delivered/register_failure + max_attempts 状态机；`delivery.py` 仅轮询投递、`stream_handler.py` 已独立；delivery-agent 本轮收尾 |
+| 🟡 P1 | 3 | **mart 按用途拆库** | mart_ops 混合 | mart_facts / mart_dims / mart_queue 分离 | 独立扩缩容、独立备份 | 高（连接串改） | 🟡 设计稿已出：`specs/2026-09-16-mart-split-design.md`（同实例 schema 拆分，mart_ops 收敛为控制面；「独立扩缩容」收益已放弃，只保职责/权限/备份粒度）；本轮不落地迁移 |
+| 🟡 P1 | 4 | **API 版本化** | 无版本 | URL 或 header `API-Version` | 前后端解耦，灰度发布 | 低（可共存） | 🟡 进行中：api-agent 本轮落地 URL 前缀 + `API-Version` header 双通道（默认 v1、未知版本 404，见 `bi_web/app.py`） |
+| 🟢 P2 | 5 | **Redis 可观测** | fail-open | metrics 记录 cache_hit/miss/error | 可评估缓存价值 | 低 | ✅ 已完成：`CacheMetrics` hit/miss/error/耗时计数 + `/diagnostics/cache` 顶层只读诊断端点（api-agent） |
+| 🟢 P2 | 6 | **消息队列** | robot_outbox 表 | Kafka/RabbitMQ | 支持多 consumer | 中（引入新组件） | 本轮不立项；接口预留建议见 `specs/2026-09-16-mart-split-design.md` §6 |
+
+### 8.4 mart 拆分细化方案
+
+```
+mart_ops/
+├── mart_facts/           # fact_* 只读汇总表
+│   ├── fact_daily_report_offline
+│   ├── fact_channel_daily_sales
+│   └── ...
+├── mart_dims/            # 维度与配置表
+│   ├── dim_calendar       # 静态，变更少
+│   ├── dim_target        # 目标配置
+│   └── dim_product       # 商品维度
+└── mart_queue/           # 投递状态机（独立队列库）
+    └── robot_outbox
+```
+
+**拆分理由**：
+- `mart_dims` 可独立更新频率（dim_calendar 年更新一次）
+- `mart_queue` 是状态机，不是业务汇总，适合独立服务
+- `mart_facts` 可按需加读副本
+
+### 8.5 extract-mart 增量改造方案
+
+```sql
+-- 当前（全量覆盖）
+INSERT INTO mart_ops.dim_calendar (...) SELECT ... FROM raw_dingtalk.calendar;
+
+-- 优化后（upsert）
+INSERT INTO mart_ops.dim_calendar (...)
+SELECT ... FROM raw_dingtalk.calendar
+WHERE updated_at > (SELECT MAX(sync_ts) FROM mart_ops.sync_runs WHERE table_name='dim_calendar')
+ON DUPLICATE KEY UPDATE ...;
+```
+
+**收益**：
+- 增量同步时间从 ~10min 降至 ~1min
+- 降低对源数据库的压力
+- 保留变更历史（通过 updated_at 字段）
+
+---
+
+## 9. 文档索引
 
 - 需求源：`e:\repos\BI看板颗粒度需求表.xlsx`
-- 展示层设计：`docs/superpowers/specs/2026-09-12-bi-web-design.md`
+- 展示层设计（旧，已过时）：`docs/superpowers/specs/2026-09-12-bi-web-design.md`
+- **前端架构**：`frontend/bi-react/ARCHITECTURE.md`（React + Vite + TypeScript）
+- **前端进度**：`frontend/bi-react/PROGRESS.md`
+- **派生指标**：`docs/derived-metrics.md`
 - 阶段 B 设计：`docs/superpowers/specs/2026-09-12-bi-web-stage-b-design.md`
 - 阶段 B1 设计：`docs/superpowers/specs/2026-09-14-bi-web-stage-b1-design.md`
 - 缓存分离设计：`docs/superpowers/specs/2026-09-14-bi-web-cache-separation-design.md`
+- 数据契约：`frontend/bi-ui/CubeSchema.md`
+- 可视化规范：`frontend/bi-ui/VISUALIZATION.md`
 - 采集运行手册：`docs/阶段4切换运行手册.md`
 - 命令速查：`docs/命令速查表.md`

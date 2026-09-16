@@ -1,5 +1,13 @@
-// 三态：复用 bi-ui/components.css 的 .loading / .empty / .page-error。
-// 与 V1 的 loading(aria-busy)/empty/error 体系对齐，保证状态覆盖一致。
+/**
+ * 三态组件：复用 bi-ui/components.css 的 .loading / .empty / .page-error。
+ *
+ * 状态覆盖：
+ *   - LoadingState：aria-busy="true"，告知无障碍工具
+ *   - EmptyState：数据为空（可能是看板无卡、后端无数据）
+ *   - ErrorState：BiWebError 走 toMessage()，其他走 error.message；支持重试回调
+ *
+ * 与 V1 的 loading/empty/error 体系对齐，保证状态覆盖一致。
+ */
 import { BiWebError } from '../../data/errors';
 
 export function LoadingState({ label = '加载中…' }: { label?: string }) {

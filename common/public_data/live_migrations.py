@@ -207,6 +207,21 @@ def _build_mart_ddl() -> tuple[str, ...]:
     return (_SYNC_RUNS_DDL, _SYNC_DATASET_SUMMARY_DDL)
 
 
+# 提取层增量化（2026-09-16）：digest 命中/窗口为空的数据集跳过写入时，
+# 摘要行以 skipped=1 显式标记（records_written=0），审计不丢「没写」的
+# 原因。纯追加列 + 默认值，旧代码读写不受影响；独立版本而非改写
+# mart-ops-v1，避免已应用库的校验和漂移。提取代码侧用
+# information_schema 探测该列，未迁移时降级为普通摘要（fail-open）。
+_SYNC_DATASET_SUMMARY_SKIPPED_DDL = (
+    "ALTER TABLE `sync_dataset_summary`\n"
+    "  ADD COLUMN `skipped` TINYINT(1) NOT NULL DEFAULT 0"
+)
+
+
+def _build_mart_summary_skipped_ddl() -> tuple[str, ...]:
+    return (_SYNC_DATASET_SUMMARY_SKIPPED_DDL,)
+
+
 def _build_mart_outbox_ddl() -> tuple[str, ...]:
     return (_ROBOT_OUTBOX_DDL,)
 
@@ -249,6 +264,7 @@ _MIGRATIONS = (
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
+    ("mart-ops-summary-skipped-v1", "mart", _build_mart_summary_skipped_ddl()),
     ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
     ("mart-extract-finance-v1", "mart", finance_ddl_statements()),
     ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),

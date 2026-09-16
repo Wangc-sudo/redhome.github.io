@@ -116,6 +116,35 @@ def _build_manifest():
 # Test class
 # ---------------------------------------------------------------------------
 
+#: 本文件内所有固定 run_id（LiveSyncService 用例的 new_run_id）。
+#: MySQL 卷持久化时，残留行会让二次运行在 ``start_run`` 撞上主键冲突；
+#: setUp/tearDown 对这批 id 做幂等清理，保证测试可重复运行。
+_FIXED_RUN_IDS = (
+    "isolation-test-run-0001",
+    "idempotent-full-run-a",
+    "idempotent-full-run-b",
+    "projection-recovery-run-0001",
+    "should-not-be-used",
+)
+
+
+def _purge_fixed_sync_runs(connection):
+    """删除固定 run_id 的摘要行与 run 行（先子表后父表），并提交。"""
+
+    placeholders = ", ".join(["%s"] * len(_FIXED_RUN_IDS))
+    cursor = connection.cursor()
+    try:
+        for table in ("sync_dataset_summary", "sync_runs"):
+            cursor.execute(
+                f"DELETE FROM `{table}` "
+                f"WHERE `sync_run_id` IN ({placeholders})",
+                _FIXED_RUN_IDS,
+            )
+    finally:
+        cursor.close()
+    connection.commit()
+
+
 @unittest.skipUnless(
     os.environ.get("INTEGRATION_TEST_RUNNER") == "1",
     "Requires the Docker Compose MySQL integration environment.",
@@ -138,6 +167,14 @@ class PublicDataLiveMySQLIntegrationTests(unittest.TestCase):
         cls.dingtalk_connection.close()
         cls.wdt_connection.close()
         cls.mart_connection.close()
+
+    def setUp(self):
+        # 预清：上一轮残留（含中途崩溃的卷）不影响本次运行。
+        _purge_fixed_sync_runs(self.mart_connection)
+
+    def tearDown(self):
+        # 后清：不留固定 run_id 行，持久卷上可反复运行。
+        _purge_fixed_sync_runs(self.mart_connection)
 
     # -- helpers -------------------------------------------------------------
 

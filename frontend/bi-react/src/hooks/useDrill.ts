@@ -1,6 +1,16 @@
+/**
+ * 交互中心：层系下钻 + 图表联动事件总线。
+ *
+ * 状态：
+ *   path：当前看板 id
+ *   drillLevel：下钻层级（0=默认，1+=更深层）
+ *   filters：筛选参数（后端透传，不过滤派生指标）
+ *   bus：极简事件总线（emit/on，供图表联动）
+ *
+ * 下钻：hierarchies.levels 顺序推进，setPath 触发 App 重新 useCube 取下一层 cube
+ * 联动：emit('filter',{dim,value}) → 其他 widget on 监听后加 filter 重取
+ */
 import { create } from 'zustand';
-
-// 交互中心：层系下钻 + 图表联动事件总线。
 // 下钻：hierarchies.levels 顺序推进，setPath 触发 App 重新 useCube 取下一层 cube。
 // 联动：emit('filter',{dim,value}) → 其他 widget 的 on 监听后加 filter 重取。
 type Listener = (payload: unknown) => void;

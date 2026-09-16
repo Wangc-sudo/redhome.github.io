@@ -126,7 +126,7 @@ describe('cardToCube · 边界', () => {
     expect(cube.rows).toEqual([]);
   });
 
-  it('table 带 target/done → 派生层注入缺口/完成率/所需日均，不再注入告警', () => {
+  it('table 带 target/done 但后端未给 severity → 前端零补算（derive.ts 已删），行字段原样透传', () => {
     const cube = cardToCube(
       card('table', 'table_people_mtd'),
       {
@@ -137,24 +137,20 @@ describe('cardToCube · 边界', () => {
           { key: 'done', title: '已完成', format: 'wan' },
         ],
         rows: [
-          // 工作日由后端 dim_calendar 下发（2026-09 = 24 天），前端不推算
-          { name: '张伟', target: 800000, done: 0, total_workdays: 24, elapsed_workdays: 13, remaining_workdays: 11 },
-          { name: '陈杰', target: 400000, done: 620000, total_workdays: 24, elapsed_workdays: 13, remaining_workdays: 11 },
+          { name: '张伟', target: 800000, done: 0, total_workdays: 24 },
+          { name: '陈杰', target: 400000, done: 620000, total_workdays: 24 },
         ],
       },
       { now: NOW },
     );
 
-    const zero = cube.derived?.['张伟'];
-    expect(zero?.shortfall).toBe(800000);
-    expect(zero?.progressRate).toBe(0);
-    expect(zero?.requiredDaily).toBeCloseTo(800000 / 24, 6); // 24 = 后端 dim_calendar
-    expect(zero?.alert).toBeUndefined(); // 告警归后端：前端不产 severity
-
-    const over = cube.derived?.['陈杰'];
-    expect(over?.shortfall).toBe(-220000); // 超额为负缺口
-    expect(over?.progressRate).toBeCloseTo(1.55, 8); // 原值保留，封顶只在展示层
-    expect(over?.alert).toBeUndefined(); // 同理：不再有「ok = 达标」的伪告警
+    // 派生一律后端算：前端不再注入 shortfall/progressRate/requiredDaily，
+    // 也不再注入告警；行字段（含后端工作日）原样保留，缺派生渲染「—」
+    expect(cube.derived?.['张伟']).toBeUndefined();
+    expect(cube.derived?.['陈杰']).toBeUndefined();
+    expect(cube.rows[0]['target']).toBe(800000);
+    expect(cube.rows[0]['done']).toBe(0);
+    expect(cube.rows[0]['total_workdays']).toBe(24);
   });
 });
 

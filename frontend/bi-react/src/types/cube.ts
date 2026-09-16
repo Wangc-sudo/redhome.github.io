@@ -14,7 +14,7 @@ export interface FieldDef {
   unit?: string;
   /** 后端表格列的展示格式（wan/ratio/int/pct/text），前端只格式化不换算语义 */
   format?: string;
-  /** 派生列（缺口/完成率/告警…）由后端或 derive.ts 产出 */
+  /** 派生列（缺口/完成率/告警…）由后端产出，前端只读 */
   derived?: boolean;
 }
 
@@ -67,7 +67,7 @@ export interface CubeSchema {
   rowKeys?: string[];
   /** 表格列定义（优先于 dimensions+measures，保证列序与后端一致） */
   columns?: FieldDef[];
-  /** key = 行主键；行级派生指标由后端算好（过渡期由 derive.ts 补）。 */
+  /** key = 行主键；行级派生指标一律由后端算好（前端无派生实现，缺了渲染「—」）。 */
   derived?: Record<string, DerivedMetric>;
   asOf?: string; // 数据时间
   updatedAt?: string;

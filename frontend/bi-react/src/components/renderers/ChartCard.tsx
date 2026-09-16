@@ -1,7 +1,15 @@
+/**
+ * 图表卡（折线/柱状）：option 纯由 CubeSchema 结构推导，不写业务计算。
+ *
+ * 数据流：
+ *   CardPayload.line/bar → cardToCube(fromLine/fromBar) → CubeSchema{chart, dimensions, measures, rows}
+ *   → echarts option（xAxis=首维度，series=各 measure）
+ *
+ * 性能：大数据走 large:true + lttb 采样（VISUALIZATION §4）
+ * 主题色：从 bi-ui tokens.css 读取 CSS 变量，不在 JS 里维护第二套 token
+ */
 import ReactECharts from 'echarts-for-react';
 import type { CubeSchema } from '../../types/cube';
-
-// 图表卡（折线/柱状）：option 纯由 CubeSchema 结构推导，不写业务计算。
 // 大数据走 large + sampling（bi-ui/VISUALIZATION.md §4）。
 
 /** 从 bi-ui tokens.css 读取主题色，避免在 JS 里维护第二套 token。 */

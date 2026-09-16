@@ -1,8 +1,15 @@
+/**
+ * 布局层：react-grid-layout 拖动/缩放。
+ *
+ * 布局源：后端 cards[].span（12 栅格系统）
+ * 用户拖拽后写 localStorage；初始化时读取并与默认布局 merge
+ * 关键修复：旧实现只写不读，刷新必回默认；现在 mergeLayout 保证旧布局不丢
+ *
+ * 存储键：bi-react:layout:{dashboardId}
+ */
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import GridLayout, { WidthProvider, type Layout } from 'react-grid-layout';
 import { ErrorBoundary } from '../common/ErrorBoundary';
-
-// 布局层：react-grid-layout 拖动/缩放。
 // 布局源 = 后端 cards[].span（12 栅格），用户拖拽后写 localStorage；
 // 初始化时**读取** localStorage 并与默认布局 merge（旧实现只写不读，刷新必回默认）。
 

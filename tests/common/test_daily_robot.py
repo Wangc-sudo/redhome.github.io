@@ -190,7 +190,8 @@ class TestDoRemind(unittest.TestCase):
             do_remind(config, state, now, 1)
             mock_send.assert_called_once()
             args = mock_send.call_args
-            self.assertIn("Bob", args[0][2])
+            # 新签名: send_group(config, robot_target, title, text, at_ids=...)
+            self.assertIn("Bob", args[0][3])
             self.assertIn("remind_20260901", state)
             self.assertIsNotNone(state["remind_20260901"])
 

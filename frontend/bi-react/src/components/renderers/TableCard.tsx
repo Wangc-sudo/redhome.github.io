@@ -1,9 +1,18 @@
+/**
+ * 表格卡：吸顶表头 + 缺失显示「—」+ 合计行 + ARIA + 行级告警 chip。
+ *
+ * 数据流：
+ *   CardPayload.table → cardToCube(fromTable) → CubeSchema{chart:'table', columns, rows}
+ *   → derived['rowKey'] = { target, done, shortfall, alert, ... }
+ *
+ * 列定义优先级：cube.columns（后端列序） > [...dimensions, ...measures]
+ * 合计行：数值列求和，比率列不求和（完成率均值无意义）
+ * 告警格：format='severity' 的列渲染成 AlertChip；首列无独立告警列时附加 chip
+ */
 import type { CubeSchema, CubeValue, DerivedMetric, FieldDef } from '../../types/cube';
 import { formatCell } from '../../data/adapter/cardToCube';
 import { alertOf } from '../../data/severity';
 import { AlertChip } from './AlertChip';
-
-// 表格卡：吸顶表头 + 缺失显示「—」+ 合计行 + ARIA + 行级告警 chip。
 // 列定义优先取 cube.columns（后端列序/格式），否则退化 dimensions+measures。
 function columnsOf(cube: CubeSchema): FieldDef[] {
   if (cube.columns?.length) return cube.columns;
@@ -31,11 +40,31 @@ function SeverityCell({ value, derived }: { value: CubeValue; derived?: DerivedM
   return alert ? <AlertChip alert={alert} /> : <>—</>;
 }
 
+/**
+ * has_fact=false 诊断角标（「挂零」：本月截至今日无销单行）。
+ * ---------------------------------------------------------------------------
+ * 纯渲染、**不参与任何判定**：has_fact 是后端下发的诊断字段（docs/derived-metrics.md §5，
+ * 裁决 #3：字段保留作诊断，不参与 severity），前端既不改告警颜色也不改数值，
+ * 只在行上加一个中性的 .badge-defect 标记，把「挂零」这一数据事实显式化（CubeSchema §5）。
+ */
+function NoFactBadge() {
+  return (
+    <span
+      className="badge-defect"
+      title="本月截至今日无销单（后端 has_fact=false 诊断字段；仅提示，不影响告警判定与数值）"
+    >
+      挂零
+    </span>
+  );
+}
+
 export function TableCard({ cube }: { cube: CubeSchema }) {
   const columns = columnsOf(cube);
   if (columns.length === 0) return null;
   // 有独立告警列时，首列不再重复挂 chip
   const hasSeverityCol = columns.some((c) => c.format === 'severity');
+  // 挂零角标挂在姓名列（anomaly_top 首列是 rank，角标跟着人走）；没有 name 列则退回首列
+  const badgeColIdx = Math.max(0, columns.findIndex((c) => c.key === 'name'));
 
   return (
     <div className="card">
@@ -65,6 +94,7 @@ export function TableCard({ cube }: { cube: CubeSchema }) {
                         formatCell(r[c.key], c.format)
                       )}
                       {ci === 0 && !hasSeverityCol && derived?.alert && <AlertChip alert={derived.alert} />}
+                      {ci === badgeColIdx && r['has_fact'] === false && <NoFactBadge />}
                     </td>
                   ))}
                 </tr>

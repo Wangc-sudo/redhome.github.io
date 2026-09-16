@@ -4,6 +4,12 @@ import { useCallback, useEffect, useState } from 'react';
 const HASH_RE = /^#?\/?d\/([^/?#]+)/;
 
 /** '#/d/l1-cockpit' → 'l1-cockpit'；不匹配返回 null。 */
+/**
+ * Hash 路由：# → #/d/{id}
+ *
+ * 用 hash 而非 history.pushState：避免服务端配置，支持静态部署
+ * 与 pathname 取数习惯兼容（hash 里的 id 即 dashboardId）
+ */
 export function parseHash(hash: string): string | null {
   const m = HASH_RE.exec(hash.trim());
   return m ? decodeURIComponent(m[1]) : null;

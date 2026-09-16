@@ -1,6 +1,11 @@
 /**
  * 看板级取数：列表 / 定义 / 筛选项。
+ *
  * 全部走 usePolled 共享缓存（同一 key 只发一次请求），组件禁止直接 fetch。
+ *
+ * useDashboardList：看板列表（侧边栏导航用）
+ * useDashboardDef：看板定义（含 cards[]、filters[]、refresh_seconds）
+ * useFilterOptions：筛选项（/api/v1/options/{source}）
  */
 
 import { useCallback } from 'react';

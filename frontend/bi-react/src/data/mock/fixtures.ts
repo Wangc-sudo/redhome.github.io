@@ -7,7 +7,8 @@
  * 再统一经 adapter/cardToCube.ts 归一成 CubeSchema —— 保证 mock 与真实链路同构，
  * 不会出现「mock 能跑、真机翻车」。
  *
- * cube 字段名（target/done）沿用 CubeSchema.md §4，用于演示 derive.ts 的缺口/告警口径。
+ * cube 字段名（target/done/shortfall/severity…）沿用 CubeSchema.md §4 与后端真实下发，
+ * 缺口/告警口径一律由后端算好，前端只透传渲染。
  */
 
 import { BiWebError } from '../errors';
@@ -138,17 +139,25 @@ const l1: MockDashboard = {
         {
           name: '李树军', dept: '线下运营中心', target: 1030000.0, done: 60454.0, shortfall: 969546.0,
           rate: 0.058693203883495144, required_daily: 42916.666666666664, severity: 'p1',
-          remaining_workdays: 11, elapsed_workdays: 13,
+          remaining_workdays: 11, elapsed_workdays: 13, has_fact: true,
         },
         {
           name: '卢炳华', dept: '滨萧', target: 1019000.0, done: 225845.0, shortfall: 793155.0,
           rate: 0.22163395485770362, required_daily: 42458.333333333336, severity: 'p1',
-          remaining_workdays: 11, elapsed_workdays: 13,
+          remaining_workdays: 11, elapsed_workdays: 13, has_fact: true,
         },
         {
           // 无目标 → 缺口不可算（CubeSchema §5 显式化）
           name: '陈杰', dept: '杭中', target: null, done: 620000.0, shortfall: null, rate: null,
-          required_daily: null, severity: 'ok', remaining_workdays: 11, elapsed_workdays: 13,
+          required_daily: null, severity: 'ok', remaining_workdays: 11, elapsed_workdays: 13, has_fact: true,
+        },
+        {
+          // 演示「挂零」诊断角标（非真机抓取，形状按 golden row_cases.row_no_fact_with_target_is_also_p0）：
+          // has_fact=false = 本月截至今日无销单行；裁决 #3：后端仍判 p0，字段只作诊断。
+          // 前端原样透传 p0 chip + 数值，额外渲染中性「挂零」角标，角标不参与判定。
+          name: '演示·挂零', dept: '绍兴一部', target: 240000.0, done: 0.0, shortfall: 240000.0,
+          rate: 0.0, required_daily: 10000.0, severity: 'p0',
+          remaining_workdays: 11, elapsed_workdays: 13, has_fact: false,
         },
       ],
     },
@@ -175,12 +184,12 @@ const l1: MockDashboard = {
         {
           rank: 1, name: '李树军', dept: '线下运营中心', target: 1030000.0, done: 60454.0,
           shortfall: 969546.0, rate: 0.058693203883495144, required_daily: 42916.666666666664,
-          severity: 'p1', remaining_workdays: 11, elapsed_workdays: 13,
+          severity: 'p1', remaining_workdays: 11, elapsed_workdays: 13, has_fact: true,
         },
         {
           rank: 2, name: '卢炳华', dept: '滨萧', target: 1019000.0, done: 225845.0,
           shortfall: 793155.0, rate: 0.22163395485770362, required_daily: 42458.333333333336,
-          severity: 'p1', remaining_workdays: 11, elapsed_workdays: 13,
+          severity: 'p1', remaining_workdays: 11, elapsed_workdays: 13, has_fact: true,
         },
       ],
     },

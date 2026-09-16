@@ -35,7 +35,22 @@ Routing (spec section 6; API-first per the 2026-09-14 separation spec):
   with hot/cold TTLs, fail-open to a direct mart read, one compute per
   key under concurrency -- the ``no-store`` header stays, caching only
   ever lives server-side;
+* ``GET /diagnostics/cache`` -- read-only cache counters (backend name,
+  hit/miss/error, backend-call latency aggregates), at the same
+  operational tier as ``/healthz``: a top-level route OUTSIDE the
+  version layer, so the versioned surface keeps one uniform auth
+  semantic; no auth, no gate, and no DSN, key samples, or payloads --
+  aggregates only;
 * ``GET /healthz`` -- liveness + mart connectivity (``SELECT 1``).
+
+API versioning skeleton (P1): every versioned handler is registered
+through :class:`_VersionedApi`, which mounts two channels for one
+handler -- the URL-prefix channel ``/api/v1/...`` (behaviour identical
+to the pre-skeleton routes, field by field) and the header channel
+``/api/...`` where the ``API-Version`` header picks the version
+(undeclared defaults to v1, an unregistered version answers 404
+``not_found``).  The legacy ``/api/d/...`` card route IS the header
+channel of the v1 card handler.
 
 Two guards run per request on ``/d/`` and ``/api/`` only:
 
@@ -56,8 +71,9 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -90,6 +106,79 @@ _WEB_DIR = Path(__file__).parent / "web"
 #: WARNING with the exception class name only (never ``str(exc)`` or a
 #: traceback, see the module docstring).
 _LOGGER = logging.getLogger(__name__)
+
+
+class ErrorDetail(str, Enum):
+    """The generalized error vocabulary every error response draws from.
+
+    Enum'ed so a new ad-hoc detail string is a diff against this class,
+    not a grep across the module; members are ``str`` so Starlette's
+    JSON encoder serializes the value verbatim (no payload, no SQL, no
+    host names can ever ride along).
+    """
+
+    UNAUTHORIZED = "unauthorized"
+    UNAVAILABLE = "unavailable"
+    NOT_FOUND = "not_found"
+    BAD_REQUEST = "bad_request"
+    CARD_ERROR = "card_error"
+
+
+#: The header channel's version header (P1); undeclared -> the default.
+API_VERSION_HEADER = "API-Version"
+
+#: The version an undeclared ``API-Version`` resolves to.
+DEFAULT_API_VERSION = "v1"
+
+
+def _version_guard(served_version: str) -> Callable[..., None]:
+    """Header-channel guard: resolve ``API-Version`` against *served_version*.
+
+    Undeclared (or blank) resolves to :data:`DEFAULT_API_VERSION`; a
+    declared version this route does not serve answers 404 -- the
+    requested version simply does not exist here.
+    """
+
+    def guard(
+        api_version: Optional[str] = Header(default=None, alias=API_VERSION_HEADER),
+    ) -> None:
+        requested = (api_version or "").strip() or DEFAULT_API_VERSION
+        if requested != served_version:
+            raise HTTPException(status_code=404, detail=ErrorDetail.NOT_FOUND)
+
+    return guard
+
+
+class _VersionedApi:
+    """Version-route registrar: one handler, two channels (P1 skeleton).
+
+    ``registrar.route("v1", "/dashboards")`` mounts the handler at both
+    ``/api/v1/dashboards`` (URL-prefix channel: bearer only, behaviour
+    identical to the pre-skeleton route) and ``/api/dashboards`` (header
+    channel: bearer + the version guard).  Adding a v2 later is a second
+    registrar pass over new handlers -- existing mounts never move.
+    """
+
+    def __init__(self, app: FastAPI, bearer: Callable[..., None]) -> None:
+        self._app = app
+        self._bearer = bearer
+
+    def route(self, version: str, path: str) -> Callable[[Callable], Callable]:
+        def decorator(handler: Callable) -> Callable:
+            self._app.get(
+                f"/api/{version}{path}",
+                dependencies=[Depends(self._bearer)],
+            )(handler)
+            self._app.get(
+                f"/api{path}",
+                dependencies=[
+                    Depends(self._bearer),
+                    Depends(_version_guard(version)),
+                ],
+            )(handler)
+            return handler
+
+        return decorator
 
 #: Filter source name -> option query.  The key set is pinned to
 #: ``config.KNOWN_FILTER_SOURCES`` by the test suite -- drift is a red
@@ -137,7 +226,7 @@ def serve(application):
 # Startup seed validation
 # ---------------------------------------------------------------------------
 
-def validate_seed_file(seed_path, registry):
+def validate_seed_file(seed_path: str, registry: Dict[str, Any]) -> None:
     """Validate the dashboard seed at *seed_path* against *registry*.
 
     ``load_seed`` + ``parse_dashboard_config`` +
@@ -260,9 +349,11 @@ def _build_bearer_dependency(token):
     """Bearer dependency for the ``/d/`` and ``/api/`` routes (no-op if open)."""
     expected = f"Bearer {token}" if token else None
 
-    def require_bearer(authorization: str | None = Header(default=None)) -> None:
+    def require_bearer(
+        authorization: Optional[str] = Header(default=None),
+    ) -> None:
         if expected is not None and authorization != expected:
-            raise HTTPException(status_code=401, detail="unauthorized")
+            raise HTTPException(status_code=401, detail=ErrorDetail.UNAUTHORIZED)
 
     return require_bearer
 
@@ -286,7 +377,12 @@ def _mart_connector(settings):
     return connector
 
 
-def _resolve_dashboard(dashboard_id, dashboard_source, registry, gate):
+def _resolve_dashboard(
+    dashboard_id: str,
+    dashboard_source,
+    registry: Dict[str, Any],
+    gate: Callable[[], bool],
+):
     """The shared ``/d/`` and ``/api/`` prefix chain.
 
     Gate off -> 503.  A corrupt definition (source parse failure or a card
@@ -296,27 +392,27 @@ def _resolve_dashboard(dashboard_id, dashboard_source, registry, gate):
     Nacos -> seed -> default chain -- is not a page -> 404.
     """
     if not gate():
-        raise HTTPException(status_code=503, detail="unavailable")
+        raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
     try:
         dashboard = dashboard_source.get_dashboard(dashboard_id)
     except DashboardConfigError as exc:
         _LOGGER.warning(
             "dashboard config failed to resolve: %s", type(exc).__name__
         )
-        raise HTTPException(status_code=503, detail="unavailable")
+        raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
     if not dashboard.enabled or not dashboard.cards:
-        raise HTTPException(status_code=404, detail="not_found")
+        raise HTTPException(status_code=404, detail=ErrorDetail.NOT_FOUND)
     try:
         validate_dashboard_config(dashboard, registry)
     except CardConfigError as exc:
         _LOGGER.warning(
             "dashboard config failed validation: %s", type(exc).__name__
         )
-        raise HTTPException(status_code=503, detail="unavailable")
+        raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
     return dashboard
 
 
-def _nav_entries(dashboard_source):
+def _nav_entries(dashboard_source) -> Tuple[Tuple[str, str], ...]:
     """Top-navigation entries: every enabled dashboard, by nav_order.
 
     Enumeration failures degrade to "no navigation" (fail-open, never a
@@ -346,7 +442,7 @@ def _nav_entries(dashboard_source):
     )
 
 
-def _dashboard_definition(dashboard, registry):
+def _dashboard_definition(dashboard, registry: Dict[str, Any]) -> Dict[str, Any]:
     """The ``/api/v1/dashboards/{id}`` payload the static shell renders from.
 
     Each card entry carries its placement (span/title/on_click) plus the
@@ -404,6 +500,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
 
     app = FastAPI(title="bi-web")
     app.mount("/web", StaticFiles(directory=_WEB_DIR, check_dir=False))
+    versioned = _VersionedApi(app, require_bearer)
 
     @app.get("/")
     def root():
@@ -426,6 +523,14 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok", "database": "ok"})
 
+    @app.get("/diagnostics/cache")
+    def cache_diagnostics():
+        # healthz 同级的运维端点：顶层路由、注册在版本路由层之外，
+        # 版本化表面因此保持统一的认证语义（无鉴权特例）。无 auth、
+        # 无 gate、只读聚合快照（后端名 + 计数，绝不含 DSN、键样本
+        # 或载荷）。
+        return JSONResponse(card_cache.metrics_snapshot())
+
     @app.get("/d/{dashboard_id}", dependencies=[Depends(require_bearer)])
     def dashboard_page(dashboard_id: str):
         # The shell carries no data -- the same resolve chain as the APIs
@@ -434,10 +539,10 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
         return FileResponse(_WEB_DIR / "index.html")
 
-    @app.get("/api/v1/dashboards", dependencies=[Depends(require_bearer)])
+    @versioned.route("v1", "/dashboards")
     def dashboard_list():
         if not gate():
-            raise HTTPException(status_code=503, detail="unavailable")
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         # Enumeration failures already degrade to "no navigation" inside
         # _nav_entries (fail-open, never a 5xx).
         return JSONResponse(
@@ -449,35 +554,27 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
             }
         )
 
-    @app.get(
-        "/api/v1/dashboards/{dashboard_id}",
-        dependencies=[Depends(require_bearer)],
-    )
+    @versioned.route("v1", "/dashboards/{dashboard_id}")
     def dashboard_definition(dashboard_id: str):
         dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
         return JSONResponse(_dashboard_definition(dashboard, registry))
 
-    @app.get("/api/v1/options/{source}", dependencies=[Depends(require_bearer)])
+    @versioned.route("v1", "/options/{source}")
     def filter_options(source: str):
         if not gate():
-            raise HTTPException(status_code=503, detail="unavailable")
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         if source not in _FILTER_SOURCE_QUERIES:
-            raise HTTPException(status_code=404, detail="not_found")
+            raise HTTPException(status_code=404, detail=ErrorDetail.NOT_FOUND)
         options = option_sets.options(source)
         if options is None:
             # Same mapping the retired shell had: a failed dimension
             # query is a local 503, never a 5xx escape.
-            raise HTTPException(status_code=503, detail="unavailable")
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"source": source, "options": list(options)})
 
-    @app.get(
-        "/api/d/{dashboard_id}/cards/{card_id}",
-        dependencies=[Depends(require_bearer)],
-    )
-    @app.get(
-        "/api/v1/d/{dashboard_id}/cards/{card_id}",
-        dependencies=[Depends(require_bearer)],
-    )
+    # The header channel of this registration IS the legacy
+    # ``/api/d/{dashboard_id}/cards/{card_id}`` route.
+    @versioned.route("v1", "/d/{dashboard_id}/cards/{card_id}")
     def card_data(dashboard_id: str, card_id: str, request: Request):
         dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
         placement = None
@@ -486,14 +583,16 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                 placement = candidate
                 break
         if placement is None:
-            raise HTTPException(status_code=404, detail="not_found")
+            raise HTTPException(status_code=404, detail=ErrorDetail.NOT_FOUND)
         card = registry[card_id]
         params = dict(request.query_params)
         if any(key not in card.params_schema for key in params):
-            raise HTTPException(status_code=400, detail="bad_request")
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         for key, value in params.items():
             if not option_sets.contains(card.params_schema[key], value):
-                raise HTTPException(status_code=400, detail="bad_request")
+                raise HTTPException(
+                    status_code=400, detail=ErrorDetail.BAD_REQUEST
+                )
         def compute():
             with db_connector() as connection:
                 return card.run(connection, params)
@@ -513,7 +612,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
             _LOGGER.warning(
                 "card run failed: %s", type(exc).__name__
             )
-            raise HTTPException(status_code=500, detail="card_error")
+            raise HTTPException(status_code=500, detail=ErrorDetail.CARD_ERROR)
 
     return app
 

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { cardToCube } from './cardToCube';
-import * as deriveNS from '../derive';
 import type { CardDef, TablePayload } from '../types';
 
 /**
@@ -10,8 +9,9 @@ import type { CardDef, TablePayload } from '../types';
  * payload 形状取自 common/bi_web/queries.py::run_kpi_shortfall / run_anomaly_top
  * （columns 由 shortfall_columns() 给出，行字段由 shortfall_rows() 给出）。
  *
- * 核心断言：**后端算好的 severity/required_daily 原样透传**，不经过 derive.ts
- * 二次加工 —— 否则会出现「后端说 p2、前端显示 p0」的口径漂移。
+ * 核心断言：**后端算好的 severity/required_daily 原样透传**，前端零加工 ——
+ * derive.ts 已按路线图 P3 整文件删除（防回归守卫见 deriveGolden.test.ts），
+ * 不存在「后端说 p2、前端显示 p0」的第二份口径。
  */
 
 const card = (id: string): CardDef => ({
@@ -98,8 +98,8 @@ describe('kpi_shortfall · 后端派生口径透传', () => {
     expect(sx?.alert?.label).toBe('P2');
     expect(sx?.alert?.reason).not.toBe('');
 
-    // 判定函数已从 derive.ts 删除（team-lead 2026-09-15 裁决）；加回来这条就变红
-    expect((deriveNS as Record<string, unknown>)['severityOf']).toBeUndefined();
+    // severity 判定只存在于后端 derived.py；derive.ts 已整文件删除，
+    // 「severityOf 不得在任何 src 文件里复活」的文件级守卫见 deriveGolden.test.ts
   });
 
   it('required_daily / shortfall / rate 用后端值（不是本地重算值）', () => {
@@ -203,16 +203,15 @@ describe('kpi_shortfall · 真机 payload（2026-09-15 直连测试库抓取）'
 /**
  * `has_fact`（后端 2026-09-15 新增，docs/derived-metrics.md 登记为第 5 类缺陷）。
  *
- * ⚠️ **后端消息与 golden `row_cases` 目前互相矛盾，已上报 team-lead 待裁决**：
- *   - metrics-semantics 的消息：has_fact=false ⇒ done/shortfall/rate/required_daily/severity
- *     全 null ⇒ 前端「—」、**不进 p0**；
- *   - 同一份 golden 的 `row_cases.row_no_fact_with_target_is_also_p0`：has_fact=false 仍期望
- *     shortfall=240 / rate=0 / severity=**p0**（"LEFT JOIN 右表为空 = 挂零的另一名字"）。
+ * 裁决已定（roadmap §3 #3，撤销降级）：has_fact=false = 有目标无销单 = 挂零，
+ * **后端仍按 done=0 判 p0**（以 golden `row_cases.row_no_fact_with_target_is_also_p0`
+ * 为准）；字段保留作**纯诊断**，不参与 severity。早前「后端消息 vs golden 矛盾」的
+ * 记载已被 roadmap 作废声明推翻（矛盾源于改判前的陈旧消息）。
  *
- * 前端**不替后端选语义**，只守住两条不变量（任一侧改口径都会变红，强制重走裁决）：
- *   ① 后端给了 severity ⇒ 原样透传，含 p0 chip，前端绝不改判；
- *   ② 后端没给 severity ⇒ 交 derive.ts，done 列存在即按 0 ⇒ 缺口 = 目标（偏严，
- *      与 golden row_cases 的数值一致；team-lead 改判精神：宁可偏严也不把挂零粉饰成无数据）。
+ * 前端只守两条不变量：
+ *   ① 后端给了 severity ⇒ 原样透传 chip 与数值（含 has_fact=false 的 p0），绝不改判；
+ *   ② 后端没给 severity ⇒ 该行无派生（derive.ts 已删，前端零补算），渲染「—」，
+ *      行上的 has_fact=false 由 TableCard 挂「挂零」诊断角标（见 TableCard.hasFact.test.tsx）。
  */
 describe('has_fact：后端怎么判，前端怎么显示（不替后端选语义）', () => {
   const cube = cardToCube(card('kpi_shortfall'), {
@@ -235,22 +234,23 @@ describe('has_fact：后端怎么判，前端怎么显示（不替后端选语�
     ],
   });
 
-  it('① 后端给了 severity ⇒ 原样透传 chip，不重算', () => {
+  it('① 后端给了 severity ⇒ 原样透传 chip 与数值（has_fact=false 的 p0 不改判）', () => {
     const d = cube.derived?.['无销单人'];
     expect(d?.alert?.severity).toBe('p0');
     expect(d?.shortfall).toBe(240);
+    // 诊断字段随行透传，供 TableCard 渲染「挂零」角标
+    expect(cube.rows.find((r) => r['name'] === '无销单人')?.['has_fact']).toBe(false);
   });
 
-  it('② 后端没给 severity ⇒ derive.ts 按 done=0 补缺口（偏严，与 golden row_cases 数值一致）', () => {
-    const d = cube.derived?.['未同步人'];
-    expect(d?.shortfall).toBe(240); // 缺口 = 目标 − 0
-    expect(d?.progressRate).toBe(0);
-    expect(d?.alert).toBeUndefined(); // 前端不产 severity：告警只能来自后端
+  it('② 后端没给 severity ⇒ 前端零补算（派生一律后端算），行诊断字段原样保留', () => {
+    // derive.ts 已删：没有任何前端派生实现来填这一行，渲染「—」+「挂零」角标
+    expect(cube.derived?.['未同步人']).toBeUndefined();
+    expect(cube.rows.find((r) => r['name'] === '未同步人')?.['has_fact']).toBe(false);
   });
 });
 
-describe('回归：没有 severity 的表仍走 derive.ts（只补缺口/完成率/日均，不补告警）', () => {
-  it('table_people_leaderboard 这类后端未派生的表，前端继续补口径', () => {
+describe('回归：没有 severity 的表，前端零补算（派生一律后端算）', () => {
+  it('table_people_leaderboard 这类后端未派生的表，前端不产任何 derived（缺了渲染「—」）', () => {
     const cube = cardToCube(
       { card: 'table_people_mtd', title: '人员本月达成', chart: 'table', span: 12, on_click: null, params: [] },
       {
@@ -260,24 +260,11 @@ describe('回归：没有 severity 的表仍走 derive.ts（只补缺口/完成�
           { key: 'target', title: '目标', format: 'wan' },
           { key: 'done', title: '已完成', format: 'wan' },
         ],
-        // 后端会随行下发工作日（dim_calendar）；前端不推算，缺了就不可算
-        rows: [
-          {
-            name: '张伟',
-            target: 800000,
-            done: 0,
-            total_workdays: 24,
-            elapsed_workdays: 13,
-            remaining_workdays: 11,
-          },
-        ],
+        rows: [{ name: '张伟', target: 800000, done: 0 }],
       },
       { now: new Date(2026, 8, 15) },
     );
-    const d = cube.derived?.['张伟'];
-    expect(d?.shortfall).toBe(800000);
-    expect(d?.progressRate).toBe(0);
-    expect(d?.requiredDaily).toBeCloseTo(800000 / 24, 6); // 24 = 后端 dim_calendar
-    expect(d?.alert).toBeUndefined(); // 告警归后端，前端不自造
+    // derive.ts 已删：target/done 再齐全，前端也不产缺口/完成率/日均 —— 需要就回后端补
+    expect(cube.derived?.['张伟']).toBeUndefined();
   });
 });

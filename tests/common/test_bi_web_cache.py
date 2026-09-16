@@ -229,6 +229,76 @@ class RedisCardCacheTests(unittest.TestCase):
         self.assertTrue(client.closed)
 
 
+class CacheMetricsTests(unittest.TestCase):
+    """P2 可观测：hit/miss 在读穿层计数，error/耗时由后端上报。"""
+
+    def test_hit_and_miss_are_counted_per_lookup(self):
+        cache = InProcessCardCache()
+
+        cache.get_or_compute("k", 60.0, lambda: {"v": 1})  # miss + compute
+        cache.get_or_compute("k", 60.0, lambda: {"v": 1})  # hit
+
+        snapshot = cache.metrics_snapshot()
+        self.assertEqual("in_process", snapshot["backend"])
+        self.assertEqual(1, snapshot["hits"])
+        self.assertEqual(1, snapshot["misses"])
+        self.assertEqual(0.5, snapshot["hit_rate"])
+
+    def test_backend_calls_are_timed(self):
+        cache = InProcessCardCache()
+
+        cache.get_or_compute("k", 60.0, lambda: {"v": 1})
+
+        latency = cache.metrics_snapshot()["backend_latency"]
+        self.assertGreaterEqual(latency["calls"], 2)  # get + set
+        self.assertGreaterEqual(latency["total_ms"], 0.0)
+        self.assertGreaterEqual(latency["max_ms"], 0.0)
+        self.assertIsNotNone(latency["avg_ms"])
+
+    def test_raising_redis_backend_counts_errors_but_still_misses(self):
+        cache = RedisCardCache(
+            "redis://example:6379/0",
+            client=_FakeRedis(error=ConnectionError("redis down")),
+        )
+
+        self.assertIsNone(cache.get("k"))
+        cache.set("k", {"v": 1}, ttl=60.0)  # must not raise
+
+        snapshot = cache.metrics_snapshot()
+        self.assertEqual("redis", snapshot["backend"])
+        self.assertEqual(2, snapshot["errors"])
+        self.assertEqual(2, snapshot["backend_latency"]["calls"])
+
+    def test_raising_backend_error_and_hit_rate_coexist(self):
+        # fail-open 语义：后端全挂时每次 get_or_compute 都是 miss +
+        # error，但 compute 仍执行，路由不受影响。
+        cache = RedisCardCache(
+            "redis://example:6379/0",
+            client=_FakeRedis(error=ConnectionError("redis down")),
+        )
+
+        self.assertEqual(
+            {"v": 1}, cache.get_or_compute("k", 60.0, lambda: {"v": 1})
+        )
+
+        snapshot = cache.metrics_snapshot()
+        self.assertEqual(1, snapshot["misses"])
+        self.assertEqual(0, snapshot["hits"])
+        self.assertEqual(0.0, snapshot["hit_rate"])
+        self.assertGreaterEqual(snapshot["errors"], 1)
+
+    def test_snapshot_never_carries_the_dsn(self):
+        cache = RedisCardCache(
+            "redis://:pw123-secret@redis-secret-host:6379/0",
+            client=_FakeRedis(),
+        )
+
+        text = str(cache.metrics_snapshot())
+
+        self.assertNotIn("pw123-secret", text)
+        self.assertNotIn("redis-secret-host", text)
+
+
 class BuildCardCacheTests(unittest.TestCase):
     def test_url_present_builds_redis_backend(self):
         cache = build_card_cache(
@@ -414,6 +484,40 @@ class AppWiringTests(unittest.TestCase):
                    params={"region": "杭州"})
 
         self.assertEqual(2, len(run_calls))
+
+    def test_diagnostics_endpoint_counts_requests_across_the_route(self):
+        run_calls = []
+        client = TestClient(_cached_app(run_calls, InProcessCardCache()))
+
+        client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")  # miss
+        client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")  # hit
+        response = client.get("/diagnostics/cache")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("in_process", payload["backend"])
+        self.assertEqual(1, payload["hits"])
+        self.assertEqual(1, payload["misses"])
+        self.assertEqual(0.5, payload["hit_rate"])
+        self.assertEqual(0, payload["errors"])
+        self.assertGreaterEqual(payload["backend_latency"]["calls"], 3)
+
+    def test_diagnostics_endpoint_never_leaks_the_dsn(self):
+        run_calls = []
+        cache = RedisCardCache(
+            "redis://:pw123-secret@redis-secret-host:6379/0",
+            client=_FakeRedis(error=ConnectionError("redis down")),
+        )
+        client = TestClient(_cached_app(run_calls, cache))
+
+        client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")  # fail-open
+        response = client.get("/diagnostics/cache")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("redis", response.json()["backend"])
+        self.assertGreaterEqual(response.json()["errors"], 1)
+        self.assertNotIn("pw123-secret", response.text)
+        self.assertNotIn("redis-secret-host", response.text)
 
     def test_raising_backend_never_5xxes_the_route(self):
         run_calls = []

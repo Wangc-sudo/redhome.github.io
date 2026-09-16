@@ -670,6 +670,147 @@ class V1ApiTests(unittest.TestCase):
         self.assertEqual("bad_request", rejected.json()["detail"])
 
 
+class VersionRoutingTests(unittest.TestCase):
+    """P1 版本化骨架：URL 前缀通道 + API-Version header 通道。
+
+    双通道同一 handler：``/api/v1/...`` 行为逐字段零变化（URL 显式
+    声明版本，header 不参与）；``/api/...`` 由 ``API-Version`` 头
+    解析版本，未声明默认 v1，声明未注册版本 → 404 ``not_found``。
+    """
+
+    def test_header_channel_defaults_to_v1_without_the_header(self):
+        client = TestClient(_build_app())
+
+        unprefixed = client.get("/api/dashboards")
+        prefixed = client.get("/api/v1/dashboards")
+
+        self.assertEqual(200, unprefixed.status_code)
+        self.assertEqual(prefixed.json(), unprefixed.json())
+
+    def test_header_channel_accepts_an_explicit_v1_header(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/api/dashboards", headers={"API-Version": "v1"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            client.get("/api/v1/dashboards").json(), response.json()
+        )
+
+    def test_header_channel_rejects_an_unregistered_version(self):
+        client = TestClient(_build_app())
+
+        for path in ("/api/dashboards", "/api/options/regions",
+                     "/api/d/l1-cockpit/cards/kpi_offline_mtd"):
+            with self.subTest(path=path):
+                response = client.get(path, headers={"API-Version": "v9"})
+                self.assertEqual(404, response.status_code)
+                self.assertEqual("not_found", response.json()["detail"])
+
+    def test_url_prefix_channel_ignores_the_version_header(self):
+        # URL 显式声明版本即最终裁决：前缀通道不读 header，v1 行为
+        # 逐字段零变化的红线覆盖「带奇怪 header 的旧客户端」。
+        client = TestClient(_build_app())
+
+        response = client.get(
+            "/api/v1/dashboards", headers={"API-Version": "v9"}
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            client.get("/api/v1/dashboards").json(), response.json()
+        )
+
+    def test_header_channel_serves_the_full_v1_surface(self):
+        client = TestClient(_build_app())
+
+        self.assertEqual(
+            200, client.get("/api/dashboards/l1-cockpit").status_code
+        )
+        self.assertEqual(200, client.get("/api/options/regions").status_code)
+        card = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        self.assertEqual(200, card.status_code)
+        self.assertEqual("no-store", card.headers["cache-control"])
+
+    def test_legacy_card_route_is_the_header_channel_no_conflict(self):
+        # 裁决钉死：legacy ``/api/d/...`` 与 header 通道是同一条注册
+        # （而非两条路由的偶然叠加）——无 header 与显式 v1 的响应逐
+        # 字段一致，未知版本 404，且与 URL 前缀通道同载荷。
+        client = TestClient(_build_app())
+
+        bare = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        explicit = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd",
+            headers={"API-Version": "v1"},
+        )
+        prefixed = client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd")
+
+        self.assertEqual(200, bare.status_code)
+        self.assertEqual(bare.json(), explicit.json())
+        self.assertEqual(prefixed.json(), bare.json())
+        unknown = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd",
+            headers={"API-Version": "v9"},
+        )
+        self.assertEqual(404, unknown.status_code)
+        self.assertEqual("not_found", unknown.json()["detail"])
+
+    def test_header_channel_keeps_bearer_and_gate_semantics(self):
+        guarded = TestClient(_build_app(token="t"))
+        self.assertEqual(401, guarded.get("/api/dashboards").status_code)
+
+        gated = TestClient(_build_app(gate=lambda: False))
+        self.assertEqual(503, gated.get("/api/dashboards").status_code)
+
+
+class CacheDiagnosticsTests(unittest.TestCase):
+    """``/diagnostics/cache``: healthz 同级的顶层只读计数端点。
+
+    裁决：注册在版本路由层之外（顶层路由），版本化表面不出现无
+    鉴权特例；内容只含聚合计数，禁止 DSN/key/Redis URL。
+    """
+
+    def test_reports_aggregates_without_auth_or_gate(self):
+        client = TestClient(_build_app(token="t", gate=lambda: False))
+
+        response = client.get("/diagnostics/cache")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("in_process", payload["backend"])
+        self.assertEqual(0, payload["hits"])
+        self.assertEqual(0, payload["misses"])
+        self.assertEqual(0, payload["errors"])
+        self.assertIsNone(payload["hit_rate"])
+        self.assertEqual(0, payload["backend_latency"]["calls"])
+        self.assertIsNone(payload["backend_latency"]["avg_ms"])
+
+    def test_no_diagnostics_exception_inside_the_v1_namespace(self):
+        # 裁决钉死：诊断端点只在顶层；v1 命名空间内不出现无 bearer
+        # 特例，/api/v1/diagnostics/cache 无路由命中（框架默认 404），
+        # 且响应绝不是诊断载荷。
+        client = TestClient(_build_app())
+
+        response = client.get("/api/v1/diagnostics/cache")
+
+        self.assertEqual(404, response.status_code)
+        self.assertNotIn("hits", response.text)
+        self.assertNotIn("backend", response.text)
+
+    def test_v1_diagnostics_is_404_even_with_a_valid_bearer(self):
+        # 裁决负向断言：合法 bearer 下 /api/v1/diagnostics/cache 仍
+        # 404——钉死「v1 命名空间无此无鉴权特例」，防止后人把端点
+        # 注册回 v1 下（bearer 通过 ≠ 路由存在）。
+        client = TestClient(_build_app(token="t"))
+
+        response = client.get(
+            "/api/v1/diagnostics/cache", headers={"Authorization": "Bearer t"}
+        )
+
+        self.assertEqual(404, response.status_code)
+        self.assertNotIn("hits", response.text)
+
+
 class CardApiTests(unittest.TestCase):
     def test_returns_the_run_payload_with_no_store(self):
         connection = _mock_connection()
@@ -1438,6 +1579,10 @@ _RECON_TWO_LINE_TARGET_SQL = (
     "AND year = YEAR(CURDATE())"
 )
 
+# L1 首屏 11 张卡（stage-B1 既定现实，roadmap 主线 B「9→11 张」）：
+# 与 docker/integration/bi.seed.yaml 的 l1-cockpit 编排逐一核对过，
+# 全部存在于 cards.py 注册表（table_channel_mtd/anomaly_top/kpi_shortfall
+# 为 stage-B1 新增的三张表卡）。
 _STAGE_B_L1_CARD_IDS = (
     "kpi_offline_dod",
     "kpi_channel_dod",
@@ -1447,6 +1592,9 @@ _STAGE_B_L1_CARD_IDS = (
     "pie_sku_mtd",
     "trend_region_daily",
     "bar_channel_mtd",
+    "table_channel_mtd",
+    "anomaly_top",
+    "kpi_shortfall",
 )
 
 # L2 页面测试的卡片计数从本表推导（单一数据源）：两测试各自硬编码时，
@@ -1462,6 +1610,14 @@ _STAGE_B_L2_PLACEMENTS = {
         "trend_channel_daily": "line",
         "table_channel_mtd": "table",
         "table_store_mtd": "table",
+    },
+    # stage-B1 新增「商品动销」页（商渠明细）：四卡，筛选为
+    # month/brand/channel 三项（与其余 L2 页的两项不同）。
+    "l2-product": {
+        "kpi_sku_mtd": "scalar",
+        "table_sku_hot_total": "table",
+        "table_sku_hot_brand": "table",
+        "table_sku_hot_channel": "table",
     },
     "l2-people": {
         "kpi_people_count": "scalar",
@@ -1567,12 +1723,12 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual({"status": "ok", "database": "ok"}, response.json())
 
-    def test_l1_cockpit_definition_places_the_eight_cards(self):
+    def test_l1_cockpit_definition_places_the_eleven_cards(self):
         response = self.client.get("/api/v1/dashboards/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
-        self.assertEqual(8, len(payload["cards"]))
+        self.assertEqual(11, len(payload["cards"]))
         self.assertEqual(
             set(_STAGE_B_L1_CARD_IDS),
             {card["card"] for card in payload["cards"]},
@@ -1602,8 +1758,11 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "pie_sku_mtd": "pie",
             "trend_region_daily": "line",
             "bar_channel_mtd": "bar",
+            "table_channel_mtd": "table",
+            "anomaly_top": "table",
+            "kpi_shortfall": "table",
         }
-        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举八卡，
+        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举 11 卡，
         # 漂移（加卡只改一处）在此立刻红，而不是静默漏测。
         self.assertEqual(set(_STAGE_B_L1_CARD_IDS), set(charts))
         for card_id, chart in charts.items():
@@ -1695,20 +1854,24 @@ class BiWebAppIntegrationTests(unittest.TestCase):
                     self.assertEqual(chart, payload["chart"])
                     self._assert_payload_structure(card_id, payload)
 
-    def test_l2_definitions_carry_two_filters_and_full_navigation(self):
-        # 计划原文对三页统一断言 region 首筛，但 Task 10 落地的 l2-channel
-        # 筛选是 channel（渠道）+ month：第一筛选项按页面区分。
-        # 卡片计数从 _STAGE_B_L2_PLACEMENTS 推导（单一数据源）；API-first
-        # 之后，筛选/下钻/参数白名单都由 v1 定义载荷承载。
+    def test_l2_definitions_carry_page_filters_and_full_navigation(self):
+        # 筛选项按页面区分（Task 10 起即如此）：l2-region/l2-people 为
+        # region+month，l2-channel 为 channel+month，stage-B1 新增的
+        # l2-product 为 month+brand+channel 三项。卡片计数从
+        # _STAGE_B_L2_PLACEMENTS 推导（单一数据源）；API-first 之后，
+        # 筛选/下钻/参数白名单都由 v1 定义载荷承载。
         card_counts = {
             dashboard_id: len(cards)
             for dashboard_id, cards in _STAGE_B_L2_PLACEMENTS.items()
         }
-        first_params = {
-            "l2-region": "region",
-            "l2-channel": "channel",
-            "l2-people": "region",
+        # 每页筛选 param 精确列表（与 bi.seed.yaml 逐项核对）。
+        filter_params = {
+            "l2-region": ["region", "month"],
+            "l2-channel": ["channel", "month"],
+            "l2-product": ["month", "brand", "channel"],
+            "l2-people": ["region", "month"],
         }
+        self.assertEqual(set(card_counts), set(filter_params))
         for dashboard_id, expected in card_counts.items():
             with self.subTest(dashboard=dashboard_id):
                 response = self.client.get(f"/api/v1/dashboards/{dashboard_id}")
@@ -1716,11 +1879,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
                 self.assertEqual(200, response.status_code)
                 payload = response.json()
                 self.assertEqual(expected, len(payload["cards"]))
-                self.assertEqual(2, len(payload["filters"]))
                 self.assertEqual(
-                    first_params[dashboard_id], payload["filters"][0]["param"]
+                    filter_params[dashboard_id],
+                    [spec["param"] for spec in payload["filters"]],
                 )
-                self.assertEqual("month", payload["filters"][1]["param"])
                 # The guarded shell URL still serves the page.
                 self.assertEqual(200, self.client.get(f"/d/{dashboard_id}").status_code)
 
@@ -1741,7 +1903,7 @@ class BiWebAppIntegrationTests(unittest.TestCase):
 
         nav = self.client.get("/api/v1/dashboards").json()["dashboards"]
         self.assertEqual(
-            ["l1-cockpit", "l2-region", "l2-channel", "l2-people"],
+            ["l1-cockpit", "l2-region", "l2-channel", "l2-product", "l2-people"],
             [entry["id"] for entry in nav],
         )
 
@@ -1870,10 +2032,24 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             for value in payload["values"]:
                 self.assertIsInstance(value, float)
             self.assertEqual("元", payload["unit"])
+        elif card_id == "kpi_sku_mtd":
+            # 商品动销 KPI：月累计 + 日环比字段并存（日环比可空，与
+            # dod 家族同约定）；sku_count 为计数、month 为统计月份。
+            self.assertIsInstance(payload["value"], float)
+            self.assertEqual("元", payload["unit"])
+            self.assertIsInstance(payload["month"], str)
+            self.assertIsInstance(payload["sku_count"], int)
+            self.assertIsInstance(payload["active_sku_count"], int)
+            self.assertIsInstance(payload["trend7"], list)
         elif card_id in (
             "table_channel_mtd",
             "table_store_mtd",
             "table_people_leaderboard",
+            "anomaly_top",
+            "kpi_shortfall",
+            "table_sku_hot_total",
+            "table_sku_hot_brand",
+            "table_sku_hot_channel",
         ):
             self.assertIsInstance(payload["columns"], list)
             for column in payload["columns"]:

@@ -5,8 +5,6 @@ interface ImportMetaEnv {
   readonly VITE_BI_WEB_TOKEN?: string;
   /** VITE_MOCK=1 → 不请求后端，用 src/data/mock/fixtures.ts 的 CubeSchema fixture。 */
   readonly VITE_MOCK?: string;
-  /** VITE_DERIVE=0 → 关闭前端过渡派生层（derive.ts 临时债）。 */
-  readonly VITE_DERIVE?: string;
 }
 
 interface ImportMeta {

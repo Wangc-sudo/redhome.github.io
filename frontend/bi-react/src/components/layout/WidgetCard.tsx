@@ -1,3 +1,13 @@
+/**
+ * 单卡组件：自己订阅共享缓存，按 chart 选哑渲染器。
+ *
+ * 数据流：
+ *   WidgetCard → useCardCube(dashboardId, card, params) → CubeSchema
+ *   → 按 chart 分派到 ScalarCard/ChartCard/PieCard/TableCard
+ *
+ * 关键设计：每张卡是独立组件，各自订阅共享缓存
+ * 取代旧的 renderWidget()（在 DashboardGrid 的 map 里直接调 hook，N 卡状态串台）
+ */
 import { cardKey, refreshResource, useCardCube } from '../../data/useCube';
 import { pickParams } from '../../data/biWebClient';
 import type { CardDef } from '../../data/types';
@@ -6,8 +16,6 @@ import { ScalarCard } from '../renderers/ScalarCard';
 import { ChartCard } from '../renderers/ChartCard';
 import { TableCard } from '../renderers/TableCard';
 import { PieCard } from '../renderers/PieCard';
-
-// 单卡组件：自己订阅共享缓存（Rule of Hooks 合规），按 chart 选哑渲染器。
 // 取代旧的 renderWidget()（在 DashboardGrid 的 map 里直接调 hook，N 卡状态串台）。
 interface Props {
   dashboardId: string;

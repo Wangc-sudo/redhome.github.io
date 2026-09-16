@@ -1,6 +1,11 @@
+/**
+ * React 错误边界：等价材料的 componentDidCatch。
+ *
+ * 职责：单卡渲染崩溃时，只显示该卡的降级 UI，不拖垮整板。
+ * 上报：componentDidCatch 里预留上报钩子（接错误监控，见 ARCHITECTURE.md §6）。
+ * ⚠️ TODO：接入监控系统（当前仅 console.error）
+ */
 import React from 'react';
-
-// React 错误边界：等价材料的 componentDidCatch。
 // 单卡渲染崩溃时，只显示该卡的降级 UI，不拖垮整板。
 // componentDidCatch 里预留上报钩子（接错误监控，见 ARCHITECTURE.md §6）。
 interface Props {

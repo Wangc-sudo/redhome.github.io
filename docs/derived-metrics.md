@@ -1,7 +1,10 @@
 # 派生指标清单（CubeSchema §2）
 
 口径真相源：`frontend/bi-ui/CubeSchema.md`（§2 派生口径 / §2.3 四级告警 / §5 数据缺陷显式化）。
-**铁律：派生指标一律后端算，前端只渲染。** 实现：`common/bi_web/derived.py`（纯函数、零 DB 依赖）。
+**铁律：派生指标一律后端算，前端只渲染。**
+
+> ✅ **状态（2026-09-15）**：`common/bi_web/derived.py` 已交付，与前端 golden 夹具对拍一致。
+> 前端 `frontend/bi-react/src/data/derive.ts` 为临时过渡实现，可通过 `VITE_DERIVE=0` 关闭。
 
 ## 1. 派生清单
 
@@ -70,6 +73,6 @@ SQL 只取事实（`queries.shortfall_facts`），派生组装在 `queries.short
 `python -m unittest discover -s tests -t . -k bi_web_derived -v`
 —— 覆盖 p0/p1/p2/ok 四边界（含 p0 的 ≥2 工作日、p1 的 0.5 系数）、`mom` 的
 `prev=0`/`None`、无目标返回 `None`，以及回归用例「同一组数据在月初/月中得到同一 severity」。
-**双端对拍夹具**：`tests/fixtures/derived_golden.json`（24 条派生 + 3 条日历 + 3 条行级
+**双端对拍夹具**：`tests/fixtures/derived_golden.json`（24 条派生 + 4 条日历 + 3 条行级
 `row_cases`；期望值手写且标注 `source` = CubeSchema.md 条款）—— Python 与前端 TS 跑同一
 份 JSON，两边都绿才算口径统一。

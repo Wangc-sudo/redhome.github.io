@@ -2,11 +2,10 @@
  * 四级告警的**展示映射**（色/文案），与 CubeSchema.md §2.3 的值域一致。
  * ---------------------------------------------------------------------------
  * 这里只有 code → {label, reason} 的查表，**没有任何算式**（缺口/告警级别的
- * 计算只在后端 derived.py；过渡期前端副本只存在于 data/derive.ts）。
+ * 计算只在后端 derived.py；前端过渡副本 derive.ts 已按路线图 P3 整文件删除）。
  *
- * 为什么独立成文件：后端已经自己产出 severity（kpi_shortfall / anomaly_top），
- * 前端只需把它装饰成 alert-chip；这份映射在 derive.ts 被删之后仍然要保留，
- * 所以不能跟着 derive.ts 一起走。
+ * 为什么独立成文件：后端自己产出 severity（kpi_shortfall / anomaly_top），
+ * 前端只需把它装饰成 alert-chip；这份映射是 chip 展示的唯一依赖，长期保留。
  */
 
 import type { AlertInfo, Severity } from '../types/cube';
