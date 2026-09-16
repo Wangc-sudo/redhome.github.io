@@ -71,6 +71,8 @@ export interface CubeSchema {
   derived?: Record<string, DerivedMetric>;
   asOf?: string; // 数据时间
   updatedAt?: string;
+  /** 卡级挂零 = 应接入未接入：占位卡为 false（payload 顶层透传，与行级 has_fact 无关） */
+  hasFact?: boolean;
 }
 
 export class CubeError extends Error {

@@ -23,6 +23,7 @@ from common.bi_web.derived import (
     P1_CAPACITY_FACTOR,
     SEVERITY_DOMAIN,
     elapsed_workdays,
+    margin,
     mom,
     p1_threshold,
     rate,
@@ -32,6 +33,7 @@ from common.bi_web.derived import (
     shortfall,
     total_workdays,
     workdays,
+    yoy_rate,
 )
 
 #: 某月的工作日（周末已剔除），22 天。
@@ -137,6 +139,45 @@ class MomTests(unittest.TestCase):
 
     def test_denominator_is_the_absolute_prev(self):
         self.assertEqual({"value": 3.0, "direction": "up"}, mom(100.0, -50.0))
+
+
+class MarginTests(unittest.TestCase):
+    """§2 占比类派生（人工报表 ④⑤ 毛利率）：分母 0/None、分子 None → None。"""
+
+    def test_margin_is_part_over_whole(self):
+        self.assertEqual(0.3, margin(60.0, 200.0))
+
+    def test_uncomputable_denominator_yields_none(self):
+        self.assertIsNone(margin(60.0, 0))
+        self.assertIsNone(margin(60.0, None))
+
+    def test_missing_part_is_not_zero(self):
+        """分子未填（选填未填）→ None，绝不当 0 算出「零毛利」。"""
+        self.assertIsNone(margin(None, 200.0))
+
+    def test_negative_part_is_computed_as_is(self):
+        """亏损月照实算负值，不截断（与 shortfall 超额为负同纪律）。"""
+        self.assertEqual(-0.2, margin(-40.0, 200.0))
+
+
+class YoyRateTests(unittest.TestCase):
+    """同比率（需求⑬）：除零/无基数 → None（前端「—」，绝不 0%/-100%）。"""
+
+    def test_yoy_is_current_over_previous(self):
+        self.assertEqual(0.2, yoy_rate(240.0, 200.0))
+
+    def test_negative_yoy_is_computed_as_is(self):
+        """下滑照实算负值，不截断。"""
+        self.assertEqual(-0.1, yoy_rate(180.0, 200.0))
+
+    def test_zero_or_missing_previous_yields_none(self):
+        """除零与无基数都不可算 → None，绝不显示 0% 或 -100%。"""
+        self.assertIsNone(yoy_rate(240.0, 0))
+        self.assertIsNone(yoy_rate(240.0, None))
+
+    def test_missing_current_is_not_zero(self):
+        """本期未取数 → None，绝不当 0 算出 −1.0 伪装「归零」。"""
+        self.assertIsNone(yoy_rate(None, 200.0))
 
 
 class SeverityTests(unittest.TestCase):
@@ -413,11 +454,35 @@ class GoldenFixtureTests(unittest.TestCase):
                     else:
                         self.assertEqual(expected, actual, key)
 
+    def test_margin_cases_match_the_frozen_golden_values(self):
+        """占比类派生用例：期望值手写，钉「未填不是 0、分母 0 不除」。"""
+        for case in self.fixture["margin_cases"]:
+            with self.subTest(case=case["name"]):
+                self._assert_scalar(
+                    "margin",
+                    derived.margin(case["inputs"]["part"], case["inputs"]["whole"]),
+                    case["expect"]["margin"],
+                )
+
+    def test_yoy_cases_match_the_frozen_golden_values(self):
+        """同比率用例：期望值手写，钉「除零/无基数 → null，绝不 0%/-100%」。"""
+        for case in self.fixture["yoy_cases"]:
+            with self.subTest(case=case["name"]):
+                self._assert_scalar(
+                    "yoy",
+                    derived.yoy_rate(
+                        case["inputs"]["current"], case["inputs"]["previous"]
+                    ),
+                    case["expect"]["yoy"],
+                )
+
     def test_every_case_has_a_unique_name_and_a_contract_source(self):
         cases = (
             self.fixture["cases"]
             + self.fixture["calendar_cases"]
             + self.fixture["row_cases"]
+            + self.fixture["margin_cases"]
+            + self.fixture["yoy_cases"]
         )
         names = [case["name"] for case in cases]
 

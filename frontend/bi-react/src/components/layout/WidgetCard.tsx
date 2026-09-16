@@ -40,7 +40,8 @@ export function WidgetCard({ dashboardId, card, params, refreshMs }: Props) {
     return <EmptyState />;
   }
 
-  if (data.rows.length === 0 && data.chart !== 'scalar') return <EmptyState />;
+  // 空行 → 空态；但占位卡（卡级 hasFact=false）要放行给 TableCard 渲染「应接入未接入」占位态
+  if (data.rows.length === 0 && data.chart !== 'scalar' && data.hasFact !== false) return <EmptyState />;
 
   switch (data.chart) {
     case 'scalar':

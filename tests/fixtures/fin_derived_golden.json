@@ -1,0 +1,190 @@
+{
+  "meta": {
+    "contract": "docs/superpowers/specs/2026-09-16-fund-safety-draft.md §3（资金安全页卡片 SQL 与派生口径草案）",
+    "purpose": "common/bi_web/fin_derived.py 的 golden 夹具（形态照 derived_golden.json）：期望值手写、标注 source，逐位对拍；财务口径变更时先改这里。",
+    "expectations_are_hand_written": true,
+    "tolerance": "浮点按 1e-9 绝对误差比较；expect 里的数字是手写推算值，不是实现输出后回填的。",
+    "unit": "金额单位统一为元（原始单位），换算万由前端按 card.unit 决定；本夹具不含任何换算。",
+    "null_rule": "JSON null 即 Python None（不可算，前端渲染「—」）；分量缺失绝不静默补 0。",
+    "severity_domain": "超期命中 → p1；分量缺失不可算 → p2；正常 → ok；p0 保留给挂零语义，fin 卡不用。",
+    "input_contract": {
+      "aging_cases": "inputs 给 ending_balance/aging_0_30/aging_31_60 三个分量，expect.over_60 为手写差额（ending − 0_30 − 31_60）或 null（任一分量缺失）。",
+      "days_cases": "inputs 给 statement_date（ISO 字符串或 null）与固定的 today，expect.days 为手写自然日差或 null（对账日不可解析，不猜日期）。",
+      "severity_cases": "function 指定被测 severity 函数，inputs 为其入参（键名即参数名），expect.severity 为 p1/p2/ok 三档之一。"
+    },
+    "case_fields": {
+      "name": "唯一标识（测试用 subTest 逐条报名字）",
+      "source": "对应 fund-safety-draft 的条款编号，口径变更时据此定位要改哪几条",
+      "note": "人话说明这条在钉什么边界"
+    }
+  },
+
+  "aging_cases": [
+    {
+      "name": "aging_normal_difference",
+      "source": "draft §3.2（aging_over_60 = ending_balance − aging_0_30 − aging_31_60）",
+      "note": "基准：1000 − 300 − 200 = 500（差额推导，raw 侧没有 >60 列）。",
+      "inputs": {"ending_balance": 1000.0, "aging_0_30": 300.0, "aging_31_60": 200.0},
+      "expect": {"over_60": 500.0}
+    },
+    {
+      "name": "aging_zero_difference_is_not_overdue",
+      "source": "draft §3.2（差额口径待财务确认）",
+      "note": "差额恰好为 0：账全在 0-60 天两桶内，不算 >60 天超期（与 severity 的 >0 判定配套）。",
+      "inputs": {"ending_balance": 500.0, "aging_0_30": 300.0, "aging_31_60": 200.0},
+      "expect": {"over_60": 0.0}
+    },
+    {
+      "name": "aging_missing_ending_balance_is_none",
+      "source": "draft §3.2 + §5（分量缺失 → null，不静默补 0）",
+      "note": "期末余额缺失 → 差额不可算 → null（前端「—」+ 缺陷角标），绝不当 0 参与超期判定。",
+      "inputs": {"ending_balance": null, "aging_0_30": 300.0, "aging_31_60": 200.0},
+      "expect": {"over_60": null}
+    },
+    {
+      "name": "aging_missing_bucket_0_30_is_none",
+      "source": "draft §3.2 + §5",
+      "note": "0-30 天桶缺失 → null；缺桶不是零桶。",
+      "inputs": {"ending_balance": 1000.0, "aging_0_30": null, "aging_31_60": 200.0},
+      "expect": {"over_60": null}
+    },
+    {
+      "name": "aging_missing_bucket_31_60_is_none",
+      "source": "draft §3.2 + §5",
+      "note": "31-60 天桶缺失 → null；三分量缺一不可。",
+      "inputs": {"ending_balance": 1000.0, "aging_0_30": 300.0, "aging_31_60": null},
+      "expect": {"over_60": null}
+    }
+  ],
+
+  "days_cases": [
+    {
+      "name": "days_exactly_sixty_is_the_threshold_boundary",
+      "source": "draft §3.3（days_outstanding = today − statement_date）",
+      "note": "2026-07-18 → 2026-09-16 恰好 60 个自然日（挂账当天为 0 起算）；阈值边界锚点：60 不超期（判定取严格大于）。",
+      "inputs": {"statement_date": "2026-07-18", "today": "2026-09-16"},
+      "expect": {"days": 60}
+    },
+    {
+      "name": "days_sixty_one_is_over_the_threshold",
+      "source": "draft §3.3（>60 天告警，行业默认值待财务确认）",
+      "note": "早一天（2026-07-17）即 61 天 > 60 → 超期命中侧；与上条构成阈值两侧的夹逼。",
+      "inputs": {"statement_date": "2026-07-17", "today": "2026-09-16"},
+      "expect": {"days": 61}
+    },
+    {
+      "name": "days_missing_statement_date_is_none",
+      "source": "draft §3.3（statement_date 为 None → None，不猜日期）",
+      "note": "raw 日期不可解析（投影层已计数进 statement_date_unparsed）→ null（前端「—」），绝不猜一个日期。",
+      "inputs": {"statement_date": null, "today": "2026-09-16"},
+      "expect": {"days": null}
+    }
+  ],
+
+  "severity_cases": [
+    {
+      "name": "aging_severity_over_60_hit_is_p1",
+      "source": "draft §3.2（超期命中 → p1）",
+      "note": ">60 天桶有余额 → p1。",
+      "function": "aging_severity",
+      "inputs": {"over_60": 500.0, "overdue_amount": 0.0},
+      "expect": {"severity": "p1"}
+    },
+    {
+      "name": "aging_severity_overdue_amount_hit_is_p1",
+      "source": "draft §3.2（aging_over_60 > 0 或 overdue_amount > 0 → 告警）",
+      "note": ">60 天桶为 0 但逾期金额列有余额 → 同样 p1。",
+      "function": "aging_severity",
+      "inputs": {"over_60": 0.0, "overdue_amount": 50.0},
+      "expect": {"severity": "p1"}
+    },
+    {
+      "name": "aging_severity_uncomputable_is_p2",
+      "source": "draft §3.2 + §5（分量缺失不可算 → p2）",
+      "note": "差额为 null（账龄分量缺失）→ p2 数据缺陷关注，不静默当正常、也不升级 p1。",
+      "function": "aging_severity",
+      "inputs": {"over_60": null, "overdue_amount": 50.0},
+      "expect": {"severity": "p2"}
+    },
+    {
+      "name": "aging_severity_clean_row_is_ok",
+      "source": "draft §3.2（正常 → ok）",
+      "note": "两口径都无逾期 → ok；逾期金额列缺失（null）按无逾期列处理，不升级。",
+      "function": "aging_severity",
+      "inputs": {"over_60": 0.0, "overdue_amount": null},
+      "expect": {"severity": "ok"}
+    },
+    {
+      "name": "uninvoiced_severity_sixty_one_days_is_p1",
+      "source": "draft §3.3（uninvoiced > 0 且 days > 60 → 告警，行业默认值待财务确认）",
+      "note": "未到票 100、挂账 61 天 > 60 → p1（严格大于）。",
+      "function": "uninvoiced_severity",
+      "inputs": {"uninvoiced_amount": 100.0, "days": 61},
+      "expect": {"severity": "p1"}
+    },
+    {
+      "name": "uninvoiced_severity_exactly_sixty_days_is_ok",
+      "source": "draft §3.3（>60 天阈值边界）",
+      "note": "挂账恰好 60 天不超期（阈值取严格大于）→ ok；与上条构成 60/61 夹逼。",
+      "function": "uninvoiced_severity",
+      "inputs": {"uninvoiced_amount": 100.0, "days": 60},
+      "expect": {"severity": "ok"}
+    },
+    {
+      "name": "uninvoiced_severity_zero_amount_is_ok",
+      "source": "draft §3.3（超期需未到票金额 > 0）",
+      "note": "挂账再久，未到票金额为 0 也不告警。",
+      "function": "uninvoiced_severity",
+      "inputs": {"uninvoiced_amount": 0.0, "days": 90},
+      "expect": {"severity": "ok"}
+    },
+    {
+      "name": "uninvoiced_severity_missing_amount_is_p2",
+      "source": "draft §3.3 + §5（分量缺失不可算 → p2）",
+      "note": "未到票金额未填（null）→ 不可判超期 → p2；未填不是 0。",
+      "function": "uninvoiced_severity",
+      "inputs": {"uninvoiced_amount": null, "days": 61},
+      "expect": {"severity": "p2"}
+    },
+    {
+      "name": "uninvoiced_severity_missing_days_is_p2",
+      "source": "draft §3.3（statement_date 不可解析 → days null → 不可判）",
+      "note": "对账日缺失 → 挂账天数不可算 → p2，不猜日期、不静默当正常。",
+      "function": "uninvoiced_severity",
+      "inputs": {"uninvoiced_amount": 100.0, "days": null},
+      "expect": {"severity": "p2"}
+    },
+    {
+      "name": "deposit_severity_normal_cooperation_is_ok",
+      "source": "draft §3.4（正常合作/运营状态 → ok）",
+      "note": "线下侧「正常合作」→ ok（状态原文透传，severity 按含「正常」字样保守判定，枚举清单待财务/运营确认）。",
+      "function": "deposit_severity",
+      "inputs": {"status": "正常合作"},
+      "expect": {"severity": "ok"}
+    },
+    {
+      "name": "deposit_severity_normal_operation_is_ok",
+      "source": "draft §3.4",
+      "note": "平台侧「正常运营」→ ok。",
+      "function": "deposit_severity",
+      "inputs": {"status": "正常运营"},
+      "expect": {"severity": "ok"}
+    },
+    {
+      "name": "deposit_severity_terminated_is_p2",
+      "source": "draft §3.4（非正常状态 → p2 可退未退关注）",
+      "note": "合作终止等任何非正常状态 → p2 关注；枚举不固化，保守判 p2。",
+      "function": "deposit_severity",
+      "inputs": {"status": "已终止"},
+      "expect": {"severity": "p2"}
+    },
+    {
+      "name": "deposit_severity_missing_status_is_p2",
+      "source": "draft §3.4 + §5",
+      "note": "状态缺失 → p2（不可判正常与否，按关注处理）。",
+      "function": "deposit_severity",
+      "inputs": {"status": null},
+      "expect": {"severity": "p2"}
+    }
+  ]
+}

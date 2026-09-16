@@ -231,6 +231,8 @@ function fromTable(card: CardDef, p: TablePayload, opts: CardToCubeOptions): Cub
     derived: Object.keys(derived).length > 0 ? derived : undefined,
     asOf: p.as_of ?? opts.asOf,
     updatedAt: new Date().toISOString(),
+    // 卡级 has_fact 顶层透传（占位卡 = false）；只搬运，零判定
+    hasFact: p.has_fact ?? undefined,
   };
 }
 

@@ -103,6 +103,8 @@ export interface TablePayload {
   limit?: number | null;
   /** 后端 severity 值域（CubeSchema §2.3），前端据此校验而不是硬编码 */
   severity_domain?: string[];
+  /** 卡级挂零：占位卡（应接入未接入）为 false，行级 has_fact 不动；缺省/true = 正常卡 */
+  has_fact?: boolean;
 }
 
 export interface PieItem {

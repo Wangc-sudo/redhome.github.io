@@ -148,6 +148,34 @@ def mom(current, prev):
     return {"value": value, "direction": direction}
 
 
+def margin(part, whole):
+    """§2 占比类派生 = 部分 ÷ 整体（人工报表 ④⑤ 的毛利率 = 毛利 ÷ 收入）。
+
+    护栏与 ``rate`` 同源（§5 数据缺陷显式化）：分母缺失或为 0 → ``None``
+    （不静默补 0、不产出 ±∞）；分子缺失（选填未填）→ ``None`` —— 未填
+    不是 0，毛利率随之不可算，前端渲染「—」。分子为负（亏损）照实算出
+    负值，不截断。
+    """
+    if part is None or whole is None or whole == 0:
+        return None
+    return float(part) / float(whole)
+
+
+def yoy_rate(current, previous):
+    """同比率 = (本期 − 去年同期) ÷ 去年同期（需求⑬月度同比）。
+
+    null 规则（§5 数据缺陷显式化，同比页硬约束）：
+
+    * ``previous`` 为 ``None``（无基数，如体验馆首年）或为 0 → ``None``：
+      除零 → null → 前端「—」，**绝不显示 0% 或 -100%**；
+    * ``current`` 为 ``None``（本期未取数）→ ``None``；
+    * 否则 ``(current − previous) ÷ previous``，负值照实输出，不截断。
+    """
+    if current is None or previous is None or previous == 0:
+        return None
+    return (float(current) - float(previous)) / float(previous)
+
+
 def severity(done, shortfall, required_daily, remaining_workdays, elapsed_workdays):
     """§2.3 四级告警 → ``'p0'|'p1'|'p2'|'ok'``（取最高，最先匹配为准）。
 

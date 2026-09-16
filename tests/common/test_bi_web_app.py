@@ -408,9 +408,13 @@ class DashboardPageTests(unittest.TestCase):
     """
 
     def test_serves_the_static_shell_without_any_data(self):
-        client = TestClient(_build_app())
+        # V1 (2026-09-16): /d/{id} serves the bi-react dist when present;
+        # the legacy web/ shell remains the documented rollback path, so
+        # these legacy-wiring assertions pin it via BI_WEB_SHELL=legacy.
+        with patch.dict(os.environ, {"BI_WEB_SHELL": "legacy"}):
+            client = TestClient(_build_app())
 
-        response = client.get("/d/l1-cockpit")
+            response = client.get("/d/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         body = response.text
@@ -427,9 +431,10 @@ class DashboardPageTests(unittest.TestCase):
         # manual smoke (unstyled/script-less cockpit, render-blocking CDN
         # fetch).  ``defer`` is safe: dashboard.js touches the echarts
         # global only from fetch callbacks, long after DOMContentLoaded.
-        client = TestClient(_build_app())
+        with patch.dict(os.environ, {"BI_WEB_SHELL": "legacy"}):
+            client = TestClient(_build_app())
 
-        response = client.get("/d/l1-cockpit")
+            response = client.get("/d/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         body = response.text
@@ -1625,6 +1630,40 @@ _STAGE_B_L2_PLACEMENTS = {
         "kpi_people_rate": "scalar",
         "table_people_leaderboard": "table",
     },
+    # 前后端拉齐 V1（2026-09-16）：资金安全五卡真卡页（fact_fin_* 只读），
+    # ④⑤⑪ 月报页（人工报表窄表，未导入期间自然挂零），五张 0 占位页
+    # （结构卡 rows=[] + has_fact=false，应接入未接入）。
+    "l2-fund-safety": {
+        "kpi_fin_receivables_overdue": "scalar",
+        "trend_fin_store_funds": "line",
+        "table_fin_receivables_aging": "table",
+        "table_fin_prepayment_uninvoiced": "table",
+        "table_fin_deposit_status": "table",
+    },
+    "l2-ecom": {
+        "table_manual_ecommerce_monthly": "table",
+    },
+    "l2-dining": {
+        "table_manual_restaurant_monthly": "table",
+    },
+    "l2-hall": {
+        "table_manual_showroom_monthly": "table",
+    },
+    "l2-inventory": {
+        "table_inventory_aging": "table",
+    },
+    "l2-warehouse": {
+        "table_warehouse_ops": "table",
+    },
+    "l2-quarter": {
+        "table_quarter_budget_actual": "table",
+    },
+    "l2-yoy": {
+        "table_yoy_monthly": "table",
+    },
+    "l2-contract": {
+        "table_contract_writeoff": "table",
+    },
 }
 
 _APP_FIXTURE_PREFIX = "biweb-app-test:"
@@ -1870,6 +1909,17 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "l2-channel": ["channel", "month"],
             "l2-product": ["month", "brand", "channel"],
             "l2-people": ["region", "month"],
+            # V1 新页：资金安全与三个月报页无筛选（卡片 params_schema
+            # 留空）；五张占位页只挂月份（页面级 filters）。
+            "l2-fund-safety": [],
+            "l2-ecom": [],
+            "l2-dining": [],
+            "l2-hall": [],
+            "l2-inventory": ["month"],
+            "l2-warehouse": ["month"],
+            "l2-quarter": ["month"],
+            "l2-yoy": ["month"],
+            "l2-contract": ["month"],
         }
         self.assertEqual(set(card_counts), set(filter_params))
         for dashboard_id, expected in card_counts.items():
@@ -1903,7 +1953,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
 
         nav = self.client.get("/api/v1/dashboards").json()["dashboards"]
         self.assertEqual(
-            ["l1-cockpit", "l2-region", "l2-channel", "l2-product", "l2-people"],
+            ["l1-cockpit", "l2-region", "l2-channel", "l2-product",
+             "l2-people", "l2-fund-safety", "l2-ecom", "l2-dining", "l2-hall",
+             "l2-inventory", "l2-warehouse", "l2-quarter", "l2-yoy",
+             "l2-contract"],
             [entry["id"] for entry in nav],
         )
 
@@ -2006,6 +2059,7 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "kpi_annual_progress",
             "kpi_region_mtd",
             "kpi_people_rate",
+            "kpi_fin_receivables_overdue",
         ):
             self.assertIsInstance(payload["value"], float)
             self.assertIsInstance(payload["target"], float)
@@ -2018,7 +2072,11 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         elif card_id == "kpi_people_completed":
             self.assertIsInstance(payload["value"], float)
             self.assertEqual("元", payload["unit"])
-        elif card_id in ("trend_region_daily", "trend_channel_daily"):
+        elif card_id in (
+            "trend_region_daily",
+            "trend_channel_daily",
+            "trend_fin_store_funds",
+        ):
             self.assertIsInstance(payload["dates"], list)
             for entry in payload["series"]:
                 self.assertIsInstance(entry["name"], str)
@@ -2050,12 +2108,34 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "table_sku_hot_total",
             "table_sku_hot_brand",
             "table_sku_hot_channel",
+            "table_manual_ecommerce_monthly",
+            "table_manual_restaurant_monthly",
+            "table_manual_showroom_monthly",
+            "table_fin_receivables_aging",
+            "table_fin_prepayment_uninvoiced",
+            "table_fin_deposit_status",
         ):
             self.assertIsInstance(payload["columns"], list)
             for column in payload["columns"]:
                 self.assertIn("key", column)
                 self.assertIn("title", column)
             self.assertIsInstance(payload["rows"], list)
+        elif card_id in (
+            # 0 占位结构卡（待接入页）：挂零语义钉死——空行 + has_fact
+            # 恒为 False（应接入未接入），列结构非空。
+            "table_inventory_aging",
+            "table_warehouse_ops",
+            "table_quarter_budget_actual",
+            "table_yoy_monthly",
+            "table_contract_writeoff",
+        ):
+            self.assertIs(False, payload["has_fact"])
+            self.assertEqual([], payload["rows"])
+            self.assertEqual("元", payload["unit"])
+            self.assertGreater(len(payload["columns"]), 0)
+            for column in payload["columns"]:
+                self.assertIn("key", column)
+                self.assertIn("title", column)
         elif card_id == "pie_sku_mtd":
             self.assertIsInstance(payload["items"], list)
             for item in payload["items"]:

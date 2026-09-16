@@ -20,6 +20,14 @@ import { WidgetCard } from './WidgetCard';
 // 卡片高度按 chart 给默认值（rowHeight=64），后端若补 min_h 再改成透传。
 const HEIGHT: Record<ChartKind, number> = { scalar: 2, line: 5, bar: 5, pie: 5, table: 7 };
 
+/** 刷新周期文案：T+1（86400s）按天显示，其余按小时/分钟。 */
+function refreshText(seconds: number): string {
+  if (seconds <= 0) return '不自动刷新';
+  if (seconds % 86400 === 0) return `每 ${seconds / 86400} 天自动刷新`;
+  if (seconds % 3600 === 0) return `每 ${seconds / 3600} 小时自动刷新`;
+  return `每 ${Math.round(seconds / 60)} 分钟自动刷新`;
+}
+
 export function DashboardView({ id }: { id: string | undefined }) {
   const { data: def, loading, error } = useDashboardDef(id);
   const filters = useDrill((s) => s.filters);
@@ -53,7 +61,7 @@ export function DashboardView({ id }: { id: string | undefined }) {
       <header className="page-head">
         <h1>{def.title}</h1>
         <p>
-          {def.cards.length} 张卡片 · {def.refresh_seconds > 0 ? `每 ${Math.round(def.refresh_seconds / 60)} 分钟自动刷新` : '不自动刷新'}
+          {def.cards.length} 张卡片 · {refreshText(def.refresh_seconds)}
         </p>
       </header>
 
@@ -64,6 +72,9 @@ export function DashboardView({ id }: { id: string | undefined }) {
       ) : (
         <DashboardGrid dashboardId={def.id} items={items} />
       )}
+
+      {/* 数据口径标注：14 页共用这一处实现（bi-ui 既有 .table-footer 样式） */}
+      <footer className="table-footer">数据口径 T+1</footer>
     </>
   );
 }

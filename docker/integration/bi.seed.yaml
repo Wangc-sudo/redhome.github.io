@@ -4,7 +4,7 @@
 l1-cockpit:
   title: "首页驾驶舱"
   enabled: true
-  refresh_seconds: 300
+  refresh_seconds: 86400
   nav_order: 0
   # 结果（本月累计 / 目标达成）→ 变化（趋势、排行、渠道对比）→
   # 日环比降为条线级辅助信息，不再占据首屏第一排。
@@ -46,7 +46,7 @@ l1-cockpit:
 l2-region:
   title: "区域下钻"
   enabled: true
-  refresh_seconds: 300
+  refresh_seconds: 86400
   nav_order: 10
   filters:
     - {param: region, source: regions, label: "区域"}
@@ -64,7 +64,7 @@ l2-region:
 l2-channel:
   title: "渠道明细"
   enabled: true
-  refresh_seconds: 300
+  refresh_seconds: 86400
   nav_order: 20
   filters:
     - {param: channel, source: channels, label: "渠道"}
@@ -88,7 +88,7 @@ l2-channel:
 l2-product:
   title: "商品动销"
   enabled: true
-  refresh_seconds: 300
+  refresh_seconds: 86400
   nav_order: 25
   filters:
     - {param: month, source: months, label: "月份"}
@@ -110,7 +110,7 @@ l2-product:
 l2-people:
   title: "人员榜"
   enabled: true
-  refresh_seconds: 300
+  refresh_seconds: 86400
   nav_order: 30
   filters:
     - {param: region, source: regions, label: "区域"}
@@ -127,4 +127,114 @@ l2-people:
       span: 4
     - card: table_people_leaderboard
       title: "人员销售榜"
+      span: 12
+# 资金安全（需求⑩）：五张 fact_fin_* 真卡，编排照 fund-safety-draft §4；
+# 派生口径（>60 天差额桶/挂账天数/severity）全部后端算（fin_derived）。
+l2-fund-safety:
+  title: "资金安全"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 40
+  cards:
+    - card: kpi_fin_receivables_overdue
+      title: "应收逾期总览"
+      span: 4
+    - card: trend_fin_store_funds
+      title: "店铺资金余额趋势"
+      span: 8
+    - card: table_fin_receivables_aging
+      title: "应收账龄明细"
+      span: 12
+    - card: table_fin_prepayment_uninvoiced
+      title: "预付与未到票"
+      span: 6
+    - card: table_fin_deposit_status
+      title: "保证金状态"
+      span: 6
+# ④ 电商月报 / ⑤ 餐饮月报 / ⑪ 体验馆月报：真卡（人工报表窄表），
+# 未首填期间自然挂零（空行）；month 参数待月份值域重叠确认后追加。
+l2-ecom:
+  title: "电商月度经营"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 50
+  cards:
+    - card: table_manual_ecommerce_monthly
+      title: "电商月度经营对比"
+      span: 12
+l2-dining:
+  title: "餐饮月度经营"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 60
+  cards:
+    - card: table_manual_restaurant_monthly
+      title: "餐饮月度经营对比"
+      span: 12
+l2-hall:
+  title: "体验馆月度经营"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 70
+  cards:
+    - card: table_manual_showroom_monthly
+      title: "体验馆月度经营对比"
+      span: 12
+# 以下五页为 0 占位（待接入）：结构卡 rows=[] + has_fact=false 挂零语义
+# （应接入未接入），不建临时表；filters 只挂月份（卡片 params_schema
+# 留空，值域校验不会 400）。
+l2-inventory:
+  title: "库存库龄（待接入）"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 80
+  filters:
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: table_inventory_aging
+      title: "库存库龄分布"
+      span: 12
+l2-warehouse:
+  title: "仓储运作（待接入）"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 90
+  filters:
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: table_warehouse_ops
+      title: "超时订单明细"
+      span: 12
+l2-quarter:
+  title: "季度预实（待接入）"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 100
+  filters:
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: table_quarter_budget_actual
+      title: "季度预实明细"
+      span: 12
+l2-yoy:
+  title: "月度同比（待接入）"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 110
+  filters:
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: table_yoy_monthly
+      title: "同比明细"
+      span: 12
+l2-contract:
+  title: "合同核销（待接入）"
+  enabled: true
+  refresh_seconds: 86400
+  nav_order: 120
+  filters:
+    - {param: month, source: months, label: "月份"}
+  cards:
+    - card: table_contract_writeoff
+      title: "品牌×渠道核销进度"
       span: 12

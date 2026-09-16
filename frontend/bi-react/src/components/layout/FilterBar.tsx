@@ -20,11 +20,18 @@ function FilterSelect({
   onChange: (v: string) => void;
 }) {
   const { data: options, loading } = useFilterOptions(filter.source);
+  // 候选值为空数组（如占位页数据源未接入）→ 禁用态，避免给用户一个假选择
+  const noOptions = options != null && options.length === 0;
 
   return (
     <label className="filter">
       <span className="filter-label">{filter.label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={loading && !options}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={(loading && !options) || noOptions}
+        title={noOptions ? '暂无候选值' : undefined}
+      >
         <option value="">全部</option>
         {(options ?? []).map((o) => (
           <option key={o} value={o}>

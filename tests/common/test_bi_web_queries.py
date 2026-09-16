@@ -33,11 +33,13 @@ from common.bi_web.queries import (
     channel_mtd_total,
     channel_options,
     department_mtd_ranking,
+    manual_report_rows,
     month_bounds,
     month_options,
     offline_annual_total,
     offline_dod,
     offline_mtd_total,
+    pivot_manual_rows,
     region_daily_series,
     region_month_daily_series,
     region_month_target,
@@ -60,6 +62,19 @@ from common.bi_web.queries import (
     run_kpi_region_mtd,
     run_pie_sku_mtd,
     run_table_channel_mtd,
+    run_table_manual_ecommerce_monthly,
+    run_table_manual_restaurant_monthly,
+    run_table_manual_showroom_monthly,
+    run_kpi_fin_receivables_overdue,
+    run_table_fin_receivables_aging,
+    run_table_fin_prepayment_uninvoiced,
+    run_table_fin_deposit_status,
+    run_trend_fin_store_funds,
+    run_table_inventory_aging,
+    run_table_warehouse_ops,
+    run_table_quarter_budget_actual,
+    run_table_yoy_monthly,
+    run_table_contract_writeoff,
     run_table_people_leaderboard,
     run_table_store_mtd,
     run_trend_channel_daily,
@@ -126,6 +141,11 @@ class FakeConnection:
         "dim_target",
         "months",  # 伪表键：month_options 的 UNION 查询横跨两张事实表
         "dim_calendar",  # l2-people: fetch_workdays 的日历查询
+        "fact_manual_report",  # ④⑤⑪ 人工报表窄表
+        "fact_fin_receivables_aging",  # ⑩ 应收账龄
+        "fact_fin_prepayment_invoice",  # ⑩ 预付与未到票
+        "fact_fin_store_funds",  # ⑩ 店铺资金余额
+        "fact_fin_offline_deposit",  # ⑩ 保证金（线下+平台 UNION ALL）
     )
 
     def __init__(self, scalars=None, rowsets=None):
@@ -137,6 +157,10 @@ class FakeConnection:
         return FakeCursor(self)
 
     def _table_of(self, sql):
+        # 保证金合一查询是「线下 UNION ALL 平台」，先于通用 UNION→months
+        # 规则归到线下键（该串不会出现在任何既有 SQL 中，行为零回归）。
+        if "fact_fin_offline_deposit" in sql:
+            return "fact_fin_offline_deposit"
         if "UNION" in sql:
             return "months"
         for table in self._TABLES:
@@ -1843,6 +1867,546 @@ class PeopleRunTests(unittest.TestCase):
         self.assertEqual(2, len(results["blocking"]))
         self.assertEqual(results["blocking"], results["second"])
         self.assertEqual([], conn_b.executed)
+
+
+class ManualReportSqlShapeTests(unittest.TestCase):
+    """人工报表窄行查询的形态钉死（消费契约 §2.2 的三处关键差异）。
+
+    该查询绑定 dataset/period_start 两个参数（%s 占位、值绝不拼进 SQL），
+    形态不符「全静态」，故不进 ``StaticSqlTests._QUERY_FUNCTIONS`` —— 这里
+    以同等强度钉它的带参形态。
+    """
+
+    def test_manual_report_rows_binds_dataset_and_period_start(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        manual_report_rows(
+            connection, dataset="ecommerce_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIn("FROM fact_manual_report", sql)
+        self.assertIn("dataset = %s", sql)
+        self.assertIn("period_start = %s", sql)
+        self.assertEqual(("ecommerce_monthly", date(2026, 8, 1)), parameters)
+
+    def test_manual_report_sql_has_no_truncation_summary_or_case_when(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        manual_report_rows(
+            connection, dataset="restaurant_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        sql, _ = connection.executed[0]
+        # 无未来预填行 → 不做 CURDATE 截断（历史月要看全月数）。
+        self.assertNotIn("CURDATE()", sql)
+        # 总计行不入库 → 不做「合计」过滤（与线下日报表的关键差异）。
+        self.assertNotIn("合计", sql)
+        # metric 不写死 → 无 CASE WHEN 列展开（模板加列不改 SQL）。
+        self.assertNotIn("CASE", sql.upper())
+
+
+class ManualReportRowsTests(unittest.TestCase):
+    """只读事实层：窄行原样取回，Decimal 不透改、NULL 不补 0。"""
+
+    def test_rows_are_returned_as_is(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("100.5"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "expense", "value": None, "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        result = manual_report_rows(
+            connection, dataset="ecommerce_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        self.assertEqual(rows, result)
+        self.assertIsInstance(result[0]["value"], Decimal)  # 低层保持 Decimal
+        self.assertIsNone(result[1]["value"])  # 选填未填 = None，绝不补 0
+
+
+class PivotManualRowsTests(unittest.TestCase):
+    """窄行→宽行：dim_scope 过滤、缺失指标=键不存在、直接取值不 SUM。"""
+
+    def test_pivot_groups_metrics_by_dimension_value(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("100"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "gross_profit", "value": Decimal("30"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "京东",
+             "metric": "revenue", "value": Decimal("50"), "unit": "元"},
+        ]
+
+        wide = pivot_manual_rows(rows, dim_scope="channel")
+
+        self.assertEqual(
+            [
+                {"name": "天猫", "revenue": Decimal("100"),
+                 "gross_profit": Decimal("30")},
+                {"name": "京东", "revenue": Decimal("50")},
+            ],
+            wide,
+        )
+        # 缺失指标 = 键不存在（消费方按 None 处理），不是 0。
+        self.assertNotIn("gross_profit", wide[1])
+
+    def test_pivot_drops_other_dim_scopes_and_keeps_null_values(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("999"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "expense", "value": None, "unit": "元"},
+        ]
+
+        wide = pivot_manual_rows(rows, dim_scope="channel")
+
+        self.assertEqual([{"name": "天猫", "expense": None}], wide)
+
+    def test_pivot_skips_rows_without_name_or_metric(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": None,
+             "metric": "revenue", "value": Decimal("1"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": None, "value": Decimal("1"), "unit": "元"},
+        ]
+
+        self.assertEqual([], pivot_manual_rows(rows, dim_scope="channel"))
+
+
+class RunTableManualMonthlyTests(unittest.TestCase):
+    """④⑤ 两张人工月报表卡：载荷形状、float 边界、派生列与空值护栏。"""
+
+    _ROWS = (
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "revenue", "value": Decimal("200"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "gross_profit", "value": Decimal("60"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "expense", "value": None, "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "京东",
+         "metric": "revenue", "value": Decimal("100"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "京东",
+         "metric": "gross_profit", "value": Decimal("-25"), "unit": "元"},
+    )
+
+    def test_ecommerce_payload_shape_and_margin(self):
+        connection = FakeConnection(
+            rowsets={"fact_manual_report": [dict(row) for row in self._ROWS]}
+        )
+
+        payload = run_table_manual_ecommerce_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual("2026-08", payload["month"])
+        self.assertEqual("ecommerce_monthly", payload["dataset"])
+        self.assertEqual(
+            ["name", "revenue", "gross_profit", "expense", "margin"],
+            [column["key"] for column in payload["columns"]],
+        )
+        self.assertEqual("渠道", payload["columns"][0]["title"])
+        self.assertEqual(
+            "percent",
+            [c for c in payload["columns"] if c["key"] == "margin"][0]["format"],
+        )
+        rows = {row["name"]: row for row in payload["rows"]}
+        tmall = rows["天猫"]
+        self.assertEqual(200.0, tmall["revenue"])
+        self.assertIsInstance(tmall["revenue"], float)  # run_* 边界转 float
+        self.assertIsNone(tmall["expense"])  # NULL → None（前端「—」），不补 0
+        self.assertAlmostEqual(0.3, tmall["margin"], delta=1e-9)
+        jingdong = rows["京东"]
+        self.assertIsNone(jingdong["expense"])  # 缺失指标按 None 处理
+        self.assertAlmostEqual(-0.25, jingdong["margin"], delta=1e-9)  # 负值照实
+
+    def test_period_start_is_the_month_first_day(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        run_table_manual_restaurant_monthly(connection, {"month": "2026-08"})
+
+        _sql, parameters = connection.executed[0]
+        self.assertEqual(("restaurant_monthly", date(2026, 8, 1)), parameters)
+
+    def test_margin_column_absent_without_revenue_and_gross_profit(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb门店甲",
+             "metric": "expense", "value": Decimal("10"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_restaurant_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual("restaurant_monthly", payload["dataset"])
+        self.assertEqual(
+            ["name", "expense"],
+            [column["key"] for column in payload["columns"]],
+        )
+        self.assertEqual("门店", payload["columns"][0]["title"])
+        self.assertEqual(
+            [{"name": "biweb门店甲", "expense": 10.0}], payload["rows"]
+        )
+
+    def test_unknown_metric_falls_back_to_key_as_title(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb门店甲",
+             "metric": "tax", "value": Decimal("3"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_restaurant_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        # 模板新增指标：列自动出现、键名兜底作标题，代码零改动。
+        self.assertEqual(
+            {"key": "tax", "title": "tax", "format": "wan"},
+            payload["columns"][1],
+        )
+
+    def test_empty_month_yields_only_the_dimension_column(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        payload = run_table_manual_ecommerce_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual([{"key": "name", "title": "渠道"}], payload["columns"])
+        self.assertEqual([], payload["rows"])
+
+
+class RunTableManualShowroomMonthlyTests(unittest.TestCase):
+    """⑪ 体验馆月报卡：克隆 ④⑤ 模式，dataset 固化 + 维度标题「体验馆」。"""
+
+    def test_binds_showroom_dataset_and_month_first_day(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        payload = run_table_manual_showroom_monthly(connection, {"month": "2026-08"})
+
+        _sql, parameters = connection.executed[0]
+        self.assertEqual(("showroom_monthly", date(2026, 8, 1)), parameters)
+        self.assertEqual("showroom_monthly", payload["dataset"])
+        self.assertEqual("2026-08", payload["month"])
+        self.assertEqual([{"key": "name", "title": "体验馆"}], payload["columns"])
+        self.assertEqual([], payload["rows"])  # 未首填自然挂零
+
+    def test_payload_uses_store_scope_with_hall_label(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb万科馆",
+             "metric": "revenue", "value": Decimal("80"), "unit": "元"},
+            {"dim_scope": "store", "dimension_value": "biweb万科馆",
+             "metric": "gross_profit", "value": Decimal("20"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_showroom_monthly(connection, {"month": "2026-08"})
+
+        self.assertEqual("体验馆", payload["columns"][0]["title"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(
+            [{"name": "biweb万科馆", "revenue": 80.0, "gross_profit": 20.0,
+              "margin": 0.25}],
+            payload["rows"],
+        )
+
+
+class FinSqlShapeTests(unittest.TestCase):
+    """资金安全五卡 SQL 形态钉死（fund-safety-draft §3.1–3.5）。
+
+    全部只读 mart ``fact_fin_*``、全静态（本批无 URL 参数）；快照表整表
+    替换、无未来预填行，故**不做 CURDATE 截断**；>60 天桶/挂账天数是
+    后端差额推导，SQL 里不得出现 CASE/日期差派生。
+    """
+
+    def _sole_static_sql(self, connection, run):
+        run(connection, {})
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIsNone(parameters)
+        self.assertNotIn("CURDATE()", sql)
+        return sql
+
+    def test_kpi_overdue_sql_shape(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("1"), "balance": Decimal("2")}
+            ]}
+        )
+
+        sql = self._sole_static_sql(connection, run_kpi_fin_receivables_overdue)
+
+        self.assertIn("FROM fact_fin_receivables_aging", sql)
+        self.assertIn("SUM(overdue_amount)", sql)
+        self.assertIn("SUM(ending_balance)", sql)
+
+    def test_aging_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_fin_receivables_aging": []})
+
+        sql = self._sole_static_sql(connection, run_table_fin_receivables_aging)
+
+        self.assertIn("FROM fact_fin_receivables_aging", sql)
+        self.assertIn("aging_0_30", sql)
+        self.assertIn("aging_31_60", sql)
+        self.assertIn("updated_date", sql)  # 编制日期原样透传
+        self.assertIn("ORDER BY overdue_amount DESC", sql)
+        # >60 天桶是后端差额推导（draft §2.3 缺口），SQL 不得派生。
+        self.assertNotIn("CASE", sql.upper())
+
+    def test_prepayment_sql_shape(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_prepayment_invoice": []}
+        )
+
+        sql = self._sole_static_sql(
+            connection, run_table_fin_prepayment_uninvoiced
+        )
+
+        self.assertIn("FROM fact_fin_prepayment_invoice", sql)
+        self.assertIn("statement_date", sql)
+        self.assertIn("ORDER BY uninvoiced_amount DESC", sql)
+
+    def test_deposit_sql_shape_unions_offline_and_platform(self):
+        connection = FakeConnection(rowsets={"fact_fin_offline_deposit": []})
+
+        sql = self._sole_static_sql(connection, run_table_fin_deposit_status)
+
+        self.assertIn("FROM fact_fin_offline_deposit", sql)
+        self.assertIn("UNION ALL", sql)
+        self.assertIn("FROM fact_fin_platform_deposit", sql)
+        self.assertIn("'线下'", sql)
+        self.assertIn("'平台'", sql)
+        self.assertIn("ORDER BY deposit_balance DESC", sql)
+
+    def test_store_funds_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": []})
+
+        sql = self._sole_static_sql(connection, run_trend_fin_store_funds)
+
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("ORDER BY month, store_name", sql)
+
+
+class FinRunPayloadTests(unittest.TestCase):
+    """资金安全五卡载荷：派生列（>60 桶/挂账天数/severity）与空值护栏。"""
+
+    def test_kpi_overdue_payload_and_divide_by_zero_guard(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("300"), "balance": Decimal("1000")}
+            ]}
+        )
+
+        payload = run_kpi_fin_receivables_overdue(connection, {})
+
+        self.assertEqual("scalar", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(300.0, payload["value"])
+        self.assertEqual(1000.0, payload["target"])
+        self.assertAlmostEqual(0.3, payload["rate"], delta=1e-9)
+
+        zero = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("0"), "balance": Decimal("0")}
+            ]}
+        )
+        # 除零护栏：balance 为 0 → rate None（前端「—」），绝不 ±∞。
+        self.assertIsNone(run_kpi_fin_receivables_overdue(zero, {})["rate"])
+
+    def test_aging_payload_derives_over_60_and_severity(self):
+        rows = [
+            {"counterparty_name": "biweb甲公司", "receivable_category": "货款",
+             "company_entity": "biweb主体A", "ending_balance": Decimal("1000"),
+             "overdue_amount": Decimal("0"), "aging_0_30": Decimal("300"),
+             "aging_31_60": Decimal("200"), "updated_date": date(2026, 9, 15)},
+            {"counterparty_name": "biweb乙公司", "receivable_category": "货款",
+             "company_entity": "biweb主体A", "ending_balance": Decimal("800"),
+             "overdue_amount": Decimal("10"), "aging_0_30": None,
+             "aging_31_60": Decimal("100"), "updated_date": None},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": rows}
+        )
+
+        payload = run_table_fin_receivables_aging(connection, {})
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(("p0", "p1", "p2", "ok"),
+                         tuple(payload["severity_domain"]))
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertIn("aging_over_60", keys)
+        self.assertEqual(
+            "severity",
+            [c for c in payload["columns"] if c["key"] == "severity"][0]["format"],
+        )
+        first, second = payload["rows"]
+        self.assertEqual(500.0, first["aging_over_60"])  # 1000−300−200 差额推导
+        self.assertIsInstance(first["ending_balance"], float)  # run_* 边界转 float
+        self.assertEqual("p1", first["severity"])
+        self.assertEqual("2026-09-15", first["updated_date"])  # 透传为 ISO 字符串
+        self.assertIsNone(second["aging_over_60"])  # 分量缺失 → None，不补 0
+        self.assertEqual("p2", second["severity"])  # 不可算 → p2
+        self.assertIsNone(second["updated_date"])
+
+    def test_prepayment_payload_derives_days_and_severity(self):
+        today = datetime.now().date()
+        rows = [
+            {"supplier_name": "biweb供应商甲", "company_entity": "biweb主体A",
+             "prepayment_ledger_amount": Decimal("500"),
+             "ap_estimated_amount": Decimal("400"),
+             "ledger_reconciliation_status": "相符",
+             "uninvoiced_amount": Decimal("100"),
+             "statement_date": today - timedelta(days=61)},
+            {"supplier_name": "biweb供应商乙", "company_entity": "biweb主体A",
+             "prepayment_ledger_amount": Decimal("300"),
+             "ap_estimated_amount": None,
+             "ledger_reconciliation_status": "待核",
+             "uninvoiced_amount": Decimal("50"),
+             "statement_date": None},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_prepayment_invoice": rows}
+        )
+
+        payload = run_table_fin_prepayment_uninvoiced(connection, {})
+
+        first, second = payload["rows"]
+        self.assertEqual(61, first["days_outstanding"])  # 挂账 61 天 > 60
+        self.assertEqual("p1", first["severity"])
+        self.assertEqual(
+            (today - timedelta(days=61)).isoformat(), first["statement_date"]
+        )
+        self.assertIsNone(second["days_outstanding"])  # 对账日不可解析，不猜日期
+        self.assertIsNone(second["statement_date"])
+        self.assertEqual("p2", second["severity"])  # 不可算 → p2
+        self.assertEqual("待核", second["reconciliation"])  # 账账核对原文透传
+
+    def test_deposit_payload_passthrough_status_and_severity(self):
+        rows = [
+            {"company_entity": "biweb主体A", "counterparty": "biweb供应商甲",
+             "project_name": "biweb项目X", "status": "正常合作",
+             "deposit_balance": Decimal("200"),
+             "updated_at": datetime(2026, 9, 1, 12, 0), "source": "线下"},
+            {"company_entity": "biweb主体B", "counterparty": "biweb店铺乙",
+             "project_name": "biweb项目Y", "status": "已终止",
+             "deposit_balance": Decimal("300"),
+             "updated_at": None, "source": "平台"},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_offline_deposit": rows}
+        )
+
+        payload = run_table_fin_deposit_status(connection, {})
+
+        first, second = payload["rows"]
+        self.assertEqual("正常合作", first["status"])  # 状态枚举不固化，原文透传
+        self.assertEqual("ok", first["severity"])
+        self.assertEqual("线下", first["source"])
+        self.assertEqual("2026-09-01T12:00:00", first["updated_at"])
+        self.assertEqual("已终止", second["status"])
+        self.assertEqual("p2", second["severity"])  # 非正常状态 → p2 关注
+        self.assertEqual("平台", second["source"])
+        self.assertIsNone(second["updated_at"])  # 平台侧无更新时间列 → None
+
+    def test_store_funds_trend_zero_fills_missing_months(self):
+        rows = [
+            {"month": "2026-02", "store_name": "biweb店A", "channel": "天猫",
+             "balance": Decimal("10")},
+            {"month": "2026-01", "store_name": "biweb店B", "channel": "京东",
+             "balance": Decimal("20")},
+            {"month": "2026-02", "store_name": "biweb店B", "channel": "京东",
+             "balance": Decimal("30")},
+        ]
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": rows})
+
+        payload = run_trend_fin_store_funds(connection, {})
+
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(["2026-01", "2026-02"], payload["dates"])  # 月升序轴
+        series = {entry["name"]: entry["data"] for entry in payload["series"]}
+        self.assertEqual([0.0, 10.0], series["biweb店A"])  # 缺月零填充
+        self.assertEqual([20.0, 30.0], series["biweb店B"])
+
+    def test_empty_tables_yield_empty_payloads(self):
+        connection = FakeConnection()
+
+        aging = run_table_fin_receivables_aging(connection, {})
+        trend = run_trend_fin_store_funds(connection, {})
+
+        self.assertEqual([], aging["rows"])
+        self.assertEqual([], trend["dates"])
+        self.assertEqual([], trend["series"])
+
+
+class PlaceholderCardTests(unittest.TestCase):
+    """五张 0 占位结构卡（待接入页）：不查库、rows 空、has_fact=false。
+
+    契约逐字遵守：``{"chart": "table", "columns": [...], "rows": [],
+    "has_fact": false, "unit": "元"}``；run 函数直接返回静态结构，
+    ``connection`` 绝不被触碰（``executed`` 必须为空）。
+    """
+
+    #: card run 函数 → 钉死的列结构（key, format|None 有序对）。
+    _PLACEHOLDER_CARDS = (
+        (run_table_inventory_aging, (
+            ("sku", None), ("warehouse", None), ("qty", "number"),
+            ("amount", "wan"), ("aging_0_90", "wan"), ("aging_91_180", "wan"),
+            ("aging_181_365", "wan"), ("aging_over_365", "wan"),
+            ("severity", "severity"),
+        )),
+        (run_table_warehouse_ops, (
+            ("order_no", None), ("channel", None), ("item", None),
+            ("reason", None), ("hours", "number"), ("sla_band", None),
+            ("severity", "severity"),
+        )),
+        (run_table_quarter_budget_actual, (
+            ("board", None), ("revenue_budget", "wan"),
+            ("revenue_actual", "wan"), ("revenue_rate", "percent"),
+            ("profit_budget", "wan"), ("profit_actual", "wan"),
+            ("profit_rate", "percent"), ("expense_budget", "wan"),
+            ("expense_actual", "wan"), ("expense_rate", "percent"),
+        )),
+        (run_table_yoy_monthly, (
+            ("board", None), ("brand", None), ("current", "wan"),
+            ("previous", "wan"), ("diff", "wan"), ("yoy", "pct"),
+            ("cum_yoy", "pct"), ("severity", "severity"),
+        )),
+        (run_table_contract_writeoff, (
+            ("brand", None), ("channel", None), ("total", "wan"),
+            ("done", "wan"), ("pending", "wan"), ("overdue", "wan"),
+            ("rate", "percent"), ("severity", "severity"),
+        )),
+    )
+
+    def test_payload_contract_and_no_sql(self):
+        for run, expected_columns in self._PLACEHOLDER_CARDS:
+            with self.subTest(card=run.__name__):
+                connection = FakeConnection()
+
+                payload = run(connection, {})
+
+                # 0 占位卡不得执行任何 SQL。
+                self.assertEqual([], connection.executed)
+                self.assertEqual("table", payload["chart"])
+                self.assertEqual([], payload["rows"])
+                self.assertIs(False, payload["has_fact"])  # 挂零语义，非 falsy 巧合
+                self.assertEqual("元", payload["unit"])
+                self.assertEqual(
+                    list(expected_columns),
+                    [(column["key"], column.get("format"))
+                     for column in payload["columns"]],
+                )
 
 
 # ---------------------------------------------------------------------------

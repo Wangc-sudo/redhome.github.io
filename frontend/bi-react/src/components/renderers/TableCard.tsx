@@ -11,7 +11,7 @@
  */
 import type { CubeSchema, CubeValue, DerivedMetric, FieldDef } from '../../types/cube';
 import { formatCell } from '../../data/adapter/cardToCube';
-import { alertOf } from '../../data/severity';
+import { alertOf, noFactCardAlert } from '../../data/severity';
 import { AlertChip } from './AlertChip';
 // 列定义优先取 cube.columns（后端列序/格式），否则退化 dimensions+measures。
 function columnsOf(cube: CubeSchema): FieldDef[] {
@@ -65,10 +65,24 @@ export function TableCard({ cube }: { cube: CubeSchema }) {
   const hasSeverityCol = columns.some((c) => c.format === 'severity');
   // 挂零角标挂在姓名列（anomaly_top 首列是 rank，角标跟着人走）；没有 name 列则退回首列
   const badgeColIdx = Math.max(0, columns.findIndex((c) => c.key === 'name'));
+  // 卡级挂零（cube.hasFact === false）：占位卡 = 应接入未接入。
+  // 列头照常渲染（结构一次到位），表体渲染空态文案 + 卡级 p0 chip + 「待接入」角标；
+  // 行级 has_fact 角标行为不变（占位卡 rows 本为空，不会重复渲染）。
+  const cardNoFact = cube.hasFact === false;
 
   return (
     <div className="card">
-      <div className="card-title">{cube.title}</div>
+      <div className="card-title">
+        {cube.title}
+        {cardNoFact && (
+          <span
+            className="badge-defect"
+            title="该卡片应接入数据源、暂未接入（后端卡级 has_fact=false；挂零 = p0）"
+          >
+            待接入
+          </span>
+        )}
+      </div>
       <div className="table-scroll">
         <table className="data-table" role="table">
           <thead>
@@ -81,35 +95,45 @@ export function TableCard({ cube }: { cube: CubeSchema }) {
             </tr>
           </thead>
           <tbody>
-            {cube.rows.map((r, i) => {
-              const rowKey = cube.rowKeys?.[i];
-              const derived = rowKey ? cube.derived?.[rowKey] : undefined;
-              return (
-                <tr key={rowKey ?? i}>
-                  {columns.map((c, ci) => (
-                    <td key={c.key} className={ci === 0 ? '' : 'num'}>
-                      {c.format === 'severity' ? (
-                        <SeverityCell value={r[c.key]} derived={derived} />
-                      ) : (
-                        formatCell(r[c.key], c.format)
-                      )}
-                      {ci === 0 && !hasSeverityCol && derived?.alert && <AlertChip alert={derived.alert} />}
-                      {ci === badgeColIdx && r['has_fact'] === false && <NoFactBadge />}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
+            {cardNoFact ? (
+              <tr>
+                <td colSpan={columns.length} className="empty-cell">
+                  暂无数据（待接入） <AlertChip alert={noFactCardAlert()} />
+                </td>
+              </tr>
+            ) : (
+              cube.rows.map((r, i) => {
+                const rowKey = cube.rowKeys?.[i];
+                const derived = rowKey ? cube.derived?.[rowKey] : undefined;
+                return (
+                  <tr key={rowKey ?? i}>
+                    {columns.map((c, ci) => (
+                      <td key={c.key} className={ci === 0 ? '' : 'num'}>
+                        {c.format === 'severity' ? (
+                          <SeverityCell value={r[c.key]} derived={derived} />
+                        ) : (
+                          formatCell(r[c.key], c.format)
+                        )}
+                        {ci === 0 && !hasSeverityCol && derived?.alert && <AlertChip alert={derived.alert} />}
+                        {ci === badgeColIdx && r['has_fact'] === false && <NoFactBadge />}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })
+            )}
           </tbody>
-          <tfoot>
-            <tr>
-              {columns.map((c, ci) => {
-                if (ci === 0) return <td key={c.key}>合计</td>;
-                const sum = sumOf(cube, c);
-                return <td key={c.key}>{sum == null ? '—' : formatCell(sum, c.format)}</td>;
-              })}
-            </tr>
-          </tfoot>
+          {!cardNoFact && (
+            <tfoot>
+              <tr>
+                {columns.map((c, ci) => {
+                  if (ci === 0) return <td key={c.key}>合计</td>;
+                  const sum = sumOf(cube, c);
+                  return <td key={c.key}>{sum == null ? '—' : formatCell(sum, c.format)}</td>;
+                })}
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </div>

@@ -503,7 +503,9 @@ class BiSeedFileTests(unittest.TestCase):
 
         self.assertEqual(
             {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
-             "l2-people"},
+             "l2-people", "l2-fund-safety", "l2-ecom", "l2-dining",
+             "l2-hall", "l2-inventory", "l2-warehouse", "l2-quarter",
+             "l2-yoy", "l2-contract"},
             set(mapping),
         )
         configs = {
@@ -602,6 +604,74 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             (4, 4, 4, 12), tuple(placement.span for placement in people.cards)
         )
+
+        # 前后端拉齐 V1（2026-09-16）：全部 14 页 refresh_seconds 统一
+        # 86400（T+1 口径，全站无自动刷新/轮询）。
+        for dashboard_id, config in configs.items():
+            with self.subTest(dashboard=dashboard_id, field="refresh"):
+                self.assertEqual(86400, config.refresh_seconds)
+
+        # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：五张真卡。
+        fund = configs["l2-fund-safety"]
+        self.assertEqual(40, fund.nav_order)
+        self.assertEqual((), fund.filters)
+        self.assertEqual(
+            ("kpi_fin_receivables_overdue", "trend_fin_store_funds",
+             "table_fin_receivables_aging", "table_fin_prepayment_uninvoiced",
+             "table_fin_deposit_status"),
+            tuple(placement.card for placement in fund.cards),
+        )
+        self.assertEqual(
+            (4, 8, 12, 6, 6), tuple(placement.span for placement in fund.cards)
+        )
+
+        # ④⑤⑪ 月报页：单卡整幅、无筛选（卡片 params_schema 留空）。
+        monthly_pages = (
+            ("l2-ecom", 50, "table_manual_ecommerce_monthly"),
+            ("l2-dining", 60, "table_manual_restaurant_monthly"),
+            ("l2-hall", 70, "table_manual_showroom_monthly"),
+        )
+        for dashboard_id, nav_order, card_id in monthly_pages:
+            with self.subTest(dashboard=dashboard_id):
+                config = configs[dashboard_id]
+                self.assertEqual(nav_order, config.nav_order)
+                self.assertEqual((), config.filters)
+                self.assertEqual(
+                    (card_id,),
+                    tuple(placement.card for placement in config.cards),
+                )
+                self.assertEqual(
+                    (12,), tuple(placement.span for placement in config.cards)
+                )
+
+        # 五张 0 占位页：单卡整幅 + 月份筛选（页面级 filters；卡片
+        # params_schema 留空不会 400），标题带「（待接入）」标注。
+        placeholder_pages = (
+            ("l2-inventory", 80, "table_inventory_aging"),
+            ("l2-warehouse", 90, "table_warehouse_ops"),
+            ("l2-quarter", 100, "table_quarter_budget_actual"),
+            ("l2-yoy", 110, "table_yoy_monthly"),
+            ("l2-contract", 120, "table_contract_writeoff"),
+        )
+        for dashboard_id, nav_order, card_id in placeholder_pages:
+            with self.subTest(dashboard=dashboard_id):
+                config = configs[dashboard_id]
+                self.assertEqual(nav_order, config.nav_order)
+                self.assertIn("（待接入）", config.title)
+                self.assertEqual(
+                    (("month", "months", "月份"),),
+                    tuple(
+                        (spec.param, spec.source, spec.label)
+                        for spec in config.filters
+                    ),
+                )
+                self.assertEqual(
+                    (card_id,),
+                    tuple(placement.card for placement in config.cards),
+                )
+                self.assertEqual(
+                    (12,), tuple(placement.span for placement in config.cards)
+                )
 
 
 class FileDashboardSourceTests(_SeedFileTestCase):

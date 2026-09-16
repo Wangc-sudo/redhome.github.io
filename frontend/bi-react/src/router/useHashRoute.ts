@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 const HASH_RE = /^#?\/?d\/([^/?#]+)/;
+const PATH_RE = /^\/d\/([^/?#]+)/;
 
 /** '#/d/l1-cockpit' → 'l1-cockpit'；不匹配返回 null。 */
 /**
@@ -20,10 +21,24 @@ export function hrefFor(id: string): string {
 }
 
 /**
+ * 初始路由（仅页面加载时用一次，之后仍由 hashchange 驱动）：
+ * hash 优先；hash 为空且 pathname 是 `/d/{id}`（T5 壳替换后用户直访旧书签）→ 取该 id。
+ */
+function initialId(): string | null {
+  const fromHash = parseHash(window.location.hash);
+  if (fromHash) return fromHash;
+  if (window.location.hash === '') {
+    const m = PATH_RE.exec(window.location.pathname);
+    if (m) return decodeURIComponent(m[1]);
+  }
+  return null;
+}
+
+/**
  * 当前看板 id + 跳转函数。刷新/分享 URL 都能还原页面（旧实现存 zustand，刷新回首页）。
  */
 export function useHashRoute(): [string | null, (id: string) => void] {
-  const [id, setId] = useState<string | null>(() => parseHash(window.location.hash));
+  const [id, setId] = useState<string | null>(initialId);
 
   useEffect(() => {
     const onHash = () => setId(parseHash(window.location.hash));

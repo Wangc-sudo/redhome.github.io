@@ -31,7 +31,10 @@ from common.bi_web.config import (
 
 #: The registry card ids: seventeen stage-B cards (含 SKU 环形图) 加四张
 #: 商品动销卡（2026-09-15 商渠明细），再加两张派生口径卡（CubeSchema §2
-#: 的缺口/告警与缺口 TOP），共 23 张。
+#: 的缺口/告警与缺口 TOP），再加两张人工报表消费卡（2026-09-16 ④⑤，
+#: dataset 固化、暂无 URL 参数），再加一张体验馆月报克隆卡（⑪）、资金
+#: 安全五卡（需求⑩，fin_derived 派生）与五张 0 占位结构卡（待接入页，
+#: 静态 rows=[] + has_fact=false），共 36 张。
 STAGE_B_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
@@ -56,6 +59,19 @@ STAGE_B_CARD_IDS = (
     "table_sku_hot_channel",
     "kpi_shortfall",
     "anomaly_top",
+    "table_manual_ecommerce_monthly",
+    "table_manual_restaurant_monthly",
+    "table_manual_showroom_monthly",
+    "kpi_fin_receivables_overdue",
+    "table_fin_receivables_aging",
+    "table_fin_prepayment_uninvoiced",
+    "table_fin_deposit_status",
+    "trend_fin_store_funds",
+    "table_inventory_aging",
+    "table_warehouse_ops",
+    "table_quarter_budget_actual",
+    "table_yoy_monthly",
+    "table_contract_writeoff",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -93,6 +109,19 @@ EXPECTED_CHARTS = {
     "table_sku_hot_channel": "table",
     "kpi_shortfall": "table",
     "anomaly_top": "table",
+    "table_manual_ecommerce_monthly": "table",
+    "table_manual_restaurant_monthly": "table",
+    "table_manual_showroom_monthly": "table",
+    "kpi_fin_receivables_overdue": "scalar",
+    "table_fin_receivables_aging": "table",
+    "table_fin_prepayment_uninvoiced": "table",
+    "table_fin_deposit_status": "table",
+    "trend_fin_store_funds": "line",
+    "table_inventory_aging": "table",
+    "table_warehouse_ops": "table",
+    "table_quarter_budget_actual": "table",
+    "table_yoy_monthly": "table",
+    "table_contract_writeoff": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -120,6 +149,19 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_sku_hot_channel": queries.run_table_sku_hot_channel,
     "kpi_shortfall": queries.run_kpi_shortfall,
     "anomaly_top": queries.run_anomaly_top,
+    "table_manual_ecommerce_monthly": queries.run_table_manual_ecommerce_monthly,
+    "table_manual_restaurant_monthly": queries.run_table_manual_restaurant_monthly,
+    "table_manual_showroom_monthly": queries.run_table_manual_showroom_monthly,
+    "kpi_fin_receivables_overdue": queries.run_kpi_fin_receivables_overdue,
+    "table_fin_receivables_aging": queries.run_table_fin_receivables_aging,
+    "table_fin_prepayment_uninvoiced": queries.run_table_fin_prepayment_uninvoiced,
+    "table_fin_deposit_status": queries.run_table_fin_deposit_status,
+    "trend_fin_store_funds": queries.run_trend_fin_store_funds,
+    "table_inventory_aging": queries.run_table_inventory_aging,
+    "table_warehouse_ops": queries.run_table_warehouse_ops,
+    "table_quarter_budget_actual": queries.run_table_quarter_budget_actual,
+    "table_yoy_monthly": queries.run_table_yoy_monthly,
+    "table_contract_writeoff": queries.run_table_contract_writeoff,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -147,6 +189,24 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_sku_hot_channel": {"channel": "sku_channels", "month": "months"},
     "kpi_shortfall": {"region": "regions", "month": "months"},
     "anomaly_top": {"month": "months"},
+    # 人工报表两张卡：dataset 固化进卡片 id；month 参数待月份值域重叠
+    # 确认后追加（month_options 不含人工报表独有月份，先留空防 400）。
+    "table_manual_ecommerce_monthly": {},
+    "table_manual_restaurant_monthly": {},
+    # ⑪ 克隆卡同 ④⑤ 裁决：params_schema 留空（month 参数待值域重叠确认）。
+    "table_manual_showroom_monthly": {},
+    # 资金安全五卡与五张占位卡：params_schema 保守留空（筛选挂在页面级
+    # filters，卡片白名单为空不会 400）。
+    "kpi_fin_receivables_overdue": {},
+    "table_fin_receivables_aging": {},
+    "table_fin_prepayment_uninvoiced": {},
+    "table_fin_deposit_status": {},
+    "trend_fin_store_funds": {},
+    "table_inventory_aging": {},
+    "table_warehouse_ops": {},
+    "table_quarter_budget_actual": {},
+    "table_yoy_monthly": {},
+    "table_contract_writeoff": {},
 }
 
 
@@ -177,7 +237,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(23, len(REGISTRY))
+        self.assertEqual(36, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

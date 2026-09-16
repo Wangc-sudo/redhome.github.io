@@ -32,3 +32,14 @@ export function alertOf(severity: unknown): AlertInfo | undefined {
   if (!isSeverity(severity)) return undefined;
   return { severity, label: LABEL[severity], reason: REASON[severity] };
 }
+
+/**
+ * 占位卡（卡级 has_fact=false）的告警 chip：应接入未接入。
+ * ---------------------------------------------------------------------------
+ * 语义：该卡应接入数据源但尚未接入（0 占位），按 p0 渲染（指南裁决：挂零 = p0）。
+ * label/severity 复用上表查表，reason 是占位卡专属文案 —— 文案集中在
+ * 本文件这一处，组件不自造第二份文案表。
+ */
+export function noFactCardAlert(): AlertInfo {
+  return { severity: 'p0', label: LABEL.p0, reason: '应接入未接入' };
+}

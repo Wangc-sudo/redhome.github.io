@@ -10,7 +10,9 @@
       "counts_instead_of_calendar": "cases 直接给 total/elapsed/remaining_workdays 三个整数，规避双端对 dim_calendar 理解的差异；日历派生另由 calendar_cases 覆盖。",
       "null": "JSON null 即 Python None（不可算，前端渲染「—」）。",
       "mom": "只有带 current/prev 的用例才断言 mom；current 视为独立入参（与 done 是否同源由调用方决定）。",
-      "row_cases": "行级组装用例（queries.shortfall_rows）：喂一条事实行 dict，断言整行输出（含 has_fact）。它与 cases 的区别是——cases 钉纯函数，row_cases 钉「组装层护栏」：has_fact 是纯诊断字段（False=本月截至今日无销单），不得改变任何派生值，挂零仍挂零。"
+      "row_cases": "行级组装用例（queries.shortfall_rows）：喂一条事实行 dict，断言整行输出（含 has_fact）。它与 cases 的区别是——cases 钉纯函数，row_cases 钉「组装层护栏」：has_fact 是纯诊断字段（False=本月截至今日无销单），不得改变任何派生值，挂零仍挂零。",
+      "margin_cases": "占比类派生用例（derived.margin）：inputs 只给 part/whole 两个入参，expect.margin 为手写商或 null。分母 0/null 与分子 null 都必须 null（未填不是 0，不可算就是不可算）；负分子照实算出负值。",
+      "yoy_cases": "同比率用例（derived.yoy_rate，需求⑬）：inputs 只给 current/previous 两个入参，expect.yoy 为手写值或 null。previous 为 null（无基数）或 0（除零）与 current 为 null 都必须 null——前端渲染「—」，绝不显示 0% 或 -100%；负同比照实算出负值。"
     },
     "case_fields": {
       "name": "唯一标识（测试用 subTest 逐条报名字）",
@@ -277,6 +279,82 @@
       "note": "数据缺陷的真形态：target 缺失 ⇒ 派生列全 None（前端「—」+ 缺陷角标），与 has_fact 无关；has_fact 只是诊断字段，原值透传不参与判定。",
       "inputs": {"fact": {"name": "无目标人", "dept": "示例部", "target": null, "done": 0, "has_fact": false}, "calendar": {"total_workdays": 20, "elapsed_workdays": 2, "remaining_workdays": 18}},
       "expect": {"name": "无目标人", "dept": "示例部", "target": null, "done": 0.0, "shortfall": null, "rate": null, "required_daily": null, "severity": null, "has_fact": false, "remaining_workdays": 18, "elapsed_workdays": 2}
+    }
+  ],
+
+  "margin_cases": [
+    {
+      "name": "margin_normal",
+      "source": "§2 派生口径（占比类：部分 ÷ 整体，人工报表 ④⑤ 毛利率 = 毛利 ÷ 收入）",
+      "note": "基准：60 ÷ 200 = 0.3。",
+      "inputs": {"part": 60.0, "whole": 200.0},
+      "expect": {"margin": 0.3}
+    },
+    {
+      "name": "margin_whole_zero_is_none",
+      "source": "§2 + §5（分母为 0 不除，不静默补 0）",
+      "note": "收入为 0 时毛利率不可算 → null（前端「—」），绝不产出 ±∞ 或 0。",
+      "inputs": {"part": 60.0, "whole": 0.0},
+      "expect": {"margin": null}
+    },
+    {
+      "name": "margin_whole_missing_is_none",
+      "source": "§2 + §5（分母缺失不除）",
+      "note": "收入未填（null）→ null；未填不是 0，但同样不可做分母。",
+      "inputs": {"part": 60.0, "whole": null},
+      "expect": {"margin": null}
+    },
+    {
+      "name": "margin_part_missing_is_none",
+      "source": "§2 + §5（分子缺失 = 选填未填，不是 0）",
+      "note": "毛利未填 → 毛利率不可算 → null；绝不当 0 算出 0.0 伪装「零毛利」。",
+      "inputs": {"part": null, "whole": 200.0},
+      "expect": {"margin": null}
+    },
+    {
+      "name": "margin_negative_part_is_computed",
+      "source": "§2（负值照实计算，不截断）",
+      "note": "亏损月毛利为负：−40 ÷ 200 = −0.2，负值如实输出（与 shortfall 超额为负同纪律）。",
+      "inputs": {"part": -40.0, "whole": 200.0},
+      "expect": {"margin": -0.2}
+    }
+  ],
+
+  "yoy_cases": [
+    {
+      "name": "yoy_normal",
+      "source": "§2 派生口径（同比率 = (本期 − 去年同期) ÷ 去年同期）",
+      "note": "基准：去年同期 200、本期 240 → (240 − 200) ÷ 200 = 0.2。",
+      "inputs": {"current": 240.0, "previous": 200.0},
+      "expect": {"yoy": 0.2}
+    },
+    {
+      "name": "yoy_negative_is_computed",
+      "source": "§2（负同比照实计算，不截断）",
+      "note": "下滑月：180 vs 200 → −0.1，负值如实输出。",
+      "inputs": {"current": 180.0, "previous": 200.0},
+      "expect": {"yoy": -0.1}
+    },
+    {
+      "name": "yoy_previous_zero_is_none",
+      "source": "§5（除零 → null → 前端「—」，绝不 0%/-100%）",
+      "note": "去年同期为 0 不除：返回 null，绝不产出 ±∞ 或 -100%。",
+      "inputs": {"current": 240.0, "previous": 0.0},
+      "expect": {"yoy": null}
+    },
+    {
+      "name": "yoy_previous_missing_is_none",
+      "source": "§5（无基数 → null）",
+      "note": "去年同期无基数（新板块/首年经营）→ null；未填不是 0，但同样不可做分母。",
+      "inputs": {"current": 240.0, "previous": null},
+      "expect": {"yoy": null}
+    },
+    {
+      "name": "yoy_current_missing_is_none",
+      "source": "§5（本期缺失 → null）",
+      "note": "本期未取数 → 同比不可算 → null；绝不当 0 算出 −1.0 伪装「归零」。",
+      "inputs": {"current": null, "previous": 200.0},
+      "expect": {"yoy": null}
     }
   ]
 }

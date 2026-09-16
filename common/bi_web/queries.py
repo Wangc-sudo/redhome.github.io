@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from common.bi_web import derived
+from common.bi_web import derived, fin_derived
 from common.calendar_utils import month_days
 from common.daily_robot.mart_leaderboard import mart_collect
 from common.daily_robot.mart_tasks import MartTaskError
@@ -1607,3 +1607,556 @@ def run_table_people_leaderboard(connection, params) -> dict:
         ],
         "rows": rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# 人工报表消费（需求 ④⑤：fact_manual_report 窄表 → 月度经营对比表）
+#
+# 契约：docs/superpowers/specs/2026-09-16-manual-report-consumption.md。
+# 与业务事实表的三处关键差异（契约 §2.2，违反即错数）：
+#   * **不做 CURDATE 截断** —— 人工月报按整个期间一次导入，无未来预填行，
+#     历史月就该看到全月数；
+#   * **不做「合计」过滤** —— 总计行只用于导入对账，不入窄表；
+#   * **value 为 NULL = 选填未填**，绝不替换成 0（前端显示「—」）。
+# SQL 只取窄行事实；metric 名绝不写死（模板加一列指标，卡片 SQL 不跟着改），
+# 窄行 → 宽行的展开与派生（毛利率）全部在 Python 侧完成。
+# ---------------------------------------------------------------------------
+
+#: 人工报表窄行：一个 dataset 一个期间的全部维度×指标行（契约 §3.2）。
+_MANUAL_REPORT_ROWS_SQL = (
+    "SELECT dim_scope, dimension_value, metric, value, unit "
+    "FROM fact_manual_report "
+    "WHERE dataset = %s AND period_start = %s"
+)
+
+#: 两张卡固化的 dataset → 维度口径（dataset 不做 URL 参数：新增 filter
+#: source 要同步改 config/app 两层，而 app 层本批冻结 —— 与
+#: ``run_kpi_shortfall`` 的 grain 同处置）。params_schema 留空同理：
+#: month_options 的选项来自两张业务事实表的 DISTINCT 月，人工报表独有
+#: 月份（餐饮无系统采集源）不在值域内会被 app 层判 400；集成库暂无人工
+#: 报表数据可验证重叠，先走保守分支，确认重叠后再**追加** month 参数。
+_MANUAL_MONTHLY_DATASETS = {
+    "ecommerce_monthly": {"dim_scope": "channel", "dim_label": "渠道"},
+    "restaurant_monthly": {"dim_scope": "store", "dim_label": "门店"},
+    # ⑪ 体验馆月报（克隆 ⑤ 模式）：门店粒度，维度标题「体验馆」。
+    "showroom_monthly": {"dim_scope": "store", "dim_label": "体验馆"},
+}
+
+#: 指标键 → 列标题（纯展示映射；模板新增指标时以键名兜底显示，代码零改动，
+#: 与「metric 不写死」纪律一致 —— 这里不是 SQL 列展开）。
+_MANUAL_METRIC_LABELS = {
+    "revenue": "收入",
+    "gross_profit": "毛利",
+    "expense": "费用",
+}
+
+
+def manual_report_rows(connection, *, dataset, period_start) -> list:
+    """只读事实：某 dataset 某期间的窄行列表（契约 §3.2）。
+
+    ``period_start`` 由调用方按 period_type 推导（month → 月首，复用
+    ``month_bounds`` 的日历口径）。返回
+    ``[{dim_scope, dimension_value, metric, value(Decimal|None), unit}]``，
+    **不含任何派生列**（同 ``shortfall_facts`` 的可测边界）。
+    """
+    return _fetch_rows(
+        connection, _MANUAL_REPORT_ROWS_SQL, (dataset, period_start)
+    )
+
+
+def pivot_manual_rows(rows, *, dim_scope) -> list:
+    """窄行 → 宽行：``[{name, <metric>: Decimal|None, ...}]``（契约 §3.3）。
+
+    * 只保留 ``dim_scope`` 匹配的行（防御多维模板混入）；
+    * 同一 ``(dimension_value, metric)`` 在表内唯一（唯一键保证），直接
+      取值，**绝不 SUM**（无 melt 陷阱）；
+    * 缺失指标 → **键不存在**（消费方按 None 处理，显示「—」）；``value``
+      为 NULL 的行保留 ``None``，不补 0；
+    * 保持 ``Decimal``，``float`` 转换只在 ``run_*`` 边界做。
+    """
+    grouped = {}
+    order = []
+    for row in rows:
+        if row.get("dim_scope") != dim_scope:
+            continue
+        name = row.get("dimension_value")
+        metric = row.get("metric")
+        if name is None or metric is None:
+            continue
+        if name not in grouped:
+            grouped[name] = {"name": name}
+            order.append(name)
+        grouped[name][metric] = row.get("value")
+    return [grouped[name] for name in order]
+
+
+def _manual_monthly_payload(connection, *, dataset, month) -> dict:
+    """④⑤ 月度经营对比表载荷：维度 × 指标（动态展开）+ 毛利率派生列。
+
+    指标列由当月实际出现的 metric 集合驱动（模板加列 → 卡片自动多一列）；
+    毛利率列只在 revenue 与 gross_profit 同时存在时出现，派生走
+    :func:`derived.margin`（分母 0/None → None，不静默补 0）。
+    """
+    meta = _MANUAL_MONTHLY_DATASETS[dataset]
+    first_day, _last_day = month_bounds(month)
+    rows = manual_report_rows(connection, dataset=dataset, period_start=first_day)
+    wide = pivot_manual_rows(rows, dim_scope=meta["dim_scope"])
+    metrics = []
+    for row in wide:
+        for key in row:
+            if key != "name" and key not in metrics:
+                metrics.append(key)
+    columns = [{"key": "name", "title": meta["dim_label"]}]
+    columns.extend(
+        {
+            "key": metric,
+            "title": _MANUAL_METRIC_LABELS.get(metric, metric),
+            "format": "wan",
+        }
+        for metric in metrics
+    )
+    with_margin = {"revenue", "gross_profit"} <= set(metrics)
+    if with_margin:
+        columns.append({"key": "margin", "title": "毛利率", "format": "percent"})
+    table_rows = []
+    for row in wide:
+        out = {"name": row["name"]}
+        for metric in metrics:
+            value = row.get(metric)
+            out[metric] = None if value is None else float(value)
+        if with_margin:
+            out["margin"] = derived.margin(
+                row.get("gross_profit"), row.get("revenue")
+            )
+        table_rows.append(out)
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "month": month,
+        "dataset": dataset,
+        "columns": columns,
+        "rows": table_rows,
+    }
+
+
+def run_table_manual_ecommerce_monthly(connection, params) -> dict:
+    """④ 电商月度经营表: dataset 固化 ecommerce_monthly，渠道×指标+毛利率。
+
+    params_schema 为空（month 缺省当前月）：月报整月一次导入，历史月
+    不做 CURDATE 截断；month 参数待月份值域重叠确认后追加（见
+    ``_MANUAL_MONTHLY_DATASETS`` 注释）。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="ecommerce_monthly", month=month
+    )
+
+
+def run_table_manual_restaurant_monthly(connection, params) -> dict:
+    """⑤ 餐饮月度经营表: dataset 固化 restaurant_monthly，门店×指标+毛利率。
+
+    餐饮板块无系统采集源（人工模板是唯一进库通道），其余口径与
+    :func:`run_table_manual_ecommerce_monthly` 相同。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="restaurant_monthly", month=month
+    )
+
+
+def run_table_manual_showroom_monthly(connection, params) -> dict:
+    """⑪ 体验馆月度经营表: dataset 固化 showroom_monthly（克隆 ⑤ 模式）。
+
+    维度粒度与餐饮月报同为门店（dim_scope=store），列标题「体验馆」；
+    未首填则自然挂零（空行 + 仅维度列）。params_schema 留空，与 ④⑤
+    同裁决（month 参数待月份值域重叠确认后追加）。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="showroom_monthly", month=month
+    )
+
+
+# ---------------------------------------------------------------------------
+# 资金安全页（需求⑩）：五张 fact_fin_* 真卡
+#
+# 方案：docs/superpowers/specs/2026-09-16-fund-safety-draft.md §3.1–3.5。
+# 铁律沿用：SQL 只取事实（只读 mart），派生一律走
+# :mod:`common.bi_web.fin_derived`（超期阈值 >60 天为行业默认值，
+# 待财务确认）；金额单位一律元，SQL 不做万换算；分量缺失不静默补 0。
+# severity 三档用法见 fin_derived 模块 docstring（p0 保留给挂零语义，
+# fin 卡不用）。
+# ---------------------------------------------------------------------------
+
+#: 应收逾期总览（draft §3.1）：Σ逾期金额、Σ期末余额（静态 SQL）。
+_FIN_RECEIVABLES_OVERDUE_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(overdue_amount), 0) AS overdue,
+           COALESCE(SUM(ending_balance), 0) AS balance
+    FROM fact_fin_receivables_aging
+    """
+).strip()
+
+#: 应收账龄明细（draft §3.2）：按往来单位一行，逾期金额降序。
+_FIN_RECEIVABLES_AGING_SQL = textwrap.dedent(
+    """
+    SELECT counterparty_name, receivable_category, company_entity,
+           ending_balance, overdue_amount, aging_0_30, aging_31_60,
+           updated_date
+    FROM fact_fin_receivables_aging
+    ORDER BY overdue_amount DESC, counterparty_name
+    """
+).strip()
+
+#: 预付/未到票明细（draft §3.3）：未到票金额降序。
+_FIN_PREPAYMENT_UNINVOICED_SQL = textwrap.dedent(
+    """
+    SELECT supplier_name, company_entity, prepayment_ledger_amount,
+           ap_estimated_amount, ledger_reconciliation_status,
+           uninvoiced_amount, statement_date
+    FROM fact_fin_prepayment_invoice
+    ORDER BY uninvoiced_amount DESC, supplier_name
+    """
+).strip()
+
+#: 保证金合一（draft §3.4）：线下 + 平台 UNION ALL，余额降序。
+_FIN_DEPOSIT_STATUS_SQL = textwrap.dedent(
+    """
+    SELECT company_entity, supplier_name AS counterparty, project_name,
+           cooperation_status AS status, deposit_balance, updated_at,
+           '线下' AS source
+    FROM fact_fin_offline_deposit
+    UNION ALL
+    SELECT company_entity, store_name AS counterparty, project_name,
+           store_operating_status AS status, deposit_balance, NULL AS updated_at,
+           '平台' AS source
+    FROM fact_fin_platform_deposit
+    ORDER BY deposit_balance DESC
+    """
+).strip()
+
+#: 店铺资金余额月度趋势（draft §3.5）：melt 窄表，月升序。
+_FIN_STORE_FUNDS_SQL = textwrap.dedent(
+    """
+    SELECT month, store_name, channel, balance
+    FROM fact_fin_store_funds
+    ORDER BY month, store_name
+    """
+).strip()
+
+
+def _iso_or_none(value):
+    """date/datetime → ISO 字符串；None 原样透传（不猜日期）。"""
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _float_or_none(value):
+    """Decimal → float；None 原样透传（§5：不静默补 0）。"""
+    return None if value is None else float(value)
+
+
+def run_kpi_fin_receivables_overdue(connection, params) -> dict:
+    """⑩ 应收逾期总览: Σ逾期金额(value) / Σ期末余额(target) / 逾期占比(rate)。
+
+    rate = overdue ÷ balance，后端除法 + 除零护栏（balance 为 0 → None，
+    前端「—」）；聚合查询恒有一行，COALESCE 兜底空表为 0。
+    """
+    rows = _fetch_rows(connection, _FIN_RECEIVABLES_OVERDUE_SQL)
+    row = rows[0] if rows else {}
+    overdue = Decimal(row.get("overdue") or 0)
+    balance = Decimal(row.get("balance") or 0)
+    rate = None if balance == 0 else float(overdue) / float(balance)
+    return {
+        "chart": "scalar",
+        "value": float(overdue),
+        "target": float(balance),
+        "rate": rate,
+        "unit": _UNIT,
+    }
+
+
+def run_table_fin_receivables_aging(connection, params) -> dict:
+    """⑩ 应收账龄明细: 含差额推导的 >60 天桶与超期告警。
+
+    ``aging_over_60`` 与 ``severity`` 由 :mod:`fin_derived` 派生（SQL 不碰）；
+    ``updated_date`` 原样透传（账龄表编制日期，页面角标用）。
+    """
+    rows = _fetch_rows(connection, _FIN_RECEIVABLES_AGING_SQL)
+    table_rows = []
+    for row in rows:
+        over_60 = fin_derived.aging_over_60(
+            row.get("ending_balance"), row.get("aging_0_30"),
+            row.get("aging_31_60"),
+        )
+        table_rows.append(
+            {
+                "counterparty": row.get("counterparty_name"),
+                "category": row.get("receivable_category"),
+                "entity": row.get("company_entity"),
+                "ending_balance": _float_or_none(row.get("ending_balance")),
+                "overdue_amount": _float_or_none(row.get("overdue_amount")),
+                "aging_0_30": _float_or_none(row.get("aging_0_30")),
+                "aging_31_60": _float_or_none(row.get("aging_31_60")),
+                "aging_over_60": over_60,
+                "updated_date": _iso_or_none(row.get("updated_date")),
+                "severity": fin_derived.aging_severity(
+                    over_60, row.get("overdue_amount")
+                ),
+            }
+        )
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "counterparty", "title": "往来单位"},
+            {"key": "category", "title": "应收类别"},
+            {"key": "entity", "title": "公司主体"},
+            {"key": "ending_balance", "title": "期末余额", "format": "wan"},
+            {"key": "overdue_amount", "title": "逾期金额", "format": "wan"},
+            {"key": "aging_0_30", "title": "账龄0-30天", "format": "wan"},
+            {"key": "aging_31_60", "title": "账龄31-60天", "format": "wan"},
+            {"key": "aging_over_60", "title": "账龄>60天", "format": "wan"},
+            {"key": "updated_date", "title": "编制日期"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_table_fin_prepayment_uninvoiced(connection, params) -> dict:
+    """⑩ 预付与未到票: 挂账天数（>60 天告警）与未到票金额。
+
+    ``days_outstanding`` = 今天 − 对账日（自然日），对账日不可解析
+    → None（不猜日期）；``ledger_reconciliation_status`` 原样透传
+    （账账核对枚举清单待财务给，登记不阻塞）。
+    """
+    today = datetime.now().date()
+    rows = _fetch_rows(connection, _FIN_PREPAYMENT_UNINVOICED_SQL)
+    table_rows = []
+    for row in rows:
+        days = fin_derived.days_outstanding(row.get("statement_date"), today)
+        table_rows.append(
+            {
+                "supplier": row.get("supplier_name"),
+                "entity": row.get("company_entity"),
+                "prepayment": _float_or_none(row.get("prepayment_ledger_amount")),
+                "ap_estimated": _float_or_none(row.get("ap_estimated_amount")),
+                "reconciliation": row.get("ledger_reconciliation_status"),
+                "uninvoiced": _float_or_none(row.get("uninvoiced_amount")),
+                "statement_date": _iso_or_none(row.get("statement_date")),
+                "days_outstanding": days,
+                "severity": fin_derived.uninvoiced_severity(
+                    row.get("uninvoiced_amount"), days
+                ),
+            }
+        )
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "supplier", "title": "供应商"},
+            {"key": "entity", "title": "公司主体"},
+            {"key": "prepayment", "title": "预付账款", "format": "wan"},
+            {"key": "ap_estimated", "title": "应付暂估", "format": "wan"},
+            {"key": "reconciliation", "title": "账账核对"},
+            {"key": "uninvoiced", "title": "未到票金额", "format": "wan"},
+            {"key": "statement_date", "title": "对账日期"},
+            {"key": "days_outstanding", "title": "挂账天数", "format": "number"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_table_fin_deposit_status(connection, params) -> dict:
+    """⑩ 保证金状态: 线下 + 平台合一，状态原文透传（枚举不固化）。
+
+    severity：非正常合作/运营状态 → p2 关注（可退未退），正常 → ok；
+    判定规则保守化在 :func:`fin_derived.deposit_severity`（「正常」取值
+    清单待财务/运营确认）。
+    """
+    rows = _fetch_rows(connection, _FIN_DEPOSIT_STATUS_SQL)
+    table_rows = [
+        {
+            "entity": row.get("company_entity"),
+            "counterparty": row.get("counterparty"),
+            "project": row.get("project_name"),
+            "status": row.get("status"),
+            "deposit": _float_or_none(row.get("deposit_balance")),
+            "updated_at": _iso_or_none(row.get("updated_at")),
+            "source": row.get("source"),
+            "severity": fin_derived.deposit_severity(row.get("status")),
+        }
+        for row in rows
+    ]
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "entity", "title": "公司主体"},
+            {"key": "counterparty", "title": "往来对象"},
+            {"key": "project", "title": "项目"},
+            {"key": "status", "title": "状态"},
+            {"key": "deposit", "title": "保证金余额", "format": "wan"},
+            {"key": "updated_at", "title": "更新时间"},
+            {"key": "source", "title": "来源"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_trend_fin_store_funds(connection, params) -> dict:
+    """⑩ 店铺资金余额趋势: 月升序轴 × 店铺系列（零填充）。
+
+    与 ``_align_series_rows`` 同款零填充思路：轴为窄表去重后的全部月份
+    （``YYYY-MM`` 字符串，天然可排序），店铺在某月无行 → 0。
+    """
+    rows = _fetch_rows(connection, _FIN_STORE_FUNDS_SQL)
+    months = sorted({row["month"] for row in rows if row.get("month")})
+    index_of = {month: index for index, month in enumerate(months)}
+    by_store = {}
+    for row in rows:
+        month = row.get("month")
+        if month is None:
+            continue
+        name = row.get("store_name") or ""
+        by_store.setdefault(name, [Decimal(0)] * len(months))[
+            index_of[month]
+        ] = Decimal(row.get("balance") or 0)
+    return {
+        "chart": "line",
+        "dates": months,
+        "series": [
+            {"name": name, "data": [float(value) for value in by_store[name]]}
+            for name in sorted(by_store)
+        ],
+        "unit": _UNIT,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 0 占位卡（需求 ③⑦⑥⑧⑨⑬ 的待接入页）：挂零语义。
+#
+# 契约（与前端已约定，逐字遵守）：
+# ``{"chart": "table", "columns": [...], "rows": [], "has_fact": false,
+#   "unit": "元"}``。run 函数直接返回静态结构，**不查库**（connection
+# 形参仅为 Card.run 契约存在，绝不执行任何 SQL）；不建临时表、不造
+# 临时口径；列结构按需求表（preview.html 对应页）一次到位。
+# ---------------------------------------------------------------------------
+
+
+def _placeholder_payload(columns) -> dict:
+    """0 占位：has_fact=false，应接入未接入，不建临时表。"""
+    return {
+        "chart": "table",
+        "columns": columns,
+        "rows": [],
+        "has_fact": False,
+        "unit": _UNIT,
+    }
+
+
+def run_table_inventory_aging(connection, params) -> dict:
+    """③⑦ 库存/库龄表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    列结构参照需求表库存页（库龄分桶 0-90/91-180/181-365/>365，
+    **非效期口径**）。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "sku", "title": "SKU"},
+            {"key": "warehouse", "title": "仓库"},
+            {"key": "qty", "title": "库存量", "format": "number"},
+            {"key": "amount", "title": "库存金额", "format": "wan"},
+            {"key": "aging_0_90", "title": "库龄0-90天", "format": "wan"},
+            {"key": "aging_91_180", "title": "库龄91-180天", "format": "wan"},
+            {"key": "aging_181_365", "title": "库龄181-365天", "format": "wan"},
+            {"key": "aging_over_365", "title": "库龄>365天", "format": "wan"},
+            {"key": "severity", "title": "状态", "format": "severity"},
+        ]
+    )
+
+
+def run_table_warehouse_ops(connection, params) -> dict:
+    """⑧ 仓储运作表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    列结构含超时六类原因（缺货待补/拣货积压/待揽收/打包瓶颈/系统故障/
+    人力不足，原文透传）+ 48h/24h 分段 SLA。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "order_no", "title": "订单号"},
+            {"key": "channel", "title": "渠道"},
+            {"key": "item", "title": "品项"},
+            {"key": "reason", "title": "超时原因"},
+            {"key": "hours", "title": "超时时长", "format": "number"},
+            {"key": "sla_band", "title": "SLA分段"},
+            {"key": "severity", "title": "状态", "format": "severity"},
+        ]
+    )
+
+
+def run_table_quarter_budget_actual(connection, params) -> dict:
+    """⑥ 季度预实表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    三板块（线下/电商/餐饮）收入/毛利/费用的预算 vs 实际结构一次到位。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "board", "title": "板块"},
+            {"key": "revenue_budget", "title": "预算收入", "format": "wan"},
+            {"key": "revenue_actual", "title": "实际收入", "format": "wan"},
+            {"key": "revenue_rate", "title": "收入达成", "format": "percent"},
+            {"key": "profit_budget", "title": "预算毛利", "format": "wan"},
+            {"key": "profit_actual", "title": "实际毛利", "format": "wan"},
+            {"key": "profit_rate", "title": "毛利达成", "format": "percent"},
+            {"key": "expense_budget", "title": "预算费用", "format": "wan"},
+            {"key": "expense_actual", "title": "实际费用", "format": "wan"},
+            {"key": "expense_rate", "title": "费用执行", "format": "percent"},
+        ]
+    )
+
+
+def run_table_yoy_monthly(connection, params) -> dict:
+    """⑬ 月度同比表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    同比率列 format 'pct'；无基数/除零 → null 显示「—」（口径见
+    :func:`derived.yoy_rate`），绝不 0%/-100%。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "board", "title": "板块"},
+            {"key": "brand", "title": "品牌"},
+            {"key": "current", "title": "当月", "format": "wan"},
+            {"key": "previous", "title": "去年同月", "format": "wan"},
+            {"key": "diff", "title": "增减额", "format": "wan"},
+            {"key": "yoy", "title": "同比", "format": "pct"},
+            {"key": "cum_yoy", "title": "1-当月累计同比", "format": "pct"},
+            {"key": "severity", "title": "预警", "format": "severity"},
+        ]
+    )
+
+
+def run_table_contract_writeoff(connection, params) -> dict:
+    """⑨ 合同核销表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    品牌 × 渠道核销进度表结构（合同/已核销/待核销/超期/进度/预警）。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "brand", "title": "品牌"},
+            {"key": "channel", "title": "渠道"},
+            {"key": "total", "title": "合同金额", "format": "wan"},
+            {"key": "done", "title": "已核销", "format": "wan"},
+            {"key": "pending", "title": "待核销", "format": "wan"},
+            {"key": "overdue", "title": "超期金额", "format": "wan"},
+            {"key": "rate", "title": "核销进度", "format": "percent"},
+            {"key": "severity", "title": "预警", "format": "severity"},
+        ]
+    )

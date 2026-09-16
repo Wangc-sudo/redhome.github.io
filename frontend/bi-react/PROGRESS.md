@@ -191,6 +191,26 @@
 
 ---
 
+## 0.7 V1 发布（2026-09-16）：前后端拉齐 · 14 页全集上线
+
+> 执行依据：`指南/前后端拉齐V1-执行提示词.md`（T1–T7）。多 agent 协同：backend-cards / frontend-adapter / preview-fixer + main 集成。
+
+| 项 | 结果 |
+|---|---|
+| 卡片注册表 | **25 → 36**：资金安全 5 真卡（`fin_derived.py` 纯函数 + `fin_derived_golden.json` 逐位对拍，超期 >60 天默认「待财务确认」）+ ⑪ 体验馆克隆（`showroom_monthly`）+ 5 张 0 占位结构卡（不查库，`rows:[]` + 卡级 `has_fact:false`，列结构按需求表一次到位） |
+| 同比率 null 规则 | `derived.yoy_rate`（除零/无基数 → null → 前端「—」，绝不 0%/-100%）+ golden `yoy_cases` 5 条（追加式，既有条目逐字未动） |
+| seed 编排 | `bi.seed.yaml` 5 → **14 页**；全页 `refresh_seconds=86400`（T+1）；占位 5 页标题带「（待接入）」 |
+| 前端 | 卡级占位态（p0 chip「应接入未接入」+「待接入」角标 + 列头照常 + 空态文案）；页脚统一「数据口径 T+1」；FilterBar 空候选禁用态；`/d/{id}` 路径直访初始路由兜底（hash 机制不变）；轮询源确认：仅 useCube 一条后端驱动链 |
+| preview.html | 文案级修复 6 项（删"每 5 分钟自动刷新"、3 处单位 bug、效期→库龄、首页撤体验馆日销 KPI、品牌树"其中"标注、11 页上线状态标注），JS 逻辑未动 |
+| 壳替换 | `app.py` `_shell_index_html()`：dist 存在即 serve React 壳；`BI_WEB_SHELL=legacy` 或删 dist 一键回退 V0；旧 `web/` 保留未删；`.dockerignore` 放行 dist、排除 node_modules |
+| 测试 | Python **1080 OK**（本地 skipped=36；Docker 容器内 skipped=11，集成测试真实跑通）· 新增 42 例（后端 33 + 壳 9）；vitest **54 passed / 4 skipped**（新增 15 例，skip 无新增）；守门断言 25→36 同步追加、集合相等断言原样 |
+| 冒烟 | 14 页 API/壳/载荷逐项可达；占位页挂零语义正确；资金安全真卡端到端绿；旧卡零回归 |
+
+**不做清单（按提示词 §6）**：上云、播报 P0、WDT 入 mart、建新表等均未触碰。
+**回退预案**：seed git 回滚；`BI_WEB_SHELL=legacy` 切回旧壳；占位页下线 = seed 删条目（未建表，无数据残留）。
+
+---
+
 ## 1. 已修开工必修缺陷
 
 | # | 位置 | 问题 | 处理 |

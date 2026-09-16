@@ -11,7 +11,18 @@ product-movement board (``l2-product``) adds four more (``kpi_sku_mtd``
 plus the total / per-brand / per-channel hot-SKU tables) for
 twenty-one in all; the derived-metric half of the CubeSchema brings two
 more (``kpi_shortfall`` with the region/month whitelist and the
-parameter-light ``anomaly_top``) for twenty-three.
+parameter-light ``anomaly_top``) for twenty-three; the manual-report
+consumption pair (``table_manual_ecommerce_monthly`` /
+``table_manual_restaurant_monthly``, dataset fixed per card id, no URL
+parameters yet) brings the total to twenty-five; the fund-safety five
+(``kpi_fin_receivables_overdue`` / ``table_fin_receivables_aging`` /
+``table_fin_prepayment_uninvoiced`` / ``table_fin_deposit_status`` /
+``trend_fin_store_funds``, derived via ``fin_derived``), the showroom
+monthly clone (``table_manual_showroom_monthly``) and the five
+placeholder structural cards (``table_inventory_aging`` /
+``table_warehouse_ops`` / ``table_quarter_budget_actual`` /
+``table_yoy_monthly`` / ``table_contract_writeoff``, static ``rows=[]``
+with ``has_fact=false``) bring the total to thirty-six.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -143,6 +154,42 @@ _CARDS = (
         "anomaly_top", "table", queries.run_anomaly_top,
         {"month": "months"},
     ),
+    _card(
+        "table_manual_ecommerce_monthly", "table",
+        queries.run_table_manual_ecommerce_monthly,
+    ),
+    _card(
+        "table_manual_restaurant_monthly", "table",
+        queries.run_table_manual_restaurant_monthly,
+    ),
+    _card(
+        "table_manual_showroom_monthly", "table",
+        queries.run_table_manual_showroom_monthly,
+    ),
+    # 资金安全页（需求⑩）五卡：SQL 只读 mart fact_fin_*，派生走
+    # fin_derived；params_schema 保守留空（同 ④⑤ 裁决）。
+    _card("kpi_fin_receivables_overdue", "scalar",
+          queries.run_kpi_fin_receivables_overdue),
+    _card("table_fin_receivables_aging", "table",
+          queries.run_table_fin_receivables_aging),
+    _card("table_fin_prepayment_uninvoiced", "table",
+          queries.run_table_fin_prepayment_uninvoiced),
+    _card("table_fin_deposit_status", "table",
+          queries.run_table_fin_deposit_status),
+    _card("trend_fin_store_funds", "line",
+          queries.run_trend_fin_store_funds),
+    # 5 张 0 占位结构卡：run 直接返回静态结构（不查库），
+    # has_fact=false 挂零语义（应接入未接入）。
+    _card("table_inventory_aging", "table",
+          queries.run_table_inventory_aging),
+    _card("table_warehouse_ops", "table",
+          queries.run_table_warehouse_ops),
+    _card("table_quarter_budget_actual", "table",
+          queries.run_table_quarter_budget_actual),
+    _card("table_yoy_monthly", "table",
+          queries.run_table_yoy_monthly),
+    _card("table_contract_writeoff", "table",
+          queries.run_table_contract_writeoff),
 )
 
 #: card_id -> Card, built and import-time validated (chart + filter source).

@@ -70,4 +70,32 @@ describe('App 冒烟（mock 后端）', () => {
     // 有人把前端判定加回来了。
     expect(screen.queryAllByText(/今日跟进|缺口超半月产能|有缺口，持续观察|P0|P1|P2/)).toHaveLength(0);
   });
+
+  it('导航扩到 14 页：占位页集中在尾部且标题带「（待接入）」', async () => {
+    await mountAt('#/d/l1-cockpit');
+    await waitFor(() => expect(screen.getByText('首页驾驶舱')).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByText('合同核销（待接入）')).toBeTruthy(), { timeout: 3000 });
+    // 14 页导航项齐全（5 已上线 + 资金安全 + 3 月报 + 5 占位）
+    const links = document.querySelectorAll('.sidebar nav a');
+    expect(links).toHaveLength(14);
+  });
+
+  it('l2-inventory（占位页）：渲染「待接入」+ 卡级 p0 chip「应接入未接入」+ footer「数据口径 T+1」', async () => {
+    await mountAt('#/d/l2-inventory');
+
+    // 标题与侧边栏链接同名，锁定 h1
+    await waitFor(() => expect(screen.getByRole('heading', { name: '库存与库龄（待接入）' })).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByText(/暂无数据（待接入）/)).toBeTruthy(), { timeout: 3000 });
+
+    // 「待接入」角标（卡片 badge-defect）+ 卡级 p0 chip（severity.ts 查表文案）
+    expect(screen.getByText('待接入', { selector: 'span.badge-defect' })).toBeTruthy();
+    expect(screen.getByText('应接入未接入')).toBeTruthy();
+    // 列头照常渲染（结构一次到位：库龄分桶，非效期口径）
+    expect(screen.getByText('库龄0-90天')).toBeTruthy();
+    expect(screen.getByText('库龄>365天')).toBeTruthy();
+    // 行级「挂零」角标不误渲染（占位卡无数据行）
+    expect(screen.queryByText('挂零')).toBeNull();
+    // 页尾统一口径标注（14 页共用 DashboardView 一处实现）
+    expect(screen.getByText('数据口径 T+1')).toBeTruthy();
+  });
 });

@@ -159,6 +159,13 @@ describe('formatCell · 只格式化不换算', () => {
     expect(formatCell(null, 'wan')).toBe('—');
     expect(formatCell(undefined, 'int')).toBe('—');
   });
+  it('同比率 null（除零/无基数）→ 「—」，绝不显示 0% / -100%（指南 §2 铁律钉死）', () => {
+    expect(formatCell(null, 'pct')).toBe('—');
+    expect(formatCell(null, 'percent')).toBe('—');
+    expect(formatCell(null, 'ratio')).toBe('—');
+    // 真实的 0 仍是 0.0%——只有 null 才是「—」
+    expect(formatCell(0, 'pct')).toBe('0.0%');
+  });
   it('wan → 万；int → 千分位', () => {
     expect(Number(formatCell(5619927.19, 'wan'))).toBeCloseTo(562.0, 1);
     expect(Number(formatCell(12345, 'int').replace(/,/g, ''))).toBe(12345);

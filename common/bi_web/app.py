@@ -101,6 +101,29 @@ _FILTER_TTL_SECONDS = 30.0
 #: rendering path is retired and the dependency unpinned.
 _WEB_DIR = Path(__file__).parent / "web"
 
+#: The bi-react production build (V1, 2026-09-16): when ``dist/index.html``
+#: exists it replaces the legacy ``web/`` shell at ``/d/{id}`` -- the React
+#: shell is likewise data-free and resolves the dashboard from
+#: ``location.pathname`` / ``#/d/{id}``, so bookmarkable URLs keep their
+#: semantics.  The legacy shell is NOT deleted: ``BI_WEB_SHELL=legacy``
+#: (or simply removing the dist directory) rolls straight back to V0.
+_REACT_DIST_DIR = Path(__file__).parents[2] / "frontend" / "bi-react" / "dist"
+
+
+def _shell_index_html() -> Path:
+    """Pick the ``/d/{id}`` shell: bi-react dist when present, else legacy.
+
+    The decision is made per request so a rollback (env flip or dist
+    removal) takes effect without a process restart.  ``BI_WEB_SHELL``
+    is an ops switch, never a secret.
+    """
+    if os.environ.get("BI_WEB_SHELL", "").strip().lower() == "legacy":
+        return _WEB_DIR / "index.html"
+    react_index = _REACT_DIST_DIR / "index.html"
+    if react_index.is_file():
+        return react_index
+    return _WEB_DIR / "index.html"
+
 #: Module logger -- the repo's first logging module, so the pattern is set
 #: here: one module-level logger per module, 5xx paths log exactly one
 #: WARNING with the exception class name only (never ``str(exc)`` or a
@@ -500,6 +523,13 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
 
     app = FastAPI(title="bi-web")
     app.mount("/web", StaticFiles(directory=_WEB_DIR, check_dir=False))
+    # bi-react dist static assets (V1 shell); check_dir=False keeps the app
+    # bootable when the dist has not been built -- the shell picker then
+    # falls back to the legacy web/ index.html.
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_REACT_DIST_DIR / "assets", check_dir=False),
+    )
     versioned = _VersionedApi(app, require_bearer)
 
     @app.get("/")
@@ -537,7 +567,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         # still guards the URL (404 missing/disabled, 503 corrupt), and
         # the client fetches everything else from /api/v1/.
         _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
-        return FileResponse(_WEB_DIR / "index.html")
+        return FileResponse(_shell_index_html())
 
     @versioned.route("v1", "/dashboards")
     def dashboard_list():

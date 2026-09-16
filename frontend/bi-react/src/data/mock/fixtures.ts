@@ -20,6 +20,8 @@ const OPTIONS: Record<string, string[]> = {
   months: ['2026-09', '2026-08'],
   brands: ['习酒', '金钻'],
   sku_channels: ['天猫', '京东', '拼多多'],
+  // 占位页筛选项：数据源未接入 → 候选为空数组，FilterBar 渲染禁用态（T6 裁决）
+  warehouses: [],
 };
 
 interface CardSpec {
@@ -46,7 +48,7 @@ interface MockDashboard {
 
 const l1: MockDashboard = {
   title: '首页驾驶舱',
-  refresh_seconds: 300,
+  refresh_seconds: 86400,
   filters: [],
   cards: [
     { card: 'kpi_offline_mtd', title: '线下本月累计销售', chart: 'scalar', span: 4 },
@@ -223,7 +225,7 @@ const regionFilters: FilterDef[] = [
 
 const l2Region: MockDashboard = {
   title: '区域下钻',
-  refresh_seconds: 300,
+  refresh_seconds: 86400,
   filters: regionFilters,
   cards: [
     { card: 'kpi_region_mtd', title: '区域本月累计销售', chart: 'scalar', span: 4, params: ['region', 'month'] },
@@ -248,7 +250,7 @@ const channelFilters: FilterDef[] = [{ param: 'month', source: 'months', label: 
 
 const l2Channel: MockDashboard = {
   title: '渠道明细',
-  refresh_seconds: 300,
+  refresh_seconds: 86400,
   filters: channelFilters,
   cards: [
     { card: 'kpi_channel_mtd', title: '电商渠道本月累计销售', chart: 'scalar', span: 4, params: ['month'] },
@@ -266,7 +268,7 @@ const l2Channel: MockDashboard = {
 
 const l2Product: MockDashboard = {
   title: '商品动销',
-  refresh_seconds: 300,
+  refresh_seconds: 86400,
   filters: channelFilters,
   cards: [
     { card: 'pie_sku_mtd', title: '电商 SKU 本月销售占比', chart: 'pie', span: 6 },
@@ -301,7 +303,7 @@ const l2Product: MockDashboard = {
 // kpi_shortfall / anomaly_top（后端 derived.py 产出，原样透传）。
 const l2People: MockDashboard = {
   title: '人员榜',
-  refresh_seconds: 300,
+  refresh_seconds: 86400,
   filters: regionFilters,
   cards: [
     {
@@ -337,12 +339,250 @@ const l2People: MockDashboard = {
   },
 };
 
+/* ----------------------------------------------------- l2-fund-safety（资金安全） */
+/* V1 新增真卡页（⑩）。行为对齐后端 seed：全页 refresh_seconds=86400（T+1）。
+ * 下方行为演示结构（非真机抓取），severity 由后端算好、前端只透传。 */
+const l2FundSafety: MockDashboard = {
+  title: '资金安全',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [
+    { card: 'fin_overdue_ar', title: '应收超期明细', chart: 'table', span: 12 },
+  ],
+  payloads: {
+    fin_overdue_ar: {
+      chart: 'table',
+      unit: '元',
+      as_of: '2026-09-15',
+      severity_domain: ['p0', 'p1', 'p2', 'ok'],
+      columns: [
+        { key: 'name', title: '客户/主体' },
+        { key: 'amount', title: '应收金额', format: 'wan' },
+        { key: 'overdue_days', title: '超期天数', format: 'int' },
+        { key: 'severity', title: '告警', format: 'severity' },
+      ],
+      rows: [
+        // 演示结构（非真机）：超期 >60 天为 p0（默认阈值，待财务确认）
+        { name: '演示·渠道A', amount: 120000.0, overdue_days: 75, severity: 'p0', has_fact: true },
+        { name: '演示·渠道B', amount: 80000.0, overdue_days: 30, severity: 'p2', has_fact: true },
+      ],
+    },
+  },
+};
+
+/* --------------------------------------- l2-ecom / l2-dining / l2-hall（月报真卡页） */
+
+const l2Ecom: MockDashboard = {
+  title: '电商月报',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'ecom_monthly', title: '电商月报汇总', chart: 'table', span: 12 }],
+  payloads: {
+    ecom_monthly: {
+      chart: 'table',
+      unit: '元',
+      month: '2026-09',
+      columns: [
+        { key: 'channel', title: '渠道' },
+        { key: 'sales', title: '销售额', format: 'wan' },
+        { key: 'refund', title: '退款金额', format: 'wan' },
+        { key: 'net', title: '净销售额', format: 'wan' },
+      ],
+      rows: [
+        { channel: '天猫', sales: 1407564.97, refund: 56300.0, net: 1351264.97 },
+        { channel: '京东', sales: 1042892.17, refund: 31200.0, net: 1011692.17 },
+      ],
+    },
+  },
+};
+
+const l2Dining: MockDashboard = {
+  title: '餐厅月报',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'dining_monthly', title: '餐厅月报汇总', chart: 'table', span: 12 }],
+  payloads: {
+    dining_monthly: {
+      chart: 'table',
+      unit: '元',
+      month: '2026-09',
+      columns: [
+        { key: 'item', title: '项目' },
+        { key: 'amount', title: '金额', format: 'wan' },
+        { key: 'covers', title: '接待人次', format: 'int' },
+      ],
+      rows: [
+        { item: '堂食收入', amount: 386000.0, covers: 2140 },
+        { item: '宴请收入', amount: 152000.0, covers: 460 },
+      ],
+    },
+  },
+};
+
+const l2Hall: MockDashboard = {
+  title: '体验馆月报',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'hall_monthly', title: '体验馆月报汇总', chart: 'table', span: 12 }],
+  payloads: {
+    hall_monthly: {
+      chart: 'table',
+      unit: '元',
+      month: '2026-09',
+      columns: [
+        { key: 'item', title: '项目' },
+        { key: 'amount', title: '金额', format: 'wan' },
+        { key: 'visits', title: '到访人次', format: 'int' },
+      ],
+      rows: [
+        { item: '品鉴销售', amount: 268000.0, visits: 320 },
+        { item: '团购转化', amount: 195000.0, visits: 85 },
+      ],
+    },
+  },
+};
+
+/* ------------------------------------- 占位页（0 占位：结构一次到位 + has_fact=false） */
+/* 契约形态：{"chart":"table","columns":[...],"rows":[],"has_fact":false,"unit":"元"}。
+ * 挂零 = p0「应接入未接入」；前端列头照常渲染 + 空态 + 「待接入」角标。 */
+
+const l2Inventory: MockDashboard = {
+  title: '库存与库龄（待接入）',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'inventory_age', title: '库存与库龄分布', chart: 'table', span: 12 }],
+  payloads: {
+    inventory_age: {
+      chart: 'table',
+      unit: '元',
+      has_fact: false,
+      columns: [
+        { key: 'sku', title: 'SKU' },
+        { key: 'warehouse', title: '仓库' },
+        { key: 'qty', title: '库存量', format: 'int' },
+        { key: 'amount', title: '库存金额', format: 'wan' },
+        // 库龄分桶（0-90/91-180/181-365/>365，非效期口径）
+        { key: 'age_0_90', title: '库龄0-90天', format: 'int' },
+        { key: 'age_91_180', title: '库龄91-180天', format: 'int' },
+        { key: 'age_181_365', title: '库龄181-365天', format: 'int' },
+        { key: 'age_over_365', title: '库龄>365天', format: 'int' },
+      ],
+      rows: [],
+    },
+  },
+};
+
+const l2Warehouse: MockDashboard = {
+  title: '仓储运作（待接入）',
+  refresh_seconds: 86400,
+  // 占位页筛选：数据源未接入 → warehouses 候选为空数组 → FilterBar 禁用态
+  filters: [{ param: 'warehouse', source: 'warehouses', label: '仓库' }],
+  cards: [{ card: 'warehouse_sla', title: '发货时效与超时原因', chart: 'table', span: 12, params: ['warehouse'] }],
+  payloads: {
+    warehouse_sla: {
+      chart: 'table',
+      unit: '元',
+      has_fact: false,
+      columns: [
+        { key: 'stage', title: '环节' },
+        { key: 'orders', title: '单量', format: 'int' },
+        { key: 'sla_24h', title: '24h达标率', format: 'pct' },
+        { key: 'sla_48h', title: '48h达标率', format: 'pct' },
+        // 超时六类原因
+        { key: 'timeout_stockout', title: '超时-缺货', format: 'int' },
+        { key: 'timeout_burst', title: '超时-爆单', format: 'int' },
+        { key: 'timeout_logistics', title: '超时-物流', format: 'int' },
+        { key: 'timeout_system', title: '超时-系统', format: 'int' },
+        { key: 'timeout_address', title: '超时-地址异常', format: 'int' },
+        { key: 'timeout_other', title: '超时-其他', format: 'int' },
+      ],
+      rows: [],
+    },
+  },
+};
+
+const l2Quarter: MockDashboard = {
+  title: '季度预实（待接入）',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'quarter_budget_actual', title: '季度预算 vs 实际', chart: 'table', span: 12 }],
+  payloads: {
+    quarter_budget_actual: {
+      chart: 'table',
+      unit: '元',
+      has_fact: false,
+      columns: [
+        // 三板块 预算 vs 实际 结构一次到位
+        { key: 'section', title: '板块' },
+        { key: 'budget', title: '季度预算', format: 'wan' },
+        { key: 'actual', title: '季度实际', format: 'wan' },
+        { key: 'rate', title: '达成率', format: 'pct' },
+      ],
+      rows: [],
+    },
+  },
+};
+
+const l2Yoy: MockDashboard = {
+  title: '月度同比（待接入）',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'monthly_yoy', title: '月度同比', chart: 'table', span: 12 }],
+  payloads: {
+    monthly_yoy: {
+      chart: 'table',
+      unit: '元',
+      has_fact: false,
+      columns: [
+        { key: 'metric', title: '指标' },
+        { key: 'current', title: '本月', format: 'wan' },
+        { key: 'last_year', title: '去年同月', format: 'wan' },
+        // 同比率：除零/无基数 → null → 显示「—」，绝不显示 0% / -100%
+        { key: 'yoy_rate', title: '同比率', format: 'pct' },
+      ],
+      rows: [],
+    },
+  },
+};
+
+const l2Contract: MockDashboard = {
+  title: '合同核销（待接入）',
+  refresh_seconds: 86400,
+  filters: [],
+  cards: [{ card: 'contract_writeoff', title: '品牌×渠道核销进度', chart: 'table', span: 12 }],
+  payloads: {
+    contract_writeoff: {
+      chart: 'table',
+      unit: '元',
+      has_fact: false,
+      columns: [
+        { key: 'brand', title: '品牌' },
+        { key: 'channel', title: '渠道' },
+        { key: 'contract_amount', title: '合同金额', format: 'wan' },
+        { key: 'written_off', title: '已核销', format: 'wan' },
+        { key: 'progress', title: '核销进度', format: 'pct' },
+      ],
+      rows: [],
+    },
+  },
+};
+
+// 导航排序：l1 → 资金/月报 → 占位页集中尾部（标题带「（待接入）」）
 const DASHBOARDS: Record<string, MockDashboard> = {
   'l1-cockpit': l1,
   'l2-region': l2Region,
   'l2-channel': l2Channel,
   'l2-product': l2Product,
   'l2-people': l2People,
+  'l2-fund-safety': l2FundSafety,
+  'l2-ecom': l2Ecom,
+  'l2-dining': l2Dining,
+  'l2-hall': l2Hall,
+  'l2-inventory': l2Inventory,
+  'l2-warehouse': l2Warehouse,
+  'l2-quarter': l2Quarter,
+  'l2-yoy': l2Yoy,
+  'l2-contract': l2Contract,
 };
 
 /* ------------------------------------------------------------------ 出口 */
