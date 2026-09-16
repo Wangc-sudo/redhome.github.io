@@ -3,10 +3,15 @@
 Everything runs on ``TestClient`` with fully injected fakes -- no Nacos, no
 RDS, no network.  The matrix locks:
 
-* routing: ``/`` redirects to the default dashboard, ``/d/{id}`` renders one
-  placeholder per placed card, ``/api/d/{id}/cards/{card_id}`` returns the
-  ``run`` payload with ``Cache-Control: no-store``, ``/healthz`` probes the
-  mart connection with ``SELECT 1``;
+* routing (API-first, 2026-09-14 separation spec): ``/`` redirects to the
+  default dashboard, ``/d/{id}`` serves the data-free static shell
+  (``web/index.html``) behind the shared resolve chain, the v1 API carries
+  the navigation (``/api/v1/dashboards``), the dashboard definition
+  (``/api/v1/dashboards/{id}``), and the filter option sets
+  (``/api/v1/options/{source}``), while ``/api/d/{id}/cards/{card_id}``
+  and its versioned alias ``/api/v1/d/...`` return the ``run`` payload
+  with ``Cache-Control: no-store``, and ``/healthz`` probes the mart
+  connection with ``SELECT 1``;
 * error mapping: missing or disabled dashboard -> 404, corrupt definition
   (``DashboardConfigError`` / ``CardConfigError``) -> 503 and page-local,
   unknown query parameter -> 400, card ``run`` failure -> 500 ``card_error``
@@ -236,7 +241,6 @@ class _DimensionConnection:
 
 #: keyword -> canned rows for the three filter sources.
 _REGION_ROWS = {"DISTINCT region": [{"region": "杭州"}, {"region": "绍兴"}]}
-_CHANNEL_ROWS = {"DISTINCT channel": [{"channel": "直播"}, {"channel": "京东"}]}
 _MONTH_ROWS = {"UNION": [{"month": "2026-09"}, {"month": "2026-08"}]}
 
 
@@ -363,16 +367,17 @@ class RootRedirectTests(unittest.TestCase):
 
 
 class StaticFilesTests(unittest.TestCase):
-    """The /static mount is created with ``check_dir=False``, so a forgotten
-    or excluded static directory would boot silently and ship an unstyled,
-    script-less cockpit.  These two requests are the only guard -- Task 5's
-    ``style.css`` / ``dashboard.js`` must actually exist on the served tree.
+    """The /web mount is created with ``check_dir=False``, so a forgotten
+    or excluded web directory would boot silently and ship an unstyled,
+    script-less cockpit.  These requests are the only guard -- the
+    API-first shell's ``index.html`` / ``style.css`` / ``dashboard.js``
+    must actually exist on the served tree.
     """
 
     def test_serves_style_css(self):
         client = TestClient(_build_app())
 
-        response = client.get("/static/style.css")
+        response = client.get("/web/style.css")
 
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.content)
@@ -380,129 +385,56 @@ class StaticFilesTests(unittest.TestCase):
     def test_serves_dashboard_js(self):
         client = TestClient(_build_app())
 
-        response = client.get("/static/dashboard.js")
+        response = client.get("/web/dashboard.js")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.content)
+
+    def test_serves_index_html(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/web/index.html")
 
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.content)
 
 
 class DashboardPageTests(unittest.TestCase):
-    def test_renders_one_placeholder_per_card_with_refresh_seconds(self):
+    """``/d/{id}`` serves the data-free static shell (2026-09-14 API-first).
+
+    The page route only guards the URL through the shared resolve chain
+    (404 missing/disabled, 503 corrupt) and returns ``web/index.html``;
+    every data shape moved to the v1 API tests below.
+    """
+
+    def test_serves_the_static_shell_without_any_data(self):
         client = TestClient(_build_app())
 
         response = client.get("/d/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         body = response.text
-        self.assertEqual(5, body.count('data-api="/api/d/l1-cockpit/cards/'))
-        for card_id in _L1_CARD_IDS:
-            self.assertIn(f'data-api="/api/d/l1-cockpit/cards/{card_id}"', body)
-        self.assertIn('data-refresh-seconds="300"', body)
-
-    def test_page_renders_top_navigation_with_current_page_highlight(self):
-        source = StaticDashboardSource(
-            {"l1-cockpit": _l1_mapping(), "l2-region": _l2_mapping(_REGION_MONTH_FILTERS)}
-        )
-        client = TestClient(_build_app(dashboard_source=source))
-
-        body = client.get("/d/l1-cockpit").text
-
-        self.assertIn('href="/d/l1-cockpit"', body)
-        self.assertIn('href="/d/l2-region"', body)
-        self.assertIn("首页驾驶舱", body)
-        self.assertIn("分析页", body)
-        self.assertEqual(1, body.count('class="topnav-link current"'))
-        self.assertLess(
-            body.index('href="/d/l1-cockpit"'),
-            body.index('href="/d/l2-region"'),
-        )
-
-    def test_page_with_filters_renders_one_select_per_filter(self):
-        source = StaticDashboardSource(
-            {"l2-region": _l2_mapping(_REGION_MONTH_FILTERS)}
-        )
-        client = TestClient(
-            _build_app(
-                dashboard_source=source,
-                db_connector=_dimension_connector({**_REGION_ROWS, **_MONTH_ROWS}),
-            )
-        )
-
-        body = client.get("/d/l2-region").text
-
-        self.assertEqual(2, body.count("<select"))
-        self.assertIn('data-param="region"', body)
-        self.assertIn('data-param="month"', body)
-        self.assertIn("区域", body)
-        self.assertIn("月份", body)
-        self.assertIn('<option value="">全部</option>', body)
-        self.assertIn('<option value="杭州">杭州</option>', body)
-        self.assertIn('<option value="绍兴">绍兴</option>', body)
-        self.assertIn('<option value="2026-09">2026-09</option>', body)
-
-    def test_page_emits_each_cards_param_whitelist(self):
-        registry = _FakeRegistry()
-        registry["kpi_offline_mtd"] = replace(
-            registry["kpi_offline_mtd"],
-            params_schema={"region": "regions", "month": "months"},
-        )
-        source = StaticDashboardSource(
-            {"l1-cockpit": _l1_mapping(cards=("kpi_offline_mtd", "kpi_channel_mtd"))}
-        )
-        client = TestClient(_build_app(dashboard_source=source, registry=registry))
-
-        body = client.get("/d/l1-cockpit").text
-
-        self.assertIn('data-params="region month"', body)
-        self.assertEqual(1, body.count("data-params="))
-        self.assertNotIn("data-onclick-param", body)
-
-    def test_page_emits_onclick_param_for_drilldown_cards(self):
-        source = StaticDashboardSource(
-            {
-                "l2-channel": {
-                    "title": "渠道下钻",
-                    "enabled": True,
-                    "refresh_seconds": 300,
-                    "nav_order": 20,
-                    "filters": [dict(spec) for spec in _REGION_MONTH_FILTERS],
-                    "cards": [
-                        {
-                            "card": "bar_channel_mtd",
-                            "title": "t-bar",
-                            "span": 6,
-                            "on_click": {"param": "region"},
-                        }
-                    ],
-                }
-            }
-        )
-        client = TestClient(
-            _build_app(
-                dashboard_source=source,
-                db_connector=_dimension_connector({**_REGION_ROWS, **_MONTH_ROWS}),
-            )
-        )
-
-        body = client.get("/d/l2-channel").text
-
-        self.assertIn('data-onclick-param="region"', body)
-        self.assertEqual(1, body.count("data-onclick-param="))
+        self.assertIn('href="/web/style.css"', body)
+        self.assertIn('src="/web/dashboard.js"', body)
+        # The shell is data-free: cards, params, filters, and options all
+        # arrive via /api/v1/ from dashboard.js.
+        self.assertNotIn("data-api=", body)
+        self.assertNotIn("<select", body)
 
     def test_page_wires_local_assets_and_a_deferred_echarts_cdn_script(self):
-        # base.html wiring is otherwise unpinned: a typo in an href/src or a
-        # dropped ``defer`` would pass the whole suite and surface only in
+        # index.html wiring is otherwise unpinned: a typo in an href/src or
+        # a dropped ``defer`` would pass the whole suite and surface only in
         # manual smoke (unstyled/script-less cockpit, render-blocking CDN
-        # fetch).  ``defer`` is safe: dashboard.js touches the echarts global
-        # only from fetch callbacks, long after DOMContentLoaded.
+        # fetch).  ``defer`` is safe: dashboard.js touches the echarts
+        # global only from fetch callbacks, long after DOMContentLoaded.
         client = TestClient(_build_app())
 
         response = client.get("/d/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
         body = response.text
-        self.assertIn('href="/static/style.css"', body)
-        self.assertIn('src="/static/dashboard.js"', body)
+        self.assertIn('href="/web/style.css"', body)
+        self.assertIn('src="/web/dashboard.js"', body)
         self.assertIn(
             "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js", body
         )
@@ -552,6 +484,331 @@ class DashboardPageTests(unittest.TestCase):
 
         self.assertEqual(200, client.get("/d/l1-cockpit").status_code)
         self.assertTrue(set(_L1_CARD_IDS) <= set(REGISTRY))
+
+
+class V1ApiTests(unittest.TestCase):
+    """The API-first surface (2026-09-14 separation spec).
+
+    ``/api/v1/dashboards`` carries the navigation,
+    ``/api/v1/dashboards/{id}`` the definition the shell renders from,
+    ``/api/v1/options/{source}`` one filter's option set, and
+    ``/api/v1/d/...`` is the versioned alias of the legacy card route
+    (same handler, same semantics).
+    """
+
+    def test_dashboards_lists_enabled_pages_by_nav_order(self):
+        source = StaticDashboardSource({
+            "l2-people": _l2_mapping(_REGION_MONTH_FILTERS, nav_order=30),
+            "l1-cockpit": _l1_mapping(),
+            "l2-region": _l2_mapping(_REGION_MONTH_FILTERS, nav_order=10),
+        })
+        client = TestClient(_build_app(dashboard_source=source))
+
+        response = client.get("/api/v1/dashboards")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "dashboards": [
+                    {"id": "l1-cockpit", "title": "首页驾驶舱"},
+                    {"id": "l2-region", "title": "分析页"},
+                    {"id": "l2-people", "title": "分析页"},
+                ]
+            },
+            response.json(),
+        )
+
+    def test_dashboards_degrades_to_empty_when_enumeration_fails(self):
+        class _UnenumerableSource(StaticDashboardSource):
+            def dashboard_ids(self):
+                raise RuntimeError("nacos list failed")
+
+        client = TestClient(
+            _build_app(
+                dashboard_source=_UnenumerableSource({"l1-cockpit": _l1_mapping()})
+            )
+        )
+
+        response = client.get("/api/v1/dashboards")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"dashboards": []}, response.json())
+
+    def test_dashboards_is_unavailable_when_the_gate_is_off(self):
+        client = TestClient(_build_app(gate=lambda: False))
+
+        response = client.get("/api/v1/dashboards")
+
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("unavailable", response.json()["detail"])
+
+    def test_definition_carries_title_refresh_filters_and_card_placements(self):
+        registry = _FakeRegistry()
+        registry["kpi_offline_mtd"] = replace(
+            registry["kpi_offline_mtd"],
+            params_schema={"region": "regions", "month": "months"},
+        )
+        source = StaticDashboardSource(
+            {"l2-region": _l2_mapping(_REGION_MONTH_FILTERS)}
+        )
+        client = TestClient(_build_app(dashboard_source=source, registry=registry))
+
+        response = client.get("/api/v1/dashboards/l2-region")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "id": "l2-region",
+                "title": "分析页",
+                "refresh_seconds": 300,
+                "filters": [dict(spec) for spec in _REGION_MONTH_FILTERS],
+                "cards": [
+                    {
+                        "card": "kpi_offline_mtd",
+                        "title": "t-kpi_offline_mtd",
+                        "span": 4,
+                        "on_click": None,
+                        # The registry's param whitelist, so the client
+                        # intersects page URL params per card exactly like
+                        # the retired server-rendered shell did.
+                        "params": ["region", "month"],
+                    }
+                ],
+            },
+            response.json(),
+        )
+
+    def test_definition_carries_on_click_for_drilldown_cards(self):
+        source = StaticDashboardSource(
+            {
+                "l2-channel": {
+                    "title": "渠道下钻",
+                    "enabled": True,
+                    "refresh_seconds": 300,
+                    "nav_order": 20,
+                    "filters": [dict(spec) for spec in _REGION_MONTH_FILTERS],
+                    "cards": [
+                        {
+                            "card": "bar_channel_mtd",
+                            "title": "t-bar",
+                            "span": 6,
+                            "on_click": {"param": "region"},
+                        }
+                    ],
+                }
+            }
+        )
+        client = TestClient(_build_app(dashboard_source=source))
+
+        payload = client.get("/api/v1/dashboards/l2-channel").json()
+
+        self.assertEqual("region", payload["cards"][0]["on_click"])
+        self.assertEqual([], payload["cards"][0]["params"])
+
+    def test_definition_404_for_missing_or_disabled_and_503_for_corrupt(self):
+        source = _CorruptDashboardSource(
+            {
+                "l1-cockpit": _l1_mapping(),
+                "l2-off": _l1_mapping(enabled=False),
+                "l2-broken": {"title": "broken"},
+            },
+            corrupt_ids=("l2-broken",),
+        )
+        client = TestClient(_build_app(dashboard_source=source))
+
+        self.assertEqual(404, client.get("/api/v1/dashboards/nope").status_code)
+        self.assertEqual(404, client.get("/api/v1/dashboards/l2-off").status_code)
+        broken = client.get("/api/v1/dashboards/l2-broken")
+        self.assertEqual(503, broken.status_code)
+        self.assertEqual("unavailable", broken.json()["detail"])
+
+    def test_options_returns_the_option_list(self):
+        client = TestClient(
+            _build_app(db_connector=_dimension_connector(_REGION_ROWS))
+        )
+
+        response = client.get("/api/v1/options/regions")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"source": "regions", "options": ["杭州", "绍兴"]}, response.json()
+        )
+
+    def test_options_unknown_source_is_not_found(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/api/v1/options/no_such_source")
+
+        self.assertEqual(404, response.status_code)
+        self.assertEqual("not_found", response.json()["detail"])
+
+    def test_options_is_unavailable_when_the_gate_is_off(self):
+        client = TestClient(_build_app(gate=lambda: False))
+
+        self.assertEqual(503, client.get("/api/v1/options/regions").status_code)
+
+    def test_v1_card_alias_matches_the_legacy_route(self):
+        client = TestClient(_build_app())
+
+        legacy = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        alias = client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd")
+
+        self.assertEqual(200, alias.status_code)
+        self.assertEqual(legacy.json(), alias.json())
+        self.assertEqual("no-store", alias.headers["cache-control"])
+
+    def test_v1_card_alias_keeps_the_404_and_400_semantics(self):
+        client = TestClient(_build_app())
+
+        self.assertEqual(
+            404, client.get("/api/v1/d/l1-cockpit/cards/not_placed").status_code
+        )
+        rejected = client.get(
+            "/api/v1/d/l1-cockpit/cards/kpi_offline_mtd", params={"wat": "1"}
+        )
+        self.assertEqual(400, rejected.status_code)
+        self.assertEqual("bad_request", rejected.json()["detail"])
+
+
+class VersionRoutingTests(unittest.TestCase):
+    """P1 版本化骨架：URL 前缀通道 + API-Version header 通道。
+
+    双通道同一 handler：``/api/v1/...`` 行为逐字段零变化（URL 显式
+    声明版本，header 不参与）；``/api/...`` 由 ``API-Version`` 头
+    解析版本，未声明默认 v1，声明未注册版本 → 404 ``not_found``。
+    """
+
+    def test_header_channel_defaults_to_v1_without_the_header(self):
+        client = TestClient(_build_app())
+
+        unprefixed = client.get("/api/dashboards")
+        prefixed = client.get("/api/v1/dashboards")
+
+        self.assertEqual(200, unprefixed.status_code)
+        self.assertEqual(prefixed.json(), unprefixed.json())
+
+    def test_header_channel_accepts_an_explicit_v1_header(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/api/dashboards", headers={"API-Version": "v1"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            client.get("/api/v1/dashboards").json(), response.json()
+        )
+
+    def test_header_channel_rejects_an_unregistered_version(self):
+        client = TestClient(_build_app())
+
+        for path in ("/api/dashboards", "/api/options/regions",
+                     "/api/d/l1-cockpit/cards/kpi_offline_mtd"):
+            with self.subTest(path=path):
+                response = client.get(path, headers={"API-Version": "v9"})
+                self.assertEqual(404, response.status_code)
+                self.assertEqual("not_found", response.json()["detail"])
+
+    def test_url_prefix_channel_ignores_the_version_header(self):
+        # URL 显式声明版本即最终裁决：前缀通道不读 header，v1 行为
+        # 逐字段零变化的红线覆盖「带奇怪 header 的旧客户端」。
+        client = TestClient(_build_app())
+
+        response = client.get(
+            "/api/v1/dashboards", headers={"API-Version": "v9"}
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            client.get("/api/v1/dashboards").json(), response.json()
+        )
+
+    def test_header_channel_serves_the_full_v1_surface(self):
+        client = TestClient(_build_app())
+
+        self.assertEqual(
+            200, client.get("/api/dashboards/l1-cockpit").status_code
+        )
+        self.assertEqual(200, client.get("/api/options/regions").status_code)
+        card = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        self.assertEqual(200, card.status_code)
+        self.assertEqual("no-store", card.headers["cache-control"])
+
+    def test_legacy_card_route_is_the_header_channel_no_conflict(self):
+        # 裁决钉死：legacy ``/api/d/...`` 与 header 通道是同一条注册
+        # （而非两条路由的偶然叠加）——无 header 与显式 v1 的响应逐
+        # 字段一致，未知版本 404，且与 URL 前缀通道同载荷。
+        client = TestClient(_build_app())
+
+        bare = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        explicit = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd",
+            headers={"API-Version": "v1"},
+        )
+        prefixed = client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd")
+
+        self.assertEqual(200, bare.status_code)
+        self.assertEqual(bare.json(), explicit.json())
+        self.assertEqual(prefixed.json(), bare.json())
+        unknown = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd",
+            headers={"API-Version": "v9"},
+        )
+        self.assertEqual(404, unknown.status_code)
+        self.assertEqual("not_found", unknown.json()["detail"])
+
+    def test_header_channel_keeps_bearer_and_gate_semantics(self):
+        guarded = TestClient(_build_app(token="t"))
+        self.assertEqual(401, guarded.get("/api/dashboards").status_code)
+
+        gated = TestClient(_build_app(gate=lambda: False))
+        self.assertEqual(503, gated.get("/api/dashboards").status_code)
+
+
+class CacheDiagnosticsTests(unittest.TestCase):
+    """``/diagnostics/cache``: healthz 同级的顶层只读计数端点。
+
+    裁决：注册在版本路由层之外（顶层路由），版本化表面不出现无
+    鉴权特例；内容只含聚合计数，禁止 DSN/key/Redis URL。
+    """
+
+    def test_reports_aggregates_without_auth_or_gate(self):
+        client = TestClient(_build_app(token="t", gate=lambda: False))
+
+        response = client.get("/diagnostics/cache")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual("in_process", payload["backend"])
+        self.assertEqual(0, payload["hits"])
+        self.assertEqual(0, payload["misses"])
+        self.assertEqual(0, payload["errors"])
+        self.assertIsNone(payload["hit_rate"])
+        self.assertEqual(0, payload["backend_latency"]["calls"])
+        self.assertIsNone(payload["backend_latency"]["avg_ms"])
+
+    def test_no_diagnostics_exception_inside_the_v1_namespace(self):
+        # 裁决钉死：诊断端点只在顶层；v1 命名空间内不出现无 bearer
+        # 特例，/api/v1/diagnostics/cache 无路由命中（框架默认 404），
+        # 且响应绝不是诊断载荷。
+        client = TestClient(_build_app())
+
+        response = client.get("/api/v1/diagnostics/cache")
+
+        self.assertEqual(404, response.status_code)
+        self.assertNotIn("hits", response.text)
+        self.assertNotIn("backend", response.text)
+
+    def test_v1_diagnostics_is_404_even_with_a_valid_bearer(self):
+        # 裁决负向断言：合法 bearer 下 /api/v1/diagnostics/cache 仍
+        # 404——钉死「v1 命名空间无此无鉴权特例」，防止后人把端点
+        # 注册回 v1 下（bearer 通过 ≠ 路由存在）。
+        client = TestClient(_build_app(token="t"))
+
+        response = client.get(
+            "/api/v1/diagnostics/cache", headers={"Authorization": "Bearer t"}
+        )
+
+        self.assertEqual(404, response.status_code)
+        self.assertNotIn("hits", response.text)
 
 
 class CardApiTests(unittest.TestCase):
@@ -744,11 +1001,20 @@ class SafeErrorLoggingTests(unittest.TestCase):
 
 
 class AuthTests(unittest.TestCase):
+    #: The protected surface: pages plus legacy and v1 API routes alike.
+    _PROTECTED_PATHS = (
+        "/d/l1-cockpit",
+        "/api/d/l1-cockpit/cards/kpi_offline_mtd",
+        "/api/v1/dashboards",
+        "/api/v1/dashboards/l1-cockpit",
+        "/api/v1/options/regions",
+        "/api/v1/d/l1-cockpit/cards/kpi_offline_mtd",
+    )
+
     def test_missing_or_wrong_bearer_is_unauthorized_on_protected_routes(self):
         client = TestClient(_build_app(token="t"))
-        paths = ("/d/l1-cockpit", "/api/d/l1-cockpit/cards/kpi_offline_mtd")
 
-        for path in paths:
+        for path in self._PROTECTED_PATHS:
             with self.subTest(path=path):
                 self.assertEqual(401, client.get(path).status_code)
                 wrong = client.get(path, headers={"Authorization": "Bearer wrong"})
@@ -759,21 +1025,17 @@ class AuthTests(unittest.TestCase):
         client = TestClient(_build_app(token="t"))
         headers = {"Authorization": "Bearer t"}
 
-        self.assertEqual(200, client.get("/d/l1-cockpit", headers=headers).status_code)
-        self.assertEqual(
-            200,
-            client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd", headers=headers).status_code,
-        )
+        for path in self._PROTECTED_PATHS:
+            with self.subTest(path=path):
+                self.assertEqual(200, client.get(path, headers=headers).status_code)
 
     def test_missing_or_empty_token_leaves_everything_open(self):
         for token in (None, ""):
             with self.subTest(token=token):
                 client = TestClient(_build_app(token=token))
-                self.assertEqual(200, client.get("/d/l1-cockpit").status_code)
-                self.assertEqual(
-                    200,
-                    client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd").status_code,
-                )
+                for path in self._PROTECTED_PATHS:
+                    with self.subTest(path=path):
+                        self.assertEqual(200, client.get(path).status_code)
 
 
 class GateTests(unittest.TestCase):
@@ -785,6 +1047,16 @@ class GateTests(unittest.TestCase):
         self.assertEqual("unavailable", page.json()["detail"])
         self.assertEqual(
             503, client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd").status_code
+        )
+        # The v1 surface is gated identically.
+        self.assertEqual(503, client.get("/api/v1/dashboards").status_code)
+        self.assertEqual(
+            503, client.get("/api/v1/dashboards/l1-cockpit").status_code
+        )
+        self.assertEqual(503, client.get("/api/v1/options/regions").status_code)
+        self.assertEqual(
+            503,
+            client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd").status_code,
         )
         self.assertEqual(200, client.get("/healthz").status_code)
 
@@ -975,23 +1247,27 @@ class NavTests(unittest.TestCase):
 
 
 class FilterRenderingTests(unittest.TestCase):
-    """Filter dropdowns: server-side options via db_connector, TTL-cached."""
+    """Filter options endpoint: ``/api/v1/options/{source}``, TTL-cached.
 
-    def test_page_with_filters_loads_each_source_once_within_the_ttl(self):
+    The API-first shell never touches the mart for page loads; option sets
+    are fetched by ``dashboard.js`` from this endpoint, still through the
+    TTL cache that page rendering used before the separation.
+    """
+
+    def test_options_load_each_source_once_within_the_ttl(self):
         connector = _dimension_connector({**_REGION_ROWS, **_MONTH_ROWS})
-        source = StaticDashboardSource(
-            {"l1-cockpit": _l1_mapping(), "l2-region": _l2_mapping(_REGION_MONTH_FILTERS)}
-        )
-        client = TestClient(_build_app(dashboard_source=source, db_connector=connector))
+        client = TestClient(_build_app(db_connector=connector))
 
-        first = client.get("/d/l2-region")
-        second = client.get("/d/l2-region")
+        first = client.get("/api/v1/options/regions")
+        second = client.get("/api/v1/options/regions")
+        third = client.get("/api/v1/options/months")
 
         self.assertEqual(200, first.status_code)
         self.assertEqual(200, second.status_code)
+        self.assertEqual(200, third.status_code)
         self.assertEqual(2, len(connector.connection.dimension_sql))
 
-    def test_page_without_filters_opens_no_connection(self):
+    def test_shell_opens_no_connection(self):
         connector = _counting_connector(_DimensionConnection({}))
         client = TestClient(_build_app(db_connector=connector))
 
@@ -1000,16 +1276,11 @@ class FilterRenderingTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual([], connector.calls)
 
-    def test_dimension_fetch_failure_is_unavailable_and_page_local(self):
+    def test_dimension_fetch_failure_is_unavailable_without_details(self):
         secret = RuntimeError("connect to mart-secret-host.example.test with pw123")
-        source = StaticDashboardSource(
-            {"l1-cockpit": _l1_mapping(), "l2-region": _l2_mapping(_REGION_MONTH_FILTERS)}
-        )
-        client = TestClient(
-            _build_app(dashboard_source=source, db_connector=_fake_db_connector(error=secret))
-        )
+        client = TestClient(_build_app(db_connector=_fake_db_connector(error=secret)))
 
-        broken = client.get("/d/l2-region")
+        broken = client.get("/api/v1/options/regions")
         healthy = client.get("/d/l1-cockpit")
 
         self.assertEqual(503, broken.status_code)
@@ -1020,13 +1291,10 @@ class FilterRenderingTests(unittest.TestCase):
 
     def test_dimension_fetch_failure_logs_the_class_name_only(self):
         secret = RuntimeError("connect to mart-secret-host.example.test with pw123")
-        source = StaticDashboardSource({"l2-region": _l2_mapping(_REGION_MONTH_FILTERS)})
-        client = TestClient(
-            _build_app(dashboard_source=source, db_connector=_fake_db_connector(error=secret))
-        )
+        client = TestClient(_build_app(db_connector=_fake_db_connector(error=secret)))
 
         with self.assertLogs("common.bi_web.app", level="WARNING") as logs:
-            response = client.get("/d/l2-region")
+            response = client.get("/api/v1/options/regions")
 
         self.assertEqual(503, response.status_code)
         self.assertEqual(1, len(logs.output))
@@ -1311,14 +1579,22 @@ _RECON_TWO_LINE_TARGET_SQL = (
     "AND year = YEAR(CURDATE())"
 )
 
+# L1 首屏 11 张卡（stage-B1 既定现实，roadmap 主线 B「9→11 张」）：
+# 与 docker/integration/bi.seed.yaml 的 l1-cockpit 编排逐一核对过，
+# 全部存在于 cards.py 注册表（table_channel_mtd/anomaly_top/kpi_shortfall
+# 为 stage-B1 新增的三张表卡）。
 _STAGE_B_L1_CARD_IDS = (
     "kpi_offline_dod",
     "kpi_channel_dod",
     "kpi_offline_mtd",
     "kpi_channel_mtd",
     "kpi_annual_progress",
+    "pie_sku_mtd",
     "trend_region_daily",
     "bar_channel_mtd",
+    "table_channel_mtd",
+    "anomaly_top",
+    "kpi_shortfall",
 )
 
 # L2 页面测试的卡片计数从本表推导（单一数据源）：两测试各自硬编码时，
@@ -1334,6 +1610,14 @@ _STAGE_B_L2_PLACEMENTS = {
         "trend_channel_daily": "line",
         "table_channel_mtd": "table",
         "table_store_mtd": "table",
+    },
+    # stage-B1 新增「商品动销」页（商渠明细）：四卡，筛选为
+    # month/brand/channel 三项（与其余 L2 页的两项不同）。
+    "l2-product": {
+        "kpi_sku_mtd": "scalar",
+        "table_sku_hot_total": "table",
+        "table_sku_hot_brand": "table",
+        "table_sku_hot_channel": "table",
     },
     "l2-people": {
         "kpi_people_count": "scalar",
@@ -1439,25 +1723,30 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual({"status": "ok", "database": "ok"}, response.json())
 
-    def test_l1_cockpit_page_places_the_seven_cards(self):
-        response = self.client.get("/d/l1-cockpit")
+    def test_l1_cockpit_definition_places_the_eleven_cards(self):
+        response = self.client.get("/api/v1/dashboards/l1-cockpit")
 
         self.assertEqual(200, response.status_code)
-        self.assertEqual(7, response.text.count('data-api="/api/d/l1-cockpit/cards/'))
-        for card_id in _STAGE_B_L1_CARD_IDS:
-            self.assertIn(
-                f'data-api="/api/d/l1-cockpit/cards/{card_id}"', response.text
-            )
+        payload = response.json()
+        self.assertEqual(11, len(payload["cards"]))
+        self.assertEqual(
+            set(_STAGE_B_L1_CARD_IDS),
+            {card["card"] for card in payload["cards"]},
+        )
+        # The shell itself still serves the same guarded URL.
+        self.assertEqual(200, self.client.get("/d/l1-cockpit").status_code)
 
     def test_static_style_css_ships_inside_the_image(self):
         # Controller-authorized addition A: the host StaticFilesTests run
         # from the repository tree, so a Docker-context exclusion of
-        # templates/static would pass them and surface only as an unstyled
-        # cockpit.  This request runs inside the image -- the real guard.
-        response = self.client.get("/static/style.css")
+        # web/ would pass them and surface only as an unstyled cockpit.
+        # These requests run inside the image -- the real guard.
+        for path in ("/web/style.css", "/web/dashboard.js", "/web/index.html"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
 
-        self.assertEqual(200, response.status_code)
-        self.assertTrue(response.content)
+                self.assertEqual(200, response.status_code)
+                self.assertTrue(response.content)
 
     def test_every_card_answers_its_chart_payload_with_no_store(self):
         charts = {
@@ -1466,10 +1755,14 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "kpi_offline_mtd": "scalar",
             "kpi_channel_mtd": "scalar",
             "kpi_annual_progress": "scalar",
+            "pie_sku_mtd": "pie",
             "trend_region_daily": "line",
             "bar_channel_mtd": "bar",
+            "table_channel_mtd": "table",
+            "anomaly_top": "table",
+            "kpi_shortfall": "table",
         }
-        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举七卡，
+        # 双源交叉校验：_STAGE_B_L1_CARD_IDS 与本字典各自枚举 11 卡，
         # 漂移（加卡只改一处）在此立刻红，而不是静默漏测。
         self.assertEqual(set(_STAGE_B_L1_CARD_IDS), set(charts))
         for card_id, chart in charts.items():
@@ -1493,7 +1786,11 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             cursor.execute(_RECON_OFFLINE_MTD_SQL)
             sql_value = float(next(iter(cursor.fetchone().values())))
 
-        response = self.client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        # 新 app 实例：阶段 2 的卡片缓存按实例持有，口径对拍必须直查
+        # mart（与 _TTLOptionSets 同理），绝不对拍一份缓存载荷。
+        response = self._fresh_client().get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd"
+        )
         payload = response.json()
 
         print(
@@ -1525,7 +1822,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             target = float(next(iter(cursor.fetchone().values())))
 
         two_line_annual = offline_annual + channel_annual
-        response = self.client.get("/api/d/l1-cockpit/cards/kpi_annual_progress")
+        # 同上：replace_dim_target 之后必须直查，新实例 = 冷缓存。
+        response = self._fresh_client().get(
+            "/api/d/l1-cockpit/cards/kpi_annual_progress"
+        )
         payload = response.json()
 
         print(
@@ -1554,38 +1854,58 @@ class BiWebAppIntegrationTests(unittest.TestCase):
                     self.assertEqual(chart, payload["chart"])
                     self._assert_payload_structure(card_id, payload)
 
-    def test_l2_pages_render_two_filters_and_full_navigation(self):
-        # 计划原文对三页统一断言 data-param="region"，但 Task 10 落地的
-        # l2-channel 筛选是 channel（渠道）+ month：第一筛选项按页面区分。
-        # 卡片计数从 _STAGE_B_L2_PLACEMENTS 推导（单一数据源）。
+    def test_l2_definitions_carry_page_filters_and_full_navigation(self):
+        # 筛选项按页面区分（Task 10 起即如此）：l2-region/l2-people 为
+        # region+month，l2-channel 为 channel+month，stage-B1 新增的
+        # l2-product 为 month+brand+channel 三项。卡片计数从
+        # _STAGE_B_L2_PLACEMENTS 推导（单一数据源）；API-first 之后，
+        # 筛选/下钻/参数白名单都由 v1 定义载荷承载。
         card_counts = {
             dashboard_id: len(cards)
             for dashboard_id, cards in _STAGE_B_L2_PLACEMENTS.items()
         }
-        first_params = {
-            "l2-region": "region",
-            "l2-channel": "channel",
-            "l2-people": "region",
+        # 每页筛选 param 精确列表（与 bi.seed.yaml 逐项核对）。
+        filter_params = {
+            "l2-region": ["region", "month"],
+            "l2-channel": ["channel", "month"],
+            "l2-product": ["month", "brand", "channel"],
+            "l2-people": ["region", "month"],
         }
+        self.assertEqual(set(card_counts), set(filter_params))
         for dashboard_id, expected in card_counts.items():
             with self.subTest(dashboard=dashboard_id):
-                response = self.client.get(f"/d/{dashboard_id}")
+                response = self.client.get(f"/api/v1/dashboards/{dashboard_id}")
 
                 self.assertEqual(200, response.status_code)
-                body = response.text
+                payload = response.json()
+                self.assertEqual(expected, len(payload["cards"]))
                 self.assertEqual(
-                    expected, body.count(f'data-api="/api/d/{dashboard_id}/cards/')
+                    filter_params[dashboard_id],
+                    [spec["param"] for spec in payload["filters"]],
                 )
-                self.assertEqual(2, body.count("<select"))
-                self.assertIn(f'data-param="{first_params[dashboard_id]}"', body)
-                self.assertIn('data-param="month"', body)
-                self.assertEqual(1, body.count('class="topnav-link current"'))
-                for nav_id in ("l1-cockpit", "l2-region", "l2-channel", "l2-people"):
-                    self.assertIn(f'href="/d/{nav_id}"', body)
+                # The guarded shell URL still serves the page.
+                self.assertEqual(200, self.client.get(f"/d/{dashboard_id}").status_code)
 
-        channel_body = self.client.get("/d/l2-channel").text
-        self.assertIn('data-onclick-param="channel"', channel_body)
-        self.assertIn('data-params="channel month"', channel_body)
+        channel_payload = self.client.get("/api/v1/dashboards/l2-channel").json()
+        # 旧模板断言 data-onclick-param="channel" 与 data-params="channel month"
+        # 同在页面出现——它们分属两张卡：下钻柱卡（bar_channel_mtd）自身
+        # 只收 month（始终展示全渠道排行，点击设置 channel 筛选给其他卡）；
+        # table_store_mtd 才同时收 channel + month。
+        bar = next(
+            card for card in channel_payload["cards"] if card["on_click"] is not None
+        )
+        self.assertEqual("channel", bar["on_click"])
+        self.assertEqual(["month"], bar["params"])
+        store_table = next(
+            card for card in channel_payload["cards"] if card["card"] == "table_store_mtd"
+        )
+        self.assertEqual(["channel", "month"], store_table["params"])
+
+        nav = self.client.get("/api/v1/dashboards").json()["dashboards"]
+        self.assertEqual(
+            ["l1-cockpit", "l2-region", "l2-channel", "l2-product", "l2-people"],
+            [entry["id"] for entry in nav],
+        )
 
     def test_l2_api_accepts_valid_params_and_rejects_invalid_values(self):
         today = self._server_today()
@@ -1712,16 +2032,36 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             for value in payload["values"]:
                 self.assertIsInstance(value, float)
             self.assertEqual("元", payload["unit"])
+        elif card_id == "kpi_sku_mtd":
+            # 商品动销 KPI：月累计 + 日环比字段并存（日环比可空，与
+            # dod 家族同约定）；sku_count 为计数、month 为统计月份。
+            self.assertIsInstance(payload["value"], float)
+            self.assertEqual("元", payload["unit"])
+            self.assertIsInstance(payload["month"], str)
+            self.assertIsInstance(payload["sku_count"], int)
+            self.assertIsInstance(payload["active_sku_count"], int)
+            self.assertIsInstance(payload["trend7"], list)
         elif card_id in (
             "table_channel_mtd",
             "table_store_mtd",
             "table_people_leaderboard",
+            "anomaly_top",
+            "kpi_shortfall",
+            "table_sku_hot_total",
+            "table_sku_hot_brand",
+            "table_sku_hot_channel",
         ):
             self.assertIsInstance(payload["columns"], list)
             for column in payload["columns"]:
                 self.assertIn("key", column)
                 self.assertIn("title", column)
             self.assertIsInstance(payload["rows"], list)
+        elif card_id == "pie_sku_mtd":
+            self.assertIsInstance(payload["items"], list)
+            for item in payload["items"]:
+                self.assertIsInstance(item["name"], str)
+                self.assertIsInstance(item["value"], float)
+            self.assertEqual("元", payload["unit"])
         else:
             self.fail(f"payload structure not asserted for {card_id}")
 

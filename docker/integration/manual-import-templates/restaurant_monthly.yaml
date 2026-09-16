@@ -1,0 +1,47 @@
+# 餐厅月度经营（BI 需求 ⑤）：门店 × 月，收入 / 毛利 / 费用。
+# 餐厅板块没有系统采集源，本模板即其唯一进库通道。
+#
+# 门店清单由业务增减，故刻意**不设枚举**——枚举只用于取值固定的字典
+# （渠道、板块），门店用「必填 + 非空」守，清单变化不必改模板。
+version: 1
+dataset: restaurant_monthly
+target_table: manual_restaurant_monthly
+period_type: month
+description: 餐厅月度经营（门店×月，收入/毛利/费用）
+extreme_value_threshold: 100000000
+total_check:
+  expression: "sum(revenue) == total.revenue"
+  total_row: 合计
+  tolerance: 0.001
+columns:
+  - source: 月份
+    field: period
+    role: period
+    type: period
+    required: true
+  - source: 门店
+    field: store
+    role: dimension
+    type: string
+    required: true
+  - source: 营业收入
+    field: revenue
+    role: metric
+    type: decimal
+    required: true
+    unit: 元
+    label: 收入
+  - source: 毛利
+    field: gross_profit
+    role: metric
+    type: decimal
+    required: true
+    unit: 元
+    label: 毛利
+  - source: 费用
+    field: expense
+    role: metric
+    type: decimal
+    required: false
+    unit: 元
+    label: 费用

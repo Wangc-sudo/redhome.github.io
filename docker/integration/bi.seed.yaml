@@ -6,13 +6,9 @@ l1-cockpit:
   enabled: true
   refresh_seconds: 300
   nav_order: 0
+  # 结果（本月累计 / 目标达成）→ 变化（趋势、排行、渠道对比）→
+  # 日环比降为条线级辅助信息，不再占据首屏第一排。
   cards:
-    - card: kpi_offline_dod
-      title: "线下日环比"
-      span: 6
-    - card: kpi_channel_dod
-      title: "电商渠道日环比"
-      span: 6
     - card: kpi_offline_mtd
       title: "线下本月累计销售"
       span: 4
@@ -28,6 +24,25 @@ l1-cockpit:
     - card: bar_channel_mtd
       title: "渠道本月排行"
       span: 4
+    - card: table_channel_mtd
+      title: "渠道本月对比"
+      span: 12
+    - card: pie_sku_mtd
+      title: "电商 SKU 本月销售占比"
+      span: 6
+    # 派生口径（CubeSchema §2）由后端算：缺口/所需日均/四级告警，前端只渲染。
+    - card: anomaly_top
+      title: "今日跟进（缺口 TOP10）"
+      span: 6
+    - card: kpi_shortfall
+      title: "目标缺口与告警"
+      span: 6
+    - card: kpi_offline_dod
+      title: "线下日环比"
+      span: 3
+    - card: kpi_channel_dod
+      title: "电商渠道日环比"
+      span: 3
 l2-region:
   title: "区域下钻"
   enabled: true
@@ -67,6 +82,30 @@ l2-channel:
       span: 6
     - card: table_store_mtd
       title: "店铺本月排行"
+      span: 6
+# 商品动销（商渠明细）：结果（总榜）→ 分组比较（分品牌/分渠道）→ 异常
+# （环比下滑）同页可达；筛选按月、品牌、店铺渠道。
+l2-product:
+  title: "商品动销"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 25
+  filters:
+    - {param: month, source: months, label: "月份"}
+    - {param: brand, source: brands, label: "品牌"}
+    - {param: channel, source: sku_channels, label: "渠道"}
+  cards:
+    - card: kpi_sku_mtd
+      title: "本月商品累计销售"
+      span: 4
+    - card: table_sku_hot_total
+      title: "热销商品总榜"
+      span: 8
+    - card: table_sku_hot_brand
+      title: "分品牌热销商品"
+      span: 6
+    - card: table_sku_hot_channel
+      title: "分渠道热销商品"
       span: 6
 l2-people:
   title: "人员榜"

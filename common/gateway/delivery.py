@@ -16,6 +16,7 @@
 原文永远不进 DB、不进日志行。
 """
 
+import enum
 from dataclasses import dataclass, field
 
 
@@ -23,24 +24,41 @@ class DeliveryError(RuntimeError):
     """投递无法执行（消息不得包含载荷、URL 或响应体）。"""
 
 
+class DeliveryErrorCode(str, enum.Enum):
+    """写 ``outbox.last_error`` 的非泄露错误码全集（收敛枚举）。
+
+    新增失败路径必须在此登记成员；``str`` 子类，``member.value`` 即落库
+    文本。异常原文（可能含 URL、响应体、凭据片段）永远不进枚举。
+    """
+
+    GROUP_SEND_FAILED = "group_send_failed"
+    DING_SEND_FAILED = "ding_send_failed"
+    UNKNOWN_OUTBOX_KIND = "unknown_outbox_kind"
+
+
 #: 群消息类 kind：走 DingTalkClient 的群 Markdown。
 _GROUP_KINDS = frozenset({"remind", "check", "leaderboard"})
 
 #: 每种 kind 的非泄露错误码（写 outbox.last_error）。
 _ERROR_CODES = {
-    "remind": "group_send_failed",
-    "check": "group_send_failed",
-    "leaderboard": "group_send_failed",
-    "ding": "ding_send_failed",
+    "remind": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "check": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "leaderboard": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "ding": DeliveryErrorCode.DING_SEND_FAILED,
 }
 
 
 @dataclass(frozen=True)
 class DeliverReport:
-    """一轮投递的安全摘要（只含 dedupe_key 与计数）。"""
+    """一轮投递的安全摘要（只含 dedupe_key 与计数）。
+
+    ``dead_letters`` 是本轮**转终态** ``failed``（重试耗尽）的 key——
+    控制面据此告警，不重复计入 ``failed`` 的语义另有 ``failed_count``。
+    """
 
     delivered: tuple = field(default_factory=tuple)
     failed: tuple = field(default_factory=tuple)
+    dead_letters: tuple = field(default_factory=tuple)
 
     @property
     def delivered_count(self):
@@ -49,6 +67,10 @@ class DeliverReport:
     @property
     def failed_count(self):
         return len(self.failed)
+
+    @property
+    def dead_letter_count(self):
+        return len(self.dead_letters)
 
 
 class OutboxDeliveryWorker:
@@ -64,25 +86,40 @@ class OutboxDeliveryWorker:
         """取一批 ``pending`` 并逐行投递，返回 :class:`DeliverReport`。"""
         delivered = []
         failed = []
+        dead_letters = []
         for row in self._outbox.fetch_pending():
-            if self._deliver(row):
+            outcome = self._deliver(row)
+            if outcome is True:
                 delivered.append(row["dedupe_key"])
             else:
                 failed.append(row["dedupe_key"])
-        return DeliverReport(delivered=tuple(delivered), failed=tuple(failed))
+                if outcome == "dead":
+                    dead_letters.append(row["dedupe_key"])
+        return DeliverReport(
+            delivered=tuple(delivered),
+            failed=tuple(failed),
+            dead_letters=tuple(dead_letters),
+        )
 
-    def run_forever(self, *, interval_seconds=30):
-        """长驻循环（容器入口）。``KeyboardInterrupt`` 正常退出。"""
+    def run_forever(self, *, interval_seconds=30, after_batch=None):
+        """长驻循环（容器入口）。``KeyboardInterrupt`` 正常退出。
+
+        *after_batch*：每批投递后回调（如 ``conn.commit``）——长驻模式
+        必须借此按批提交，状态落库并释放 ``SKIP LOCKED`` 行锁，否则
+        同事务快照会让已投递行被反复领取。
+        """
         if self._sleep is None:
             raise DeliveryError("run_forever requires a sleep callable")
         while True:
             self.deliver_once()
+            if after_batch is not None:
+                after_batch()
             self._sleep(interval_seconds)
 
     # ------------------------------------------------------------------
 
     def _deliver(self, row):
-        """投递单行。返回 True=delivered，False=已登记失败。"""
+        """投递单行。返回 True=delivered，False=已登记失败，"dead"=转死信。"""
         kind = row["kind"]
         try:
             if kind in _GROUP_KINDS:
@@ -101,11 +138,11 @@ class OutboxDeliveryWorker:
             else:
                 raise DeliveryError("unknown outbox kind")
         except Exception:
-            self._outbox.register_failure(
-                row["dedupe_key"],
-                error_code=_ERROR_CODES.get(kind, "unknown_outbox_kind"),
+            code = _ERROR_CODES.get(kind, DeliveryErrorCode.UNKNOWN_OUTBOX_KIND)
+            terminal = self._outbox.register_failure(
+                row["dedupe_key"], error_code=code.value,
             )
-            return False
+            return "dead" if terminal else False
 
         self._outbox.mark_delivered(
             row["dedupe_key"], delivered_at=self._now()

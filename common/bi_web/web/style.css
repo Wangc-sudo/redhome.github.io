@@ -1,7 +1,7 @@
-/* bi-web L1 驾驶舱样式（阶段 A）。
+/* bi-web 看板样式（API-first 前端，2026-09-14 分离规格）。
  *
  * 12 栅格 + 白底卡片；纯静态文件，服务端不做任何处理（无构建、无预处理）。
- * 配合 templates/base.html 与 static/dashboard.js 使用；金额单位「万」由
+ * 配合 web/index.html 与 web/dashboard.js 使用；金额单位「万」由
  * dashboard.js 负责格式化，这里只管布局与状态样式。
  */
 
@@ -81,10 +81,15 @@ body {
 }
 
 .card-body {
-  min-height: 140px;
   display: flex;
   flex-direction: column;
   justify-content: center;
+}
+
+/* 只有标量 KPI 保底高度，且比原先的 140px 紧凑——指标区横向排列时
+ * 不再把趋势与明细挤到首屏之外；表格/图表卡按内容自适应。 */
+.card-body.kpi {
+  min-height: 96px;
 }
 
 /* 图表卡：echarts 需要高度确定的容器。 */
@@ -133,7 +138,16 @@ body {
   font-size: 14px;
 }
 
-/* ---- 阶段 B：导航 / 筛选 / 表格 / 环比 / 迷你趋势 -------------------- */
+/* 页面级失败态（看板定义/筛选选项拉取失败）：整行横跨。 */
+.page-error {
+  grid-column: span 12;
+  padding: 48px 0;
+  text-align: center;
+  color: var(--error-fg);
+  font-size: 14px;
+}
+
+/* ---- 导航 / 筛选 / 表格 / 环比 / 迷你趋势 --------------------------- */
 
 .topnav {
   display: flex;
@@ -242,4 +256,148 @@ body {
 .trend7 {
   margin-top: 8px;
   height: 56px;
+}
+
+/* ---- 页头：标题 / 统计范围 / 数据截至 · 读取时间 --------------------- */
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 20px 16px 0;
+  max-width: 1480px;
+  margin: 0 auto;
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.page-head p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.page-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.page-actions button {
+  padding: 5px 14px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.page-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- 表格：工具条 / 固定表头 / 排序 / 合计 --------------------------- */
+
+.table-tools {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.table-asof {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.table-search {
+  width: 140px;
+  padding: 4px 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.table-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 明细区独立滚动：表头吸顶，长榜单不把页面撑长。 */
+.table-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card-bg);
+}
+
+/* 表头排序按钮：无边框的朴素按钮，选中列加蓝。 */
+.th-sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.th-sort:hover {
+  color: var(--accent);
+}
+
+.th-sort.active {
+  color: var(--accent);
+}
+
+/* 合计行跟随表体滚动但在表尾常驻。 */
+.data-table tfoot td {
+  position: sticky;
+  bottom: 0;
+  background: #fafbfc;
+  font-weight: 600;
+  border-top: 1px solid var(--card-border);
+  border-bottom: 0;
+}
+
+/* 商品名等长文本左对齐并允许换行，数字列保持等宽右对齐。 */
+.data-table td.text-cell {
+  text-align: left;
+  white-space: normal;
+  min-width: 180px;
+}
+
+.data-table td.delta-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table td.delta-cell.up {
+  color: #067647;
+}
+
+.data-table td.delta-cell.down {
+  color: var(--error-fg);
+}
+
+.data-table td.delta-cell.flat {
+  color: var(--text-muted);
 }

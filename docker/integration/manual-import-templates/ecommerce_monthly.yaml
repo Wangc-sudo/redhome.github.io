@@ -1,0 +1,53 @@
+# 电商月度经营（BI 需求 ④）：渠道 × 月，收入 / 毛利 / 费用。
+#
+# 用法（默认 dry-run，只打印校验报告）：
+#   python -m common.public_data.cli import-manual \
+#       --template ecommerce_monthly --file 电商月报-2026-08.xlsx --period 2026-08
+# 确认无误后加 --apply 落库。
+version: 1
+dataset: ecommerce_monthly
+target_table: manual_ecommerce_monthly
+period_type: month
+description: 电商月度经营（渠道×月，收入/毛利/费用）
+# 单项指标绝对值超过 1 亿提示（单位填错是最常见的事故）
+extreme_value_threshold: 100000000
+total_check:
+  # 明细行 revenue 求和，必须等于报表「合计」行的 revenue
+  expression: "sum(revenue) == total.revenue"
+  # 渠道取值等于「合计」的那一行视为报表总计行：只用于对账，不导入
+  total_row: 合计
+  # 相对容差 0.1%（绝对下限 0.01）
+  tolerance: 0.001
+columns:
+  - source: 月份
+    field: period
+    role: period
+    type: period
+    required: true
+  - source: 渠道
+    field: channel
+    role: dimension
+    type: string
+    required: true
+    enum: [天猫, 京东, 拼多多, 抖音, 猫超, 即时零售, 私域, 其他]
+  - source: 销售收入
+    field: revenue
+    role: metric
+    type: decimal
+    required: true
+    unit: 元
+    label: 收入
+  - source: 毛利
+    field: gross_profit
+    role: metric
+    type: decimal
+    required: true
+    unit: 元
+    label: 毛利
+  - source: 费用
+    field: expense
+    role: metric
+    type: decimal
+    required: false
+    unit: 元
+    label: 费用

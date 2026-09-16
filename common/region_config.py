@@ -10,9 +10,14 @@
 
 种子里 robotCode / openConversationId / tableUrl 一律是占位符——真实值
 由运维发布到 Nacos，不入 git（与 config.json / test_groups.json 同约定）。
+
+无 AI 表区域（报数直接 Stream 落库）的当月月目标由可选字段
+``monthlyTargets``（表内用名 → 金额）承载：报数落库时快照进事实行，
+口径等价于 AI 表行携带月目标。真实目标值同样只走 Nacos，不进种子。
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +51,8 @@ class RegionConfig:
     dept_label: dict = field(default_factory=dict)
     broadcast_exclude: tuple = ()
     leaderboard_url: str = ""
+    #: 无 AI 表区域的当月月目标（表内用名 → 金额），报数落库时快照。
+    monthly_targets: dict = field(default_factory=dict)
 
 
 def _require_str(raw, key, label):
@@ -100,6 +107,21 @@ def _parse_region(region, raw, label):
     if not isinstance(leaderboard_url, str):
         raise RegionConfigError(f"{label}.leaderboardUrl must be a string")
 
+    monthly_targets = raw.get("monthlyTargets") or {}
+    if not isinstance(monthly_targets, dict) or any(
+        not isinstance(k, str)
+        or not k
+        or isinstance(v, bool)
+        or not isinstance(v, (int, float))
+        or not math.isfinite(v)
+        or v < 0
+        for k, v in monthly_targets.items()
+    ):
+        raise RegionConfigError(
+            f"{label}.monthlyTargets must map non-empty names "
+            "to non-negative finite numbers"
+        )
+
     return RegionConfig(
         region=region,
         display=_require_str(raw, "display", label),
@@ -114,6 +136,7 @@ def _parse_region(region, raw, label):
         dept_label=dict(dept_label),
         broadcast_exclude=broadcast_exclude,
         leaderboard_url=leaderboard_url,
+        monthly_targets=dict(monthly_targets),
     )
 
 
@@ -154,6 +177,7 @@ def _to_mapping(cfg):
         "deptLabel": dict(cfg.dept_label),
         "broadcastExclude": list(cfg.broadcast_exclude),
         "leaderboardUrl": cfg.leaderboard_url,
+        "monthlyTargets": dict(cfg.monthly_targets),
     }
 
 

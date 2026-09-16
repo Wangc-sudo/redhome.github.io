@@ -366,6 +366,9 @@ class _FakeOrgGateway:
     def list_sub_departments(self, dept_id):
         return []
 
+    def get_department_name(self, dept_id):
+        return f"dept-{dept_id}"
+
     def list_user_ids(self, dept_id):
         return ["u1"]
 

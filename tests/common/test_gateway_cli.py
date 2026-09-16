@@ -81,14 +81,14 @@ class GatewayCliTests(unittest.TestCase):
         mocks = _patch_common()
         with mocks["settings"], mocks["gate"], mocks["configs"], \
              mocks["creds"], mocks["deliverer"], \
-             mocks["conn"], mocks["worker"] as build_worker:
+             mocks["conn"] as conn, mocks["worker"] as build_worker:
             main([
                 "run", "--live-send", "--confirm-local-test-write",
                 "--source-credentials", "/c.json", "--interval", "5",
             ])
 
         build_worker.return_value.run_forever.assert_called_once_with(
-            interval_seconds=5
+            interval_seconds=5, after_batch=conn.return_value.commit,
         )
         build_worker.return_value.deliver_once.assert_not_called()
 
@@ -201,6 +201,99 @@ class GatewayStreamModeTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("status=listening", text)
         self.assertIn("mode=outbox+stream", text)
+
+
+class RequeueCliTests(unittest.TestCase):
+    """``requeue`` 子命令：dry-run 默认只读，--execute 需显式确认。"""
+
+    _FAILED_ROW = {
+        "dedupe_key": "hangzhou:remind:2026-09-11",
+        "region": "hangzhou",
+        "kind": "remind",
+        "business_date": "2026-09-11",
+        "attempts": 5,
+        "last_error": "group_send_failed",
+        "created_at": "2026-09-11 10:00:00",
+    }
+
+    def _patch_requeue(self, rows=None):
+        outbox = Mock()
+        outbox.list_failed.return_value = (
+            [dict(self._FAILED_ROW)] if rows is None else rows
+        )
+        return (
+            patch("common.gateway.cli.load_settings", return_value=_settings()),
+            patch("common.gateway.cli.connect_mart"),
+            patch("common.gateway.cli.build_outbox", return_value=outbox),
+            outbox,
+        )
+
+    def test_execute_requires_confirmation(self):
+        with self.assertRaises(SystemExit) as raised:
+            main(["requeue", "--all", "--execute"])
+        self.assertNotEqual(0, raised.exception.code)
+
+    def test_requires_an_explicit_selection(self):
+        with self.assertRaises(SystemExit) as raised:
+            main(["requeue"])
+        self.assertNotEqual(0, raised.exception.code)
+
+    def test_dry_run_lists_without_writing(self):
+        settings, conn, build_outbox, outbox = self._patch_requeue()
+        output = io.StringIO()
+        with settings, conn as conn_mock, build_outbox:
+            with redirect_stdout(output):
+                main(["requeue", "--all"])
+
+        text = output.getvalue()
+        self.assertIn("status=dry-run", text)
+        self.assertIn("matched=1", text)
+        self.assertIn("dedupe_key=hangzhou:remind:2026-09-11", text)
+        self.assertIn("attempts=5", text)
+        self.assertIn("last_error=group_send_failed", text)
+        outbox.requeue.assert_not_called()
+        conn_mock.return_value.commit.assert_not_called()
+
+    def test_dedupe_key_filter_narrows_the_selection(self):
+        settings, conn, build_outbox, outbox = self._patch_requeue()
+        output = io.StringIO()
+        with settings, conn, build_outbox:
+            with redirect_stdout(output):
+                main(["requeue", "--dedupe-key", "other:check:2026-09-11"])
+
+        self.assertIn("matched=0", output.getvalue())
+
+    def test_execute_requeues_and_commits(self):
+        settings, conn, build_outbox, outbox = self._patch_requeue()
+        outbox.requeue.return_value = True
+        output = io.StringIO()
+        with settings, conn as conn_mock, build_outbox:
+            with redirect_stdout(output):
+                main([
+                    "requeue", "--dedupe-key", "hangzhou:remind:2026-09-11",
+                    "--execute", "--confirm-local-test-write",
+                ])
+
+        outbox.requeue.assert_called_once_with("hangzhou:remind:2026-09-11")
+        conn_mock.return_value.commit.assert_called_once()
+        text = output.getvalue()
+        self.assertIn("status=completed", text)
+        self.assertIn("requeued=1", text)
+
+    def test_failure_is_safe(self):
+        output = io.StringIO()
+        with patch("common.gateway.cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.gateway.cli.connect_mart",
+                   side_effect=RuntimeError("secret-dsn")):
+            with redirect_stdout(output):
+                with self.assertRaises(SystemExit):
+                    main(["requeue", "--all"])
+
+        text = output.getvalue()
+        self.assertIn("status=failed", text)
+        self.assertNotIn("secret-dsn", text)
+        self.assertNotIn("Traceback", text)
 
 
 class PublishRegionsCliTests(unittest.TestCase):

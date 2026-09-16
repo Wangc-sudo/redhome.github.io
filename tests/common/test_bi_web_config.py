@@ -502,7 +502,9 @@ class BiSeedFileTests(unittest.TestCase):
         mapping = load_seed(_REPO_BI_SEED_PATH)
 
         self.assertEqual(
-            {"l1-cockpit", "l2-region", "l2-channel", "l2-people"}, set(mapping)
+            {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
+             "l2-people"},
+            set(mapping),
         )
         configs = {
             dashboard_id: parse_dashboard_config(dashboard_id, mapping[dashboard_id])
@@ -516,15 +518,18 @@ class BiSeedFileTests(unittest.TestCase):
         l1 = configs["l1-cockpit"]
         self.assertEqual(0, l1.nav_order)
         self.assertEqual((), l1.filters)
-        self.assertEqual(7, len(l1.cards))
+        # 结果 → 变化 → 风险：本月累计与目标在前，缺口/告警（派生口径）
+        # 紧跟其后，日环比降为条线辅助。
+        self.assertEqual(11, len(l1.cards))
         self.assertEqual(
-            ("kpi_offline_dod", "kpi_channel_dod", "kpi_offline_mtd",
-             "kpi_channel_mtd", "kpi_annual_progress", "trend_region_daily",
-             "bar_channel_mtd"),
+            ("kpi_offline_mtd", "kpi_channel_mtd", "kpi_annual_progress",
+             "trend_region_daily", "bar_channel_mtd", "table_channel_mtd",
+             "pie_sku_mtd", "anomaly_top", "kpi_shortfall",
+             "kpi_offline_dod", "kpi_channel_dod"),
             tuple(placement.card for placement in l1.cards),
         )
         self.assertEqual(
-            (6, 6, 4, 4, 4, 8, 4),
+            (4, 4, 4, 8, 4, 12, 6, 6, 6, 3, 3),
             tuple(placement.span for placement in l1.cards),
         )
 
@@ -561,6 +566,24 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertIsNone(channel.cards[1].on_click)
         self.assertEqual(
             (4, 8, 6, 6), tuple(placement.span for placement in channel.cards)
+        )
+
+        product = configs["l2-product"]
+        self.assertEqual(25, product.nav_order)
+        self.assertEqual(
+            (("month", "months", "月份"), ("brand", "brands", "品牌"),
+             ("channel", "sku_channels", "渠道")),
+            tuple(
+                (spec.param, spec.source, spec.label) for spec in product.filters
+            ),
+        )
+        self.assertEqual(
+            ("kpi_sku_mtd", "table_sku_hot_total", "table_sku_hot_brand",
+             "table_sku_hot_channel"),
+            tuple(placement.card for placement in product.cards),
+        )
+        self.assertEqual(
+            (4, 8, 6, 6), tuple(placement.span for placement in product.cards)
         )
 
         people = configs["l2-people"]
@@ -656,6 +679,85 @@ class NacosDashboardSourceTests(unittest.TestCase):
         )
 
         self.assertFalse(source.get_dashboard("l1-cockpit").enabled)
+
+    def test_get_dashboard_is_cached_within_the_ttl(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, len(client.requests))
+
+    def test_get_dashboard_refetches_after_the_ttl(self):
+        now = [0.0]
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(
+            server="nacos:8848", client=client,
+            ttl_seconds=30.0, monotonic=lambda: now[0],
+        )
+
+        source.get_dashboard("l1-cockpit")
+        now[0] = 31.0
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_fallback_resolution_after_a_failed_read_is_cached(self):
+        # Nacos down -> the fallback/minimal default resolution IS cached
+        # within the TTL: a dead registry must cost its connection penalty
+        # at most once per window (that penalty is the 2026-09-14 20s bug).
+        class _FlakyClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_config(self, data_id, group):
+                self.calls += 1
+                raise RuntimeError("connection refused")
+
+        client = _FlakyClient()
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, client.calls)
+
+    def test_parse_errors_are_never_cached(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): "cards: [unbalanced\n"}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        for _ in range(2):
+            with self.assertRaises(DashboardConfigError):
+                source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_dashboard_ids_are_cached(self):
+        class _CountingSource(StaticDashboardSource):
+            def __init__(self, mapping):
+                super().__init__(mapping)
+                self.calls = 0
+
+            def dashboard_ids(self):
+                self.calls += 1
+                return super().dashboard_ids()
+
+        fallback = _CountingSource({"l1-cockpit": {}})
+        source = NacosDashboardSource(
+            server="nacos:8848", client=_FakeNacosClient(), fallback=fallback
+        )
+
+        source.dashboard_ids()
+        source.dashboard_ids()
+
+        self.assertEqual(1, fallback.calls)
 
     def test_minimal_default_when_missing_empty_or_unreachable(self):
         clients = (

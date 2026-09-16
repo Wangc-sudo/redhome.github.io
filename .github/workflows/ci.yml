@@ -1,6 +1,7 @@
 name: CI
 
-# 云迁移后启用：push / PR 时做只读质量检查（不触碰钉钉凭据与真实数据）
+# push / PR 到 main 时做只读质量检查（不触碰钉钉凭据与真实数据）。
+# 定时执行 / 发消息 / 页面发布仍在本机，见 docs 云迁移指南 §3。
 on:
   push:
     branches: [main]
@@ -8,16 +9,16 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  python-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 语法编译检查（全部脚本）
+      - name: 语法编译检查（common / tests / 数字化）
         run: |
-          python -m compileall -q "数字化/钉钉/杭州日报机器人" "数字化/钉钉/渠道日报机器人"
+          python -m compileall -q "common" "tests" "数字化"
       - name: 配置模板校验
         run: |
           python - <<'EOF'
@@ -32,3 +33,34 @@ jobs:
                   print(f"FAIL: {p}: {e}")
           sys.exit(0 if ok else 1)
           EOF
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 集成测试（test-runner，448 例）
+        run: docker compose -f docker-compose.integration.yml run --rm test-runner
+      - name: 清理 compose 资源
+        if: always()
+        run: docker compose -f docker-compose.integration.yml down -v --remove-orphans
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/bi-react
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/bi-react/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: 类型检查
+        run: npm run typecheck
+      - name: 单元测试
+        run: npm run test
+      - name: 构建
+        run: npm run build

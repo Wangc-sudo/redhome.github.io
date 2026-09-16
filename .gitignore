@@ -35,3 +35,9 @@ config-local/public-data/
 
 # æµ‹è¯•ç¾¤çœŸå®é…ç½®ï¼ˆå« openConversationIdï¼‰
 common/dingtalk/test_groups.json
+
+# ±¾µØÔËĞĞ²úÎïÓë»º´æ£¨²»Èë¿â£©
+pip/
+outputs/
+_tmp_*.py
+_local_regions.*.json

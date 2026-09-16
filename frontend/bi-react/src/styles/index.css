@@ -1,0 +1,7 @@
+/* 设计系统单一真相源：bi-ui 三件套已落库到 src/styles/bi-ui/（从 ../bi-ui 拷贝，只读不改动），
+   这里用相对路径引用，去掉对会话目录 ../../bi-ui 的依赖。
+   依赖顺序：tokens → base → components → app（app.css 只放应用外壳布局，不含 token/卡片样式）。 */
+@import './bi-ui/tokens.css';
+@import './bi-ui/base.css';
+@import './bi-ui/components.css';
+@import './app.css';
