@@ -1,0 +1,92 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>渠道日报 BI 看板 · 2026-09-16</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f5f7fa;color:#1f2937;padding:20px}
+.header{background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:20px 24px;border-radius:10px;margin-bottom:16px}
+.header h1{font-size:19px;font-weight:600}
+.header .sub{font-size:12px;opacity:.8;margin-top:6px}
+.kpis{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.kpi{flex:1;min-width:150px;background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.kpi .label{font-size:12px;color:#6b7280}
+.kpi .value{font-size:22px;font-weight:600;margin-top:6px;font-variant-numeric:tabular-nums}
+.kpi .delta{font-size:12px;margin-top:4px}
+.up{color:#059669}.down{color:#dc2626}
+.card{background:#fff;border-radius:10px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.card h2{font-size:14px;margin-bottom:10px}
+.chart{width:100%;height:260px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #f3f4f6}
+th{background:#f9fafb;font-weight:600;font-size:12px;color:#374151}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.footer{text-align:center;color:#9ca3af;font-size:11px;padding:12px}
+</style></head><body>
+<div class="header"><h1>渠道日报 BI 看板</h1>
+<div class="sub">2026-09-16 · 数据源 钉钉AI表格「电商渠道日报表」· 生成于 2026-09-17 14:09</div></div>
+<div class="kpis">
+<div class="kpi"><div class="label">全渠道销售额</div><div class="value">137.0万</div><div class="delta down">环比 ▼21.1%</div></div>
+<div class="kpi"><div class="label">推广费</div><div class="value">5.7万</div><div class="delta">ROI 23.85</div></div>
+<div class="kpi"><div class="label">月累计</div><div class="value">2156.4万</div><div class="delta">目标 5527.1万</div></div>
+<div class="kpi"><div class="label">月目标达成</div><div class="value">39.0%</div><div class="delta">时间进度 53.3%</div></div>
+</div>
+<div class="card"><h2>近 7 日全渠道走势</h2><div id="trend" class="chart"></div></div>
+<div class="card"><h2>当日渠道分布（销售额 / ROI）</h2><div id="mix" class="chart"></div></div>
+<div class="card"><h2>月目标达成率</h2><div id="goal" class="chart"></div></div>
+<div class="card"><h2>渠道明细</h2><table>
+<tr><th>渠道</th><th class="num">销售额</th><th class="num">推广费</th><th class="num">ROI</th><th class="num">环比</th><th class="num">月累计</th><th class="num">月目标</th><th class="num">达成率</th></tr>
+<tr><td>猫超</td><td class='num'>46.2万</td><td class='num'>6,164</td><td class='num'>75.01</td><td class='num'>▲234.8%</td><td class='num'>542.7万</td><td class='num'>1500.0万</td><td class='num'>36.2%</td></tr>
+<tr><td>直播</td><td class='num'>38.8万</td><td class='num'>4.4万</td><td class='num'>8.86</td><td class='num'>▼27.9%</td><td class='num'>723.3万</td><td class='num'>2531.1万</td><td class='num'>28.6%</td></tr>
+<tr><td>拼多多</td><td class='num'>21.9万</td><td class='num'>1,142</td><td class='num'>192.10</td><td class='num'>▼24.4%</td><td class='num'>369.8万</td><td class='num'>362.0万</td><td class='num'>102.2%</td></tr>
+<tr><td>天猫</td><td class='num'>11.8万</td><td class='num'>4,260</td><td class='num'>27.78</td><td class='num'>▼14.1%</td><td class='num'>186.6万</td><td class='num'>630.0万</td><td class='num'>29.6%</td></tr>
+<tr><td>京东</td><td class='num'>10.2万</td><td class='num'>2,116</td><td class='num'>48.25</td><td class='num'>▲1.5%</td><td class='num'>139.4万</td><td class='num'>315.0万</td><td class='num'>44.3%</td></tr>
+<tr><td>即时零售</td><td class='num'>8.1万</td><td class='num'>0</td><td class='num'>--</td><td class='num'>▼84.5%</td><td class='num'>186.3万</td><td class='num'>164.0万</td><td class='num'>113.6%</td></tr>
+<tr><td>私域</td><td class='num'>0</td><td class='num'>0</td><td class='num'>--</td><td class='num'>▼100.0%</td><td class='num'>8.2万</td><td class='num'>25.0万</td><td class='num'>32.8%</td></tr>
+</table></div>
+<div class="footer">每日 11:00 自动更新 · 达成率 = 月累计 ÷ 月目标</div>
+<script>
+var DATA = {"day": "2026-09-16", "total": 1370493.64, "prev": 1736384.35, "promo": 57456.78, "roi": 23.852600859289364, "mtd": 21563679.44, "target": 55271000.0, "trendDays": ["09-10", "09-11", "09-12", "09-13", "09-14", "09-15", "09-16"], "trendValues": [1498007.18, 1476136.25, 2399941.83, 1475169.71, 1204032.9, 1736384.35, 1370493.64], "rows": [{"channel": "猫超", "sales": 462339.73, "promo": 6163.97, "base": 138094.54, "roi": 75.00681054580083, "mtd": 5426845.21, "target": 15000000.0, "rate": 0.36178968066666667}, {"channel": "直播", "sales": 387706.54, "promo": 43774.6, "base": 538059.24, "roi": 8.856883672266566, "mtd": 7232645.8100000005, "target": 25311000.0, "rate": 0.28575108885464817}, {"channel": "拼多多", "sales": 219431.88, "promo": 1142.29, "base": 290219.19, "roi": 192.09822374353274, "mtd": 3698394.1599999997, "target": 3620000.0, "rate": 1.0216558453038673}, {"channel": "天猫", "sales": 118342.69, "promo": 4260.349999999999, "base": 137695.14, "roi": 27.77769197366414, "mtd": 1866423.2500000005, "target": 6300000.0, "rate": 0.2962576587301588}, {"channel": "京东", "sales": 102079.8, "promo": 2115.57, "base": 100572.23999999999, "roi": 48.251676853046696, "mtd": 1393896.1200000003, "target": 3150000.0, "rate": 0.44250670476190485}, {"channel": "即时零售", "sales": 80593.0, "promo": 0.0, "base": 518994.0, "roi": null, "mtd": 1863455.89, "target": 1640000.0, "rate": 1.1362535914634146}, {"channel": "私域", "sales": 0.0, "promo": 0.0, "base": 12750.0, "roi": null, "mtd": 82019.0, "target": 250000.0, "rate": 0.328076}], "generated": "2026-09-17 14:09"};
+if (window.echarts) {
+  var names = DATA.rows.map(function (r) { return r.channel; });
+  var sales = DATA.rows.map(function (r) { return +(r.sales / 10000).toFixed(2); });
+  var roi = DATA.rows.map(function (r) { return r.roi ? +r.roi.toFixed(2) : 0; });
+  var rate = DATA.rows.map(function (r) { return r.rate ? +(r.rate * 100).toFixed(1) : 0; });
+  echarts.init(document.getElementById('trend')).setOption({
+    grid: {left: 8, right: 12, top: 24, bottom: 8, containLabel: true},
+    tooltip: {trigger: 'axis'},
+    xAxis: {type: 'category', data: DATA.trendDays, boundaryGap: false},
+    yAxis: {type: 'value', axisLabel: {formatter: '{value} 万'}},
+    series: [{type: 'line', smooth: true, areaStyle: {}, data: DATA.trendValues.map(function (v) { return +(v / 10000).toFixed(2); }), itemStyle: {color: '#2563eb'}}]
+  });
+  echarts.init(document.getElementById('mix')).setOption({
+    grid: {left: 8, right: 12, top: 40, bottom: 8, containLabel: true},
+    tooltip: {trigger: 'axis', axisPointer: {type: 'shadow'}},
+    legend: {data: ['销售额(万)', 'ROI']},
+    xAxis: {type: 'category', data: names},
+    yAxis: [{type: 'value', name: '万'}, {type: 'value', name: 'ROI'}],
+    series: [
+      {name: '销售额(万)', type: 'bar', barWidth: '45%', data: sales, itemStyle: {color: '#3b82f6', borderRadius: [4, 4, 0, 0]}},
+      {name: 'ROI', type: 'line', yAxisIndex: 1, data: roi, itemStyle: {color: '#f59e0b'}}
+    ]
+  });
+  echarts.init(document.getElementById('goal')).setOption({
+    grid: {left: 8, right: 24, top: 24, bottom: 8, containLabel: true},
+    tooltip: {trigger: 'axis', formatter: '{b}: {c}%'},
+    xAxis: {type: 'value', max: function (v) { return Math.max(100, Math.ceil(v.max / 20) * 20); }},
+    yAxis: {type: 'category', data: names.slice().reverse(), inverse: false},
+    series: [
+      {type: 'bar', data: rate.slice().reverse(), barWidth: '55%',
+        label: {show: true, position: 'right', formatter: '{c}%'},
+        itemStyle: {borderRadius: [0, 4, 4, 0], color: function (p) { return p.value >= 100 ? '#059669' : (p.value >= 50 ? '#2563eb' : '#f59e0b'); }}},
+      {type: 'line', data: names.map(function () { return 100; }), symbol: 'none',
+        lineStyle: {type: 'dashed', color: '#dc2626'}}
+    ]
+  });
+} else {
+  document.querySelectorAll('.chart').forEach(function (el) {
+    el.innerHTML = '<p style="color:#9ca3af;font-size:12px;padding:16px 0">图表库未能加载（离线环境），下方明细数据不受影响。</p>';
+  });
+}
+</script>
+</body></html>
