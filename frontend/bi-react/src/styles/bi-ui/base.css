@@ -23,8 +23,31 @@ body {
   font-size: var(--font-size);
   line-height: var(--line-height);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
+
+/* ---- 滚动条 / 选中态（2026-09-17 皮肤补丁） ---------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #d3d8e0;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b9c1cd;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::selection { background: #dbe6ff; color: #10244e; }
+
+/* 卡片入场：只动 opacity，不碰 transform
+   —— transform 留给 :hover，且避免与 react-grid-layout 的 translate 定位相冲 */
+@keyframes cardIn { from { opacity: 0; } to { opacity: 1; } }
+.card { animation: cardIn 0.28s ease-out; }
 
 h1, h2, h3, h4, p, figure {
   margin: 0;
