@@ -218,7 +218,7 @@ def _build_wdt_call(wdt_creds):
 
     # Placeholder detection: if any field looks like the example template, return stub
     if not sid or not app_key or not app_secret or "replace" in sid.lower():
-        def _wdt_stub(**kwargs):
+        def _wdt_stub(*args, **kwargs):
             raise RuntimeError("WDT credentials are placeholders; cannot call WDT API")
         return _wdt_stub
 

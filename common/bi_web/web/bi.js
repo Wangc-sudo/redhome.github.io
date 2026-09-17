@@ -64,33 +64,60 @@ function ChartLine(host, opt){
   var cats = opt.cats, series = opt.series, pal = opt.pal || PAL;
   var W = host.clientWidth || 720, H = opt.height || host.clientHeight || 280;
   var L = 56, R = 14, T = 8, B = 24;
+  /* 迷你趋势（KPI 卡内 sparkline）：高度不足时收窄边距并隐藏 Y 轴——
+   * 否则 5 条刻度挤在十几像素里，标签必然重叠成一片。 */
+  var compact = H < 80;
+  if (compact){ L = 6; R = 6; T = 4; B = 16; }
   var maxV = 0;
   series.forEach(function(s){ s.data.forEach(function(v){ if (v > maxV) maxV = v; }); });
   var max = niceMax(maxV * 1.12) || 10;
   var iw = Math.max(10, W - L - R), ih = Math.max(10, H - T - B);
   var svg = svgNode('svg', {viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none'});
-  yTicks(max, 4).forEach(function(v){
-    var y = T + ih - (v / max) * ih;
-    svg.appendChild(svgNode('line', {x1: L, y1: y, x2: L + iw, y2: y, class: 'grid-line'}));
-    var tx = svgNode('text', {x: L - 8, y: y + 4, class: 'axis-txt', 'text-anchor': 'end'});
-    tx.textContent = fmtAxis(v); svg.appendChild(tx);
-  });
+  if (!compact){
+    yTicks(max, 4).forEach(function(v){
+      var y = T + ih - (v / max) * ih;
+      svg.appendChild(svgNode('line', {x1: L, y1: y, x2: L + iw, y2: y, class: 'grid-line'}));
+      var tx = svgNode('text', {x: L - 8, y: y + 4, class: 'axis-txt', 'text-anchor': 'end'});
+      tx.textContent = fmtAxis(v); svg.appendChild(tx);
+    });
+  }
   var step = cats.length > 1 ? iw / (cats.length - 1) : 0;
   var X = function(i){ return cats.length > 1 ? L + i * step : L + iw / 2; };
   var Y = function(v){ return T + ih - (Math.max(0, v) / max) * ih; };
+  var valid = function(v){ return typeof v === 'number' && isFinite(v); };
   series.forEach(function(s, si){
-    var pts = s.data.map(function(v, i){ return X(i).toFixed(1) + ',' + Y(v).toFixed(1); }).join(' ');
+    /* null 不截 0：拆成连续段绘制、缺口断线（与 dashboard.js echarts
+     * 版 connectNulls:false 同口径），面积也只铺在有效段下。 */
+    var segs = [], cur = [];
+    s.data.forEach(function(v, i){
+      if (valid(v)) cur.push([X(i), Y(v)]);
+      else if (cur.length){ segs.push(cur); cur = []; }
+    });
+    if (cur.length) segs.push(cur);
     if (opt.area !== false && series.length === 1){
       var cid = 'ga' + si + '_' + Math.random().toString(36).slice(2, 8);
       var defs = svgNode('defs'), lg = svgNode('linearGradient', {id: cid, x1: 0, y1: 0, x2: 0, y2: 1});
       lg.appendChild(svgNode('stop', {offset: '0%', 'stop-color': pal[si % pal.length], 'stop-opacity': .22}));
       lg.appendChild(svgNode('stop', {offset: '100%', 'stop-color': pal[si % pal.length], 'stop-opacity': 0}));
       defs.appendChild(lg); svg.appendChild(defs);
-      svg.appendChild(svgNode('polygon', {points: pts + ' ' + X(cats.length - 1).toFixed(1) + ',' + (T + ih) + ' ' + X(0).toFixed(1) + ',' + (T + ih), fill: 'url(#' + cid + ')'}));
+      segs.forEach(function(seg){
+        var pts = seg.map(function(p){ return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+        svg.appendChild(svgNode('polygon', {points: pts + ' ' + seg[seg.length - 1][0].toFixed(1) + ',' + (T + ih) + ' ' + seg[0][0].toFixed(1) + ',' + (T + ih), fill: 'url(#' + cid + ')'}));
+      });
     }
-    svg.appendChild(svgNode('polyline', {points: pts, fill: 'none', stroke: pal[si % pal.length],
-      'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}));
+    segs.forEach(function(seg){
+      if (seg.length < 2){
+        /* 孤立点：>32 类目时不画数据点，这里补一个，否则直接跳过（≤32
+         * 时下方统一画圆点，避免重复）。 */
+        if (cats.length > 32) svg.appendChild(svgNode('circle', {cx: seg[0][0], cy: seg[0][1], r: 2.6, fill: '#fff', stroke: pal[si % pal.length], 'stroke-width': 1.6}));
+        return;
+      }
+      var pts = seg.map(function(p){ return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+      svg.appendChild(svgNode('polyline', {points: pts, fill: 'none', stroke: pal[si % pal.length],
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}));
+    });
     if (cats.length <= 32) s.data.forEach(function(v, i){
+      if (!valid(v)) return;
       svg.appendChild(svgNode('circle', {cx: X(i), cy: Y(v), r: 2.6, fill: '#fff', stroke: pal[si % pal.length], 'stroke-width': 1.6}));
     });
   });
