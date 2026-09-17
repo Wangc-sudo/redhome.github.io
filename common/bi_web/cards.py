@@ -22,7 +22,13 @@ monthly clone (``table_manual_showroom_monthly``) and the five
 placeholder structural cards (``table_inventory_aging`` /
 ``table_warehouse_ops`` / ``table_quarter_budget_actual`` /
 ``table_yoy_monthly`` / ``table_contract_writeoff``, static ``rows=[]``
-with ``has_fact=false``) bring the total to thirty-six.
+with ``has_fact=false``) bring the total to thirty-six; the per-entity
+view of ``trend_fin_store_funds`` (2026-09-17: 38 stores on one line chart
+is unreadable, and the company entities change over time, so the four
+hard-coded split cards were collapsed into one parameterized card
+``trend_fin_store_funds_entity`` plus the ``entities`` filter source --
+SQL aggregation pushed down, entity bound as ``%s``) brings it to
+thirty-seven.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -178,6 +184,14 @@ _CARDS = (
           queries.run_table_fin_deposit_status),
     _card("trend_fin_store_funds", "line",
           queries.run_trend_fin_store_funds),
+    # 店铺资金余额趋势的主体参数化版（2026-09-17 P2）：38 家店铺一张图
+    # 不可读，而公司主体会变，故 4 张硬编码分屏卡收敛为 1 张 +
+    # ``entities`` 筛选源（entity 空 = 全主体按渠道汇总）。
+    _card(
+        "trend_fin_store_funds_entity", "line",
+        queries.run_trend_fin_store_funds_entity,
+        {"entity": "entities"},
+    ),
     # 5 张 0 占位结构卡：run 直接返回静态结构（不查库），
     # has_fact=false 挂零语义（应接入未接入）。
     _card("table_inventory_aging", "table",

@@ -239,9 +239,13 @@ class ExtractPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(mart_conn.commits, 2)
         self.assertEqual(0, mart_conn.rollbacks)
 
-        # mart 写入幂等：ON DUPLICATE KEY UPDATE。
+        # mart 写入幂等：ON DUPLICATE KEY UPDATE。逐行 execute 与批量
+        # executemany（2026-09-17 排查报告 §2.1 P1）都接受，写法与
+        # ``_mart_write_tables`` 一致（两条通道都扫）。
+        statements = [sql for sql, _ in mart_cursor.executed]
+        statements += [sql for sql, _ in mart_cursor.executemany_calls]
         upsert_sql = next(
-            sql for sql, _ in mart_cursor.executed if "ON DUPLICATE KEY UPDATE" in sql
+            sql for sql in statements if "ON DUPLICATE KEY UPDATE" in sql
         )
         self.assertIn("`fact_daily_report_offline`", upsert_sql)
 

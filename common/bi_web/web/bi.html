@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DIGITAL OPS · BI 看板</title>
+<link rel="stylesheet" href="/web/bi.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">DO</span><span>DIGITAL OPS<small>BI 看板</small></span></div>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <span class="live"><em></em>T+1 数据 · 截至 <span id="footAsOf">—</span></span>
+      <span>数据口径 T+1</span>
+    </div>
+  </aside>
+  <main class="app-main">
+    <div class="page-top">
+      <header class="page-head">
+        <div><h1 id="pgTitle">—</h1><p id="pgSub">—</p></div>
+        <div class="page-note" id="pgNote"></div>
+      </header>
+      <div class="filters" id="pgFilters"></div>
+    </div>
+    <div class="dashboard-grid" id="grid"></div>
+  </main>
+</div>
+<div id="tip" class="chart-tip"></div>
+<div id="toast" class="toast"></div>
+<script src="/web/bi.js"></script>
+<script src="/web/bi-data.js"></script>
+</body>
+</html>

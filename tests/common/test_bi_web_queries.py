@@ -33,6 +33,7 @@ from common.bi_web.queries import (
     channel_mtd_total,
     channel_options,
     department_mtd_ranking,
+    entity_options,
     manual_report_rows,
     month_bounds,
     month_options,
@@ -70,6 +71,7 @@ from common.bi_web.queries import (
     run_table_fin_prepayment_uninvoiced,
     run_table_fin_deposit_status,
     run_trend_fin_store_funds,
+    run_trend_fin_store_funds_entity,
     run_table_inventory_aging,
     run_table_warehouse_ops,
     run_table_quarter_budget_actual,
@@ -2194,6 +2196,82 @@ class FinSqlShapeTests(unittest.TestCase):
 
         self.assertIn("FROM fact_fin_store_funds", sql)
         self.assertIn("ORDER BY month, store_name", sql)
+
+
+class FinEntityTrendTests(unittest.TestCase):
+    """⑩ 店铺资金余额趋势的主体参数化卡（2026-09-17 P1 下推 + P2 参数化）。
+
+    形态钉死：entity 非空 → WHERE company_entity = %s 绑定（值绝不拼进
+    SQL）；entity 空 → 不带 WHERE 的全主体聚合（绝不传恒真通配值）。
+    载荷钉死：渠道名清洗（钉钉 dict 字面量）+ 缺月零填充。
+    """
+
+    def test_entity_path_binds_company_entity(self):
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": []})
+
+        run_trend_fin_store_funds_entity(connection, {"entity": "biweb主体A"})
+
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("WHERE company_entity = %s", sql)
+        self.assertIn("GROUP BY month, channel", sql)
+        self.assertIn("SUM(balance)", sql)
+        self.assertEqual(("biweb主体A",), parameters)
+        self.assertNotIn("biweb主体A", sql)  # 值绝不拼进 SQL 文本
+
+    def test_blank_entity_uses_the_where_free_aggregate(self):
+        for params in ({}, {"entity": ""}, {"entity": "   "}):
+            with self.subTest(params=params):
+                connection = FakeConnection(
+                    rowsets={"fact_fin_store_funds": []}
+                )
+
+                run_trend_fin_store_funds_entity(connection, params)
+
+                self.assertEqual(1, len(connection.executed))
+                sql, parameters = connection.executed[0]
+                self.assertIn("FROM fact_fin_store_funds", sql)
+                self.assertNotIn("WHERE", sql)  # 空语义走另一条 SQL
+                self.assertIsNone(parameters)  # 绝不传 ("%",) 之类
+
+    def test_payload_cleans_channel_labels_and_zero_fills(self):
+        rows = [
+            {"month": "2026-01",
+             "channel": "{'name': '拼多多', 'id': 'x'}",
+             "balance": Decimal("10")},
+            {"month": "2026-02",
+             "channel": "{'name': '拼多多', 'id': 'x'}",
+             "balance": Decimal("30")},
+            {"month": "2026-02", "channel": "京东", "balance": Decimal("20")},
+        ]
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": rows})
+
+        payload = run_trend_fin_store_funds_entity(
+            connection, {"entity": "biweb主体A"}
+        )
+
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(["2026-01", "2026-02"], payload["dates"])
+        series = {entry["name"]: entry["data"] for entry in payload["series"]}
+        self.assertEqual({"拼多多": [10.0, 30.0], "京东": [0.0, 20.0]}, series)
+
+    def test_entity_options_sql_shape_and_values(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_store_funds": [
+                {"company_entity": "biweb主体A"}, {"company_entity": None},
+            ]}
+        )
+
+        options = entity_options(connection)
+
+        self.assertEqual(["biweb主体A"], options)
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT company_entity", sql)
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("ORDER BY company_entity", sql)
+        self.assertIsNone(parameters)
 
 
 class FinRunPayloadTests(unittest.TestCase):

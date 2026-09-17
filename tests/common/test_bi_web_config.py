@@ -611,18 +611,31 @@ class BiSeedFileTests(unittest.TestCase):
             with self.subTest(dashboard=dashboard_id, field="refresh"):
                 self.assertEqual(86400, config.refresh_seconds)
 
-        # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：五张真卡。
+        # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
+        # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡
+        # 收敛为 1 张），页面级挂「公司主体」筛选。
         fund = configs["l2-fund-safety"]
         self.assertEqual(40, fund.nav_order)
-        self.assertEqual((), fund.filters)
+        # 静态资源仓链路样例（2026-09-17）：资金页图标为 FTP 仓 SVG 路径；
+        # 分组由后端 group 字段驱动（前端逻辑后端化）。
+        self.assertEqual("/static/icons/fund.svg", fund.icon)
+        self.assertEqual("专项分析", fund.group)
         self.assertEqual(
-            ("kpi_fin_receivables_overdue", "trend_fin_store_funds",
+            (("entity", "entities", "公司主体"),),
+            tuple(
+                (spec.param, spec.source, spec.label) for spec in fund.filters
+            ),
+        )
+        self.assertEqual(
+            ("kpi_fin_receivables_overdue",
+             "trend_fin_store_funds_entity",
              "table_fin_receivables_aging", "table_fin_prepayment_uninvoiced",
              "table_fin_deposit_status"),
             tuple(placement.card for placement in fund.cards),
         )
         self.assertEqual(
-            (4, 8, 12, 6, 6), tuple(placement.span for placement in fund.cards)
+            (4, 12, 12, 6, 6),
+            tuple(placement.span for placement in fund.cards),
         )
 
         # ④⑤⑪ 月报页：单卡整幅、无筛选（卡片 params_schema 留空）。

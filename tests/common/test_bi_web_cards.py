@@ -34,7 +34,9 @@ from common.bi_web.config import (
 #: 的缺口/告警与缺口 TOP），再加两张人工报表消费卡（2026-09-16 ④⑤，
 #: dataset 固化、暂无 URL 参数），再加一张体验馆月报克隆卡（⑪）、资金
 #: 安全五卡（需求⑩，fin_derived 派生）与五张 0 占位结构卡（待接入页，
-#: 静态 rows=[] + has_fact=false），共 36 张。
+#: 静态 rows=[] + has_fact=false），再加店铺资金余额趋势的主体参数化卡
+#: （2026-09-17 P2：38 家店铺一张图不可读，且公司主体会变，4 张硬编码
+#: 分屏卡收敛为 1 张 + entities 筛选源），共 37 张。
 STAGE_B_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
@@ -67,6 +69,7 @@ STAGE_B_CARD_IDS = (
     "table_fin_prepayment_uninvoiced",
     "table_fin_deposit_status",
     "trend_fin_store_funds",
+    "trend_fin_store_funds_entity",
     "table_inventory_aging",
     "table_warehouse_ops",
     "table_quarter_budget_actual",
@@ -117,6 +120,7 @@ EXPECTED_CHARTS = {
     "table_fin_prepayment_uninvoiced": "table",
     "table_fin_deposit_status": "table",
     "trend_fin_store_funds": "line",
+    "trend_fin_store_funds_entity": "line",
     "table_inventory_aging": "table",
     "table_warehouse_ops": "table",
     "table_quarter_budget_actual": "table",
@@ -157,6 +161,7 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_fin_prepayment_uninvoiced": queries.run_table_fin_prepayment_uninvoiced,
     "table_fin_deposit_status": queries.run_table_fin_deposit_status,
     "trend_fin_store_funds": queries.run_trend_fin_store_funds,
+    "trend_fin_store_funds_entity": queries.run_trend_fin_store_funds_entity,
     "table_inventory_aging": queries.run_table_inventory_aging,
     "table_warehouse_ops": queries.run_table_warehouse_ops,
     "table_quarter_budget_actual": queries.run_table_quarter_budget_actual,
@@ -202,6 +207,8 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_fin_prepayment_uninvoiced": {},
     "table_fin_deposit_status": {},
     "trend_fin_store_funds": {},
+    # 主体参数化卡（2026-09-17 P2）：entity 走 entities 值域闸，非法值 400。
+    "trend_fin_store_funds_entity": {"entity": "entities"},
     "table_inventory_aging": {},
     "table_warehouse_ops": {},
     "table_quarter_budget_actual": {},
@@ -237,7 +244,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(36, len(REGISTRY))
+        self.assertEqual(37, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

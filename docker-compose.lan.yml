@@ -1,0 +1,103 @@
+# 局域网访问覆盖层（不改动 docker-compose.integration.yml 基础编排）
+#
+# 启动：
+#   docker compose -f docker-compose.integration.yml -f docker-compose.lan.yml `
+#     --profile bi-web --profile bi-web-redis up -d
+#
+# 停止：
+#   docker compose -f docker-compose.integration.yml -f docker-compose.lan.yml `
+#     --profile bi-web --profile bi-web-redis down
+#
+# 对外只暴露 nginx:8088；mysql / redis / bi-web 仍在 compose 内网，
+# 不直接对局域网开放（compose 里 mysql root 口令是明文常量）。
+
+name: public-data-integration
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    # 与 bi-web 同一 profile：只跑同步任务（--profile live-sync-*）时
+    # nginx 不参与，避免 depends_on 指向未启用的服务而报 invalid compose project
+    profiles:
+      - bi-web
+    depends_on:
+      - bi-web
+    ports:
+      # 0.0.0.0 = 同网段其他机器可访问（不走回环）
+      - "0.0.0.0:8088:80"
+    volumes:
+      - ./docker/integration/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 静态资源仓（FTP 上传 → nginx 只读直出 /static/，见下方 ftp 服务）
+      - bi-static:/srv/static:ro
+    restart: unless-stopped
+
+  # 静态资源仓（2026-09-17）：FTP 上传入口 + 共享卷 bi-static。
+  # 浏览器取不了 FTP 文件 —— 消费路径是 nginx /static/ HTTP 直出，
+  # FTP 只负责「上传/存储」（小图标、SVG 矢量图一类）。
+  # 默认仅回环暴露（FTP 明文协议，凭据是开发默认值；要对局域网开放
+  # 上传时，把端口绑定改为 0.0.0.0 并在 .env 里覆盖强口令）。
+  ftp:
+    # 镜像源白名单拦截全部现成 FTP 镜像（2026-09-17 实测），
+    # 用 ubuntu:24.04 自建 vsftpd（docker/integration/ftp/）。
+    build:
+      context: .
+      dockerfile: docker/integration/ftp/Dockerfile
+    profiles:
+      - bi-web
+    environment:
+      FTP_USER_NAME: ${PUBLIC_DATA_FTP_USER:-bistatic}
+      FTP_USER_PASS: ${PUBLIC_DATA_FTP_PASSWORD:-bistatic-dev-pass}
+    ports:
+      - "127.0.0.1:21:21"
+      - "127.0.0.1:30000-30009:30000-30009"
+    volumes:
+      - bi-static:/home/bistatic/files
+    restart: unless-stopped
+
+  bi-web:
+    environment:
+      # Nacos 未启动（profile nacos）时，默认 nacos:8848 会让每个请求都先
+      # 连 Nacos、超时后再回退种子文件 —— 实测单次 >10s，首屏要读 14 个
+      # 看板配置，直接被拖垮。置空即直接用 bi.seed.yaml，去掉这段等待。
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+      # 走 Redis 卡片缓存（需同时启用 bi-web-redis profile；Redis 不可达时
+      # cache.py 自动 fail-open 回退 mart 直查，不会 503）
+      PUBLIC_DATA_REDIS_URL: redis://redis:6379/0
+      PUBLIC_DATA_BI_SEED: /app/docker/integration/bi.seed.yaml
+    ports:
+      # 额外留一个绕过 nginx 的直连端口，便于对比排查（基础编排的
+      # 127.0.0.1:18080 保持不变，这里用 18081 避免主机端口冲突）
+      - "0.0.0.0:18081:8080"
+
+  # 同步/投影类任务同样关掉 Nacos 等待（理由同 bi-web）：它们都在 profile 里，
+  # 不显式的 --profile 就不会随 up 启动。
+  test-runner:
+    environment:
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+
+  sync-runner:
+    environment:
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+
+  sync-dingtalk:
+    environment:
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+
+  sync-wdt:
+    environment:
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+
+  extract-mart:
+    environment:
+      PUBLIC_DATA_NACOS_SERVER: ""
+      PUBLIC_DATA_NACOS_NAMESPACE: ""
+
+volumes:
+  # 静态资源仓共享卷：ftp 写入、nginx 只读直出（/static/）。
+  bi-static:
+    name: public-data-bi-static

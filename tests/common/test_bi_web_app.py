@@ -3,9 +3,11 @@
 Everything runs on ``TestClient`` with fully injected fakes -- no Nacos, no
 RDS, no network.  The matrix locks:
 
-* routing (API-first, 2026-09-14 separation spec): ``/`` redirects to the
-  default dashboard, ``/d/{id}`` serves the data-free static shell
-  (``web/index.html``) behind the shared resolve chain, the v1 API carries
+* routing (API-first, 2026-09-14 separation spec; original-design shell
+  per the 2026-09-17 decision): ``/`` redirects to the default dashboard,
+  ``/d/{id}`` serves the data-free static shell ``web/bi.html`` (legacy
+  ``web/index.html`` remains the ``BI_WEB_SHELL=legacy`` rollback) behind
+  the shared resolve chain, the v1 API carries
   the navigation (``/api/v1/dashboards``), the dashboard definition
   (``/api/v1/dashboards/{id}``), and the filter option sets
   (``/api/v1/options/{source}``), while ``/api/d/{id}/cards/{card_id}``
@@ -398,14 +400,67 @@ class StaticFilesTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.content)
 
+    def test_serves_bi_html(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/web/bi.html")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.content)
+
+    def test_serves_bi_css(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/web/bi.css")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.content)
+
+    def test_serves_bi_js(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/web/bi.js")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.content)
+
+    def test_serves_bi_data_js(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/web/bi-data.js")
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.content)
+
 
 class DashboardPageTests(unittest.TestCase):
     """``/d/{id}`` serves the data-free static shell (2026-09-14 API-first).
 
     The page route only guards the URL through the shared resolve chain
-    (404 missing/disabled, 503 corrupt) and returns ``web/index.html``;
-    every data shape moved to the v1 API tests below.
+    (404 missing/disabled, 503 corrupt) and returns the shell (original-
+    design ``web/bi.html`` by default, ``web/index.html`` under
+    ``BI_WEB_SHELL=legacy``); every data shape moved to the v1 API tests
+    below.
     """
+
+    def test_default_shell_is_the_original_design_bi_html(self):
+        # Original-design shell (2026-09-17 decision): without BI_WEB_SHELL
+        # the page serves web/bi.html -- the original-design static shell
+        # wired to bi.css/bi.js/bi-data.js, still data-free (every number
+        # arrives via /api/v1/).
+        client = TestClient(_build_app())
+
+        response = client.get("/d/l1-cockpit")
+
+        self.assertEqual(200, response.status_code)
+        body = response.text
+        self.assertIn('href="/web/bi.css"', body)
+        self.assertIn('src="/web/bi.js"', body)
+        self.assertIn('src="/web/bi-data.js"', body)
+        # The shell is data-free: cards, params, filters, and options all
+        # arrive via /api/v1/ from bi.js.
+        self.assertNotIn("data-api=", body)
+        self.assertNotIn("<select", body)
 
     def test_serves_the_static_shell_without_any_data(self):
         # V1 (2026-09-16): /d/{id} serves the bi-react dist when present;
@@ -515,9 +570,12 @@ class V1ApiTests(unittest.TestCase):
         self.assertEqual(
             {
                 "dashboards": [
-                    {"id": "l1-cockpit", "title": "首页驾驶舱"},
-                    {"id": "l2-region", "title": "分析页"},
-                    {"id": "l2-people", "title": "分析页"},
+                    {"id": "l1-cockpit", "title": "首页驾驶舱", "icon": "",
+                     "group": ""},
+                    {"id": "l2-region", "title": "分析页", "icon": "",
+                     "group": ""},
+                    {"id": "l2-people", "title": "分析页", "icon": "",
+                     "group": ""},
                 ]
             },
             response.json(),
@@ -1179,7 +1237,10 @@ class NavTests(unittest.TestCase):
 
     def test_lists_enabled_dashboards_by_nav_order(self):
         source = StaticDashboardSource({
-            "l2-people": _l2_mapping(_REGION_MONTH_FILTERS, nav_order=30),
+            # icon（2026-09-17 前端逻辑后端化）：配置层下发，导航 API 透传。
+            "l2-people": dict(
+                _l2_mapping(_REGION_MONTH_FILTERS, nav_order=30), icon="📊"
+            ),
             "l1-cockpit": _l1_mapping(),
             "l2-region": _l2_mapping(_REGION_MONTH_FILTERS, nav_order=10),
         })
@@ -1188,9 +1249,9 @@ class NavTests(unittest.TestCase):
 
         self.assertEqual(
             (
-                ("l1-cockpit", "首页驾驶舱"),
-                ("l2-region", "分析页"),
-                ("l2-people", "分析页"),
+                ("l1-cockpit", "首页驾驶舱", "", ""),
+                ("l2-region", "分析页", "", ""),
+                ("l2-people", "分析页", "📊", ""),
             ),
             nav,
         )
@@ -1211,7 +1272,7 @@ class NavTests(unittest.TestCase):
         nav = _nav_entries(source)
 
         self.assertEqual(
-            (("l2-bbb", "分析页"), ("l2-region", "分析页")),
+            (("l2-bbb", "分析页", "", ""), ("l2-region", "分析页", "", "")),
             nav,
         )
 
@@ -1227,7 +1288,7 @@ class NavTests(unittest.TestCase):
         with self.assertLogs("common.bi_web.app", level="WARNING") as logs:
             nav = _nav_entries(source)
 
-        self.assertEqual((("l1-cockpit", "首页驾驶舱"),), nav)
+        self.assertEqual((("l1-cockpit", "首页驾驶舱", "", ""),), nav)
         joined = "\n".join(logs.output)
         self.assertIn("DashboardConfigError", joined)
         self.assertNotIn("l2-region", joined)
@@ -1633,9 +1694,11 @@ _STAGE_B_L2_PLACEMENTS = {
     # 前后端拉齐 V1（2026-09-16）：资金安全五卡真卡页（fact_fin_* 只读），
     # ④⑤⑪ 月报页（人工报表窄表，未导入期间自然挂零），五张 0 占位页
     # （结构卡 rows=[] + has_fact=false，应接入未接入）。
+    # 趋势卡主体参数化（2026-09-17 P2）：4 张分屏卡收敛为 1 张 +
+    # entities 筛选源（38 家店铺一张图不可读，主体会变）。
     "l2-fund-safety": {
         "kpi_fin_receivables_overdue": "scalar",
-        "trend_fin_store_funds": "line",
+        "trend_fin_store_funds_entity": "line",
         "table_fin_receivables_aging": "table",
         "table_fin_prepayment_uninvoiced": "table",
         "table_fin_deposit_status": "table",
@@ -1780,7 +1843,15 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         # from the repository tree, so a Docker-context exclusion of
         # web/ would pass them and surface only as an unstyled cockpit.
         # These requests run inside the image -- the real guard.
-        for path in ("/web/style.css", "/web/dashboard.js", "/web/index.html"):
+        for path in (
+            "/web/style.css",
+            "/web/dashboard.js",
+            "/web/index.html",
+            "/web/bi.html",
+            "/web/bi.css",
+            "/web/bi.js",
+            "/web/bi-data.js",
+        ):
             with self.subTest(path=path):
                 response = self.client.get(path)
 
@@ -1909,9 +1980,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "l2-channel": ["channel", "month"],
             "l2-product": ["month", "brand", "channel"],
             "l2-people": ["region", "month"],
-            # V1 新页：资金安全与三个月报页无筛选（卡片 params_schema
-            # 留空）；五张占位页只挂月份（页面级 filters）。
-            "l2-fund-safety": [],
+            # V1 新页：三个月报页无筛选（卡片 params_schema 留空）；
+            # 资金安全页挂公司主体筛选（2026-09-17 P2 主体参数化）；
+            # 五张占位页只挂月份（页面级 filters）。
+            "l2-fund-safety": ["entity"],
             "l2-ecom": [],
             "l2-dining": [],
             "l2-hall": [],
@@ -2076,6 +2148,7 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             "trend_region_daily",
             "trend_channel_daily",
             "trend_fin_store_funds",
+            "trend_fin_store_funds_entity",
         ):
             self.assertIsInstance(payload["dates"], list)
             for entry in payload["series"]:

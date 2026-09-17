@@ -211,6 +211,50 @@
 
 ---
 
+## 0.8 资金趋势卡 SQL 下推 + 主体参数化（2026-09-17 P1+P2）
+
+> 执行依据：`指南/资金趋势卡-SQL下推与参数化-执行提示词.md`（§3 P1 必做、§4 P2 按「主体会变」裁决执行）。
+
+**为什么改**：4 张硬编码分屏卡（习水村/杭易/平澜路/民酒汇）把 300 行全表拉回 Python 过滤累加，4 卡 = 4 次全表 + 4 遍 Decimal 循环；且公司主体会变（新增/改名/下线），硬编码卡每变一次就要改代码。
+
+| 项 | 结果 |
+|---|---|
+| SQL 下推（P1） | `_FIN_STORE_FUNDS_ENTITY_SQL` 改为 `WHERE company_entity = %s + GROUP BY month, channel + SUM(balance)`，值一律 `%s` 绑定；零填充（缺月补 0）不可下推，留 Python |
+| 主体参数化（P2） | 4 张分屏卡 → 1 张 `trend_fin_store_funds_entity`（`params_schema={"entity": "entities"}`）+ 新增 `entities` 筛选源（`entity_options`：DISTINCT company_entity）；entity 空 = 全主体按渠道汇总（走不带 WHERE 的 `_FIN_STORE_FUNDS_CHANNEL_SQL`，绝不传恒真通配值） |
+| 注册表 | **40 → 37**；`trend_fin_store_funds`（38 线原卡）保留未删（仅页面不挂载） |
+| 筛选源对拍 | `config.KNOWN_FILTER_SOURCES` 与 `app._FILTER_SOURCE_QUERIES` 同时 += `entities`（`FilterSourceParityTests` 钉死） |
+| seed 编排 | `l2-fund-safety` 挂页面级筛选（entity / entities / 公司主体），卡片 8 → 5，span `(4, 12, 12, 6, 6)` |
+| 守门测试 | `test_bi_web_cards`（清单/映射/params_schema/37）、`test_bi_web_config`（filters/卡片/span）、`test_bi_web_app`（页面桩、`filter_params["l2-fund-safety"]=["entity"]`、dates 结构断言）六处+三处同步；新增 `FinEntityTrendTests` 4 例（%s 绑定形态 / 空 entity 无 WHERE / 渠道名清洗+零填充 / entity_options 形态） |
+| 测试结论 | Docker 容器内 4 模块 **305 OK（skipped=1）**，无 FAILED/ERROR |
+| 前端 | **零改动**：`FilterBar` 由 `def.filters` + `/api/v1/options/entities` 驱动，下拉自动出现；`card_cache_key` 已含参数，切主体各自命中缓存 |
+| 冒烟 | `filters` 含 entity ✓；`options/entities` 返回 4 主体 ✓；无 entity → 全主体 7 条渠道线 × 8 月 ✓；`entity=习水村` → 6 条线、渠道名正常中文 ✓；非法 entity → **400 bad_request**（值域闸，非 500）✓ |
+
+**遗留**：`region`（地域）映射规则未定，本批继续用 `company_entity`；口径确认后在 mart 投影层补 `dim_store` 或加列（提示词 §7 不做清单）。
+
+---
+
+## 0.9 原稿转正（2026-09-17 P0–P2）：原稿静态壳接管 /d/{id}，React 进入下线倒计时
+
+> 决策（老板拍板）：`preview.html` 原稿视觉更好，取消 React + Vite 架构；原稿已单独发布保留。
+> 执行依据：`指南/BI看板原稿转正-任务书.md` + `指南/BI看板原稿转正-多agent执行提示词.md`；
+> 多 agent 协同：shell-forger（A 三件套）/ data-adapter（B 数据层）/ shell-switch（C 壳切换）+ main 集成。
+
+| 项 | 结果 |
+|---|---|
+| 新壳 | `common/bi_web/web/bi.html`(35) + `bi.css`(255，原稿 token 一字未动) + `bi.js`(405，零依赖 SVG 图表库+卡片构造器，零演示数据) + `bi-data.js`(338，API 适配层：dashboards→definition→options→逐卡取数，WeakMap 竞态防护) |
+| 壳选择序 | `app.py::_shell_index_html()`：**bi.html → dist（P3 前回退层）→ legacy**；`BI_WEB_SHELL=legacy` 一键回 V0；逐请求决策无需重启 |
+| 契约映射 | 5 种 payload → 原稿组件：scalar→CardKpi（进度条/环比/trend7 迷你图）、line/bar/pie→SVG 图、table→CardTable（7 种 format + severity chip + `has_fact:false` 占位「应接入未接入」）；非法筛选值 → 卡内错误态（API 400），整页不挂 |
+| 守门测试 | `test_bi_web_app`（壳断言+静态资源 8 例）、`test_bi_web_shell`（三级选择序全向钉死，main 集成时补同步——C 只跑了 app 模块，全量暴露后补齐） |
+| 测试 | 全量 **1117 OK（skipped=11）**（`--build` 重建纪律） |
+| 冒烟 | 14 页逐页 200；壳接线 bi.css/bi.js/bi-data.js 全 200；资金安全页 entity 下拉 4 选项、切主体生效、非法值卡内错误态；占位 5 页占位态正确 |
+| 回退演练 | 一次性容器 `BI_WEB_SHELL=legacy` 起 18082：legacy 壳（dashboard.js）确认可用，演练后销毁 |
+| 排障记录 | nginx 缓存旧 bi-web IP → 502（`docker restart nginx` 即恢复，今后重建 bi-web 后须同步重启 nginx）；`outputs/bi-preview/server.py`（9/14 起）长期占用 127.0.0.1:18081，直连口以 8088/容器内为准 |
+
+**React 拆除（P3 / D 批）**：观察 3-7 天无回退诉求后，按 `多agent执行提示词.md` §7 独立派发：归档本文件 → 删 bi-react 目录 → 删 dist 检测与 `/assets` → 删 CI frontend job。
+**本仓库（bi-react）自今日起冻结**：只读档案，不再接受功能改动。
+
+---
+
 ## 1. 已修开工必修缺陷
 
 | # | 位置 | 问题 | 处理 |

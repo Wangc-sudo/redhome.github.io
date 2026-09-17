@@ -24,6 +24,7 @@ in the app layer.  Money unit is 元.  The low-level queries return
 ``float`` for JSON payloads.
 """
 
+import ast
 import textwrap
 import threading
 import time
@@ -2038,6 +2039,116 @@ def run_trend_fin_store_funds(connection, params) -> dict:
         ],
         "unit": _UNIT,
     }
+
+
+#: 店铺资金余额按公司主体聚合（2026-09-17 SQL 下推）：WHERE + GROUP BY
+#: 在 SQL 侧完成，不再把 300 行全表拉回 Python 过滤；entity 一律 %s 绑定，
+#: 值绝不拼进 SQL 文本。零填充（缺月补 0）不可下推（无月份维表可
+#: LEFT JOIN），仍在 Python 侧做。
+_FIN_STORE_FUNDS_ENTITY_SQL = textwrap.dedent(
+    """
+    SELECT month, channel, SUM(balance) AS balance
+    FROM fact_fin_store_funds
+    WHERE company_entity = %s
+    GROUP BY month, channel
+    ORDER BY month
+    """
+).strip()
+
+#: 不带 WHERE 的同款聚合：entity 为空 = 全主体按渠道汇总。空语义走另一条
+#: SQL，绝不传 ``("%",)`` 之类的恒真通配值。
+_FIN_STORE_FUNDS_CHANNEL_SQL = textwrap.dedent(
+    """
+    SELECT month, channel, SUM(balance) AS balance
+    FROM fact_fin_store_funds
+    GROUP BY month, channel
+    ORDER BY month
+    """
+).strip()
+
+#: 筛选器「公司主体」下拉（l2-fund-safety 页面筛选）：DISTINCT 升序，
+#: 全静态 SQL。主体新增/改名/下线后选项自动跟随事实表。
+_FIN_STORE_ENTITY_OPTIONS_SQL = textwrap.dedent(
+    """
+    SELECT DISTINCT company_entity
+    FROM fact_fin_store_funds
+    ORDER BY company_entity
+    """
+).strip()
+
+
+def entity_options(connection) -> list:
+    """筛选器「公司主体」下拉：DISTINCT company_entity，升序。"""
+    return [
+        row["company_entity"]
+        for row in _fetch_rows(connection, _FIN_STORE_ENTITY_OPTIONS_SQL)
+        if row["company_entity"]
+    ]
+
+
+def clean_channel_label(value) -> str:
+    """钉钉 singleSelect 落库是 Python dict 字面量（``{'name': '拼多多', 'id': '…'}``）。
+
+    取 ``name`` 作为可读渠道名；解析失败或本就是纯文本则原样返回。空值
+    返回空串，由调用方归一成「未分类」——不猜、不丢弃。
+    """
+    raw = (value or "").strip()
+    if not raw or not raw.startswith("{"):
+        return raw
+    try:
+        parsed = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return raw
+    if isinstance(parsed, dict):
+        name = parsed.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return raw
+
+
+def _funds_channel_trend_payload(rows) -> dict:
+    """(month, channel, Σbalance) 聚合行 → 渠道多系列趋势载荷（零填充）。
+
+    与 ``_align_series_rows`` 同款思路：轴为去重后的全部月份
+    （``YYYY-MM`` 字符串，天然可排序），渠道在某月无行 → 0；渠道名先经
+    :func:`clean_channel_label` 清洗（钉钉 singleSelect dict 字面量）。
+    """
+    months = sorted({row["month"] for row in rows if row.get("month")})
+    index_of = {month: index for index, month in enumerate(months)}
+    by_channel = {}
+    for row in rows:
+        month = row.get("month")
+        if month is None:
+            continue
+        key = clean_channel_label(row.get("channel")) or "未分类"
+        bucket = by_channel.setdefault(key, [Decimal(0)] * len(months))
+        bucket[index_of[month]] += Decimal(row.get("balance") or 0)
+    return {
+        "chart": "line",
+        "dates": months,
+        "series": [
+            {"name": name, "data": [float(value) for value in by_channel[name]]}
+            for name in sorted(by_channel)
+        ],
+        "unit": _UNIT,
+    }
+
+
+def run_trend_fin_store_funds_entity(connection, params) -> dict:
+    """⑩ 店铺资金余额趋势（主体参数化）: entity 单主体 / 空=全主体，按渠道汇总。
+
+    38 家店铺画在一张图上 = 38 条 series，完全不可读；公司主体会变
+    （新增/改名/下线），故 4 张硬编码分屏卡收敛为本参数化卡 +
+    ``entities`` 筛选源（2026-09-17 P2）。聚合（WHERE + GROUP BY）已
+    下推 SQL，Python 只留渠道名清洗与缺月零填充；entity 经 app 层
+    ``entities`` 值域闸校验，非法值 400。
+    """
+    entity = (params.get("entity") or "").strip()
+    if entity:
+        rows = _fetch_rows(connection, _FIN_STORE_FUNDS_ENTITY_SQL, (entity,))
+    else:
+        rows = _fetch_rows(connection, _FIN_STORE_FUNDS_CHANNEL_SQL)
+    return _funds_channel_trend_payload(rows)
 
 
 # ---------------------------------------------------------------------------

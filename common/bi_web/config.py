@@ -45,7 +45,8 @@ MAX_SPAN = 12
 DEFAULT_NAV_ORDER = 0
 
 _ALLOWED_DASHBOARD_KEYS = frozenset(
-    {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters", "_说明"}
+    {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters",
+     "icon", "group", "_说明"}
 )
 _ALLOWED_CARD_KEYS = frozenset({"card", "title", "span", "on_click", "_说明"})
 _ALLOWED_FILTER_KEYS = frozenset({"param", "source", "label", "_说明"})
@@ -55,8 +56,9 @@ _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 #: 的键集合由测试对拍保持一致（漂移=红构建，而非运行期 KeyError）。
 #: 商品口径的品牌/渠道来自 fact_order_line（店铺渠道），与
 #: ``channels``（fact_channel_daily_sales 的业务渠道）是两套维度，故分开。
+#: ``entities``（fact_fin_store_funds 的公司主体）供资金安全页主体筛选。
 KNOWN_FILTER_SOURCES = frozenset(
-    {"regions", "channels", "months", "brands", "sku_channels"}
+    {"regions", "channels", "months", "brands", "sku_channels", "entities"}
 )
 
 
@@ -113,6 +115,13 @@ class DashboardConfig:
     nav_order: int = DEFAULT_NAV_ORDER
     cards: tuple = ()
     filters: tuple = ()
+    #: 导航图标：emoji 短文本或 ``/static/`` 静态资源路径（FTP 资源仓，
+    #: 2026-09-17）；空串 = 前端回退默认图标。展示逻辑归属后端配置层，
+    #: 前端只渲染（「前端逻辑后端化」裁决）。
+    icon: str = ""
+    #: 导航分组名（侧栏 nav-group 标题，如 经营驾驶舱/专项分析）；空串 =
+    #: 前端防御性回退。分组归属同 icon 裁决。
+    group: str = ""
 
 
 def parse_dashboard_config(dashboard_id, data):
@@ -135,6 +144,18 @@ def parse_dashboard_config(dashboard_id, data):
     if not isinstance(title, str):
         raise DashboardConfigError(
             f"dashboard '{dashboard_id}' field 'title' must be a string"
+        )
+
+    icon = data.get("icon", "")
+    if not isinstance(icon, str):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'icon' must be a string"
+        )
+
+    group = data.get("group", "")
+    if not isinstance(group, str):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'group' must be a string"
         )
 
     enabled = data.get("enabled", True)
@@ -193,6 +214,8 @@ def parse_dashboard_config(dashboard_id, data):
         nav_order=nav_order,
         cards=parsed_cards,
         filters=parsed_filters,
+        icon=icon,
+        group=group,
     )
 
 

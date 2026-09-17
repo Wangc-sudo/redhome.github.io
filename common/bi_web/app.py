@@ -13,10 +13,12 @@ carrying the exception class name only -- enough for an operator to tell
 Routing (spec section 6; API-first per the 2026-09-14 separation spec):
 
 * ``GET /``   -- redirect to the default dashboard (``l1-cockpit``);
-* ``GET /d/{dashboard_id}`` -- the static shell ``web/index.html`` (no
-  data in it; the client routes on ``location.pathname``), still behind
-  the shared resolve chain so a missing/disabled dashboard 404s and a
-  corrupt one 503s -- bookmarkable URLs keep their old semantics;
+* ``GET /d/{dashboard_id}`` -- the original-design static shell
+  ``web/bi.html`` (no data in it; the client routes on
+  ``location.pathname``; legacy ``web/`` remains the rollback shell),
+  still behind the shared resolve chain so a missing/disabled dashboard
+  404s and a corrupt one 503s -- bookmarkable URLs keep their old
+  semantics;
 * ``GET /api/v1/dashboards`` -- navigation list (enabled, by nav_order);
 * ``GET /api/v1/dashboards/{dashboard_id}`` -- the definition the shell
   renders from: title, ``refresh_seconds``, filters, and each card's
@@ -95,10 +97,12 @@ _GATE_TTL_SECONDS = 30.0
 #: source per window, mirroring the gate TTL).
 _FILTER_TTL_SECONDS = 30.0
 
-#: The API-first static frontend (2026-09-14 separation spec): index.html
-#: is the data-free shell served at ``/d/{id}``; dashboard.js builds the
-#: navigation, filters, and cards entirely from ``/api/v1/``.  The Jinja2
-#: rendering path is retired and the dependency unpinned.
+#: The API-first static frontend (2026-09-14 separation spec; original-design
+#: shell per the 2026-09-17 decision): ``bi.html`` is the data-free shell
+#: served at ``/d/{id}``; ``bi.js`` builds the navigation, filters, and cards
+#: entirely from ``/api/v1/``.  ``index.html`` (V0) stays on the tree as the
+#: ``BI_WEB_SHELL=legacy`` rollback shell.  The Jinja2 rendering path is
+#: retired and the dependency unpinned.
 _WEB_DIR = Path(__file__).parent / "web"
 
 #: The bi-react production build (V1, 2026-09-16): when ``dist/index.html``
@@ -111,14 +115,20 @@ _REACT_DIST_DIR = Path(__file__).parents[2] / "frontend" / "bi-react" / "dist"
 
 
 def _shell_index_html() -> Path:
-    """Pick the ``/d/{id}`` shell: bi-react dist when present, else legacy.
+    """Pick the ``/d/{id}`` shell: bi.html first, dist as fallback, else legacy.
 
-    The decision is made per request so a rollback (env flip or dist
-    removal) takes effect without a process restart.  ``BI_WEB_SHELL``
-    is an ops switch, never a secret.
+    The original-design shell ``web/bi.html`` is the first choice; the
+    bi-react dist remains a second rollback layer until P3 removes it;
+    ``web/index.html`` (V0) is the final fallback.  The decision is made
+    per request so a rollback (env flip or file removal) takes effect
+    without a process restart.  ``BI_WEB_SHELL`` is an ops switch, never
+    a secret.
     """
     if os.environ.get("BI_WEB_SHELL", "").strip().lower() == "legacy":
         return _WEB_DIR / "index.html"
+    bi_index = _WEB_DIR / "bi.html"
+    if bi_index.is_file():
+        return bi_index
     react_index = _REACT_DIST_DIR / "index.html"
     if react_index.is_file():
         return react_index
@@ -212,6 +222,7 @@ _FILTER_SOURCE_QUERIES = {
     "months": queries.month_options,
     "brands": queries.brand_options,
     "sku_channels": queries.sku_channel_options,
+    "entities": queries.entity_options,
 }
 
 
@@ -458,10 +469,12 @@ def _nav_entries(dashboard_source) -> Tuple[Tuple[str, str], ...]:
             continue
         if dashboard.enabled and dashboard.cards:
             entries.append(
-                (dashboard.nav_order, dashboard.dashboard_id, dashboard.title)
+                (dashboard.nav_order, dashboard.dashboard_id, dashboard.title,
+                 dashboard.icon, dashboard.group)
             )
     return tuple(
-        (dashboard_id, title) for _, dashboard_id, title in sorted(entries)
+        (dashboard_id, title, icon, group)
+        for _, dashboard_id, title, icon, group in sorted(entries)
     )
 
 
@@ -578,8 +591,10 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         return JSONResponse(
             {
                 "dashboards": [
-                    {"id": dashboard_id, "title": title}
-                    for dashboard_id, title in _nav_entries(dashboard_source)
+                    {"id": dashboard_id, "title": title, "icon": icon,
+                     "group": group}
+                    for dashboard_id, title, icon, group
+                    in _nav_entries(dashboard_source)
                 ]
             }
         )

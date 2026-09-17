@@ -1,9 +1,10 @@
-"""bi-web ``/d/{id}`` shell picker tests (V1, 2026-09-16).
+"""bi-web ``/d/{id}`` shell picker tests (V1 2026-09-16; V2 2026-09-17).
 
-The bi-react ``dist`` build replaces the legacy ``web/`` shell when
-present; ``BI_WEB_SHELL=legacy`` (or a missing dist) rolls back to V0
-without a restart.  The legacy shell is never deleted -- these tests
-pin both directions of the switch.
+Shell pick order (three tiers, decided per request): the original-design
+shell ``web/bi.html`` wins first; the bi-react ``dist`` build remains a
+second rollback layer until P3 removes it; ``web/index.html`` (V0) is the
+final fallback.  ``BI_WEB_SHELL=legacy`` forces V0 without a restart.
+The legacy shell is never deleted -- these tests pin every tier.
 """
 
 import os
@@ -23,6 +24,7 @@ from common.bi_web.config import StaticDashboardSource
 
 _REACT_MARKER = "<!-- bi-react-dist-shell -->"
 _LEGACY_INDEX = Path(app_module.__file__).parent / "web" / "index.html"
+_BI_INDEX = Path(app_module.__file__).parent / "web" / "bi.html"
 
 
 def _stub_connector():
@@ -66,7 +68,7 @@ def _build_app():
 
 
 class ShellPickerTests(unittest.TestCase):
-    """Unit-level: _shell_index_html() honours dist presence + env switch."""
+    """Unit-level: _shell_index_html() honours the three tiers + env switch."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -86,14 +88,36 @@ class ShellPickerTests(unittest.TestCase):
     def _write_dist_index(self):
         (self.dist / "index.html").write_text(_REACT_MARKER, encoding="utf-8")
 
-    def test_missing_dist_falls_back_to_legacy(self):
+    def _without_bi_html(self):
+        """Patch ``_WEB_DIR`` to an empty dir, simulating a missing bi.html."""
+        empty_web = Path(self._tmp.name) / "web-empty"
+        empty_web.mkdir(exist_ok=True)
+        return patch.object(app_module, "_WEB_DIR", empty_web), empty_web
+
+    def test_default_prefers_bi_html(self):
         self.assertEqual(
-            app_module._WEB_DIR / "index.html", app_module._shell_index_html()
+            app_module._WEB_DIR / "bi.html", app_module._shell_index_html()
         )
 
-    def test_present_dist_wins(self):
+    def test_bi_html_wins_over_dist(self):
         self._write_dist_index()
-        self.assertEqual(self.dist / "index.html", app_module._shell_index_html())
+        self.assertEqual(
+            app_module._WEB_DIR / "bi.html", app_module._shell_index_html()
+        )
+
+    def test_dist_wins_only_when_bi_html_missing(self):
+        # dist 是第二回退层：bi.html 缺席（P3 前的部署窗口）时才轮到他。
+        self._write_dist_index()
+        web_patcher, _ = self._without_bi_html()
+        with web_patcher:
+            self.assertEqual(self.dist / "index.html", app_module._shell_index_html())
+
+    def test_missing_bi_and_dist_falls_back_to_legacy(self):
+        web_patcher, empty_web = self._without_bi_html()
+        with web_patcher:
+            self.assertEqual(
+                empty_web / "index.html", app_module._shell_index_html()
+            )
 
     def test_legacy_env_forces_rollback_even_with_dist(self):
         self._write_dist_index()
@@ -113,7 +137,7 @@ class ShellPickerTests(unittest.TestCase):
         self._write_dist_index()
         with patch.dict(os.environ, {"BI_WEB_SHELL": "react"}):
             self.assertEqual(
-                self.dist / "index.html", app_module._shell_index_html()
+                app_module._WEB_DIR / "bi.html", app_module._shell_index_html()
             )
 
 
@@ -136,10 +160,12 @@ class ShellRouteTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_dashboard_route_serves_react_dist(self):
+    def test_dashboard_route_serves_bi_html(self):
+        # dist 在场也不再优先：bi.html 是 /d/{id} 的默认壳（V2, 2026-09-17）。
         response = self.client.get("/d/l1-cockpit")
         self.assertEqual(200, response.status_code)
-        self.assertIn(_REACT_MARKER, response.text)
+        self.assertNotIn(_REACT_MARKER, response.text)
+        self.assertEqual(_BI_INDEX.read_bytes(), response.content)
 
     def test_legacy_env_serves_legacy_shell(self):
         with patch.dict(os.environ, {"BI_WEB_SHELL": "legacy"}):
@@ -148,11 +174,11 @@ class ShellRouteTests(unittest.TestCase):
         self.assertNotIn(_REACT_MARKER, response.text)
         self.assertEqual(_LEGACY_INDEX.read_bytes(), response.content)
 
-    def test_missing_dist_route_falls_back_to_legacy(self):
+    def test_missing_dist_route_still_serves_bi_html(self):
         (self.dist / "index.html").unlink()
         response = self.client.get("/d/l1-cockpit")
         self.assertEqual(200, response.status_code)
-        self.assertEqual(_LEGACY_INDEX.read_bytes(), response.content)
+        self.assertEqual(_BI_INDEX.read_bytes(), response.content)
 
     def test_resolve_chain_still_guards_the_route(self):
         response = self.client.get("/d/no-such-dashboard")
