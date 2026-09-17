@@ -281,3 +281,125 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
         self.assertEqual(
             set(_ORDER_LINE_COLUMNS) | {"synced_at", "sync_run_id"}, columns
         )
+
+
+class MartSplitMigrationTests(unittest.TestCase):
+    """mart 拆库 M1：mart_facts / mart_dims / mart_queue 三个新 schema。
+
+    只建表不搬数据；热路径（apply_live_migrations）不感知这三个 target，
+    由 apply_mart_split_migrations 按批次显式推进（设计稿 §2.3/§2.6）。
+    """
+
+    def test_split_targets_are_registered_after_legacy_mart_versions(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        registered = {version: target for version, target, _ in _MIGRATIONS}
+        self.assertEqual("mart_facts", registered["mart-facts-v1"])
+        self.assertEqual("mart_dims", registered["mart-dims-v1"])
+        self.assertEqual("mart_queue", registered["mart-queue-v1"])
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertLess(
+            versions.index("mart-ops-manual-report-v1"),
+            versions.index("mart-facts-v1"),
+        )
+
+    def test_apply_split_migrations_builds_each_schema_with_its_tables(self):
+        from common.public_data.live_migrations import apply_mart_split_migrations
+
+        facts, dims, queue = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_mart_split_migrations(facts, dims, queue)
+
+        facts_sql = "\n".join(q for q, _ in facts.cursor_instance.executed)
+        for table in (
+            "fact_daily_report_offline",
+            "fact_channel_daily_sales",
+            "fact_fin_receivables_aging",
+            "fact_fin_prepayment_invoice",
+            "fact_fin_offline_deposit",
+            "fact_fin_platform_deposit",
+            "fact_fin_store_funds",
+            "fact_order_line",
+            "fact_manual_report",
+        ):
+            self.assertIn(
+                f"CREATE TABLE IF NOT EXISTS `{table}`", facts_sql, table
+            )
+        # 空库先建 v1 表、同版本内补渠道列（CREATE + ALTER 顺序执行）。
+        self.assertIn("ALTER TABLE `fact_order_line`", facts_sql)
+        self.assertLess(
+            facts_sql.index("CREATE TABLE IF NOT EXISTS `fact_order_line`"),
+            facts_sql.index("ALTER TABLE `fact_order_line`"),
+        )
+
+        dims_sql = "\n".join(q for q, _ in dims.cursor_instance.executed)
+        for table in (
+            "dim_calendar",
+            "dim_product",
+            "dim_robot_member",
+            "dim_target",
+        ):
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS `{table}`", dims_sql, table)
+        # 控制面与队列不进 dims。
+        self.assertNotIn("sync_runs", dims_sql)
+        self.assertNotIn("robot_outbox", dims_sql)
+
+        queue_sql = "\n".join(q for q, _ in queue.cursor_instance.executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS `robot_outbox`", queue_sql)
+        self.assertNotIn("fact_", queue_sql)
+
+        for connection in (facts, dims, queue):
+            sql = "\n".join(q for q, _ in connection.cursor_instance.executed)
+            self.assertIn(
+                "CREATE TABLE IF NOT EXISTS `pd_live_schema_migration`", sql
+            )
+
+        recorded_facts = [
+            params[0] for _, params in facts.cursor_instance.executed if params
+        ]
+        self.assertIn("mart-facts-v1", recorded_facts)
+        self.assertNotIn("mart-dims-v1", recorded_facts)
+
+    def test_live_migrations_do_not_touch_split_targets(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        recorded = [
+            params[0] for _, params in mart.cursor_instance.executed if params
+        ]
+        self.assertNotIn("mart-facts-v1", recorded)
+        self.assertNotIn("mart-dims-v1", recorded)
+        self.assertNotIn("mart-queue-v1", recorded)
+
+    def test_applied_split_migrations_are_not_replayed(self):
+        from common.public_data.live_migrations import (
+            _MIGRATIONS,
+            _combined_checksum,
+            apply_mart_split_migrations,
+        )
+
+        applied = {
+            version: _combined_checksum(statements)
+            for version, _, statements in _MIGRATIONS
+        }
+        facts, dims, queue = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_mart_split_migrations(facts, dims, queue, applied_checksums=applied)
+
+        facts_sql = "\n".join(q for q, _ in facts.cursor_instance.executed)
+        self.assertNotIn("fact_daily_report_offline", facts_sql)
+        dims_sql = "\n".join(q for q, _ in dims.cursor_instance.executed)
+        self.assertNotIn("dim_calendar", dims_sql)
+
+    def test_split_migrations_reject_checksum_drift(self):
+        from common.public_data.live_migrations import apply_mart_split_migrations
+
+        with self.assertRaisesRegex(LiveMigrationError, "checksum"):
+            apply_mart_split_migrations(
+                FakeConnection(),
+                FakeConnection(),
+                FakeConnection(),
+                applied_checksums={"mart-facts-v1": "0" * 64},
+            )

@@ -49,6 +49,14 @@ class Settings:
     #: ``robot`` / ``dingtalk-gateway`` containers (stage 4).  Unset means
     #: those commands cannot resolve any region config and fail loudly.
     region_seed_path: Path | None = None
+    #: mart 拆库三个新 schema（设计稿 2026-09-16 §2.2）。均为可选环境变量
+    #: （``PUBLIC_DATA_MART_FACTS_DATABASE`` / ``..._DIMS_...`` /
+    #: ``..._QUEUE_...``）；不配时字段为 ``None``，由
+    #: ``mart_routing.resolve_*`` 回落 ``mart_database``——灰度期零配置
+    #: 即旧行为。配了就必须过 ``*_test`` 铁律（并入 database_names 校验）。
+    mart_facts_database: DatabaseSettings | None = None
+    mart_dims_database: DatabaseSettings | None = None
+    mart_queue_database: DatabaseSettings | None = None
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -89,6 +97,17 @@ class Settings:
             database_names["manual"] = (
                 "raw_manual_test" if app_env == "test" else "raw_manual"
             )
+
+        # mart 拆库新 schema：可选；不配时不进 database_names（字段留 None，
+        # 路由层回落旧库），配了就与既有库同名同则受 *_test 铁律约束。
+        for key, env_var in (
+            ("mart_facts", "PUBLIC_DATA_MART_FACTS_DATABASE"),
+            ("mart_dims", "PUBLIC_DATA_MART_DIMS_DATABASE"),
+            ("mart_queue", "PUBLIC_DATA_MART_QUEUE_DATABASE"),
+        ):
+            split_name = (environment.get(env_var) or "").strip()
+            if split_name:
+                database_names[key] = split_name
 
         for database_name in database_names.values():
             is_test_database = database_name.endswith("_test")
@@ -154,4 +173,19 @@ class Settings:
             calendar_seed_path=calendar_seed_path,
             org_seed_path=org_seed_path,
             region_seed_path=region_seed_path,
+            mart_facts_database=(
+                DatabaseSettings(name=database_names["mart_facts"], **connection_values)
+                if "mart_facts" in database_names
+                else None
+            ),
+            mart_dims_database=(
+                DatabaseSettings(name=database_names["mart_dims"], **connection_values)
+                if "mart_dims" in database_names
+                else None
+            ),
+            mart_queue_database=(
+                DatabaseSettings(name=database_names["mart_queue"], **connection_values)
+                if "mart_queue" in database_names
+                else None
+            ),
         )

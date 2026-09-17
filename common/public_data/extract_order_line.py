@@ -220,7 +220,10 @@ def _brand_index(repository) -> dict[str, str]:
     """spec_no → brand_name，来自同一 run 已刷新的 mart dim_product。"""
 
     index: dict[str, str] = {}
-    for row in repository.read_mart_table("dim_product"):
+    # 只读反查所需两列（排查报告 2026-09-17 §2.3），避免全列载入。
+    for row in repository.read_mart_table(
+        "dim_product", columns=("spec_no", "brand_name")
+    ):
         spec_no = _clean(row.get("spec_no"))
         brand = _clean(row.get("brand_name"))
         if spec_no and brand:

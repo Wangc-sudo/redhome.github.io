@@ -234,9 +234,12 @@ class MartExtractRepositoryTests(unittest.TestCase):
             synced_at=_NOW,
         )
 
-        sql, params = self.mart.cursor_instance.executed[0]
+        # executemany 批量写入（排查报告 §2.1 P1）：单次 round-trip。
+        self.assertEqual(self.mart.cursor_instance.executed, [])
+        (sql, sequence), = self.mart.cursor_instance.executemany_calls
         self.assertIn("ON DUPLICATE KEY UPDATE", sql)
         self.assertNotIn("`source_record_id` = VALUES(`source_record_id`)", sql)
+        (params,) = sequence
         self.assertEqual(params[0], "r1")
         self.assertEqual(params[1], "hangzhou")
         self.assertEqual(params[-2], _NOW)

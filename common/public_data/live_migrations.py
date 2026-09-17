@@ -8,6 +8,13 @@ from common.public_data.manual_import.schema import (
     raw_manual_ddl_statements,
 )
 from common.public_data.mart_extract_schema import (
+    _DIM_CALENDAR_DDL,
+    _DIM_PRODUCT_DDL as _MART_DIM_PRODUCT_DDL,
+    _DIM_ROBOT_MEMBER_DDL,
+    _FACT_CHANNEL_DAILY_SALES_DDL,
+    _FACT_DAILY_REPORT_OFFLINE_DDL,
+    _FACT_ORDER_LINE_CHANNEL_DDL,
+    _FACT_ORDER_LINE_DDL,
     legacy_ddl_statements as extract_ddl,
     finance_ddl_statements,
     order_line_ddl_statements,
@@ -258,6 +265,52 @@ def _build_mart_extract_ddl() -> tuple[str, ...]:
     return extract_ddl()
 
 
+# 排查报告（2026-09-17 §1.1）P0：bi-web 最高频查询只按 business_date
+# 过滤，既有 (region,·) / (responsible_person,·) 复合索引按最左前缀全部
+# 失配、退化为全表扫描。独立新版本而非改写 mart-extract-v1（校验和红线）。
+_DAILY_REPORT_DATE_INDEX_DDL = (
+    "ALTER TABLE `fact_daily_report_offline`\n"
+    "  ADD KEY `idx_business_date` (`business_date`)"
+)
+
+
+def _build_mart_daily_report_date_index_ddl() -> tuple[str, ...]:
+    return (_DAILY_REPORT_DATE_INDEX_DDL,)
+
+
+# mart 拆库 M1（设计稿 2026-09-16 §2.3/§2.4）：三个新 schema 的建表版本。
+# 只建表、不搬数据；复用已冻结的 DDL 文本而非改写旧版本（同版本改文本会
+# 被校验和机制判漂移）。应用方为 apply_mart_split_migrations，sync /
+# extract 热路径不感知这三个 target。
+def _build_mart_facts_ddl() -> tuple[str, ...]:
+    # 新 schema 是空库：fact_order_line 先建 v1 表、同版本内紧接着补渠道列
+    # （CREATE + ALTER 顺序执行，等价于直接建最终形态）。尾部同样带上
+    # idx_business_date——mart-facts-v1 尚未在任何库应用过，追加语句不构成
+    # 校验和漂移；一旦应用过就必须像 mart 侧一样另起版本。
+    return (
+        _FACT_DAILY_REPORT_OFFLINE_DDL,
+        _FACT_CHANNEL_DAILY_SALES_DDL,
+    ) + finance_ddl_statements() + (
+        _FACT_ORDER_LINE_DDL,
+        _FACT_ORDER_LINE_CHANNEL_DDL,
+    ) + mart_manual_ddl_statements() + (
+        _DAILY_REPORT_DATE_INDEX_DDL,
+    )
+
+
+def _build_mart_dims_ddl() -> tuple[str, ...]:
+    return (
+        _DIM_CALENDAR_DDL,
+        _MART_DIM_PRODUCT_DDL,
+        _DIM_ROBOT_MEMBER_DDL,
+        _DIM_TARGET_DDL,
+    )
+
+
+def _build_mart_queue_ddl() -> tuple[str, ...]:
+    return (_ROBOT_OUTBOX_DDL,)
+
+
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
@@ -269,10 +322,18 @@ _MIGRATIONS = (
     ("mart-extract-finance-v1", "mart", finance_ddl_statements()),
     ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),
     ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
+    (
+        "mart-extract-daily-report-date-index-v1",
+        "mart",
+        _build_mart_daily_report_date_index_ddl(),
+    ),
     ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
     ("mart-ops-dim-target-v1", "mart", _build_mart_dim_target_ddl()),
     ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
     ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
+    ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
+    ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),
+    ("mart-queue-v1", "mart_queue", _build_mart_queue_ddl()),
 )
 
 
@@ -348,6 +409,34 @@ def apply_manual_migrations(manual_connection, mart_connection, applied_checksum
     ]
     _apply_to_connection(manual_connection, manual_versions, applied_checksums)
     _apply_to_connection(mart_connection, mart_versions, applied_checksums)
+
+
+def _versions_for(target: str) -> list:
+    return [(v, stmts) for v, t, stmts in _MIGRATIONS if t == target]
+
+
+def apply_mart_split_migrations(
+    facts_connection,
+    dims_connection,
+    queue_connection,
+    applied_checksums=None,
+):
+    """只应用 mart 拆库三个新 schema 的迁移（M1 注册，M2-M4 逐域启用）。
+
+    与 ``apply_live_migrations`` 互不重叠：热路径从不连接新 schema；本函数
+    由拆库各批次（queue → dims → facts，设计稿 §2.6）的运维入口显式调用。
+    ``pd_live_schema_migration`` 跟踪表按连接（即按 schema）各存一份，
+    三个库可独立推进（设计稿 §2.3）。
+    """
+    _apply_to_connection(
+        facts_connection, _versions_for("mart_facts"), applied_checksums
+    )
+    _apply_to_connection(
+        dims_connection, _versions_for("mart_dims"), applied_checksums
+    )
+    _apply_to_connection(
+        queue_connection, _versions_for("mart_queue"), applied_checksums
+    )
 
 
 def apply_live_migrations(

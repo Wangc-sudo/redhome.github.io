@@ -142,7 +142,9 @@ class OrderLineProjectionTests(unittest.TestCase):
         result = project_order_lines(repo, ds, _RUN_ID, _NOW)
 
         repo.read_wdt_trades.assert_called_once_with(_TRADE_METHOD)
-        repo.read_mart_table.assert_called_once_with("dim_product")
+        repo.read_mart_table.assert_called_once_with(
+            "dim_product", columns=("spec_no", "brand_name")
+        )
         table, columns, rows = repo.replace_table.call_args.args
         self.assertEqual(table, "fact_order_line")
         self.assertEqual(

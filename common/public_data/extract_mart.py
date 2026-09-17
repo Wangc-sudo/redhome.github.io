@@ -18,6 +18,7 @@
 import contextlib
 import hashlib
 import logging
+import re
 import textwrap
 from dataclasses import dataclass, field
 
@@ -31,6 +32,8 @@ from common.public_data.mart_extract_schema import (
 
 
 EXTRACT_SOURCE_NAME = "extract"
+
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 #: ``sync_dataset_summary`` 里工作日历那一条的数据集名。
 CALENDAR_DATASET = "dim_calendar"
@@ -126,15 +129,25 @@ class MartExtractRepository:
             cursor.execute(sql, (source_method,))
             return [dict(row) for row in cursor.fetchall()]
 
-    def read_mart_table(self, table):
-        """读取 mart 侧已注册的镜像目标表（当前仅 dim_product，供品牌反查）。"""
+    def read_mart_table(self, table, columns=None):
+        """读取 mart 侧已注册的镜像目标表（当前仅 dim_product，供品牌反查）。
+
+        *columns* 非空时只投影指定列（排查报告 2026-09-17 §2.3：品牌反查
+        只需要 spec_no / brand_name，全列 ``SELECT *`` 随商品量线性膨胀）。
+        """
 
         if table not in {
             d.target_table for d in EXTRACT_DATASETS if d.kind == "dim_mirror"
         }:
             raise MartExtractError("unregistered mart table")
+        if columns:
+            if any(not _IDENTIFIER_RE.match(c) for c in columns):
+                raise MartExtractError("invalid projection column")
+            projection = ", ".join(f"`{c}`" for c in columns)
+        else:
+            projection = "*"
         with contextlib.closing(self._mart.cursor()) as cursor:
-            cursor.execute(f"SELECT * FROM `{table}`")
+            cursor.execute(f"SELECT {projection} FROM `{table}`")
             return [dict(row) for row in cursor.fetchall()]
 
     def replace_table(self, target_table, columns, rows):
@@ -207,12 +220,19 @@ class MartExtractRepository:
             f"VALUES ({placeholders}) "
             f"ON DUPLICATE KEY UPDATE {update_clause}"
         )
-        with contextlib.closing(self._mart.cursor()) as cursor:
-            for row in rows:
-                params = [row.get("source_record_id")]
-                params += [row.get(name) for name in dataset.target_columns]
-                params += [synced_at, sync_run_id]
-                cursor.execute(sql, tuple(params))
+        # executemany 批量写入（排查报告 2026-09-17 §2.1 P1）：一次
+        # round-trip 替代逐行 N 次，语义与逐行 execute 完全等价。
+        params = [
+            tuple(
+                [row.get("source_record_id")]
+                + [row.get(name) for name in dataset.target_columns]
+                + [synced_at, sync_run_id]
+            )
+            for row in rows
+        ]
+        if params:
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.executemany(sql, params)
 
     def replace_dim_calendar(self, rows, *, sync_run_id, synced_at):
         """用 *rows* **整体替换** ``dim_calendar``。
