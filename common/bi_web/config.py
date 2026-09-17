@@ -113,8 +113,8 @@ class DashboardConfig:
     enabled: bool = True
     refresh_seconds: int = DEFAULT_REFRESH_SECONDS
     nav_order: int = DEFAULT_NAV_ORDER
-    cards: tuple = ()
-    filters: tuple = ()
+    cards: tuple[CardPlacement, ...] = ()
+    filters: tuple[FilterSpec, ...] = ()
     #: 导航图标：emoji 短文本或 ``/static/`` 静态资源路径（FTP 资源仓，
     #: 2026-09-17）；空串 = 前端回退默认图标。展示逻辑归属后端配置层，
     #: 前端只渲染（「前端逻辑后端化」裁决）。

@@ -6,17 +6,17 @@
 import json
 import logging
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.dingtalk import DingTalkClient, DingTalkError, send_markdown
+from common.dingtalk import DingTalkClient, send_markdown
 from common.dingtalk.test_group import resolve_target
 
 SKIP_PATTERNS = ("合计",)
@@ -49,7 +49,7 @@ def log(log_dir, msg):
         fh.close()
 
 
-def _resolve_group(config, group):
+def _resolve_group(config, group) -> dict[str, Any]:
     """group 为 None 时把顶层单群字段包装成隐式 group（杭州/绍兴零回归）。"""
     if group is not None:
         return group

@@ -26,8 +26,9 @@ from pathlib import Path
 # Windows 控制台默认 GBK，打印 emoji 图表字符会 UnicodeEncodeError；
 # Linux（ECS）下 stdout 已是 UTF-8，此调用无副作用。reconfigure 后失败的
 # 字符走 replace，避免调试输出反过来影响播报主流程。
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+_reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
+if _reconfigure_stdout is not None:
+    _reconfigure_stdout(encoding="utf-8", errors="replace")
 
 BASE_DIR = Path(__file__).parent
 REPO_ROOT = BASE_DIR.parents[2]
