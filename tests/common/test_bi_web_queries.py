@@ -81,6 +81,7 @@ from common.bi_web.queries import (
     run_table_store_mtd,
     run_trend_channel_daily,
     run_trend_region_daily,
+    shortfall_facts,
     sku_channel_options,
     sku_mtd_distribution,
     store_mtd_ranking,
@@ -1043,6 +1044,35 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
         self.assertIn("GROUP BY business_date, region", sql)
+
+
+class ShortfallRegionGrainTests(ParameterizedSqlShapeTests):
+    """region 汇总粒度（``grain="region"``）SQL 形状：``has_fact`` 列必须引用
+    右表真实存在的列 ``d.responsible_person``，而非 people 版别名 ``d.person``
+    （后者在 region 子查询中不存在，会导致 MySQL ``Unknown column`` 崩溃）。"""
+
+    def test_region_grain_sql_uses_real_join_column_for_has_fact(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": []}
+        )
+
+        shortfall_facts(
+            connection, grain="region",
+            first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+        )
+
+        sql = self.sole_parameterized_sql(
+            connection,
+            (date(2026, 9, 1), date(2026, 9, 30),
+             date(2026, 9, 1), date(2026, 9, 30)),
+        )
+        self.assertIn("FROM fact_daily_report_offline", sql)
+        self.assertIn("GROUP BY region, responsible_person", sql)
+        # 关键回归守门：has_fact 基于右表主键 responsible_person
+        self.assertIn(
+            "(MAX(d.responsible_person) IS NOT NULL) AS has_fact", sql
+        )
+        self.assertNotIn("d.person", sql)
 
 
 class MonthBoundsTests(unittest.TestCase):

@@ -1328,7 +1328,7 @@ _SHORTFALL_REGION_SQL = textwrap.dedent(
     """
     SELECT t.region AS name, SUM(t.mx) AS target,
     COALESCE(SUM(d.done), 0) AS done,
-    (MAX(d.person) IS NOT NULL) AS has_fact
+    (MAX(d.responsible_person) IS NOT NULL) AS has_fact
     FROM (
     SELECT region, responsible_person, MAX(monthly_target) AS mx
     FROM fact_daily_report_offline
