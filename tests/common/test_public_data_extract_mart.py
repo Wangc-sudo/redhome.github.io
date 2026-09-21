@@ -95,6 +95,8 @@ class ExtractSchemaTests(unittest.TestCase):
             "fin_ecommerce_store_funds_balance": FACT_FIN_STORE_FUNDS,
             "wdt_dim_product_mirror": "dim_product",
             "wdt_order_line_fact": "fact_order_line",
+            "wdt_stockout_line_fact": "fact_stockout_line",
+            "wdt_refund_line_fact": "fact_refund_line",
         })
 
         self.assertEqual(dataset_by_name("daily_report_offline").kind, "fact")
@@ -155,6 +157,8 @@ class ExtractSchemaTests(unittest.TestCase):
             "dim_robot_member",
             "dim_product",
             "fact_order_line",
+            "fact_stockout_line",
+            "fact_refund_line",
         ):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS `{table}`", joined)
         for column in (

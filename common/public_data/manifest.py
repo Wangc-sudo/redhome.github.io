@@ -17,7 +17,9 @@ _ALLOWED_SOURCE_TYPES = frozenset({
 
 _ALLOWED_WDT_METHODS = frozenset({
     "sales.TradeQuery.queryWithDetail",
+    "wms.stockout.Sales.queryWithDetail",
     "wms.stockin.Purchase.queryWithDetail",
+    "wms.stockin.Refund.queryWithDetail",
     "wms.StockSpec.search2",
     "goods.Goods.queryWithSpec",
 })
@@ -43,6 +45,7 @@ _KNOWN_TABLES = frozenset({
     "fin_offline_deposit_other_receivables",
     "daily_report_offline",
     "channel_daily_sales",
+    "channel_monthly_target",
     "wdt_records",
     "dingtalk_org_member",
 })

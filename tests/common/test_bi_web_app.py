@@ -43,6 +43,7 @@ import unittest
 import warnings
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -635,6 +636,10 @@ class V1ApiTests(unittest.TestCase):
                         # intersects page URL params per card exactly like
                         # the retired server-rendered shell did.
                         "params": ["region", "month"],
+                        # 日月星粒度批次（执行提示词 §4.3）：definition 每卡
+                        # 增两字段；未开通的卡缺省空档/空串（缺省即旧行为）。
+                        "grans": [],
+                        "default_gran": "",
                     }
                 ],
             },
@@ -1232,6 +1237,96 @@ class FilterSourceParityTests(unittest.TestCase):
         self.assertEqual(set(KNOWN_FILTER_SOURCES), set(_FILTER_SOURCE_QUERIES))
 
 
+class GranularityGateTests(unittest.TestCase):
+    """日月星粒度批次（执行提示词 §4.2①/§4.6/§6-5、§7.3）：gran 值域闸。
+
+    ``granularity`` 是静态值域（不查库），但仍过同一道 ``contains``
+    闸：非法值 400（绝不 500），未声明 gran 的卡（对照组语义）打
+    gran 也 400——白名单求交生效的证明。
+    """
+
+    def _gran_client(self, params_schema):
+        # gran 直达 run 用 trend_region_daily（三档开通卡）；
+        # kpi_offline_mtd 已于 2026-09-18 裁定收敛为仅月一档、白名单
+        # 无 gran，不再承担本组夹具。
+        registry = _FakeRegistry()
+        registry["trend_region_daily"] = replace(
+            registry["trend_region_daily"], params_schema=params_schema
+        )
+        return TestClient(_build_app(registry=registry)), registry
+
+    def test_options_granularity_returns_the_static_domain(self):
+        client = TestClient(_build_app())
+
+        response = client.get("/api/v1/options/granularity")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"source": "granularity",
+             "options": ["day", "week", "month", "year"]},
+            response.json(),
+        )
+
+    def test_bogus_gran_value_is_rejected_400_not_500(self):
+        client, _ = self._gran_client({"gran": "granularity"})
+
+        response = client.get(
+            "/api/d/l1-cockpit/cards/trend_region_daily",
+            params={"gran": "bogus"},
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("bad_request", response.json()["detail"])
+        self.assertNotIn("bogus", response.text)
+
+    def test_gran_on_a_card_without_the_param_is_rejected(self):
+        # 对照组语义（kpi_offline_dod 同款）：白名单无 gran 键 → 400。
+        # 此处仍走 _FakeRegistry 桩（其 kpi_offline_mtd params_schema={}），
+        # 证明的是白名单求交本身；真实注册表中 kpi_offline_mtd 已于
+        # 2026-09-21 订正批次 A 开通 gran（见下条用例）。
+        client = TestClient(_build_app())
+
+        response = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd", params={"gran": "day"}
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("bad_request", response.json()["detail"])
+
+    def test_kpi_offline_mtd_accepts_gran_after_the_correction_batch(self):
+        # 订正批次 A：kpi_offline_mtd 开通日/周/月三档——gran 直达 run；
+        # 未传 gran 时 app 层注入 default_gran（与 trend 卡同款契约）。
+        registry = _FakeRegistry()
+        registry["kpi_offline_mtd"] = replace(
+            registry["kpi_offline_mtd"],
+            params_schema={"month": "months", "gran": "granularity"},
+            grans=("day", "week", "month", "year"),
+            default_gran="month",
+        )
+        client = TestClient(_build_app(registry=registry))
+
+        response = client.get(
+            "/api/d/l1-cockpit/cards/kpi_offline_mtd", params={"gran": "day"}
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"gran": "day"}, registry.run_calls[-1][2])
+
+        response = client.get("/api/d/l1-cockpit/cards/kpi_offline_mtd")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"gran": "month"}, registry.run_calls[-1][2])
+
+    def test_valid_gran_value_reaches_run(self):
+        client, registry = self._gran_client({"gran": "granularity"})
+
+        response = client.get(
+            "/api/d/l1-cockpit/cards/trend_region_daily",
+            params={"gran": "week"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"gran": "week"}, registry.run_calls[0][2])
+
+
 class NavTests(unittest.TestCase):
     """Top navigation: enabled dashboards by nav_order, fail-open."""
 
@@ -1617,19 +1712,31 @@ _REPO_TARGET_SEED_PATH = (
 # from ``common.bi_web.queries`` -- a reconciliation only means something
 # when the test does not reuse the code under test.  Same 合计 exclusion,
 # same month/year truncation, same two-line target scope.
+# B2（水位批次）：MTD 窗口上界 = 真实水位（最新入仓日），不再是
+# CURDATE()——对拍先独立定锚再参数化求和，与 queries 侧同口径但
+# 不复用其代码（对拍的意义正在于独立重算）。
+_RECON_OFFLINE_LATEST_SQL = (
+    "SELECT MAX(business_date) AS d "
+    "FROM fact_daily_report_offline "
+    "WHERE business_date <= CURDATE() "
+    "AND responsible_person NOT LIKE '%合计%' "
+    "AND region <> '电商'"
+)
 _RECON_OFFLINE_MTD_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "
     "FROM fact_daily_report_offline "
-    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
-    "AND business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%'"
+    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01') "
+    "AND business_date <= %s "
+    "AND responsible_person NOT LIKE '%%合计%%' "
+    "AND region <> '电商'"
 )
 _RECON_OFFLINE_ANNUAL_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "
     "FROM fact_daily_report_offline "
     "WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1) "
     "AND business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%'"
+    "AND responsible_person NOT LIKE '%合计%' "
+    "AND region <> '电商'"
 )
 _RECON_CHANNEL_ANNUAL_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "
@@ -1637,12 +1744,20 @@ _RECON_CHANNEL_ANNUAL_SQL = (
     "WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1) "
     "AND business_date <= CURDATE()"
 )
-_RECON_TWO_LINE_TARGET_SQL = (
+# 2026-09-21 起分母 = 全业务线（含餐饮）；分子同步加人工月报餐饮线
+# （空表即 0，与卡片「找不到数据标红为 0」同口径）。
+_RECON_ALL_LINE_TARGET_SQL = (
     "SELECT COALESCE(SUM(annual_target), 0) "
     "FROM dim_target "
     "WHERE scope = 'line' "
-    "AND scope_key IN ('offline', 'channel') "
     "AND year = YEAR(CURDATE())"
+)
+_RECON_RESTAURANT_ANNUAL_SQL = (
+    "SELECT COALESCE(SUM(value), 0) "
+    "FROM fact_manual_report "
+    "WHERE dataset = 'restaurant_monthly' "
+    "AND metric = 'revenue' "
+    "AND period_start >= MAKEDATE(YEAR(CURDATE()), 1)"
 )
 
 # L1 首屏 11 张卡（stage-B1 既定现实，roadmap 主线 B「9→11 张」）：
@@ -1705,6 +1820,13 @@ _STAGE_B_L2_PLACEMENTS = {
     },
     "l2-ecom": {
         "table_manual_ecommerce_monthly": "table",
+    },
+    # 电商人员业绩（2026-09-18 P3）：负责人集合归属页，复用人员榜/缺口
+    # 派生卡（anomaly_top 补 region 参数后本页才成立）。
+    "l2-ecom-people": {
+        "table_people_leaderboard": "table",
+        "anomaly_top": "table",
+        "kpi_shortfall": "table",
     },
     "l2-dining": {
         "table_manual_restaurant_monthly": "table",
@@ -1893,7 +2015,9 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         printed pair is the reconciliation evidence for the report.
         """
         with self.mart_connection.cursor() as cursor:
-            cursor.execute(_RECON_OFFLINE_MTD_SQL)
+            cursor.execute(_RECON_OFFLINE_LATEST_SQL)
+            latest = next(iter(cursor.fetchone().values()))
+            cursor.execute(_RECON_OFFLINE_MTD_SQL, (latest,))
             sql_value = float(next(iter(cursor.fetchone().values())))
 
         # 新 app 实例：阶段 2 的卡片缓存按实例持有，口径对拍必须直查
@@ -1911,12 +2035,13 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         self.assertEqual("scalar", payload["chart"])
         self.assertAlmostEqual(sql_value, payload["value"], places=2)
 
-    def test_kpi_annual_progress_rate_reconciles_with_two_line_target(self):
-        """口径对拍 (addition C): rate == 两线年累计 ÷ 760,210,000.
+    def test_kpi_annual_progress_rate_reconciles_with_all_line_target(self):
+        """口径对拍 (addition C): rate == 全线年累计 ÷ 769,510,000.
 
         The denominator replays the version-controlled target seed first
         (the load-target post-condition), so the figure is pinned no
-        matter where this test runs in the suite.
+        matter where this test runs in the suite.  2026-09-21 起分子
+        含餐饮人工月报线（空表即 0），分母含餐饮目标。
         """
         from common.public_data.target_seed import load_target_seed, replace_dim_target
 
@@ -1928,10 +2053,12 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             offline_annual = float(next(iter(cursor.fetchone().values())))
             cursor.execute(_RECON_CHANNEL_ANNUAL_SQL)
             channel_annual = float(next(iter(cursor.fetchone().values())))
-            cursor.execute(_RECON_TWO_LINE_TARGET_SQL)
+            cursor.execute(_RECON_RESTAURANT_ANNUAL_SQL)
+            restaurant_annual = float(next(iter(cursor.fetchone().values())))
+            cursor.execute(_RECON_ALL_LINE_TARGET_SQL)
             target = float(next(iter(cursor.fetchone().values())))
 
-        two_line_annual = offline_annual + channel_annual
+        all_line_annual = offline_annual + channel_annual + restaurant_annual
         # 同上：replace_dim_target 之后必须直查，新实例 = 冷缓存。
         response = self._fresh_client().get(
             "/api/d/l1-cockpit/cards/kpi_annual_progress"
@@ -1940,15 +2067,15 @@ class BiWebAppIntegrationTests(unittest.TestCase):
 
         print(
             "reconciliation kpi_annual_progress:",
-            f"two_line_annual={two_line_annual} target={target}",
+            f"all_line_annual={all_line_annual} target={target}",
             f"api_value={payload['value']} api_rate={payload['rate']}",
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual("scalar", payload["chart"])
-        self.assertEqual(760210000.0, target)
-        self.assertAlmostEqual(two_line_annual, payload["value"], places=2)
+        self.assertEqual(769510000.0, target)
+        self.assertAlmostEqual(all_line_annual, payload["value"], places=2)
         self.assertAlmostEqual(target, payload["target"], places=2)
-        self.assertAlmostEqual(two_line_annual / target, payload["rate"], places=9)
+        self.assertAlmostEqual(all_line_annual / target, payload["rate"], places=9)
 
     def test_every_l2_card_answers_its_chart_payload_with_no_store(self):
         for dashboard_id, charts in _STAGE_B_L2_PLACEMENTS.items():
@@ -1985,6 +2112,8 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             # 五张占位页只挂月份（页面级 filters）。
             "l2-fund-safety": ["entity"],
             "l2-ecom": [],
+            # 电商人员业绩页：region+month（不带 default，用户手动选「电商」）。
+            "l2-ecom-people": ["region", "month"],
             "l2-dining": [],
             "l2-hall": [],
             "l2-inventory": ["month"],
@@ -2026,7 +2155,8 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         nav = self.client.get("/api/v1/dashboards").json()["dashboards"]
         self.assertEqual(
             ["l1-cockpit", "l2-region", "l2-channel", "l2-product",
-             "l2-people", "l2-fund-safety", "l2-ecom", "l2-dining", "l2-hall",
+             "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
+             "l2-dining", "l2-hall",
              "l2-inventory", "l2-warehouse", "l2-quarter", "l2-yoy",
              "l2-contract"],
             [entry["id"] for entry in nav],
@@ -2088,8 +2218,20 @@ class BiWebAppIntegrationTests(unittest.TestCase):
         ).json()
         self.assertEqual("line", trend["chart"])
         self.assertEqual(["biweb甲"], [entry["name"] for entry in trend["series"]])
-        self.assertEqual([today.strftime("%m-%d")], trend["dates"])
-        self.assertEqual([100.0], trend["series"][0]["data"])
+        # 三态轴（执行提示词 §4.2，qa-guard 预同步）：轴=月首→min(月末, as_of)
+        # 完整窗口，不再只取有数据日；单区域筛选下无行日 data=None（missing），
+        # fixture 当日 100.0（ok）。as_of 含当日的假设若与实现不符，阶段二
+        # 按 backend-dev 报告再校准。
+        expected_dates = [
+            (today.replace(day=1) + timedelta(days=offset)).strftime("%m-%d")
+            for offset in range(today.day)
+        ]
+        self.assertEqual(expected_dates, trend["dates"])
+        self.assertEqual([None] * (today.day - 1) + [100.0],
+                         trend["series"][0]["data"])
+        if "status" in trend:
+            self.assertEqual([["missing"] * (today.day - 1) + ["ok"]],
+                             trend["status"])
 
         # 值闸拒绝：不在维表里的值 → 400，安全文案且值绝不回显。
         bad = client.get(
@@ -2111,8 +2253,15 @@ class BiWebAppIntegrationTests(unittest.TestCase):
 
     def _assert_payload_structure(self, card_id, payload):
         """Structure and type only: real data may legitimately be zero."""
-        if card_id in ("kpi_offline_mtd", "kpi_channel_mtd"):
+        if card_id == "kpi_offline_mtd":
             self.assertIsInstance(payload["value"], float)
+            # B2：真实水位角标（空表时 None，前端不渲染）。
+            self.assertIsInstance(payload["as_of"], (str, type(None)))
+            self.assertEqual("元", payload["unit"])
+        elif card_id == "kpi_channel_mtd":
+            self.assertIsInstance(payload["value"], float)
+            # 2026-09-21：真实水位角标（空表时 None，前端不渲染）。
+            self.assertIsInstance(payload["as_of"], (str, type(None)))
             self.assertEqual("元", payload["unit"])
         elif card_id in ("kpi_offline_dod", "kpi_channel_dod"):
             # 真实 mart 当日预填行 sales_amount 全 NULL 时 SUM=None：value 与
@@ -2138,6 +2287,15 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             # ``None`` only while dim_target is empty (before load-target).
             self.assertIsInstance(payload["rate"], (float, type(None)))
             self.assertEqual("元", payload["unit"])
+            if card_id == "kpi_annual_progress":
+                # 2026-09-21 起逐线明细：找不到数据的线 has_data=False
+                # （前端标红为 0）。
+                self.assertIsInstance(payload["lines"], list)
+                for line in payload["lines"]:
+                    self.assertIsInstance(line["name"], str)
+                    self.assertIsInstance(line["value"], float)
+                    self.assertIsInstance(line["target"], float)
+                    self.assertIsInstance(line["has_data"], bool)
         elif card_id == "kpi_people_count":
             self.assertIsInstance(payload["value"], float)
             self.assertEqual("人", payload["unit"])
@@ -2155,7 +2313,24 @@ class BiWebAppIntegrationTests(unittest.TestCase):
                 self.assertIsInstance(entry["name"], str)
                 self.assertEqual(len(payload["dates"]), len(entry["data"]))
                 for point in entry["data"]:
-                    self.assertIsInstance(point, float)
+                    # 三态（执行提示词 §4.2）：missing 的点 data 必须是
+                    # None（断线），绝不用 0 表示「没数据」。
+                    self.assertIsInstance(point, (float, type(None)))
+            if "status" in payload:
+                # 三态载荷：与 series 一一对应、与 dates 等长；zero 的
+                # 点 data 必须是 0.0 而非 None。missing 放宽为 None 或
+                # 0.0——§4.2 表允许「本系列无行但当日其他系列有行」时给
+                # 0.0+missing（该区域未上报），与 §7.3「missing→null」
+                # 的张力已上报 main 裁定，此处先按并集守门。
+                self.assertEqual(len(payload["series"]), len(payload["status"]))
+                for entry, entry_status in zip(payload["series"], payload["status"]):
+                    self.assertEqual(len(payload["dates"]), len(entry_status))
+                    for point, point_status in zip(entry["data"], entry_status):
+                        self.assertIn(point_status, ("ok", "zero", "missing"))
+                        if point_status == "zero":
+                            self.assertEqual(0.0, point)
+                        elif point_status == "missing":
+                            self.assertIn(point, (None, 0.0))
         elif card_id in ("bar_channel_mtd", "bar_department_mtd"):
             self.assertEqual(len(payload["categories"]), len(payload["values"]))
             for category in payload["categories"]:

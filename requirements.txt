@@ -12,3 +12,5 @@ redis==5.2.1
 # 人工报表导入通道读 XLSX（CSV 不需要；仍为惰性导入，
 # 见 docs/manual-import-channel.md）。
 openpyxl==3.1.5
+# scheduler 服务的 cron 表达式解析（仅 common/public_data/scheduler.py 使用）。
+croniter==3.0.4

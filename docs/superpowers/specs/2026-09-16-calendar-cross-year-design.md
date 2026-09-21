@@ -66,7 +66,7 @@ seed months 扩至 **2025-01 ~ 2026-12 共 24 个月**。结构不变（version 
 1. HR 确认 2025 全年 + 2026 全年各月 bigRestSaturdays；数据组按国务院通知转录 holidays/makeupWorkdays；
 2. 更新 `calendar.seed.json`（24 个月，含逐月 `_说明` 自证），version 仍为 1；
 3. 新增 seed 自证单测 + 跑通 `calendar_real_dim_calendar_2026_09` 护栏与全量 unittest；
-4. 测试环境 `extract-mart` 验证 `dim_calendar` 731 行（365+366），抽查 2025-01/2025-10（国庆）/2026-02（春节）；
+4. 测试环境 `extract-mart` 验证 `dim_calendar` 730 行（365+365，2025/2026 均平年，2026-02=28 已有测试钉死；原稿 731 系笔误），抽查 2025-01/2025-10（国庆）/2026-02（春节）；
 5. ⑬ 同比卡启用仍需 2025 基数经 `generic` 模板首填（manual-report-consumption.md §3.4）。
 
 ## 6. 风险

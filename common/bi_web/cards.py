@@ -28,7 +28,17 @@ is unreadable, and the company entities change over time, so the four
 hard-coded split cards were collapsed into one parameterized card
 ``trend_fin_store_funds_entity`` plus the ``entities`` filter source --
 SQL aggregation pushed down, entity bound as ``%s``) brings it to
-thirty-seven.
+thirty-seven.  The day/week/month granularity batch (2026-09-18) keeps
+the count at thirty-seven: three sample cards declare ``grans`` /
+``default_gran`` (``trend_region_daily`` day+week+month default day;
+``kpi_offline_mtd`` month only; ``trend_fin_store_funds_entity`` month
+only) while ``kpi_offline_dod`` stays the undeclared control group --
+cards without a declaration behave exactly as before.  The 2026-09-21
+correction batch (订正方案 §4-A) re-opens ``kpi_offline_mtd`` to
+day/week/month with ``gran`` entering the whitelist: its source table is
+day-grained, so the month-only declaration was a fake control (the seg
+rendered with no ``on`` state and no request ever carried ``gran``);
+``default_gran="month"`` keeps the default path byte-identical.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -62,35 +72,58 @@ class Card:
     :mod:`common.bi_web.queries`); ``params_schema`` maps param name ->
     filter source name (``regions``/``channels``/``months``) -- the
     URL-parameter whitelist and its value domain in one mapping.
+    ``grans``/``default_gran`` declare the day/week/month granularity
+    a card accepts (2026-09-18 batch); both default to empty, so every
+    undeclared card keeps its pre-granularity behaviour untouched.
     """
 
     card_id: str
     chart: str
     run: Callable
     params_schema: dict
+    grans: tuple = ()
+    default_gran: str = ""
 
 
-def _card(card_id, chart, run, params_schema=None):
+def _card(card_id, chart, run, params_schema=None, grans=(), default_gran=""):
     """Build one card with both halves import-time validated.
 
     An unknown chart kind or an unknown filter source raises here, at
-    module load -- the same protection class for both.
+    module load -- the same protection class for both.  A declared
+    ``default_gran`` must be one of the declared ``grans``.
     """
     if chart not in KNOWN_CHARTS:
         raise CardConfigError(f"card '{card_id}' has unknown chart '{chart}'")
     schema = dict(params_schema or {})
     if any(source not in KNOWN_FILTER_SOURCES for source in schema.values()):
         raise CardConfigError(f"card '{card_id}' has an unknown filter source")
-    return Card(card_id=card_id, chart=chart, run=run, params_schema=schema)
+    grans = tuple(grans)
+    if default_gran and default_gran not in grans:
+        raise CardConfigError(f"card '{card_id}' default_gran not in grans")
+    return Card(card_id=card_id, chart=chart, run=run, params_schema=schema,
+                grans=grans, default_gran=default_gran)
 
 
 _CARDS = (
-    _card("kpi_offline_mtd", "scalar", queries.run_kpi_offline_mtd),
+    # 粒度批次 A（2026-09-21 订正）：kpi_offline_mtd 开通日/周/月三档——
+    # 源表 fact_daily_report_offline 本就是日粒度，"仅月一档 + 无 gran
+    # 白名单"渲染的是无选中态的假控件。default_gran=month：缺省请求
+    # （app 层注入 gran=month）与开通前逐字节一致；日=水位日当日值、
+    # 周=锚点所在自然周累计（语义见 run_kpi_offline_mtd）。
+    # 批次 A5（同日）：补"年"档（年首→水位，YTD 窗口）——用户口径
+    # 「数据维度改成年月日」，周档保留。
+    _card(
+        "kpi_offline_mtd", "scalar", queries.run_kpi_offline_mtd,
+        {"month": "months", "gran": "granularity"},
+        grans=("day", "week", "month", "year"), default_gran="month",
+    ),
     _card("kpi_channel_mtd", "scalar", queries.run_kpi_channel_mtd),
     _card("kpi_annual_progress", "scalar", queries.run_kpi_annual_progress),
+    # 粒度样板卡：trend_region_daily 三档、默认日（gran=day ≡ 不带参）。
     _card(
         "trend_region_daily", "line", queries.run_trend_region_daily,
-        {"region": "regions", "month": "months"},
+        {"region": "regions", "month": "months", "gran": "granularity"},
+        grans=("day", "week", "month"), default_gran="day",
     ),
     _card(
         "bar_channel_mtd", "bar", queries.run_bar_channel_mtd,
@@ -158,7 +191,7 @@ _CARDS = (
     ),
     _card(
         "anomaly_top", "table", queries.run_anomaly_top,
-        {"month": "months"},
+        {"region": "regions", "month": "months"},
     ),
     _card(
         "table_manual_ecommerce_monthly", "table",
@@ -187,10 +220,12 @@ _CARDS = (
     # 店铺资金余额趋势的主体参数化版（2026-09-17 P2）：38 家店铺一张图
     # 不可读，而公司主体会变，故 4 张硬编码分屏卡收敛为 1 张 +
     # ``entities`` 筛选源（entity 空 = 全主体按渠道汇总）。
+    # 粒度样板卡：trend_fin_store_funds_entity 仅月一档（单档不切换）。
     _card(
         "trend_fin_store_funds_entity", "line",
         queries.run_trend_fin_store_funds_entity,
-        {"entity": "entities"},
+        {"entity": "entities", "gran": "granularity"},
+        grans=("month",), default_gran="month",
     ),
     # 5 张 0 占位结构卡：run 直接返回静态结构（不查库），
     # has_fact=false 挂零语义（应接入未接入）。

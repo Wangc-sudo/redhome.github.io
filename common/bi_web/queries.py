@@ -28,7 +28,7 @@ import ast
 import textwrap
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from common.bi_web import derived, fin_derived
@@ -40,32 +40,91 @@ from common.metrics.daily_report import fetch_workdays
 #: Money unit for every chart payload (元; the front end formats 万).
 _UNIT = "元"
 
+#: 线下线归属（B3，2026-09-20 业务裁定）：fact_daily_report_offline 是
+#: 全公司日报，region=电商（直播/天猫/京东/拼多多等部门）归电商线——
+#: 线下口径一律排除该区域，年度达成不再双线各计一次。用单值排除而非
+#: 区域白名单：新区域上线默认计入线下，不会静默丢数。该串无字面 %，
+#: 静态/参数化 SQL 可直接拼接；电商线页面（l2-ecom-people）经 region
+#: 参数显式选择该区域、走人员/缺口查询族，不经过这些线下取数。
+_OFFLINE_LINE_SQL = "AND region <> '电商'"
+
+# B2（水位批次）：窗口上界由 CURDATE() 改为绑定的真实水位——日报 T+1
+# 未入仓时「本月累计」不再把缺的天假装已入仓。月首锚点仍用 MySQL 时钟
+# （时钟统一是 B6 的活，不在本批）。参数化后字面 % 一律双写：
+# '%%Y-%%m-01'（pymysql sql % params 约定，同 '%%合计%%'）。
 _OFFLINE_MTD_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT COALESCE(SUM(sales_amount), 0)
     FROM fact_daily_report_offline
-    WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
-    AND business_date <= CURDATE()
-    AND responsible_person NOT LIKE '%合计%'
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+    AND business_date <= %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
+
+#: 线下窗口求和（粒度批次 A2/A3）：起止边界一律 %s 绑定、由调用方按
+#: 档位算出（周=周一→锚点、日=锚点当日、月=月首→锚点），合计行与电商线
+#: 排除与 _OFFLINE_MTD_SQL 同口径。边界日期全部来自 DB 侧（水位/param
+#: month），本卡查询族不混用 Python 时钟（B6）。
+_OFFLINE_WINDOW_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
+
+#: 线下年累计（粒度批次 A5 年档）：年首锚点仍用 MySQL 时钟（与
+#: _OFFLINE_MTD_SQL 月首同款），上界 = 绑定的真实水位——与「年度目标
+#: 达成」的 _OFFLINE_ANNUAL_SQL 刻意分开：达成卡要吃到今天（含未入仓
+#: 风险自担），年档 KPI 只算到水位。
+_OFFLINE_YTD_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1)
+    AND business_date <= %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
     """
 ).strip()
 
 _OFFLINE_ANNUAL_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT COALESCE(SUM(sales_amount), 0)
     FROM fact_daily_report_offline
     WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1)
     AND business_date <= CURDATE()
     AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
     """
 ).strip()
 
+# 渠道 MTD 窗口上界 = 绑定的真实水位（2026-09-21，与线下 B2 同款）；
+# 参数化后 DATE_FORMAT 字面 % 双写。
 _CHANNEL_MTD_SQL = textwrap.dedent(
     """
     SELECT COALESCE(SUM(sales_amount), 0)
     FROM fact_channel_daily_sales
-    WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
-    AND business_date <= CURDATE()
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+    AND business_date <= %s
+    """
+).strip()
+
+#: 渠道真实水位：最新「有数」日。渠道 extract 会提前预填整周
+#: sales_amount=NULL 的空行，``MAX(business_date)``（日环比卡口径，
+#: 意为「最新入仓日」）会把水位虚报到预填末日——MTD 窗口/角标必须
+#: 过滤 NULL。线下日报当前无预填，两侧数值水位一致；若线下未来也
+#: 预填，应对齐为本口径（见 ``offline_latest_date``）。
+_CHANNEL_LATEST_SQL = textwrap.dedent(
+    """
+    SELECT MAX(business_date) AS d
+    FROM fact_channel_daily_sales
+    WHERE business_date <= CURDATE()
+    AND sales_amount IS NOT NULL
     """
 ).strip()
 
@@ -78,23 +137,42 @@ _CHANNEL_ANNUAL_SQL = textwrap.dedent(
     """
 ).strip()
 
-_ANNUAL_TARGET_SQL = textwrap.dedent(
+#: 年度目标分母按业务线展开（2026-09-21 口径修正）：scope='line' 全部
+#: 业务线（线下/电商渠道/餐饮…），不再只取两线——餐饮线首批无事实
+#: 数据，分子侧按 0 标红（run_kpi_annual_progress 的 lines），分母
+#: 不摘除，否则「找不到数据」的线被静默抹掉。
+_ANNUAL_TARGET_BY_LINE_SQL = textwrap.dedent(
     """
-    SELECT COALESCE(SUM(annual_target), 0)
+    SELECT scope_key, COALESCE(SUM(annual_target), 0) AS target
     FROM dim_target
     WHERE scope = 'line'
-    AND scope_key IN ('offline', 'channel')
     AND year = YEAR(CURDATE())
+    GROUP BY scope_key
+    ORDER BY scope_key
+    """
+).strip()
+
+#: 餐饮线年累计收入：人工月报是唯一进库通道（无系统采集源）。口径同
+#: 月报表卡契约——按整月一次导入、无未来预填行，故不做 CURDATE
+#: 截断，只取当年窗口。空表 ⇒ (0, False)，卡片标红为 0。
+_RESTAURANT_ANNUAL_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(value), 0) AS total, COUNT(*) AS rows_found
+    FROM fact_manual_report
+    WHERE dataset = 'restaurant_monthly'
+    AND metric = 'revenue'
+    AND period_start >= MAKEDATE(YEAR(CURDATE()), 1)
     """
 ).strip()
 
 _REGION_DAILY_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT business_date, region, SUM(sales_amount) AS total
     FROM fact_daily_report_offline
     WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
     AND business_date <= CURDATE()
     AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
     GROUP BY business_date, region
     """
 ).strip()
@@ -236,6 +314,27 @@ def sku_channel_options(connection) -> list:
             if row["channel_name"]]
 
 
+#: 粒度值域（2026-09-18 批次 A；2026-09-21 批次 A5 增 year）：星=自然周
+#: （周一~周日）；季不进 gran。year 目前只服务标量 KPI（年累计截至
+#: 水位）；折线卡未开通 year——gran=year 打过去会按「未开通档回落
+#: 默认视图」处理（与既有 fallback 语义一致）。
+_GRANULARITY = ("day", "week", "month", "year")
+
+# 粒度语义（§4.6，写进代码注释避免后人误解）：
+#   day   month 参数限定该月内的日序列（与粒度开通前行为完全一致）；
+#         轴 = 月首 → min(月末, 锚点日)。
+#   week  month 参数为窗口截止月，向前 12 个自然周；周一为首，
+#         跨月周归属起始日所在月。
+#   month month 参数为窗口截止月，向前 12 个自然月；轴标签 YYYY-MM。
+#   year  仅标量 KPI：年首（MySQL 时钟）→ min(窗口月末, 数据水位)。
+# gran 未传 → app 层注入卡片 default_gran；非法值 → 值域闸 400。
+
+
+def granularity_options(connection) -> list:
+    """静态值域：与查询型 source 同签名，供 option_sets.contains() 校验。"""
+    return list(_GRANULARITY)
+
+
 def _fetch_scalar(connection, sql, params=None) -> Decimal:
     """Run one total query and return its single value as Decimal."""
     cursor = connection.cursor()
@@ -293,9 +392,32 @@ def month_bounds(month):
     return days[0], days[-1]
 
 
+def _offline_mtd_sum(connection, latest) -> Decimal:
+    """当月 1 号 → 水位日的 Σsales；水位为空（空表）时直接 0，不发起求和。"""
+    if latest is None:
+        return Decimal(0)
+    return _fetch_scalar(connection, _OFFLINE_MTD_SQL, (latest,))
+
+
+def offline_window_sum(connection, *, first_day, last_day) -> Decimal:
+    """线下 [first_day, last_day] 闭区间 Σsales（合计行 + 电商线排除）。
+
+    粒度批次 A3 的共用窗口核：调用方负责按档位算边界（周=周一→锚点、
+    日=锚点当日、月=月首→锚点），本函数不掺任何时钟。
+    """
+    return _fetch_scalar(
+        connection, _OFFLINE_WINDOW_SQL, (first_day, last_day)
+    )
+
+
 def offline_mtd_total(connection) -> Decimal:
-    """线下本月累计销售 (①): month-to-date offline sales, 合计 rows excluded."""
-    return _fetch_scalar(connection, _OFFLINE_MTD_SQL)
+    """线下本月累计销售 (①)：窗口上界 = 真实数据水位（非 CURDATE()）。
+
+    日报 T+1 未入仓时「本月累计」截至最新入仓日；合计行排除不变；
+    水位滞后整月时区间为空、和为 0。B3 起排除 region=电商（归电商线，
+    见 ``_OFFLINE_LINE_SQL``），水位同源（同为线下口径）。
+    """
+    return _offline_mtd_sum(connection, offline_latest_date(connection))
 
 
 def offline_annual_total(connection) -> Decimal:
@@ -303,9 +425,25 @@ def offline_annual_total(connection) -> Decimal:
     return _fetch_scalar(connection, _OFFLINE_ANNUAL_SQL)
 
 
+def channel_latest_date(connection):
+    """渠道数据真实水位：最新有数日（预填 NULL 行不算；空表返回 None）。"""
+    return _fetch_one(connection, _CHANNEL_LATEST_SQL)
+
+
+def _channel_mtd_sum(connection, latest) -> Decimal:
+    """当月 1 号 → 水位日的 Σsales；水位为空（空表/全 NULL）时直接 0。"""
+    if latest is None:
+        return Decimal(0)
+    return _fetch_scalar(connection, _CHANNEL_MTD_SQL, (latest,))
+
+
 def channel_mtd_total(connection) -> Decimal:
-    """电商渠道本月累计销售 (③): month-to-date channel sales."""
-    return _fetch_scalar(connection, _CHANNEL_MTD_SQL)
+    """电商渠道本月累计销售 (③)：窗口上界 = 真实水位（最新有数日）。
+
+    与线下 B2 同款：预填 NULL 空行不算入仓，「本月累计」截至最新
+    有数日；水位滞后整月时区间为空、和为 0。
+    """
+    return _channel_mtd_sum(connection, channel_latest_date(connection))
 
 
 def channel_annual_total(connection) -> Decimal:
@@ -314,36 +452,201 @@ def channel_annual_total(connection) -> Decimal:
 
 
 def annual_target_total(connection) -> Decimal:
-    """年度目标分母: the offline + channel two-line target for this year.
+    """年度目标分母: scope='line' 全部业务线年度目标之和（769,510,000
+    元量级 with the repository seed：线下 21041 万 + 电商渠道 54980 万
+    + 餐饮 930 万）。
 
-    Only ``scope = 'line'`` rows with ``scope_key`` offline/channel are
-    summed (760,210,000 元量级 with the repository seed); the restaurant
-    target has no fact table and is deliberately not counted.
+    2026-09-21 前只取 offline/channel 两线；餐饮线目标从此计入——
+    分子侧找不到数据按 0 标红（:func:`run_kpi_annual_progress`），
+    不是把线从目标里抹掉。
     """
-    return _fetch_scalar(connection, _ANNUAL_TARGET_SQL)
+    return sum(
+        (
+            Decimal(row["target"] or 0)
+            for row in _fetch_rows(connection, _ANNUAL_TARGET_BY_LINE_SQL)
+        ),
+        Decimal(0),
+    )
 
 
-def _align_series_rows(rows, name_key) -> dict:
-    """按升序日期轴对齐各名称序列并零填充（区域/渠道趋势共用核心）。"""
-    dates = sorted({row["business_date"] for row in rows})
-    index_of = {business_date: index for index, business_date in enumerate(dates)}
-    by_name = {}
+def restaurant_annual_revenue(connection):
+    """餐饮线年累计收入（人工月报）：``(Σrevenue, 是否有数据行)``。
+
+    空表 ⇒ ``(0, False)``——「未接入」不是「0 销量」，由卡片标红。
+    """
+    rows = _fetch_rows(connection, _RESTAURANT_ANNUAL_SQL)
+    if not rows:
+        return Decimal(0), False
+    row = rows[0]
+    return Decimal(row["total"] or 0), bool(row["rows_found"])
+
+
+def _align_series_rows(rows, name_key, *, axis, workdays, as_of,
+                       label_fmt="%m-%d", bucket="day",
+                       date_key="business_date") -> dict:
+    """按完整日期窗口对齐各名称序列，逐点判定 ok/zero/missing（三态）。
+
+    ``axis`` 为完整日期窗口（date 列表，升序），由调用方按粒度生成——
+    不再从 rows 反推（全区域都没数据那天也必须进轴）；``workdays`` 为
+    ``dim_calendar`` 工作日集合（复用 :func:`month_workdays`，不另写
+    SQL）；``as_of`` 为锚点日（当前月=今天，历史月=月末，
+    :func:`_shortfall_as_of` 同口径；T+1 未入仓/未来的落点标
+    missing）。逐点规则（2026-09-18 执行提示词 §4.2，按序判定）：
+
+    1. ``d > as_of``（未来 / T+1 未入仓）→ data ``None``，missing；
+    2. 该系列无行 且 该日无任何系列的行 → data ``None``，missing；
+    3. 该系列无行 但 该日有其他系列的行 → data ``0.0``，missing
+       （该区域未上报，不是真实 0）；
+    4. 有行且 ``total > 0`` → data float，ok；
+    5. 有行且 ``total == 0``（或 None）且覆盖段内有营业日 → ``0.0``，zero；
+    6. 有行且 ``total == 0`` 且覆盖段内无营业日（含日历未覆盖）→ ``0.0``，ok。
+
+    周/月档位的「该日」读作桶起始日；营业日判定取「桶 ∩ (-∞, as_of]
+    内是否有工作日」，日档位退化为 ``d in workdays`` 本身。
+    ``dim_calendar`` 未覆盖的月份 workdays 为空 → 一律降级 ok（宁可
+    漏报，不可误报红）。``label_fmt``/``bucket`` 为粒度档位参数，日档
+    缺省即旧口径（MM-DD 标签、按日判定）；``date_key`` 为行内日期键，
+    周/月档传 ``"bucket_start"``（SQL 分桶表达式别名，B1：别名不再与
+    真实列同名，避免 MySQL GROUP BY 解析回真实列导致桶内按天散行）。
+    同 (name, date_key) 多行一律 Decimal 累加——即使上游分桶失效，
+    桶内散行也求和而不是「后者覆盖前者」（桶聚合的第二道防线）。
+    """
+    days_with_rows = {_as_date(row[date_key]) for row in rows}
+    totals = {}
     for row in rows:
         name = row[name_key] or ""
-        index = index_of[row["business_date"]]
-        by_name.setdefault(name, [Decimal(0)] * len(dates))[index] = Decimal(
-            row["total"] or 0
-        )
+        by_day = totals.setdefault(name, {})
+        key = _as_date(row[date_key])
+        by_day[key] = by_day.get(key, Decimal(0)) + Decimal(row["total"] or 0)
+    series = []
+    status = []
+    for name in sorted(totals):
+        by_day = totals[name]
+        data = []
+        states = []
+        for point in axis:
+            value, state = _series_point(
+                by_day, point, days_with_rows, workdays, as_of, bucket
+            )
+            data.append(value)
+            states.append(state)
+        series.append({"name": name, "data": data})
+        status.append(states)
     return {
-        "dates": [_mmdd(business_date) for business_date in dates],
-        "series": [
-            {"name": name, "data": by_name[name]} for name in sorted(by_name)
-        ],
+        "dates": [point.strftime(label_fmt) for point in axis],
+        "series": series,
+        "status": status,
     }
 
 
+def _as_date(value):
+    """DATE 列取值归一为 ``date``（驱动偶发返回 ``datetime``）。"""
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _bucket_end(day, bucket):
+    """桶覆盖区间终点：周=周日，月=月末，日=当天。"""
+    if bucket == "week":
+        return day + timedelta(days=6)
+    if bucket == "month":
+        return month_days(day.year, day.month)[-1]
+    return day
+
+
+def _series_point(by_day, point, days_with_rows, workdays, as_of, bucket):
+    """单点三态判定（规则表见 :func:`_align_series_rows` docstring）。"""
+    if as_of is None or point > as_of:
+        return None, "missing"
+    if point not in by_day:
+        if point in days_with_rows:
+            return 0.0, "missing"
+        return None, "missing"
+    total = by_day[point]
+    if total is not None and Decimal(total) > 0:
+        return float(total), "ok"
+    covered_end = min(_bucket_end(point, bucket), as_of)
+    if any(point <= workday <= covered_end for workday in workdays):
+        return 0.0, "zero"
+    return 0.0, "ok"
+
+
+def _day_axis(first_day, last_day, anchor):
+    """日档位轴：月首 → min(月末, 锚点日)（§4.6：月内日序列）。"""
+    end = min(last_day, anchor)
+    days = []
+    point = first_day
+    while point <= end:
+        days.append(point)
+        point += timedelta(days=1)
+    return days
+
+
+def _week_axis(anchor):
+    """周档位轴：锚点所在自然周起向前 12 个周一（§4.6：month=窗口截止月）。"""
+    last_monday = anchor - timedelta(days=anchor.weekday())
+    return [
+        last_monday - timedelta(days=7 * offset) for offset in range(11, -1, -1)
+    ]
+
+
+def _month_axis(first_day):
+    """月档位轴：截止月（月初）起向前 12 个自然月，升序。"""
+    year, month = first_day.year, first_day.month
+    for _ in range(11):
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    months = []
+    for _ in range(12):
+        months.append(date(year, month, 1))
+        year, month = (year, month + 1) if month < 12 else (year + 1, 1)
+    return months
+
+
+def _window_workdays(connection, first_day, last_day) -> set:
+    """窗口工作日集合：跨月窗口逐月取 :func:`month_workdays` 的并集。"""
+    workdays = set()
+    year, month = first_day.year, first_day.month
+    while (year, month) <= (last_day.year, last_day.month):
+        cursor = date(year, month, 1)
+        workdays |= month_workdays(connection, first_day=cursor, last_day=cursor)
+        year, month = (year, month + 1) if month < 12 else (year + 1, 1)
+    return workdays
+
+
+def _daily_three_state(connection, rows, name_key, first_day, last_day,
+                       *, anchor) -> dict:
+    """日档位三态装配：锚点轴 + 营业日集合 + as_of 下发。
+
+    ``anchor`` 由调用方给定——线下趋势卡传真实数据水位
+    （:func:`_offline_trend_anchor`），渠道趋势卡传
+    :func:`_shortfall_as_of`（当前月=今天，B2 批次不动渠道口径）；
+    轴 = 月首→min(月末, 锚点)，锚点为 None（空表）时轴为空、
+    as_of 为 None。
+    """
+    axis = _day_axis(first_day, last_day, anchor) if anchor is not None else []
+    workdays = _window_workdays(connection, first_day, axis[-1] if axis else last_day)
+    aligned = _align_series_rows(
+        rows, name_key, axis=axis, workdays=workdays, as_of=anchor
+    )
+    aligned["as_of"] = anchor.isoformat() if anchor is not None else None
+    return aligned
+
+
 def region_daily_series(connection) -> dict:
-    return _align_series_rows(_fetch_rows(connection, _REGION_DAILY_SQL), "region")
+    """L1 无参路径：当前月全区域日序列（窗口 SQL 全静态）。
+
+    轴由「有数据的日」改为 月首→min(月末, 锚点) 的完整日窗口（三态：
+    缺失日 null 断线、营业日真实 0 标 zero）；B2 起锚点 = 真实数据
+    水位（多一条静态 MAX 定锚查询），T+1 未入仓的日子不再进轴。
+    """
+    today = datetime.now().date()
+    first_day, last_day = month_bounds(today.strftime("%Y-%m"))
+    anchor = _offline_trend_anchor(connection, first_day, last_day)
+    rows = _fetch_rows(connection, _REGION_DAILY_SQL)
+    return _daily_three_state(
+        connection, rows, "region", first_day, last_day, anchor=anchor
+    )
 
 
 def channel_mtd_ranking(connection) -> dict:
@@ -492,8 +795,11 @@ def _optional_region_filter(region):
 def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal:
     """选中区域（缺省全区域）某自然月 Σsales（截断未来 + 排除合计行）。
 
-    带参 SQL 的字面 ``%`` 双写（pymysql ``sql % params`` 约定）：
-    ``'%%合计%%'`` 格式化后 MySQL 收到 ``'%合计%'``。
+    B3 起「全区域」= 线下线全域（排除 region=电商，见
+    ``_OFFLINE_LINE_SQL``）；显式选 region=电商 得空集——该区域归
+    电商线，本查询族不服务。带参 SQL 的字面 ``%`` 双写（pymysql
+    ``sql % params`` 约定）：``'%%合计%%'`` 格式化后 MySQL 收到
+    ``'%合计%'``。
     """
     region_sql, region_params = _optional_region_filter(region)
     sql = textwrap.dedent(
@@ -504,6 +810,7 @@ def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal
         {region_sql}
         AND business_date <= CURDATE()
         AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
         """
     ).strip()
     return _fetch_scalar(connection, sql, (first_day, last_day) + region_params)
@@ -525,6 +832,7 @@ def region_month_target(connection, *, region=None, first_day, last_day) -> Deci
         WHERE business_date BETWEEN %s AND %s
         {region_sql}
         AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
         GROUP BY responsible_person
         ) t
         """
@@ -543,6 +851,7 @@ def department_mtd_ranking(connection, *, region=None, first_day, last_day) -> d
         {region_sql}
         AND business_date <= CURDATE()
         AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
         GROUP BY department
         ORDER BY total DESC
         """
@@ -568,19 +877,103 @@ def region_month_daily_series(connection, *, region=None, first_day, last_day) -
         {region_sql}
         AND business_date <= CURDATE()
         AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
         GROUP BY business_date, region
         """
     ).strip()
     rows = _fetch_rows(connection, sql, (first_day, last_day) + region_params)
-    return _align_series_rows(rows, "region")
+    return _daily_three_state(
+        connection, rows, "region", first_day, last_day,
+        anchor=_offline_trend_anchor(connection, first_day, last_day),
+    )
+
+
+def region_weekly_series(connection, *, region=None, month) -> dict:
+    """周档位区域序列：month=窗口截止月，锚点所在自然周起向前 12 周。
+
+    周一为首、跨月周归属起始日所在月；桶内求和由 SQL 下推（
+    ``DATE_SUB(business_date, INTERVAL WEEKDAY(business_date) DAY)``
+    = 周一），值一律 %s 绑定。三态判定与日档同一核心（桶 ∩ 锚点内
+    有营业日才允许 zero）。
+
+    B1：分桶表达式别名 ``bucket_start`` 刻意不与真实列同名——别名
+    撞名时 MySQL 的 GROUP BY 会解析回真实 ``business_date`` 列，桶内
+    按天散行、配合旧的覆盖赋值只留最后一天（P0 假数）；Python 侧
+    同键多行累加兜底（:func:`_align_series_rows`）。B2：锚点改真实
+    数据水位（:func:`_offline_trend_anchor`）。
+    """
+    first_day, last_day = month_bounds(month)
+    as_of = _offline_trend_anchor(connection, first_day, last_day)
+    axis = _week_axis(as_of) if as_of is not None else []
+    workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
+    region_sql, region_params = _optional_region_filter(region)
+    sql = textwrap.dedent(
+        f"""
+        SELECT DATE_SUB(business_date, INTERVAL WEEKDAY(business_date) DAY) AS bucket_start,
+               region, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY bucket_start, region
+        """
+    ).strip()
+    rows = _fetch_rows(
+        connection, sql, (axis[0] if axis else first_day, last_day) + region_params
+    )
+    aligned = _align_series_rows(
+        rows, "region", axis=axis, workdays=workdays, as_of=as_of,
+        bucket="week", date_key="bucket_start",
+    )
+    aligned["as_of"] = as_of.isoformat() if as_of is not None else None
+    return aligned
+
+
+def region_monthly_series(connection, *, region=None, month) -> dict:
+    """月档位区域序列：month=窗口截止月，向前 12 个自然月（YYYY-MM 轴）。
+
+    桶键 = 月初日（SQL 下推 ``DAYOFMONTH`` 归一，别名 ``bucket_start``
+    刻意不与真实列同名，B1 同周档），标签 ``%Y-%m``；值一律 %s 绑定。
+    三态判定与日档同一核心；B2 起锚点 = 真实数据水位。
+    """
+    first_day, last_day = month_bounds(month)
+    as_of = _offline_trend_anchor(connection, first_day, last_day)
+    axis = _month_axis(first_day) if as_of is not None else []
+    workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
+    region_sql, region_params = _optional_region_filter(region)
+    sql = textwrap.dedent(
+        f"""
+        SELECT DATE_SUB(business_date, INTERVAL DAYOFMONTH(business_date) - 1 DAY) AS bucket_start,
+               region, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY bucket_start, region
+        """
+    ).strip()
+    rows = _fetch_rows(
+        connection, sql, (axis[0] if axis else first_day, last_day) + region_params
+    )
+    aligned = _align_series_rows(
+        rows, "region", axis=axis, workdays=workdays, as_of=as_of,
+        label_fmt="%Y-%m", bucket="month", date_key="bucket_start",
+    )
+    aligned["as_of"] = as_of.isoformat() if as_of is not None else None
+    return aligned
 
 
 _OFFLINE_DOD_LATEST_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT MAX(business_date) AS d
     FROM fact_daily_report_offline
     WHERE business_date <= CURDATE()
     AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
     """
 ).strip()
 
@@ -593,11 +986,12 @@ _CHANNEL_DOD_LATEST_SQL = textwrap.dedent(
 ).strip()
 
 _OFFLINE_DOD_WINDOW_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT business_date, SUM(sales_amount) AS total
     FROM fact_daily_report_offline
     WHERE business_date BETWEEN %s AND %s
     AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
     GROUP BY business_date
     """
 ).strip()
@@ -645,9 +1039,19 @@ def _dod_core(totals, latest):
     }
 
 
+def offline_latest_date(connection):
+    """线下日报数据水位：最新入仓 business_date（空表 None）。
+
+    与 :func:`offline_dod` 共用 ``_OFFLINE_DOD_LATEST_SQL``（含未来行
+    截断 + 合计行排除）；B2 起 MTD 窗口上界、线下趋势卡锚点与
+    日环比同源。
+    """
+    return _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+
+
 def offline_dod(connection):
     """⑭ 线下日环比核：最新数据日 Σsales、前一自然日、近 7 自然日。"""
-    latest = _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+    latest = offline_latest_date(connection)
     if latest is None:
         return None
     return _dod_core(_dod_totals(connection, _OFFLINE_DOD_WINDOW_SQL, latest), latest)
@@ -714,9 +1118,17 @@ def channel_month_ranking(connection, *, first_day, last_day) -> dict:
 
 
 def channel_month_daily_series(connection, *, first_day, last_day) -> dict:
-    """指定月按日 Σsales 分渠道序列（渠道名升序，零填充）。"""
+    """指定月按日 Σsales 分渠道序列（渠道名升序，三态轴）。
+
+    与区域日序列同一核心：轴 = 月首→min(月末, 锚点) 完整日窗口，缺失
+    null 断线、营业日真实 0 标 zero。锚点沿用 ``_shortfall_as_of``
+    （当前月=今天）——B2 的真实水位只切线下侧，渠道口径本批不动。
+    """
     rows = _fetch_rows(connection, _CHANNEL_MONTH_DAILY_SQL, (first_day, last_day))
-    return _align_series_rows(rows, "channel")
+    return _daily_three_state(
+        connection, rows, "channel", first_day, last_day,
+        anchor=_shortfall_as_of(first_day, last_day),
+    )
 
 
 def channel_mtd_comparison(connection, *, first_day, last_day) -> list:
@@ -841,48 +1253,157 @@ def _people_snapshot(connection, region, month):
 
 
 def run_kpi_offline_mtd(connection, params) -> dict:
-    """①线下本月累计销售: scalar KPI, 元."""
+    """①线下本月累计销售: scalar KPI, 元（粒度批次 A：日/周/月三档，默认月）。
+
+    档位语义（``month`` 参数为窗口月，缺省 = 水位所在月）：
+
+    * ``month``  该月 1 号 → 锚点的区间累计——缺省路径（无 month）复用
+      ``_offline_mtd_sum``，与 B2 版载荷逐字节一致；
+    * ``week``   锚点所在自然周（周一为首）→ 锚点的区间累计；
+    * ``day``    锚点当日值；
+    * ``year``   年首（MySQL 时钟）→ 锚点的年度累计（A5；month 参数
+      可把年累计截到该月末，锚点规则不变）。
+
+    锚点 = min(窗口月末, 数据水位)；水位 None（空表）或锚点落在窗口月
+    之前 ⇒ value=0、as_of=None（该月无入仓，不假装有数）。``as_of``
+    恒为数字的真实截止日，前端标量卡角标/页脚直接消费
+    （``payload.date || payload.as_of``）。边界日期全部来自 DB 侧
+    （水位 / param month / SQL 内 CURDATE 月首），本卡不混用 Python
+    时钟（B6）；gran 合法性由 app 层 granularity 值域闸保证。
+    """
+    month = (params.get("month") or "").strip()
+    gran = (params.get("gran") or "month").strip()
+    latest = offline_latest_date(connection)
+    value, as_of = Decimal(0), None
+    if latest is not None:
+        if month:
+            first_day, last_day = month_bounds(month)
+            anchor = min(last_day, latest)
+            if anchor < first_day:
+                anchor = None  # 窗口月整体在水位之后：该月无入仓
+        else:
+            first_day, anchor = None, latest
+        if anchor is not None:
+            if gran == "day":
+                value = offline_window_sum(
+                    connection, first_day=anchor, last_day=anchor
+                )
+            elif gran == "week":
+                monday = anchor - timedelta(days=anchor.weekday())
+                value = offline_window_sum(
+                    connection, first_day=monday, last_day=anchor
+                )
+            elif gran == "year":
+                value = _fetch_scalar(connection, _OFFLINE_YTD_SQL, (anchor,))
+            elif first_day is not None:
+                value = offline_window_sum(
+                    connection, first_day=first_day, last_day=anchor
+                )
+            else:
+                value = _offline_mtd_sum(connection, latest)
+            as_of = anchor
     return {
         "chart": "scalar",
-        "value": float(offline_mtd_total(connection)),
+        "value": float(value),
+        "as_of": as_of.isoformat() if as_of is not None else None,
         "unit": _UNIT,
     }
 
 
 def run_kpi_channel_mtd(connection, params) -> dict:
-    """③电商渠道本月累计销售: scalar KPI, 元."""
+    """③电商渠道本月累计销售: scalar KPI, 元（窗口截至真实水位，as_of 下发）。
+
+    水位定锚只跑一次（``_channel_mtd_sum`` 直接吃定锚结果）；空表时
+    value=0、as_of=None——与线下卡同款契约。
+    """
+    latest = channel_latest_date(connection)
     return {
         "chart": "scalar",
-        "value": float(channel_mtd_total(connection)),
+        "value": float(_channel_mtd_sum(connection, latest)),
+        "as_of": latest.isoformat() if latest is not None else None,
         "unit": _UNIT,
     }
 
 
-def run_kpi_annual_progress(connection, params) -> dict:
-    """⑫年度目标达成进度: two-line annual actuals over the two-line target.
+#: 年度达成卡业务线注册表：dim_target scope_key → (显示名, 取数函数)。
+#: 取数函数返回 ``(年累计, 是否有数据)``。目标里出现注册表没有的线
+#: ⇒ 值 0、has_data=False（标红「未接入」）——绝不只在分母里加目标、
+#: 分子里假装它有数。新增业务线 = 加 dim_target 行 + 注册一行。
+_ANNUAL_LINE_SOURCES = {
+    "offline": ("线下", lambda connection: (offline_annual_total(connection), True)),
+    "channel": ("电商渠道", lambda connection: (channel_annual_total(connection), True)),
+    "restaurant": ("餐饮", restaurant_annual_revenue),
+}
 
-    分子 = 线下 + 电商两线年累计 (same 合计 exclusion and future-row
-    truncation); 分母 = ``dim_target`` 的 offline + channel 两行
-    ``annual_target`` 之和; ``rate = value / target`` (``None`` when the
-    target is 0, computed at float precision for JSON).
+
+def run_kpi_annual_progress(connection, params) -> dict:
+    """⑫年度目标达成进度: 全业务线年累计 ÷ 全业务线年度目标。
+
+    分子 = 各业务线年累计之和（线下=日报、电商渠道=渠道表、餐饮=
+    人工月报，口径与各线卡一致）；分母 = ``dim_target`` scope='line'
+    全部业务线。``lines`` 逐线列出 {name, value, target, has_data}：
+    找不到数据的线值 0、has_data=False——前端标红为 0（「未接入」
+    不是「0 销量」）；rate 为 None 当分母为 0。
     """
-    value = offline_annual_total(connection) + channel_annual_total(connection)
-    target = annual_target_total(connection)
+    targets = {
+        row["scope_key"]: Decimal(row["target"] or 0)
+        for row in _fetch_rows(connection, _ANNUAL_TARGET_BY_LINE_SQL)
+    }
+    lines = []
+    value = Decimal(0)
+    target = Decimal(0)
+    ordered_keys = list(_ANNUAL_LINE_SOURCES) + sorted(
+        key for key in targets if key not in _ANNUAL_LINE_SOURCES
+    )
+    for scope_key in ordered_keys:
+        label, resolver = _ANNUAL_LINE_SOURCES.get(
+            scope_key, (scope_key, lambda connection: (Decimal(0), False))
+        )
+        line_value, has_data = resolver(connection)
+        line_target = targets.get(scope_key, Decimal(0))
+        value += line_value
+        target += line_target
+        lines.append(
+            {
+                "name": label,
+                "value": float(line_value),
+                "target": float(line_target),
+                "has_data": bool(has_data),
+            }
+        )
     rate = None if target == 0 else float(value) / float(target)
     return {
         "chart": "scalar",
         "value": float(value),
         "target": float(target),
         "rate": rate,
+        "lines": lines,
         "unit": _UNIT,
     }
 
 
 def run_trend_region_daily(connection, params) -> dict:
-    """区域日销趋势: L1 无参=当前月全区域（静态）；带参=region/month。"""
+    """区域销售趋势: gran=day 月内日序列（缺省）/ week 12 周 / month 12 月。
+
+    L1 无参=当前月全区域（静态 SQL）；带参=region/month/gran。gran 未传
+    由 app 层注入 default_gran（"day"），故 gran=day 与不带参走同一
+    路径、响应逐字节一致。``status`` 与 ``series`` 一一对应、与
+    ``dates`` 等长；``as_of`` 为事实表数据水位。
+    """
     region = params.get("region")
     month = params.get("month")
-    if region is None and month is None:
+    gran = params.get("gran") or "day"
+    if gran == "week":
+        series = region_weekly_series(
+            connection, region=region,
+            month=month or datetime.now().strftime("%Y-%m"),
+        )
+    elif gran == "month":
+        series = region_monthly_series(
+            connection, region=region,
+            month=month or datetime.now().strftime("%Y-%m"),
+        )
+    elif region is None and month is None:
         series = region_daily_series(connection)
     else:
         month = month or datetime.now().strftime("%Y-%m")
@@ -894,9 +1415,13 @@ def run_trend_region_daily(connection, params) -> dict:
         "chart": "line",
         "dates": series["dates"],
         "series": [
-            {"name": entry["name"], "data": [float(value) for value in entry["data"]]}
+            {"name": entry["name"],
+             "data": [None if value is None else float(value)
+                      for value in entry["data"]]}
             for entry in series["series"]
         ],
+        "status": series["status"],
+        "as_of": series["as_of"],
     }
 
 
@@ -1184,9 +1709,13 @@ def run_trend_channel_daily(connection, params) -> dict:
         "chart": "line",
         "dates": series["dates"],
         "series": [
-            {"name": entry["name"], "data": [float(value) for value in entry["data"]]}
+            {"name": entry["name"],
+             "data": [None if value is None else float(value)
+                      for value in entry["data"]]}
             for entry in series["series"]
         ],
+        "status": series["status"],
+        "as_of": series["as_of"],
     }
 
 
@@ -1464,6 +1993,24 @@ def _shortfall_as_of(first_day, last_day):
     return last_day
 
 
+def _offline_trend_anchor(connection, first_day, last_day):
+    """线下趋势卡锚点：当前月=真实数据水位，历史月=月末。
+
+    与缺口口径 :func:`_shortfall_as_of`（当前月=今天）刻意分开：
+    趋势图不应把 T+1 未入仓的日子画进轴、把「未入仓」标成
+    missing（两者不要混用——缺口/所需日均仍按今天算）。空表返回
+    None（轴为空、as_of 不下发）；水位滞后整月时锚在月首前一天
+    （轴同样为空）。历史月锚点必然月末，不查水位，省一条 MAX。
+    """
+    today = datetime.now().date()
+    if not (first_day <= today <= last_day):
+        return last_day
+    latest = offline_latest_date(connection)
+    if latest is None:
+        return None
+    return max(min(latest, last_day), first_day - timedelta(days=1))
+
+
 def shortfall_calendar(connection, *, first_day, last_day) -> dict:
     """缺口径的日历上下文：``total/elapsed/remaining_workdays``。
 
@@ -1554,6 +2101,7 @@ def run_anomaly_top(connection, params) -> dict:
     month, first_day, last_day = _shortfall_window(params)
     facts = shortfall_facts(
         connection, grain=_DEFAULT_SHORTFALL_GRAIN,
+        region=params.get("region"),
         first_day=first_day, last_day=last_day,
     )
     calendar = shortfall_calendar(
@@ -2127,7 +2675,9 @@ def _funds_channel_trend_payload(rows) -> dict:
         "chart": "line",
         "dates": months,
         "series": [
-            {"name": name, "data": [float(value) for value in by_channel[name]]}
+            {"name": name,
+             "data": [None if value is None else float(value)
+                      for value in by_channel[name]]}
             for name in sorted(by_channel)
         ],
         "unit": _UNIT,

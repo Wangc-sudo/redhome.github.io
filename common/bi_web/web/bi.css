@@ -120,6 +120,9 @@ a{text-decoration:none;color:inherit}
   opacity:0;transition:opacity .16s}
 .widget:hover .widget__drag{opacity:1}
 .widget__hint{font-size:11px;color:var(--text-subtle)}
+/* 拖拽占位（批次 B §5.3）：虚线 + 既有边框色 --card-border，不加新色值。
+ * 跨度类（c3/c4/c6/c8/c12）与 min-height 由 JS 按被拖卡片复制。 */
+.widget--placeholder{border:2px dashed var(--card-border);border-radius:var(--radius)}
 .c3{grid-column:span 3}.c4{grid-column:span 4}.c6{grid-column:span 6}
 .c8{grid-column:span 8}.c12{grid-column:span 12}
 /* 窄屏：把 6/8 栅格卡降到整行，避免密集表格被裁切 */

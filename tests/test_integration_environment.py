@@ -315,6 +315,53 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             environment.get("PUBLIC_DATA_SERVICE_ID"), "pages-hangzhou"
         )
 
+    def test_scheduler_is_opt_in_persistent_and_carries_union_mounts(self):
+        configuration = self._compose_config("scheduler")
+        scheduler = configuration["services"]["scheduler"]
+
+        self.assertEqual(scheduler.get("profiles"), ["scheduler"])
+        self.assertEqual(
+            "service_healthy", scheduler["depends_on"]["mysql"]["condition"]
+        )
+        self.assertNotIn("ports", scheduler)
+        # Long-running: must come back after a crash/host reboot on its own.
+        self.assertEqual(scheduler.get("restart"), "unless-stopped")
+
+        command = scheduler.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertIn("common.public_data.scheduler", parts)
+
+        # The scheduler fires every scheduled line in-process, so it carries
+        # the union of their mounts: live credentials + manifest (sync lines)
+        # and the pages output directory (leaderboard lines).
+        targets = {
+            v.get("target", "") if isinstance(v, dict) else ""
+            for v in scheduler.get("volumes", [])
+        }
+        self.assertIn("/run/live-input/source-credentials.json", targets)
+        self.assertIn("/run/live-input/manifest.json", targets)
+        self.assertIn("/output", targets)
+
+        environment = scheduler["environment"]
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_SERVICE_ID"), "scheduler"
+        )
+        # Registry-driven: Nacos env + the seed fallback must both be wired.
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_PIPELINE_SEED"),
+            "/app/docker/integration/pipelines.seed.yaml",
+        )
+        self.assertEqual(environment.get("TZ"), "Asia/Shanghai")
+        # Seeds its children rely on must be visible to the pass-through env.
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_CALENDAR_SEED"),
+            "/app/docker/integration/calendar.seed.json",
+        )
+        self.assertEqual(
+            environment.get("PUBLIC_DATA_REGION_SEED"),
+            "/app/docker/integration/regions.seed.json",
+        )
+
     def test_bi_web_is_opt_in_and_read_only(self):
         configuration = self._compose_config("bi-web")
         bi_web = configuration["services"]["bi-web"]
@@ -328,7 +375,8 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         )
 
         # 零挂载 (spec section 9): a read-only mart consumer mounts nothing --
-        # no credentials, no live-input, no output directories.
+        # no credentials, no live-input, no output directories.  免登凭据
+        # （2026-09-21 设计稿方案 A）走环境变量透传而非文件挂载，本断言不变。
         self.assertFalse(bi_web.get("volumes"))
 
         # The command runs the app module and never carries a --live-* flag.
@@ -352,6 +400,63 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # bi-web writes nowhere at all, so it never needs the runner's
         # write-gate acknowledgement.
         self.assertNotIn("INTEGRATION_TEST_RUNNER", environment)
+
+    def test_bi_web_dingtalk_credentials_are_passthrough_only(self):
+        # 免登凭据白名单（2026-09-21 设计稿 §7 方案 A，原「无外呼/无凭据」
+        # 合约的放宽形态）：外呼面收敛为 api.dingtalk.com / oapi.dingtalk.com
+        # 所需的恰好三个变量，全部宿主机透传（${...:-} 本地解析为空串）——
+        # 断言「凭据零烘焙」，而不是断言「凭据不存在」。
+        configuration = self._compose_config("bi-web")
+        environment = configuration["services"]["bi-web"]["environment"]
+
+        for variable in (
+            "BI_WEB_SESSION_SECRET",
+            "BI_DINGTALK_APPKEY",
+            "BI_DINGTALK_APPSECRET",
+        ):
+            self.assertIn(variable, environment)
+            self.assertFalse(
+                environment[variable],
+                f"{variable} must resolve empty outside a credentialed shell",
+            )
+
+    def test_ops_web_is_opt_in_loopback_only_and_passthrough(self):
+        # ops-web（2026-09-21 设计稿 §3）：权限管理的操作面，双闸合约。
+        configuration = self._compose_config("ops-web")
+        ops_web = configuration["services"]["ops-web"]
+
+        # 独立 profile：绝不随默认编排启动。
+        self.assertEqual(ops_web.get("profiles"), ["ops-web"])
+        self.assertEqual(
+            "service_healthy", ops_web["depends_on"]["mysql"]["condition"]
+        )
+        self.assertEqual(
+            ops_web["build"]["dockerfile"], "docker/integration/Dockerfile"
+        )
+
+        command = ops_web.get("command", [])
+        parts = command.split() if isinstance(command, str) else list(command)
+        self.assertEqual(["-m", "common.ops_web.app"], parts)
+        self.assertFalse(any(part.startswith("--live") for part in parts))
+
+        # 第一闸（网络层）：仅回环 18100，不对局域网暴露。
+        (port_mapping,) = ops_web["ports"]
+        self.assertEqual("127.0.0.1", port_mapping["host_ip"])
+        self.assertEqual(8080, port_mapping["target"])
+        self.assertEqual("18100", port_mapping["published"])
+
+        # 零挂载 + 凭据透传（与 bi-web 同款白名单纪律）。
+        self.assertFalse(ops_web.get("volumes"))
+        environment = ops_web["environment"]
+        for variable in (
+            "BI_WEB_SESSION_SECRET",
+            "BI_DINGTALK_APPKEY",
+            "BI_DINGTALK_APPSECRET",
+        ):
+            self.assertIn(variable, environment)
+            self.assertFalse(environment[variable])
+        # 第二闸（应用层 admin scope）由 common/ops_web 的单测钉死；
+        # 写面（bi_authz_grant* 的唯一写入方）由 bi_authz 的单测钉死。
 
     def test_bi_web_redis_cache_is_opt_in_and_fail_open(self):
         # 阶段 2 (2026-09-14 cache spec): Redis 是可选增强，不是硬依赖。

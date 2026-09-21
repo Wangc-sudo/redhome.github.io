@@ -32,6 +32,7 @@ import yaml
 from common.bi_web.cards import REGISTRY, validate_dashboard_config
 from common.bi_web.config import (
     BI_GROUP,
+    KNOWN_FILTER_SOURCES,
     CardPlacement,
     DashboardConfig,
     DashboardConfigError,
@@ -407,6 +408,25 @@ class StageBParseTests(unittest.TestCase):
         self.assertNotIn("SECRET-LEAK-CHECK", str(ctx.exception))
 
 
+class GranularityFilterSourceTests(unittest.TestCase):
+    """日月星粒度批次（执行提示词 §4.1/§6-1）：granularity 进入值域闸词汇表。
+
+    静态值域（不查库），与 regions/months 同级；config/cards/app 三处
+    缺一即红构建，此处钉 config 一侧。
+    """
+
+    def test_granularity_is_a_known_filter_source(self):
+        self.assertIn("granularity", KNOWN_FILTER_SOURCES)
+
+    def test_filter_with_granularity_source_parses(self):
+        config = parse_dashboard_config(
+            "x", {"filters": [{"param": "gran", "source": "granularity"}]}
+        )
+
+        self.assertEqual("gran", config.filters[0].param)
+        self.assertEqual("granularity", config.filters[0].source)
+
+
 class DashboardIdsTests(_SeedFileTestCase):
     """阶段 B 导航枚举：dashboard_ids() 各后端行为。"""
 
@@ -503,9 +523,9 @@ class BiSeedFileTests(unittest.TestCase):
 
         self.assertEqual(
             {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
-             "l2-people", "l2-fund-safety", "l2-ecom", "l2-dining",
-             "l2-hall", "l2-inventory", "l2-warehouse", "l2-quarter",
-             "l2-yoy", "l2-contract"},
+             "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
+             "l2-dining", "l2-hall", "l2-inventory", "l2-warehouse",
+             "l2-quarter", "l2-yoy", "l2-contract"},
             set(mapping),
         )
         configs = {
@@ -605,7 +625,28 @@ class BiSeedFileTests(unittest.TestCase):
             (4, 4, 4, 12), tuple(placement.span for placement in people.cards)
         )
 
-        # 前后端拉齐 V1（2026-09-16）：全部 14 页 refresh_seconds 统一
+        # 电商人员业绩（2026-09-18 P3）：负责人集合归属（钉钉 AI 表 user[]），
+        # 整店日销售额/月目标归集合内每位负责人（不切分、不均摊）；筛选不带
+        # default（seed filters 不支持 default 字段），用户手动选「电商」。
+        ecom_people = configs["l2-ecom-people"]
+        self.assertEqual(55, ecom_people.nav_order)
+        self.assertEqual(
+            (("region", "regions", "区域"), ("month", "months", "月份")),
+            tuple(
+                (spec.param, spec.source, spec.label)
+                for spec in ecom_people.filters
+            ),
+        )
+        self.assertEqual(
+            ("table_people_leaderboard", "anomaly_top", "kpi_shortfall"),
+            tuple(placement.card for placement in ecom_people.cards),
+        )
+        self.assertEqual(
+            (12, 6, 6),
+            tuple(placement.span for placement in ecom_people.cards),
+        )
+
+        # 前后端拉齐 V1（2026-09-16）：全部 15 页 refresh_seconds 统一
         # 86400（T+1 口径，全站无自动刷新/轮询）。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):

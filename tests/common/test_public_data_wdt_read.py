@@ -69,6 +69,43 @@ class WdtReadGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(WdtReadError, "duplicate"):
             gateway.read_dataset(dataset)
 
+    def _paged_gateway(self, pages):
+        def call(method, params, page_size=None, page_no=0, calc_total=0):
+            return {"data": {"order": pages[page_no]}}
+
+        return WdtReadGateway(call=call)
+
+    def test_cross_page_drift_duplicates_within_tolerance_are_deduped(self):
+        """翻页间隙数据被修改导致的跨页重复：保留首见、跳过重复，不杀 run。"""
+        dataset = self._dataset(
+            page_size=2, max_pages=3,
+            window_end=datetime(2026, 9, 1, 0, 49, tzinfo=timezone.utc),
+        )
+        gateway = self._paged_gateway([
+            [{"trade_no": "A"}, {"trade_no": "B"}],
+            [{"trade_no": "B"}, {"trade_no": "C"}],  # B 为漂移重复
+            [{"trade_no": "D"}],
+        ])
+
+        records = gateway.read_dataset(dataset)
+
+        self.assertEqual(["A", "B", "C", "D"], [sid for _, sid in records])
+
+    def test_cross_page_duplicates_beyond_tolerance_raise(self):
+        """跨页重复超过一整页的量：视为 record_id_path 配置错误，仍报错。"""
+        dataset = self._dataset(
+            page_size=2, max_pages=5,
+            window_end=datetime(2026, 9, 1, 0, 49, tzinfo=timezone.utc),
+        )
+        gateway = self._paged_gateway([
+            [{"trade_no": "A"}, {"trade_no": "B"}],
+            [{"trade_no": "A"}, {"trade_no": "B"}],  # 2 条漂移（=容忍度，放行）
+            [{"trade_no": "A"}],                     # 第 3 条，超阈值
+        ])
+
+        with self.assertRaisesRegex(WdtReadError, "duplicate"):
+            gateway.read_dataset(dataset)
+
     def test_boundary_windows_are_contiguous_no_gap_no_overlap(self):
         calls = []
         dataset = self._dataset(

@@ -77,6 +77,18 @@ def replace_dim_target(connection, rows):
     return _replace(connection, rows)
 
 
+def load_grant_seed(path):
+    """Parse the version-controlled ops-web grant bootstrap seed at *path*."""
+    from common.public_data.bi_authz import load_grant_seed as _load
+    return _load(path)
+
+
+def apply_grant_seed(connection, rows, if_missing=False):
+    """Upsert the grant bootstrap seed into ``bi_authz_grant`` (+ audit)."""
+    from common.public_data.bi_authz import apply_grant_seed as _apply
+    return _apply(connection, rows, if_missing=if_missing)
+
+
 def build_pipeline_config_source():
     """Return the configured pipeline-registry config source."""
     from common.public_data.pipeline_config import build_config_source
@@ -576,6 +588,30 @@ def _handle_load_target(args):
         sys.exit(1)
 
 
+def _handle_load_ops_seed(args):
+    # Safety pre-check: the write-confirmation flag is required BEFORE any work.
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        # Fail fast on a bad seed before any connection is opened.
+        rows = load_grant_seed(args.seed)
+        from common.public_data.live_migrations import apply_live_migrations
+
+        dingtalk_conn = connect(settings.dingtalk_database)
+        wdt_conn = connect(settings.wdt_database)
+        mart_conn = connect(settings.mart_database)
+        apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+        written = apply_grant_seed(mart_conn, rows, if_missing=args.if_missing)
+        print(f"grants_written={written} status=completed")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="ops_seed_error")
+        sys.exit(1)
+
+
 def _handle_import_manual(args):
     """人工报表导入：默认 dry-run 只打印校验报告，``--apply`` 才落库。"""
     try:
@@ -704,6 +740,23 @@ def main(argv=None):
         "--confirm-local-test-write", action="store_true", default=False
     )
 
+    # -- load-ops-seed --------------------------------------------------------
+    load_ops_seed = subparsers.add_parser(
+        "load-ops-seed",
+        help="Replay the ops-web grant bootstrap seed into bi_authz_grant",
+    )
+    load_ops_seed.add_argument(
+        "--seed", default="docker/integration/ops.seed.yaml",
+        help="version-controlled grant bootstrap seed file",
+    )
+    load_ops_seed.add_argument(
+        "--if-missing", action="store_true", default=False,
+        help="skip grant records that already exist (default: overwrite)",
+    )
+    load_ops_seed.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+
     # -- import-manual -------------------------------------------------------
     import_manual = subparsers.add_parser(
         "import-manual", help="Validate and import a manual report file"
@@ -741,6 +794,7 @@ def main(argv=None):
         "publish-bi": _handle_publish_bi,
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
+        "load-ops-seed": _handle_load_ops_seed,
         "import-manual": _handle_import_manual,
         "status": _handle_status,
     }

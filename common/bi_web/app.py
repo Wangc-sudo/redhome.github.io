@@ -56,7 +56,12 @@ channel of the v1 card handler.
 
 Two guards run per request on ``/d/`` and ``/api/`` only:
 
-* Bearer auth (``BI_WEB_TOKEN``; unset or empty means fully open);
+* identity: HMAC session cookie first (``BI_WEB_SESSION_SECRET``; design
+  2026-09-21 -- DingTalk passwordless login), ``BI_WEB_TOKEN`` Bearer as
+  the machine fallback channel; neither configured means fully open
+  (legacy default).  Session identities pass the deny-by-default
+  admission gate (:mod:`common.bi_web.authz`); the Bearer channel keeps
+  its legacy behavior bit-for-bit;
 * the pipeline-registry gate -- Nacos turns the service off and every page
   answers 503 without a restart.  The gate check is TTL-cached (30s) and
   fail-open, the same semantics as ``cli._pipeline_enabled``.
@@ -77,11 +82,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from common.bi_web import queries
+from common.bi_web import auth, authz, queries
 from common.bi_web.cache import build_card_cache, card_cache_key
 from common.bi_web.cards import REGISTRY, CardConfigError, validate_dashboard_config
 from common.bi_web.config import DashboardConfigError, load_seed, parse_dashboard_config
@@ -151,6 +156,7 @@ class ErrorDetail(str, Enum):
     """
 
     UNAUTHORIZED = "unauthorized"
+    FORBIDDEN = "forbidden"
     UNAVAILABLE = "unavailable"
     NOT_FOUND = "not_found"
     BAD_REQUEST = "bad_request"
@@ -223,6 +229,7 @@ _FILTER_SOURCE_QUERIES = {
     "brands": queries.brand_options,
     "sku_channels": queries.sku_channel_options,
     "entities": queries.entity_options,
+    "granularity": queries.granularity_options,
 }
 
 
@@ -379,17 +386,92 @@ class _TTLOptionSets:
 # Request guards
 # ---------------------------------------------------------------------------
 
-def _build_bearer_dependency(token):
-    """Bearer dependency for the ``/d/`` and ``/api/`` routes (no-op if open)."""
+def _build_auth_gate(token, session_secret, viewer_resolver, session_secure):
+    """身份闸：session 优先、Bearer 兜底、deny-by-default 准入门。
+
+    返回一个 ``authenticate(request, response)``：允许时返回 ``None``
+    并填 ``request.state.userid`` / ``request.state.viewer``；拒绝时返回
+    ``(reason, status)``——页面通道映射为 302 ``/auth/entry?reason=...``，
+    API 通道映射为 401/403 JSON。旧语义逐字保留：未配置 session 密钥且
+    未配置 token = 全开放；仅配 token = 纯 Bearer（与改造前一致）。
+    Bearer 是机器通道（大屏/审计），不进准入门、不解析 Viewer——行为与
+    T0 基准一致。
+    """
     expected = f"Bearer {token}" if token else None
 
-    def require_bearer(
-        authorization: Optional[str] = Header(default=None),
-    ) -> None:
-        if expected is not None and authorization != expected:
-            raise HTTPException(status_code=401, detail=ErrorDetail.UNAUTHORIZED)
+    def authenticate(request: Request, response: Response):
+        request.state.userid = None
+        request.state.viewer = None
+        if session_secret:
+            raw = request.cookies.get(auth.SESSION_COOKIE)
+            if raw:
+                userid = auth.resolve_session_userid(raw, session_secret)
+                if userid is not None:
+                    renewed = auth.slide_session(raw, session_secret)
+                    if renewed is not None:
+                        response.set_cookie(
+                            auth.SESSION_COOKIE,
+                            renewed,
+                            max_age=auth.SESSION_TTL_SECONDS,
+                            httponly=True,
+                            samesite="lax",
+                            secure=session_secure,
+                        )
+                    viewer = (
+                        viewer_resolver.resolve(userid)
+                        if viewer_resolver is not None
+                        else None
+                    )
+                    if viewer is not None and not viewer.admitted:
+                        # deny-by-default 准入门（铁律 1）：认证通过但无
+                        # 任何 grant 记录——页面见提示页，API 拿 403。
+                        return ("unauthorized", 403)
+                    request.state.userid = userid
+                    request.state.viewer = viewer
+                    return None
+        if expected is None:
+            # session 已启用但没带有效 cookie：不存在「开放」兜底。
+            return ("login", 401) if session_secret else None
+        if request.headers.get("authorization") == expected:
+            return None
+        return ("login", 401)
 
-    return require_bearer
+    return authenticate
+
+
+def _build_identity_dependencies(authenticate, *, redirect_pages):
+    """页面通道 302 / API 通道 401|403 的一对依赖。
+
+    ``redirect_pages`` 只在 session 通道启用时为真：纯 Bearer 模式下页面
+    未授权的旧行为是 401（T0 基准），免登上线后才是 302 提示页。
+    """
+
+    def require_identity_page(request: Request, response: Response) -> None:
+        denial = authenticate(request, response)
+        if denial is not None:
+            reason, status = denial
+            if not redirect_pages:
+                raise HTTPException(
+                    status_code=status, detail=ErrorDetail.UNAUTHORIZED
+                )
+            raise HTTPException(
+                status_code=302,
+                headers={"Location": f"/auth/entry?reason={reason}"},
+            )
+
+    def require_identity_api(request: Request, response: Response) -> None:
+        denial = authenticate(request, response)
+        if denial is not None:
+            _reason, status = denial
+            raise HTTPException(
+                status_code=status,
+                detail=(
+                    ErrorDetail.UNAUTHORIZED if status == 401
+                    else ErrorDetail.FORBIDDEN
+                ),
+            )
+
+    return require_identity_page, require_identity_api
 
 
 def _mart_connector(settings):
@@ -501,6 +583,10 @@ def _dashboard_definition(dashboard, registry: Dict[str, Any]) -> Dict[str, Any]
                 "span": placement.span,
                 "on_click": placement.on_click,
                 "params": list(registry[placement.card].params_schema),
+                # 粒度声明（2026-09-18 批次 A）：未声明的卡为空数组/空串，
+                # 前端据此不渲染粒度控件（缺省即旧行为）。
+                "grans": list(registry[placement.card].grans),
+                "default_gran": registry[placement.card].default_gran,
             }
             for placement in dashboard.cards
         ],
@@ -513,7 +599,9 @@ def _dashboard_definition(dashboard, registry: Dict[str, Any]) -> Dict[str, Any]
 
 def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
-               seed_path=None, card_cache=None) -> FastAPI:
+               seed_path=None, card_cache=None, session_secret=None,
+               auth_client=None, viewer_resolver=None,
+               session_secure=False) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
@@ -522,6 +610,15 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     Nacos or RDS to exercise routing, auth, or gating.  ``card_cache``
     defaults to :func:`build_card_cache` (Redis when configured, else
     in-process); it lives exactly as long as the app instance.
+
+    ``session_secret`` enables the DingTalk passwordless session channel
+    (design 2026-09-21); without it the identity layer is exactly the
+    legacy Bearer-only behavior.  ``auth_client`` is the authCode
+    exchange client (injectable; ``None`` disables ``/auth/dingtalk``).
+    ``viewer_resolver`` defaults to a TTL-cached grant reader over the
+    mart connector when the session channel is on.  ``session_secure``
+    flips the cookie's Secure attribute on once the HTTPS reverse proxy
+    lands (milestone M4); until then the only deployment is plain HTTP.
     """
     if seed_path is not None:
         validate_seed_file(seed_path, registry)
@@ -532,7 +629,16 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     if card_cache is None:
         card_cache = build_card_cache()
     option_sets = _TTLOptionSets(db_connector)
-    require_bearer = _build_bearer_dependency(token)
+    if session_secret and viewer_resolver is None:
+        viewer_resolver = authz.ViewerResolver(db_connector)
+    authenticate = _build_auth_gate(
+        token, session_secret, viewer_resolver, session_secure
+    )
+    require_identity_page, require_identity_api = (
+        _build_identity_dependencies(
+            authenticate, redirect_pages=session_secret is not None
+        )
+    )
 
     app = FastAPI(title="bi-web")
     app.mount("/web", StaticFiles(directory=_WEB_DIR, check_dir=False))
@@ -543,7 +649,48 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         "/assets",
         StaticFiles(directory=_REACT_DIST_DIR / "assets", check_dir=False),
     )
-    versioned = _VersionedApi(app, require_bearer)
+    versioned = _VersionedApi(app, require_identity_api)
+
+    # -- 认证路由（设计稿 §5；/d/ 与 /api/ 之外，无 bearer、无 gate）--------
+    @app.post("/auth/dingtalk")
+    async def auth_dingtalk(request: Request):
+        if auth_client is None or session_secret is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        auth_code = payload.get("authCode") if isinstance(payload, dict) else None
+        if not isinstance(auth_code, str) or not auth_code:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            userid = auth_client.exchange_auth_code(auth_code)
+        except auth.AuthError as exc:
+            _LOGGER.warning("dingtalk auth exchange failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        _LOGGER.info("dingtalk login: %s", auth.mask_userid(userid))
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie(
+            auth.SESSION_COOKIE,
+            auth.issue_session(userid, session_secret),
+            max_age=auth.SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=session_secure,
+        )
+        return response
+
+    @app.get("/auth/entry")
+    def auth_entry():
+        # 未登录/未授权/已登出的统一提示页（静态、无数据、无鉴权，
+        # 与 ops-web 共用同一文件）。
+        return FileResponse(auth.AUTH_ENTRY_PAGE)
+
+    @app.get("/auth/logout")
+    def auth_logout():
+        response = RedirectResponse("/auth/entry?reason=loggedout")
+        response.delete_cookie(auth.SESSION_COOKIE)
+        return response
 
     @app.get("/")
     def root():
@@ -574,34 +721,58 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         # 或载荷）。
         return JSONResponse(card_cache.metrics_snapshot())
 
-    @app.get("/d/{dashboard_id}", dependencies=[Depends(require_bearer)])
-    def dashboard_page(dashboard_id: str):
+    @app.get("/d/{dashboard_id}", dependencies=[Depends(require_identity_page)])
+    def dashboard_page(dashboard_id: str, request: Request):
         # The shell carries no data -- the same resolve chain as the APIs
         # still guards the URL (404 missing/disabled, 503 corrupt), and
         # the client fetches everything else from /api/v1/.
-        _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        viewer = getattr(request.state, "viewer", None)
+        if viewer is not None and not authz.scope_allows(
+            viewer, dashboard.required_scope
+        ):
+            # 页面级 scope 不匹配：页面通道见提示页（不暴露看板存在性）。
+            return RedirectResponse("/auth/entry?reason=forbidden")
         return FileResponse(_shell_index_html())
 
     @versioned.route("v1", "/dashboards")
-    def dashboard_list():
+    def dashboard_list(request: Request):
         if not gate():
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         # Enumeration failures already degrade to "no navigation" inside
         # _nav_entries (fail-open, never a 5xx).
+        entries = _nav_entries(dashboard_source)
+        viewer = getattr(request.state, "viewer", None)
+        if viewer is not None and not viewer.is_admin:
+            # 导航过滤（页面级）：required_scope 不达标的看板不出现在导航；
+            # 解析失败的兄弟条目按 fail-closed 跳过（权限链不放故障页）。
+            visible = []
+            for entry in entries:
+                try:
+                    dashboard = dashboard_source.get_dashboard(entry[0])
+                except DashboardConfigError:
+                    continue
+                if authz.scope_allows(viewer, dashboard.required_scope):
+                    visible.append(entry)
+            entries = visible
         return JSONResponse(
             {
                 "dashboards": [
                     {"id": dashboard_id, "title": title, "icon": icon,
                      "group": group}
-                    for dashboard_id, title, icon, group
-                    in _nav_entries(dashboard_source)
+                    for dashboard_id, title, icon, group in entries
                 ]
             }
         )
 
     @versioned.route("v1", "/dashboards/{dashboard_id}")
-    def dashboard_definition(dashboard_id: str):
+    def dashboard_definition(dashboard_id: str, request: Request):
         dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        viewer = getattr(request.state, "viewer", None)
+        if viewer is not None and not authz.scope_allows(
+            viewer, dashboard.required_scope
+        ):
+            raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
         return JSONResponse(_dashboard_definition(dashboard, registry))
 
     @versioned.route("v1", "/options/{source}")
@@ -622,6 +793,12 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     @versioned.route("v1", "/d/{dashboard_id}/cards/{card_id}")
     def card_data(dashboard_id: str, card_id: str, request: Request):
         dashboard = _resolve_dashboard(dashboard_id, dashboard_source, registry, gate)
+        viewer = getattr(request.state, "viewer", None)
+        if viewer is not None and not authz.scope_allows(
+            viewer, dashboard.required_scope
+        ):
+            # 数据面同步 fail-closed：页面不可见的看板，卡片 API 同样 403。
+            raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
         placement = None
         for candidate in dashboard.cards:
             if candidate.card == card_id:
@@ -638,6 +815,11 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                 raise HTTPException(
                     status_code=400, detail=ErrorDetail.BAD_REQUEST
                 )
+        if "gran" in card.params_schema and "gran" not in params and card.default_gran:
+            # gran 未传 → default_gran（§4.6）：注入后 gran=day 与不带参走
+            # 同一缓存键、同一计算路径，响应逐字节一致；注入值来自注册表
+            # 常量，无需再过值域闸。
+            params["gran"] = card.default_gran
         def compute():
             with db_connector() as connection:
                 return card.run(connection, params)
@@ -674,6 +856,17 @@ def main():
     try:
         settings = load_settings()
         token = os.environ.get("BI_WEB_TOKEN") or None
+        session_secret = os.environ.get("BI_WEB_SESSION_SECRET") or None
+        app_key = (os.environ.get("BI_DINGTALK_APPKEY") or "").strip()
+        app_secret = (os.environ.get("BI_DINGTALK_APPSECRET") or "").strip()
+        auth_client = (
+            auth.DingTalkAuthClient(app_key, app_secret)
+            if session_secret and app_key and app_secret
+            else None
+        )
+        session_secure = os.environ.get(
+            "BI_WEB_SESSION_SECURE", ""
+        ).strip().lower() in ("1", "true", "yes")
         dashboard_source = build_dashboard_config_source()
         seed_path = os.environ.get("PUBLIC_DATA_BI_SEED") or None
         application = create_app(
@@ -681,6 +874,9 @@ def main():
             dashboard_source=dashboard_source,
             token=token,
             seed_path=seed_path,
+            session_secret=session_secret,
+            auth_client=auth_client,
+            session_secure=session_secure,
         )
     except Exception as exc:
         print(f"bi-web startup failed: invalid configuration ({type(exc).__name__})")

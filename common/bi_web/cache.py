@@ -61,9 +61,17 @@ def period_class(params: Dict[str, str], *, now: Optional[datetime] = None,
     同步在变）。任何非当前月 → 冷、键带月：封月结果不变；未来月结果
     为空且不变，与冷数据同性质，且跨入该月后类别翻转为 ``cur``，键
     自然轮换，绝不永久陈旧。
+
+    粒度（2026-09-18 批次 A）：``gran == "day"`` 一律热（日序列随
+    T+1 入仓在变，冷 TTL 内不刷新会丢当天数据）；``gran`` 为
+    week/month 时窗口终点 = ``month`` 参数（截止月），落在当前月 →
+    热，否则冷。
     """
     current = (datetime.now() if now is None else now).strftime("%Y-%m")
     month = params.get("month") or None
+    gran = params.get("gran") or None
+    if gran == "day":
+        return "cur", hot_ttl
     if month is None or month == current:
         return "cur", hot_ttl
     return month, cold_ttl

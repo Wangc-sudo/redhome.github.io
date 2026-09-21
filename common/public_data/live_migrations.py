@@ -2,7 +2,11 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from common.public_data.finance_schema import all_table_definitions
+from common.public_data.bi_authz import bi_authz_ddl_statements
+from common.public_data.finance_schema import (
+    all_table_definitions,
+    table_definition,
+)
 from common.public_data.manual_import.schema import (
     mart_manual_ddl_statements,
     raw_manual_ddl_statements,
@@ -19,6 +23,7 @@ from common.public_data.mart_extract_schema import (
     finance_ddl_statements,
     order_line_ddl_statements,
     order_line_channel_ddl_statements,
+    stock_flow_ddl_statements,
 )
 from common.public_data.db import transaction
 
@@ -124,9 +129,18 @@ _MIGRATION_TRACKING_DDL = (
 )
 
 
+# raw-dingtalk-v1 已在 raw_dingtalk 库应用（校验和冻结）：此后注册进
+# finance_schema._TABLES 的新钉钉 raw 表一律不得混入本版本（否则触发
+# checksum drift），须另起迁移版本。channel_monthly_target（2026-09-18
+# 电商月目标表）由 raw-dingtalk-channel-monthly-target-v1 建表。
+_RAW_DINGTALK_V1_EXCLUDES = frozenset({"channel_monthly_target"})
+
+
 def _build_dingtalk_ddl() -> tuple[str, ...]:
     ddls = []
     for table in all_table_definitions():
+        if table.name in _RAW_DINGTALK_V1_EXCLUDES:
+            continue
         ddls.append(_build_finance_table_ddl(table))
     ddls.append(_SCHEMA_SNAPSHOTS_DDL)
     return tuple(ddls)
@@ -177,6 +191,14 @@ _DINGTALK_ORG_MEMBER_DDL = (
 
 def _build_dingtalk_org_ddl() -> tuple[str, ...]:
     return (_DINGTALK_ORG_MEMBER_DDL,)
+
+
+# 电商月目标表（渠道销售目标达成率9，2026-09-18 纳入采集）。DDL 文本复用
+# finance_schema 的表定义生成，与既有 raw 表同构（业务列 + 技术列 +
+# idx_synced_at/idx_sync_run_id）。独立版本而非改写 raw-dingtalk-v1
+# （校验和红线，见 _RAW_DINGTALK_V1_EXCLUDES）。
+def _build_dingtalk_channel_monthly_target_ddl() -> tuple[str, ...]:
+    return (_build_finance_table_ddl(table_definition("channel_monthly_target")),)
 
 
 def _build_wdt_ddl() -> tuple[str, ...]:
@@ -251,6 +273,13 @@ def _build_mart_dim_target_ddl() -> tuple[str, ...]:
     return (_DIM_TARGET_DDL,)
 
 
+# BI 授权两表（设计稿 2026-09-21 §4.2）：grant 现状 + audit 流水。
+# bi-web 只读、ops-web 唯一写方；独立版本而非改写既有 mart-ops 版本
+# （校验和红线）。
+def _build_mart_bi_authz_ddl() -> tuple[str, ...]:
+    return bi_authz_ddl_statements()
+
+
 def _build_raw_manual_ddl() -> tuple[str, ...]:
     """人工报表导入通道的 raw 表（C 类数据源，见 docs/manual-import-channel.md）。"""
     return raw_manual_ddl_statements()
@@ -295,7 +324,7 @@ def _build_mart_facts_ddl() -> tuple[str, ...]:
         _FACT_ORDER_LINE_CHANNEL_DDL,
     ) + mart_manual_ddl_statements() + (
         _DAILY_REPORT_DATE_INDEX_DDL,
-    )
+    ) + stock_flow_ddl_statements()
 
 
 def _build_mart_dims_ddl() -> tuple[str, ...]:
@@ -314,6 +343,11 @@ def _build_mart_queue_ddl() -> tuple[str, ...]:
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
+    (
+        "raw-dingtalk-channel-monthly-target-v1",
+        "dingtalk",
+        _build_dingtalk_channel_monthly_target_ddl(),
+    ),
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
@@ -322,6 +356,7 @@ _MIGRATIONS = (
     ("mart-extract-finance-v1", "mart", finance_ddl_statements()),
     ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),
     ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
+    ("mart-extract-stock-flow-v1", "mart", stock_flow_ddl_statements()),
     (
         "mart-extract-daily-report-date-index-v1",
         "mart",
@@ -329,6 +364,7 @@ _MIGRATIONS = (
     ),
     ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
     ("mart-ops-dim-target-v1", "mart", _build_mart_dim_target_ddl()),
+    ("mart-ops-bi-authz-v1", "mart", _build_mart_bi_authz_ddl()),
     ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
     ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),

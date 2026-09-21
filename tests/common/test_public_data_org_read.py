@@ -165,10 +165,12 @@ class ShippedOrgSeedTests(unittest.TestCase):
     """真正发版的种子：区域顺序即优先级，兜底的 other 必须在最后。"""
 
     def test_shipped_seed_regions_in_priority_order(self):
+        # hq（总部子树，2026-09-21 随 BI 免登 admin 自举加入）排在 other
+        # 兜底之前——总部成员归 hq，不被 other 的根部门展开吞掉。
         regions = load_org_seed(_SEED_PATH)
         self.assertEqual(
             [region for region, _ in regions],
-            ["hangzhou", "shaoxing", "vanke", "other"],
+            ["hangzhou", "shaoxing", "vanke", "hq", "other"],
         )
 
     def test_shipped_seed_dept_ids_match_the_robot_config(self):
@@ -182,6 +184,8 @@ class ShippedOrgSeedTests(unittest.TestCase):
         )
         # vanke（万科&大莲花&团购日报群）组织上对应体验中心部门。
         self.assertEqual(regions["vanke"], (1050251442,))
+        # hq（总部子树，含总经办/财务部，BI 免登 admin 所在区域）。
+        self.assertEqual(regions["hq"], (1050143465,))
         # other 含根部门 1050135497，递归展开即全公司——靠顺序兜底。
         self.assertIn(1050135497, regions["other"])
 

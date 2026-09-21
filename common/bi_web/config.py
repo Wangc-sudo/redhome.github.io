@@ -46,7 +46,7 @@ DEFAULT_NAV_ORDER = 0
 
 _ALLOWED_DASHBOARD_KEYS = frozenset(
     {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters",
-     "icon", "group", "_说明"}
+     "icon", "group", "required_scope", "_说明"}
 )
 _ALLOWED_CARD_KEYS = frozenset({"card", "title", "span", "on_click", "_说明"})
 _ALLOWED_FILTER_KEYS = frozenset({"param", "source", "label", "_说明"})
@@ -58,7 +58,8 @@ _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 #: ``channels``（fact_channel_daily_sales 的业务渠道）是两套维度，故分开。
 #: ``entities``（fact_fin_store_funds 的公司主体）供资金安全页主体筛选。
 KNOWN_FILTER_SOURCES = frozenset(
-    {"regions", "channels", "months", "brands", "sku_channels", "entities"}
+    {"regions", "channels", "months", "brands", "sku_channels", "entities",
+     "granularity"}
 )
 
 
@@ -122,6 +123,9 @@ class DashboardConfig:
     #: 导航分组名（侧栏 nav-group 标题，如 经营驾驶舱/专项分析）；空串 =
     #: 前端防御性回退。分组归属同 icon 裁决。
     group: str = ""
+    #: 页面级权限声明（设计稿 2026-09-21 §4.1）：``None`` = 已准入即可见
+    #: （旧格式看板零影响）；声明后需 viewer 持同名 scope grant（admin 恒过）。
+    required_scope: str | None = None
 
 
 def parse_dashboard_config(dashboard_id, data):
@@ -156,6 +160,15 @@ def parse_dashboard_config(dashboard_id, data):
     if not isinstance(group, str):
         raise DashboardConfigError(
             f"dashboard '{dashboard_id}' field 'group' must be a string"
+        )
+
+    required_scope = data.get("required_scope")
+    if required_scope is not None and (
+        not isinstance(required_scope, str) or not required_scope
+    ):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'required_scope' must be "
+            "a non-empty string"
         )
 
     enabled = data.get("enabled", True)
@@ -216,6 +229,7 @@ def parse_dashboard_config(dashboard_id, data):
         filters=parsed_filters,
         icon=icon,
         group=group,
+        required_scope=required_scope,
     )
 
 

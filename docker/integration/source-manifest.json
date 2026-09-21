@@ -2027,6 +2027,31 @@
                 "channel": "私域"
               }
             }
+          },
+          {
+            "sheet_id": "SlMvcWa",
+            "sheet_name": "渠道销售目标达成率9",
+            "dataset": "channel_monthly_target",
+            "target_table": "channel_monthly_target",
+            "max_pages": 100,
+            "field_mapping": {
+              "店铺": {
+                "column": "store_name",
+                "source_type": "text"
+              },
+              "负责人": {
+                "column": "responsible_person",
+                "source_type": "user"
+              },
+              "月目标": {
+                "column": "monthly_target",
+                "source_type": "number"
+              },
+              "渠道": {
+                "column": "channel",
+                "source_type": "text"
+              }
+            }
           }
         ]
       }
@@ -2045,8 +2070,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0000",
-        "window_start": "2026-09-09T15:05:12Z",
-        "window_end": "2026-09-09T15:55:12Z"
+        "window_start": "2026-09-20T04:18:07Z",
+        "window_end": "2026-09-20T05:08:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2059,8 +2084,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0001",
-        "window_start": "2026-09-09T15:55:12Z",
-        "window_end": "2026-09-09T16:45:12Z"
+        "window_start": "2026-09-20T05:08:07Z",
+        "window_end": "2026-09-20T05:58:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2073,8 +2098,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0002",
-        "window_start": "2026-09-09T16:45:12Z",
-        "window_end": "2026-09-09T17:35:12Z"
+        "window_start": "2026-09-20T05:58:07Z",
+        "window_end": "2026-09-20T06:48:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2087,8 +2112,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0003",
-        "window_start": "2026-09-09T17:35:12Z",
-        "window_end": "2026-09-09T18:25:12Z"
+        "window_start": "2026-09-20T06:48:07Z",
+        "window_end": "2026-09-20T07:38:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2101,8 +2126,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0004",
-        "window_start": "2026-09-09T18:25:12Z",
-        "window_end": "2026-09-09T19:15:12Z"
+        "window_start": "2026-09-20T07:38:07Z",
+        "window_end": "2026-09-20T08:28:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2115,8 +2140,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0005",
-        "window_start": "2026-09-09T19:15:12Z",
-        "window_end": "2026-09-09T20:05:12Z"
+        "window_start": "2026-09-20T08:28:07Z",
+        "window_end": "2026-09-20T09:18:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2129,8 +2154,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0006",
-        "window_start": "2026-09-09T20:05:12Z",
-        "window_end": "2026-09-09T20:55:12Z"
+        "window_start": "2026-09-20T09:18:07Z",
+        "window_end": "2026-09-20T10:08:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2143,8 +2168,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0007",
-        "window_start": "2026-09-09T20:55:12Z",
-        "window_end": "2026-09-09T21:45:12Z"
+        "window_start": "2026-09-20T10:08:07Z",
+        "window_end": "2026-09-20T10:58:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2157,8 +2182,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0008",
-        "window_start": "2026-09-09T21:45:12Z",
-        "window_end": "2026-09-09T22:35:12Z"
+        "window_start": "2026-09-20T10:58:07Z",
+        "window_end": "2026-09-20T11:48:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2171,8 +2196,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0009",
-        "window_start": "2026-09-09T22:35:12Z",
-        "window_end": "2026-09-09T23:25:12Z"
+        "window_start": "2026-09-20T11:48:07Z",
+        "window_end": "2026-09-20T12:38:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2185,8 +2210,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0010",
-        "window_start": "2026-09-09T23:25:12Z",
-        "window_end": "2026-09-10T00:15:12Z"
+        "window_start": "2026-09-20T12:38:07Z",
+        "window_end": "2026-09-20T13:28:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2199,8 +2224,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0011",
-        "window_start": "2026-09-10T00:15:12Z",
-        "window_end": "2026-09-10T01:05:12Z"
+        "window_start": "2026-09-20T13:28:07Z",
+        "window_end": "2026-09-20T14:18:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2213,8 +2238,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0012",
-        "window_start": "2026-09-10T01:05:12Z",
-        "window_end": "2026-09-10T01:55:12Z"
+        "window_start": "2026-09-20T14:18:07Z",
+        "window_end": "2026-09-20T15:08:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2227,8 +2252,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0013",
-        "window_start": "2026-09-10T01:55:12Z",
-        "window_end": "2026-09-10T02:45:12Z"
+        "window_start": "2026-09-20T15:08:07Z",
+        "window_end": "2026-09-20T15:58:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2241,8 +2266,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0014",
-        "window_start": "2026-09-10T02:45:12Z",
-        "window_end": "2026-09-10T03:35:12Z"
+        "window_start": "2026-09-20T15:58:07Z",
+        "window_end": "2026-09-20T16:48:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2255,8 +2280,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0015",
-        "window_start": "2026-09-10T03:35:12Z",
-        "window_end": "2026-09-10T04:25:12Z"
+        "window_start": "2026-09-20T16:48:07Z",
+        "window_end": "2026-09-20T17:38:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2269,8 +2294,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0016",
-        "window_start": "2026-09-10T04:25:12Z",
-        "window_end": "2026-09-10T05:15:12Z"
+        "window_start": "2026-09-20T17:38:07Z",
+        "window_end": "2026-09-20T18:28:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2283,8 +2308,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0017",
-        "window_start": "2026-09-10T05:15:12Z",
-        "window_end": "2026-09-10T06:05:12Z"
+        "window_start": "2026-09-20T18:28:07Z",
+        "window_end": "2026-09-20T19:18:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2297,8 +2322,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0018",
-        "window_start": "2026-09-10T06:05:12Z",
-        "window_end": "2026-09-10T06:55:12Z"
+        "window_start": "2026-09-20T19:18:07Z",
+        "window_end": "2026-09-20T20:08:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2311,8 +2336,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0019",
-        "window_start": "2026-09-10T06:55:12Z",
-        "window_end": "2026-09-10T07:45:12Z"
+        "window_start": "2026-09-20T20:08:07Z",
+        "window_end": "2026-09-20T20:58:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2325,8 +2350,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0020",
-        "window_start": "2026-09-10T07:45:12Z",
-        "window_end": "2026-09-10T08:35:12Z"
+        "window_start": "2026-09-20T20:58:07Z",
+        "window_end": "2026-09-20T21:48:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2339,8 +2364,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0021",
-        "window_start": "2026-09-10T08:35:12Z",
-        "window_end": "2026-09-10T09:25:12Z"
+        "window_start": "2026-09-20T21:48:07Z",
+        "window_end": "2026-09-20T22:38:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2353,8 +2378,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0022",
-        "window_start": "2026-09-10T09:25:12Z",
-        "window_end": "2026-09-10T10:15:12Z"
+        "window_start": "2026-09-20T22:38:07Z",
+        "window_end": "2026-09-20T23:28:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2367,8 +2392,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0023",
-        "window_start": "2026-09-10T10:15:12Z",
-        "window_end": "2026-09-10T11:05:12Z"
+        "window_start": "2026-09-20T23:28:07Z",
+        "window_end": "2026-09-21T00:18:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2381,8 +2406,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0024",
-        "window_start": "2026-09-10T11:05:12Z",
-        "window_end": "2026-09-10T11:55:12Z"
+        "window_start": "2026-09-21T00:18:07Z",
+        "window_end": "2026-09-21T01:08:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2395,8 +2420,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0025",
-        "window_start": "2026-09-10T11:55:12Z",
-        "window_end": "2026-09-10T12:45:12Z"
+        "window_start": "2026-09-21T01:08:07Z",
+        "window_end": "2026-09-21T01:58:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2409,8 +2434,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0026",
-        "window_start": "2026-09-10T12:45:12Z",
-        "window_end": "2026-09-10T13:35:12Z"
+        "window_start": "2026-09-21T01:58:07Z",
+        "window_end": "2026-09-21T02:48:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2423,8 +2448,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0027",
-        "window_start": "2026-09-10T13:35:12Z",
-        "window_end": "2026-09-10T14:25:12Z"
+        "window_start": "2026-09-21T02:48:07Z",
+        "window_end": "2026-09-21T03:38:07Z"
       },
       {
         "method": "sales.TradeQuery.queryWithDetail",
@@ -2437,8 +2462,8 @@
           "time_type": "2"
         },
         "dataset": "wdt_trade_detail_0028",
-        "window_start": "2026-09-10T14:25:12Z",
-        "window_end": "2026-09-10T15:05:12Z"
+        "window_start": "2026-09-21T03:38:07Z",
+        "window_end": "2026-09-21T04:18:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2449,8 +2474,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0000",
-        "window_start": "2026-09-09T15:05:12Z",
-        "window_end": "2026-09-09T15:55:12Z"
+        "window_start": "2026-09-20T04:18:07Z",
+        "window_end": "2026-09-20T05:08:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2461,8 +2486,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0001",
-        "window_start": "2026-09-09T15:55:12Z",
-        "window_end": "2026-09-09T16:45:12Z"
+        "window_start": "2026-09-20T05:08:07Z",
+        "window_end": "2026-09-20T05:58:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2473,8 +2498,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0002",
-        "window_start": "2026-09-09T16:45:12Z",
-        "window_end": "2026-09-09T17:35:12Z"
+        "window_start": "2026-09-20T05:58:07Z",
+        "window_end": "2026-09-20T06:48:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2485,8 +2510,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0003",
-        "window_start": "2026-09-09T17:35:12Z",
-        "window_end": "2026-09-09T18:25:12Z"
+        "window_start": "2026-09-20T06:48:07Z",
+        "window_end": "2026-09-20T07:38:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2497,8 +2522,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0004",
-        "window_start": "2026-09-09T18:25:12Z",
-        "window_end": "2026-09-09T19:15:12Z"
+        "window_start": "2026-09-20T07:38:07Z",
+        "window_end": "2026-09-20T08:28:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2509,8 +2534,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0005",
-        "window_start": "2026-09-09T19:15:12Z",
-        "window_end": "2026-09-09T20:05:12Z"
+        "window_start": "2026-09-20T08:28:07Z",
+        "window_end": "2026-09-20T09:18:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2521,8 +2546,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0006",
-        "window_start": "2026-09-09T20:05:12Z",
-        "window_end": "2026-09-09T20:55:12Z"
+        "window_start": "2026-09-20T09:18:07Z",
+        "window_end": "2026-09-20T10:08:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2533,8 +2558,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0007",
-        "window_start": "2026-09-09T20:55:12Z",
-        "window_end": "2026-09-09T21:45:12Z"
+        "window_start": "2026-09-20T10:08:07Z",
+        "window_end": "2026-09-20T10:58:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2545,8 +2570,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0008",
-        "window_start": "2026-09-09T21:45:12Z",
-        "window_end": "2026-09-09T22:35:12Z"
+        "window_start": "2026-09-20T10:58:07Z",
+        "window_end": "2026-09-20T11:48:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2557,8 +2582,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0009",
-        "window_start": "2026-09-09T22:35:12Z",
-        "window_end": "2026-09-09T23:25:12Z"
+        "window_start": "2026-09-20T11:48:07Z",
+        "window_end": "2026-09-20T12:38:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2569,8 +2594,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0010",
-        "window_start": "2026-09-09T23:25:12Z",
-        "window_end": "2026-09-10T00:15:12Z"
+        "window_start": "2026-09-20T12:38:07Z",
+        "window_end": "2026-09-20T13:28:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2581,8 +2606,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0011",
-        "window_start": "2026-09-10T00:15:12Z",
-        "window_end": "2026-09-10T01:05:12Z"
+        "window_start": "2026-09-20T13:28:07Z",
+        "window_end": "2026-09-20T14:18:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2593,8 +2618,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0012",
-        "window_start": "2026-09-10T01:05:12Z",
-        "window_end": "2026-09-10T01:55:12Z"
+        "window_start": "2026-09-20T14:18:07Z",
+        "window_end": "2026-09-20T15:08:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2605,8 +2630,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0013",
-        "window_start": "2026-09-10T01:55:12Z",
-        "window_end": "2026-09-10T02:45:12Z"
+        "window_start": "2026-09-20T15:08:07Z",
+        "window_end": "2026-09-20T15:58:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2617,8 +2642,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0014",
-        "window_start": "2026-09-10T02:45:12Z",
-        "window_end": "2026-09-10T03:35:12Z"
+        "window_start": "2026-09-20T15:58:07Z",
+        "window_end": "2026-09-20T16:48:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2629,8 +2654,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0015",
-        "window_start": "2026-09-10T03:35:12Z",
-        "window_end": "2026-09-10T04:25:12Z"
+        "window_start": "2026-09-20T16:48:07Z",
+        "window_end": "2026-09-20T17:38:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2641,8 +2666,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0016",
-        "window_start": "2026-09-10T04:25:12Z",
-        "window_end": "2026-09-10T05:15:12Z"
+        "window_start": "2026-09-20T17:38:07Z",
+        "window_end": "2026-09-20T18:28:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2653,8 +2678,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0017",
-        "window_start": "2026-09-10T05:15:12Z",
-        "window_end": "2026-09-10T06:05:12Z"
+        "window_start": "2026-09-20T18:28:07Z",
+        "window_end": "2026-09-20T19:18:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2665,8 +2690,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0018",
-        "window_start": "2026-09-10T06:05:12Z",
-        "window_end": "2026-09-10T06:55:12Z"
+        "window_start": "2026-09-20T19:18:07Z",
+        "window_end": "2026-09-20T20:08:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2677,8 +2702,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0019",
-        "window_start": "2026-09-10T06:55:12Z",
-        "window_end": "2026-09-10T07:45:12Z"
+        "window_start": "2026-09-20T20:08:07Z",
+        "window_end": "2026-09-20T20:58:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2689,8 +2714,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0020",
-        "window_start": "2026-09-10T07:45:12Z",
-        "window_end": "2026-09-10T08:35:12Z"
+        "window_start": "2026-09-20T20:58:07Z",
+        "window_end": "2026-09-20T21:48:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2701,8 +2726,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0021",
-        "window_start": "2026-09-10T08:35:12Z",
-        "window_end": "2026-09-10T09:25:12Z"
+        "window_start": "2026-09-20T21:48:07Z",
+        "window_end": "2026-09-20T22:38:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2713,8 +2738,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0022",
-        "window_start": "2026-09-10T09:25:12Z",
-        "window_end": "2026-09-10T10:15:12Z"
+        "window_start": "2026-09-20T22:38:07Z",
+        "window_end": "2026-09-20T23:28:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2725,8 +2750,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0023",
-        "window_start": "2026-09-10T10:15:12Z",
-        "window_end": "2026-09-10T11:05:12Z"
+        "window_start": "2026-09-20T23:28:07Z",
+        "window_end": "2026-09-21T00:18:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2737,8 +2762,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0024",
-        "window_start": "2026-09-10T11:05:12Z",
-        "window_end": "2026-09-10T11:55:12Z"
+        "window_start": "2026-09-21T00:18:07Z",
+        "window_end": "2026-09-21T01:08:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2749,8 +2774,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0025",
-        "window_start": "2026-09-10T11:55:12Z",
-        "window_end": "2026-09-10T12:45:12Z"
+        "window_start": "2026-09-21T01:08:07Z",
+        "window_end": "2026-09-21T01:58:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2761,8 +2786,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0026",
-        "window_start": "2026-09-10T12:45:12Z",
-        "window_end": "2026-09-10T13:35:12Z"
+        "window_start": "2026-09-21T01:58:07Z",
+        "window_end": "2026-09-21T02:48:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2773,8 +2798,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0027",
-        "window_start": "2026-09-10T13:35:12Z",
-        "window_end": "2026-09-10T14:25:12Z"
+        "window_start": "2026-09-21T02:48:07Z",
+        "window_end": "2026-09-21T03:38:07Z"
       },
       {
         "method": "wms.stockin.Purchase.queryWithDetail",
@@ -2785,8 +2810,762 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_purchase_orders_0028",
-        "window_start": "2026-09-10T14:25:12Z",
-        "window_end": "2026-09-10T15:05:12Z"
+        "window_start": "2026-09-21T03:38:07Z",
+        "window_end": "2026-09-21T04:18:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0000",
+        "window_start": "2026-09-20T04:18:07Z",
+        "window_end": "2026-09-20T05:08:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0001",
+        "window_start": "2026-09-20T05:08:07Z",
+        "window_end": "2026-09-20T05:58:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0002",
+        "window_start": "2026-09-20T05:58:07Z",
+        "window_end": "2026-09-20T06:48:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0003",
+        "window_start": "2026-09-20T06:48:07Z",
+        "window_end": "2026-09-20T07:38:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0004",
+        "window_start": "2026-09-20T07:38:07Z",
+        "window_end": "2026-09-20T08:28:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0005",
+        "window_start": "2026-09-20T08:28:07Z",
+        "window_end": "2026-09-20T09:18:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0006",
+        "window_start": "2026-09-20T09:18:07Z",
+        "window_end": "2026-09-20T10:08:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0007",
+        "window_start": "2026-09-20T10:08:07Z",
+        "window_end": "2026-09-20T10:58:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0008",
+        "window_start": "2026-09-20T10:58:07Z",
+        "window_end": "2026-09-20T11:48:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0009",
+        "window_start": "2026-09-20T11:48:07Z",
+        "window_end": "2026-09-20T12:38:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0010",
+        "window_start": "2026-09-20T12:38:07Z",
+        "window_end": "2026-09-20T13:28:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0011",
+        "window_start": "2026-09-20T13:28:07Z",
+        "window_end": "2026-09-20T14:18:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0012",
+        "window_start": "2026-09-20T14:18:07Z",
+        "window_end": "2026-09-20T15:08:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0013",
+        "window_start": "2026-09-20T15:08:07Z",
+        "window_end": "2026-09-20T15:58:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0014",
+        "window_start": "2026-09-20T15:58:07Z",
+        "window_end": "2026-09-20T16:48:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0015",
+        "window_start": "2026-09-20T16:48:07Z",
+        "window_end": "2026-09-20T17:38:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0016",
+        "window_start": "2026-09-20T17:38:07Z",
+        "window_end": "2026-09-20T18:28:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0017",
+        "window_start": "2026-09-20T18:28:07Z",
+        "window_end": "2026-09-20T19:18:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0018",
+        "window_start": "2026-09-20T19:18:07Z",
+        "window_end": "2026-09-20T20:08:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0019",
+        "window_start": "2026-09-20T20:08:07Z",
+        "window_end": "2026-09-20T20:58:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0020",
+        "window_start": "2026-09-20T20:58:07Z",
+        "window_end": "2026-09-20T21:48:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0021",
+        "window_start": "2026-09-20T21:48:07Z",
+        "window_end": "2026-09-20T22:38:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0022",
+        "window_start": "2026-09-20T22:38:07Z",
+        "window_end": "2026-09-20T23:28:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0023",
+        "window_start": "2026-09-20T23:28:07Z",
+        "window_end": "2026-09-21T00:18:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0024",
+        "window_start": "2026-09-21T00:18:07Z",
+        "window_end": "2026-09-21T01:08:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0025",
+        "window_start": "2026-09-21T01:08:07Z",
+        "window_end": "2026-09-21T01:58:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0026",
+        "window_start": "2026-09-21T01:58:07Z",
+        "window_end": "2026-09-21T02:48:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0027",
+        "window_start": "2026-09-21T02:48:07Z",
+        "window_end": "2026-09-21T03:38:07Z"
+      },
+      {
+        "method": "wms.stockout.Sales.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {
+          "status_type": 0
+        },
+        "dataset": "wdt_stockout_sales_0028",
+        "window_start": "2026-09-21T03:38:07Z",
+        "window_end": "2026-09-21T04:18:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0000",
+        "window_start": "2026-09-20T04:18:07Z",
+        "window_end": "2026-09-20T05:08:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0001",
+        "window_start": "2026-09-20T05:08:07Z",
+        "window_end": "2026-09-20T05:58:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0002",
+        "window_start": "2026-09-20T05:58:07Z",
+        "window_end": "2026-09-20T06:48:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0003",
+        "window_start": "2026-09-20T06:48:07Z",
+        "window_end": "2026-09-20T07:38:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0004",
+        "window_start": "2026-09-20T07:38:07Z",
+        "window_end": "2026-09-20T08:28:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0005",
+        "window_start": "2026-09-20T08:28:07Z",
+        "window_end": "2026-09-20T09:18:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0006",
+        "window_start": "2026-09-20T09:18:07Z",
+        "window_end": "2026-09-20T10:08:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0007",
+        "window_start": "2026-09-20T10:08:07Z",
+        "window_end": "2026-09-20T10:58:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0008",
+        "window_start": "2026-09-20T10:58:07Z",
+        "window_end": "2026-09-20T11:48:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0009",
+        "window_start": "2026-09-20T11:48:07Z",
+        "window_end": "2026-09-20T12:38:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0010",
+        "window_start": "2026-09-20T12:38:07Z",
+        "window_end": "2026-09-20T13:28:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0011",
+        "window_start": "2026-09-20T13:28:07Z",
+        "window_end": "2026-09-20T14:18:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0012",
+        "window_start": "2026-09-20T14:18:07Z",
+        "window_end": "2026-09-20T15:08:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0013",
+        "window_start": "2026-09-20T15:08:07Z",
+        "window_end": "2026-09-20T15:58:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0014",
+        "window_start": "2026-09-20T15:58:07Z",
+        "window_end": "2026-09-20T16:48:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0015",
+        "window_start": "2026-09-20T16:48:07Z",
+        "window_end": "2026-09-20T17:38:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0016",
+        "window_start": "2026-09-20T17:38:07Z",
+        "window_end": "2026-09-20T18:28:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0017",
+        "window_start": "2026-09-20T18:28:07Z",
+        "window_end": "2026-09-20T19:18:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0018",
+        "window_start": "2026-09-20T19:18:07Z",
+        "window_end": "2026-09-20T20:08:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0019",
+        "window_start": "2026-09-20T20:08:07Z",
+        "window_end": "2026-09-20T20:58:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0020",
+        "window_start": "2026-09-20T20:58:07Z",
+        "window_end": "2026-09-20T21:48:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0021",
+        "window_start": "2026-09-20T21:48:07Z",
+        "window_end": "2026-09-20T22:38:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0022",
+        "window_start": "2026-09-20T22:38:07Z",
+        "window_end": "2026-09-20T23:28:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0023",
+        "window_start": "2026-09-20T23:28:07Z",
+        "window_end": "2026-09-21T00:18:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0024",
+        "window_start": "2026-09-21T00:18:07Z",
+        "window_end": "2026-09-21T01:08:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0025",
+        "window_start": "2026-09-21T01:08:07Z",
+        "window_end": "2026-09-21T01:58:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0026",
+        "window_start": "2026-09-21T01:58:07Z",
+        "window_end": "2026-09-21T02:48:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0027",
+        "window_start": "2026-09-21T02:48:07Z",
+        "window_end": "2026-09-21T03:38:07Z"
+      },
+      {
+        "method": "wms.stockin.Refund.queryWithDetail",
+        "target_table": "wdt_records",
+        "record_id_path": "order_no",
+        "page_size": 100,
+        "max_pages": 1000,
+        "max_window_minutes": 50,
+        "params": {},
+        "dataset": "wdt_stockin_refund_0028",
+        "window_start": "2026-09-21T03:38:07Z",
+        "window_end": "2026-09-21T04:18:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2797,8 +3576,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0000",
-        "window_start": "2026-09-09T15:05:12Z",
-        "window_end": "2026-09-09T15:55:12Z"
+        "window_start": "2026-09-20T04:18:07Z",
+        "window_end": "2026-09-20T05:08:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2809,8 +3588,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0001",
-        "window_start": "2026-09-09T15:55:12Z",
-        "window_end": "2026-09-09T16:45:12Z"
+        "window_start": "2026-09-20T05:08:07Z",
+        "window_end": "2026-09-20T05:58:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2821,8 +3600,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0002",
-        "window_start": "2026-09-09T16:45:12Z",
-        "window_end": "2026-09-09T17:35:12Z"
+        "window_start": "2026-09-20T05:58:07Z",
+        "window_end": "2026-09-20T06:48:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2833,8 +3612,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0003",
-        "window_start": "2026-09-09T17:35:12Z",
-        "window_end": "2026-09-09T18:25:12Z"
+        "window_start": "2026-09-20T06:48:07Z",
+        "window_end": "2026-09-20T07:38:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2845,8 +3624,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0004",
-        "window_start": "2026-09-09T18:25:12Z",
-        "window_end": "2026-09-09T19:15:12Z"
+        "window_start": "2026-09-20T07:38:07Z",
+        "window_end": "2026-09-20T08:28:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2857,8 +3636,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0005",
-        "window_start": "2026-09-09T19:15:12Z",
-        "window_end": "2026-09-09T20:05:12Z"
+        "window_start": "2026-09-20T08:28:07Z",
+        "window_end": "2026-09-20T09:18:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2869,8 +3648,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0006",
-        "window_start": "2026-09-09T20:05:12Z",
-        "window_end": "2026-09-09T20:55:12Z"
+        "window_start": "2026-09-20T09:18:07Z",
+        "window_end": "2026-09-20T10:08:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2881,8 +3660,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0007",
-        "window_start": "2026-09-09T20:55:12Z",
-        "window_end": "2026-09-09T21:45:12Z"
+        "window_start": "2026-09-20T10:08:07Z",
+        "window_end": "2026-09-20T10:58:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2893,8 +3672,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0008",
-        "window_start": "2026-09-09T21:45:12Z",
-        "window_end": "2026-09-09T22:35:12Z"
+        "window_start": "2026-09-20T10:58:07Z",
+        "window_end": "2026-09-20T11:48:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2905,8 +3684,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0009",
-        "window_start": "2026-09-09T22:35:12Z",
-        "window_end": "2026-09-09T23:25:12Z"
+        "window_start": "2026-09-20T11:48:07Z",
+        "window_end": "2026-09-20T12:38:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2917,8 +3696,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0010",
-        "window_start": "2026-09-09T23:25:12Z",
-        "window_end": "2026-09-10T00:15:12Z"
+        "window_start": "2026-09-20T12:38:07Z",
+        "window_end": "2026-09-20T13:28:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2929,8 +3708,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0011",
-        "window_start": "2026-09-10T00:15:12Z",
-        "window_end": "2026-09-10T01:05:12Z"
+        "window_start": "2026-09-20T13:28:07Z",
+        "window_end": "2026-09-20T14:18:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2941,8 +3720,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0012",
-        "window_start": "2026-09-10T01:05:12Z",
-        "window_end": "2026-09-10T01:55:12Z"
+        "window_start": "2026-09-20T14:18:07Z",
+        "window_end": "2026-09-20T15:08:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2953,8 +3732,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0013",
-        "window_start": "2026-09-10T01:55:12Z",
-        "window_end": "2026-09-10T02:45:12Z"
+        "window_start": "2026-09-20T15:08:07Z",
+        "window_end": "2026-09-20T15:58:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2965,8 +3744,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0014",
-        "window_start": "2026-09-10T02:45:12Z",
-        "window_end": "2026-09-10T03:35:12Z"
+        "window_start": "2026-09-20T15:58:07Z",
+        "window_end": "2026-09-20T16:48:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2977,8 +3756,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0015",
-        "window_start": "2026-09-10T03:35:12Z",
-        "window_end": "2026-09-10T04:25:12Z"
+        "window_start": "2026-09-20T16:48:07Z",
+        "window_end": "2026-09-20T17:38:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -2989,8 +3768,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0016",
-        "window_start": "2026-09-10T04:25:12Z",
-        "window_end": "2026-09-10T05:15:12Z"
+        "window_start": "2026-09-20T17:38:07Z",
+        "window_end": "2026-09-20T18:28:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3001,8 +3780,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0017",
-        "window_start": "2026-09-10T05:15:12Z",
-        "window_end": "2026-09-10T06:05:12Z"
+        "window_start": "2026-09-20T18:28:07Z",
+        "window_end": "2026-09-20T19:18:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3013,8 +3792,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0018",
-        "window_start": "2026-09-10T06:05:12Z",
-        "window_end": "2026-09-10T06:55:12Z"
+        "window_start": "2026-09-20T19:18:07Z",
+        "window_end": "2026-09-20T20:08:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3025,8 +3804,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0019",
-        "window_start": "2026-09-10T06:55:12Z",
-        "window_end": "2026-09-10T07:45:12Z"
+        "window_start": "2026-09-20T20:08:07Z",
+        "window_end": "2026-09-20T20:58:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3037,8 +3816,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0020",
-        "window_start": "2026-09-10T07:45:12Z",
-        "window_end": "2026-09-10T08:35:12Z"
+        "window_start": "2026-09-20T20:58:07Z",
+        "window_end": "2026-09-20T21:48:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3049,8 +3828,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0021",
-        "window_start": "2026-09-10T08:35:12Z",
-        "window_end": "2026-09-10T09:25:12Z"
+        "window_start": "2026-09-20T21:48:07Z",
+        "window_end": "2026-09-20T22:38:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3061,8 +3840,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0022",
-        "window_start": "2026-09-10T09:25:12Z",
-        "window_end": "2026-09-10T10:15:12Z"
+        "window_start": "2026-09-20T22:38:07Z",
+        "window_end": "2026-09-20T23:28:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3073,8 +3852,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0023",
-        "window_start": "2026-09-10T10:15:12Z",
-        "window_end": "2026-09-10T11:05:12Z"
+        "window_start": "2026-09-20T23:28:07Z",
+        "window_end": "2026-09-21T00:18:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3085,8 +3864,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0024",
-        "window_start": "2026-09-10T11:05:12Z",
-        "window_end": "2026-09-10T11:55:12Z"
+        "window_start": "2026-09-21T00:18:07Z",
+        "window_end": "2026-09-21T01:08:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3097,8 +3876,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0025",
-        "window_start": "2026-09-10T11:55:12Z",
-        "window_end": "2026-09-10T12:45:12Z"
+        "window_start": "2026-09-21T01:08:07Z",
+        "window_end": "2026-09-21T01:58:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3109,8 +3888,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0026",
-        "window_start": "2026-09-10T12:45:12Z",
-        "window_end": "2026-09-10T13:35:12Z"
+        "window_start": "2026-09-21T01:58:07Z",
+        "window_end": "2026-09-21T02:48:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3121,8 +3900,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0027",
-        "window_start": "2026-09-10T13:35:12Z",
-        "window_end": "2026-09-10T14:25:12Z"
+        "window_start": "2026-09-21T02:48:07Z",
+        "window_end": "2026-09-21T03:38:07Z"
       },
       {
         "method": "wms.StockSpec.search2",
@@ -3133,8 +3912,8 @@
         "max_window_minutes": 50,
         "params": {},
         "dataset": "wdt_stock_specs_0028",
-        "window_start": "2026-09-10T14:25:12Z",
-        "window_end": "2026-09-10T15:05:12Z"
+        "window_start": "2026-09-21T03:38:07Z",
+        "window_end": "2026-09-21T04:18:07Z"
       }
     ]
   }

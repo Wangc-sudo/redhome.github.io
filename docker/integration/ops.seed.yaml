@@ -1,0 +1,13 @@
+# ops-web 权限自举 seed（设计稿 2026-09-21 §4.2 / §9 M0）
+#
+# 仅用于首发布把唯一 admin 落库（deny-by-default 下的准入起点）；
+# 其余所有人员的授权由 admin 在 ops-web 权限管理分配，每次变更落 audit，
+# 不再回本文件。发布命令：
+#   python -m common.public_data.cli load-ops-seed \
+#     --seed docker/integration/ops.seed.yaml --confirm-local-test-write
+version: 1
+grants:
+  - user_id: "014341566058939427"
+    grant_type: admin
+    grant_key: "-"
+    note: 自举管理员 王城

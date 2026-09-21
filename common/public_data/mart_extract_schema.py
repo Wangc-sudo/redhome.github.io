@@ -171,6 +171,24 @@ EXTRACT_DATASETS = (
         kind="order_line_expand",
         source="wdt",
     ),
+    # 仓库运作（2026-09-21）：wdt_records 销售出库 / 退货入库 payload
+    # 展开成行级事实，口径与 fact_order_line 对齐（行展开 + 渠道归一）。
+    ExtractDataset(
+        dataset="wdt_stockout_line_fact",
+        source_table="wdt_records",
+        target_table="fact_stockout_line",
+        columns=(),
+        kind="stockout_line_expand",
+        source="wdt",
+    ),
+    ExtractDataset(
+        dataset="wdt_refund_line_fact",
+        source_table="wdt_records",
+        target_table="fact_refund_line",
+        columns=(),
+        kind="refund_line_expand",
+        source="wdt",
+    ),
 )
 
 
@@ -446,9 +464,84 @@ def order_line_channel_ddl_statements() -> tuple:
     return (_FACT_ORDER_LINE_CHANNEL_DDL,)
 
 
+# 仓库运作（2026-09-21）：销售出库单行事实。``order_no`` 为 WDT 出库单号；
+# ``consign_time`` 取发货时间（采集窗口 status_type=0 同源）；品牌直接取
+# 出库明细 payload 的 ``brand_name``（WDT 侧已带），不经 dim_product 反查。
+_FACT_STOCKOUT_LINE_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_stockout_line` (\n"
+    "  `order_no` VARCHAR(64) NOT NULL,\n"
+    "  `line_no` INT UNSIGNED NOT NULL,\n"
+    "  `consign_time` DATETIME(6) DEFAULT NULL,\n"
+    "  `status` VARCHAR(20) DEFAULT NULL,\n"
+    "  `warehouse_no` VARCHAR(50) DEFAULT NULL,\n"
+    "  `warehouse_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `shop_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `channel_name` VARCHAR(100) DEFAULT NULL,\n"
+    "  `trade_no` VARCHAR(64) DEFAULT NULL,\n"
+    "  `logistics_no` VARCHAR(100) DEFAULT NULL,\n"
+    "  `logistics_name` VARCHAR(100) DEFAULT NULL,\n"
+    "  `spec_no` VARCHAR(100) DEFAULT NULL,\n"
+    "  `goods_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `brand_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `quantity` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `sell_price` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `paid_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `raw_json` JSON DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`order_no`, `line_no`),\n"
+    "  KEY `idx_stockout_consign_time` (`consign_time`),\n"
+    "  KEY `idx_stockout_spec` (`spec_no`),\n"
+    "  KEY `idx_stockout_warehouse` (`warehouse_no`),\n"
+    "  KEY `idx_stockout_channel` (`channel_name`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+# 退货入库单行事实。``order_no`` 为 WDT 入库单号，``refund_no`` 为退货单号；
+# ``check_time`` 取审核（入库）时间；退货金额取明细级
+# ``refund_amount`` / ``actual_refund_amount``。
+_FACT_REFUND_LINE_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_refund_line` (\n"
+    "  `order_no` VARCHAR(64) NOT NULL,\n"
+    "  `line_no` INT UNSIGNED NOT NULL,\n"
+    "  `refund_no` VARCHAR(64) DEFAULT NULL,\n"
+    "  `check_time` DATETIME(6) DEFAULT NULL,\n"
+    "  `process_status` VARCHAR(20) DEFAULT NULL,\n"
+    "  `warehouse_no` VARCHAR(50) DEFAULT NULL,\n"
+    "  `shop_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `channel_name` VARCHAR(100) DEFAULT NULL,\n"
+    "  `reason` VARCHAR(255) DEFAULT NULL,\n"
+    "  `logistics_no` VARCHAR(100) DEFAULT NULL,\n"
+    "  `spec_no` VARCHAR(100) DEFAULT NULL,\n"
+    "  `goods_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `brand_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `quantity` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `stockin_quantity` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `refund_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `actual_refund_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `raw_json` JSON DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`order_no`, `line_no`),\n"
+    "  KEY `idx_refund_check_time` (`check_time`),\n"
+    "  KEY `idx_refund_spec` (`spec_no`),\n"
+    "  KEY `idx_refund_no` (`refund_no`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def stock_flow_ddl_statements() -> tuple:
+    """销售出库 / 退货入库行事实表（独立迁移版本 mart-extract-stock-flow-v1）。"""
+    return (
+        _FACT_STOCKOUT_LINE_DDL,
+        _FACT_REFUND_LINE_DDL,
+    )
+
+
 def ddl_statements() -> tuple:
     return (
         legacy_ddl_statements()
         + finance_ddl_statements()
         + order_line_ddl_statements()
+        + stock_flow_ddl_statements()
     )

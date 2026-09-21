@@ -21,6 +21,24 @@
       "params": {}
     },
     {
+      "dataset": "wdt_stockout_sales",
+      "method": "wms.stockout.Sales.queryWithDetail",
+      "record_id_path": "order_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {"status_type": 0}
+    },
+    {
+      "dataset": "wdt_stockin_refund",
+      "method": "wms.stockin.Refund.queryWithDetail",
+      "record_id_path": "order_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {}
+    },
+    {
       "dataset": "wdt_stock_specs",
       "method": "wms.StockSpec.search2",
       "record_id_path": "rec_id",

@@ -222,12 +222,63 @@ class TestShippedCalendarSeed(unittest.TestCase):
     """真正发版的种子必须能复现 spec §10 的规则。"""
 
     def test_shipped_seed_reproduces_september_2026_rest_days(self):
+        """回归锚点：扩年后 2026-09 条目不动力（24 工作日、9/20 调休上班）。"""
         months = load_calendar_seed(SEED_PATH)
-        self.assertEqual(len(months), 1)
-        year, month, rest_days, source = months[0]
-        self.assertEqual((year, month), (2026, 9))
+        by_month = {(year, month): (rest_days, source)
+                    for year, month, rest_days, source in months}
+        rest_days, source = by_month[(2026, 9)]
         self.assertEqual(rest_days, [6, 13, 19, 25, 26, 27])
         self.assertEqual(source, SOURCE_LOCAL)
+
+    def test_shipped_seed_covers_2025_01_through_2026_12(self):
+        months = load_calendar_seed(SEED_PATH)
+        self.assertEqual(len(months), 24)
+        self.assertEqual(
+            [(year, month) for year, month, _, _ in months],
+            [(year, month)
+             for year in (2025, 2026) for month in range(1, 13)],
+        )
+        for _, _, _, source in months:
+            self.assertEqual(source, SOURCE_LOCAL)
+
+    def test_shipped_seed_pins_every_month_rest_days(self):
+        """逐月钉死 rest_days 推导结果（种子 diff 即审计轨迹，改动必撞此表）。
+
+        口径备忘：2025 年各月周六一律休（main 2026-09-18 裁定，宁漏报不
+        误报红，待 HR 回补），调休周六 2/8、10/11 已显式恢复；2026 年
+        维持锚点同口径（每月第 3 个周六大休）。
+        """
+        expected = {
+            (2025, 1): [1, 4, 5, 11, 12, 18, 19, 25, 28, 29, 30, 31],
+            (2025, 2): [1, 2, 3, 4, 9, 15, 16, 22, 23],
+            (2025, 3): [1, 2, 8, 9, 15, 16, 22, 23, 29, 30],
+            (2025, 4): [4, 5, 6, 12, 13, 19, 20, 26],
+            (2025, 5): [1, 2, 3, 4, 5, 10, 11, 17, 18, 24, 25, 31],
+            (2025, 6): [1, 2, 7, 8, 14, 15, 21, 22, 28, 29],
+            (2025, 7): [5, 6, 12, 13, 19, 20, 26, 27],
+            (2025, 8): [2, 3, 9, 10, 16, 17, 23, 24, 30, 31],
+            (2025, 9): [6, 7, 13, 14, 20, 21, 27],
+            (2025, 10): [1, 2, 3, 4, 5, 6, 7, 8, 12, 18, 19, 25, 26],
+            (2025, 11): [1, 2, 8, 9, 15, 16, 22, 23, 29, 30],
+            (2025, 12): [6, 7, 13, 14, 20, 21, 27, 28],
+            (2026, 1): [1, 2, 3, 11, 17, 18, 25],
+            (2026, 2): [1, 8, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+            (2026, 3): [1, 8, 15, 21, 22, 29],
+            (2026, 4): [4, 5, 6, 12, 18, 19, 26],
+            (2026, 5): [1, 2, 3, 4, 5, 10, 16, 17, 24, 31],
+            (2026, 6): [7, 14, 19, 20, 21, 28],
+            (2026, 7): [5, 12, 18, 19, 26],
+            (2026, 8): [2, 9, 15, 16, 23, 30],
+            (2026, 9): [6, 13, 19, 25, 26, 27],
+            (2026, 10): [1, 2, 3, 4, 5, 6, 7, 11, 17, 18, 25],
+            (2026, 11): [1, 8, 15, 21, 22, 29],
+            (2026, 12): [6, 13, 19, 20, 27],
+        }
+        months = load_calendar_seed(SEED_PATH)
+        self.assertEqual(
+            {(year, month): rest_days for year, month, rest_days, _ in months},
+            expected,
+        )
 
     def test_shipped_seed_never_declares_a_derived_rest_days_list(self):
         """restDays 必须推导、不得手工列举，否则会漂移。"""

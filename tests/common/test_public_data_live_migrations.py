@@ -47,7 +47,7 @@ class FinanceSchemaTests(unittest.TestCase):
         self.assertIn("idx_company_store", [idx.name for idx in table.indexes])
         self.assertIn("dingtalk_record_id", [c.name for c in table.technical_columns])
 
-    def test_all_twenty_tables_are_registered(self):
+    def test_all_twenty_one_tables_are_registered(self):
         expected = {
             "fin_store_commission",
             "fin_tax_declaration_2026",
@@ -69,6 +69,7 @@ class FinanceSchemaTests(unittest.TestCase):
             "fin_offline_deposit_other_receivables",
             "daily_report_offline",
             "channel_daily_sales",
+            "channel_monthly_target",
         }
         from common.public_data.finance_schema import all_table_definitions
         registered = {t.name for t in all_table_definitions()}

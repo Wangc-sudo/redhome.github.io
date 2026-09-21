@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from common.public_data.manifest import WdtDataset
 
 ALLOWED_WDT_METHODS = frozenset(
     {
         "sales.TradeQuery.queryWithDetail",
+        "wms.stockout.Sales.queryWithDetail",
         "wms.stockin.Purchase.queryWithDetail",
+        "wms.stockin.Refund.queryWithDetail",
         "wms.StockSpec.search2",
         "goods.Goods.queryWithSpec",
     }
@@ -27,6 +32,15 @@ class WdtReadError(ValueError):
 
 class PaginationLimitExceeded(WdtReadError):
     """Raised when a dataset requires more pages than max_pages allows."""
+
+
+#: 跨页重复 ID 容忍度（按 page_size 计）。来源是分页漂移：按修改时间排序的
+#: 结果集在翻页间隙被业务侧继续写入，后一页会带回前一页尾部若干行——保留
+#: 首见、跳过重复即可（raw 层本就按 stable_id 幂等 upsert）。同页内重复仍
+#: 视为接口异常直接报错；跨页重复超过一整页的量说明 record_id_path 配置
+#: 错误（近乎条条重复），同样报错。2026-09-21 30 天回补实锤：采购单接口
+#: 在 >100 行的繁忙窗口两页间漂移一条 CG202608310004，旧守卫直接杀 run。
+_DUPLICATE_DRIFT_TOLERANCE_PAGES = 1
 
 
 def _extract_nested(record: dict, path: str) -> Any:
@@ -117,6 +131,8 @@ class WdtReadGateway:
         """Page through a single time window, returning validated records."""
         records: list[tuple[dict, str]] = []
         seen_ids: set[str] = set()
+        drift_duplicates = 0
+        drift_tolerance = dataset.page_size * _DUPLICATE_DRIFT_TOLERANCE_PAGES
 
         for page_no in range(dataset.max_pages):
             response = self._call(
@@ -140,18 +156,36 @@ class WdtReadGateway:
                     f"({dataset.max_pages}) for method {dataset.method}"
                 )
 
+            page_ids: set[str] = set()
             for row in rows:
                 stable_id = self._extract_stable_id(row, dataset)
-                if stable_id in seen_ids:
+                if stable_id in page_ids:
                     raise WdtReadError(
-                        f"duplicate record id {stable_id!r} in dataset "
-                        f"{dataset.dataset!r}"
+                        f"duplicate record id {stable_id!r} within one page "
+                        f"in dataset {dataset.dataset!r}"
                     )
+                page_ids.add(stable_id)
+                if stable_id in seen_ids:
+                    # 跨页漂移重复：跳过重复行，保留首见（详见模块常量注释）。
+                    drift_duplicates += 1
+                    if drift_duplicates > drift_tolerance:
+                        raise WdtReadError(
+                            f"duplicate record id {stable_id!r} in dataset "
+                            f"{dataset.dataset!r}: cross-page duplicates "
+                            f"exceed tolerance {drift_tolerance}"
+                        )
+                    continue
                 seen_ids.add(stable_id)
                 records.append((row, stable_id))
 
             if not is_full_page:
                 break
+
+        if drift_duplicates:
+            logger.warning(
+                "dataset=%s 跳过 %d 条跨页漂移重复记录（容忍度 %d）",
+                dataset.dataset, drift_duplicates, drift_tolerance,
+            )
 
         return records
 

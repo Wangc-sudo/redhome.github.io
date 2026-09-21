@@ -462,6 +462,55 @@ services:
         source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
         target: /output
 
+  # 调度器：常驻容器，按注册表（Nacos/seed）里各管道的 cron 定时触发对应
+  # 一次性命令，取代宿主机 Windows 计划任务/手动 docker compose run。
+  # 挂载 = 各被调度服务的并集（live 凭据 + manifest + pages 输出目录），
+  # 子进程透传全部环境、仅覆写 PUBLIC_DATA_SERVICE_ID/ROBOT_REGION。
+  # 每次触发持 MySQL 命名锁（mart 库），防与手动 run/其他副本并发。
+  scheduler:
+    profiles:
+      - scheduler
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.public_data.scheduler
+    restart: unless-stopped
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /run/live-input/manifest.json
+      PUBLIC_DATA_ORG_SEED: /app/docker/integration/org.seed.json
+      PUBLIC_DATA_CALENDAR_SEED: /app/docker/integration/calendar.seed.json
+      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
+      PUBLIC_DATA_SERVICE_ID: scheduler
+      TZ: Asia/Shanghai
+      INTEGRATION_TEST_RUNNER: "1"
+    volumes:
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_MANIFEST_PATH:-/dev/null}
+        target: /run/live-input/manifest.json
+        read_only: true
+      - type: bind
+        source: ${PUBLIC_DATA_LIVE_CREDENTIALS_PATH:-/dev/null}
+        target: /run/live-input/source-credentials.json
+        read_only: true
+      - type: bind
+        source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
+        target: /output
+
   # 业务线 bi-web（阶段 A）：只读 mart_ops 的 L1 驾驶舱。零凭据、零挂载、
   # 零 --live-*；注册表请求级门控（Nacos 关 bi-web 即全站 503）。
   # 端口仅回环，与 mysql 13306 同约定。
@@ -492,6 +541,12 @@ services:
       PUBLIC_DATA_SERVICE_ID: bi-web
       PUBLIC_DATA_BI_SEED: /app/docker/integration/bi.seed.yaml
       BI_WEB_TOKEN: ${BI_WEB_TOKEN:-}
+      # 钉钉免登（设计稿 2026-09-21，外呼白名单方案 A）：session 密钥与
+      # 钉钉凭据一律宿主机环境变量透传、仓库外注入；三者都为空 = 免登
+      # 通道关闭，身份层退化为纯 Bearer（行为与免登引入前逐字一致）。
+      BI_WEB_SESSION_SECRET: ${BI_WEB_SESSION_SECRET:-}
+      BI_DINGTALK_APPKEY: ${BI_DINGTALK_APPKEY:-}
+      BI_DINGTALK_APPSECRET: ${BI_DINGTALK_APPSECRET:-}
       # 阶段 2 卡片缓存开关：空 = 进程内缓存兜底；指向 redis 服务则启用
       # Redis 后端。bi-web 对 redis 零 depends_on —— 缓存挂 ≠ 看板挂
       # （fail-open，miss 即 mart 直查），见 cache.py。
@@ -499,6 +554,42 @@ services:
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:18080:8080"
+
+  # 运维系统（设计稿 2026-09-21 §3）：权限管理为其第一个功能，是
+  # bi_authz_grant* 的唯一写入方。双闸——网络层仅回环（127.0.0.1:18100）、
+  # 应用层 admin scope 校验；不是面向全员的服务。凭据与 bi-web 同款
+  # 仓库外透传；零挂载（seed 经 load-ops-seed 命令落库，不经容器卷）。
+  ops-web:
+    profiles:
+      - ops-web
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    entrypoint: ["python3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - -m
+      - common.ops_web.app
+    environment:
+      <<: *nacos-env
+      APP_ENV: test
+      PUBLIC_DATA_RDS_HOST: mysql
+      PUBLIC_DATA_RDS_PORT: "3306"
+      PUBLIC_DATA_RDS_USER: public_data_test
+      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
+      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
+      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
+      PUBLIC_DATA_MART_DATABASE: mart_ops_test
+      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
+      PUBLIC_DATA_SERVICE_ID: ops-web
+      BI_WEB_SESSION_SECRET: ${BI_WEB_SESSION_SECRET:-}
+      BI_DINGTALK_APPKEY: ${BI_DINGTALK_APPKEY:-}
+      BI_DINGTALK_APPSECRET: ${BI_DINGTALK_APPSECRET:-}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:18100:8080"
 
   # 可选增强（阶段 2）：Redis 卡片缓存后端。显式 `--profile bi-web-redis`
   # 才启动；不设 PUBLIC_DATA_REDIS_URL=redis://redis:6379/0 时 bi-web

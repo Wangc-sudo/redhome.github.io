@@ -1,6 +1,8 @@
 "use strict";
 /* ========================= 0. 基础工具 ========================= */
 var PAL = ['#2f5ce8','#0f9b8e','#8f6d0a','#2f6fed','#a85400','#0a7d4f','#6366f1','#0ea5b7'];
+/* 挂零红点色：复用 bi.css --severity-p0（与 miniBar p0 同值），不新造色值。 */
+var SEV_P0 = '#cf222e';
 
 function nf(n, d){ if (n == null || !isFinite(n)) return '—'; return n.toLocaleString('zh-CN', {maximumFractionDigits: d == null ? 0 : d}); }
 function wan(n, d){ return n == null || !isFinite(n) ? '—' : nf(n / 1e4, d == null ? 1 : d); }
@@ -118,7 +120,11 @@ function ChartLine(host, opt){
     });
     if (cats.length <= 32) s.data.forEach(function(v, i){
       if (!valid(v)) return;
-      svg.appendChild(svgNode('circle', {cx: X(i), cy: Y(v), r: 2.6, fill: '#fff', stroke: pal[si % pal.length], 'stroke-width': 1.6}));
+      /* 三态：zero → 红点（severity 色填充、加大半径）；线色一律不变，
+       * 不整段变红；missing 的 null 点在上面已被 valid() 天然断线跳过。 */
+      var zero = !!(opt.status && opt.status[si] && opt.status[si][i] === 'zero');
+      svg.appendChild(svgNode('circle', {cx: X(i), cy: Y(v), r: zero ? 3.4 : 2.6,
+        fill: zero ? SEV_P0 : '#fff', stroke: pal[si % pal.length], 'stroke-width': 1.6}));
     });
   });
   var everyN = Math.ceil(cats.length / 10);
@@ -134,8 +140,17 @@ function ChartLine(host, opt){
     var i = Math.round((rel - L) / (step || 1));
     i = Math.max(0, Math.min(cats.length - 1, i));
     var html = '<div class="tt">' + esc(cats[i]) + '</div>' + series.map(function(s, si){
+      /* 三态 tooltip：zero → 数值后挂既有 .badge-defect「挂零」角标；
+       * missing → 「— · 无数据」；status 缺失按 ok 全量渲染（旧行为）。 */
+      var st = opt.status && opt.status[si] ? opt.status[si][i] : null;
+      var valHtml;
+      if (st === 'missing') valHtml = '<b>— · 无数据</b>';
+      else {
+        valHtml = '<b>' + (opt.fmt ? opt.fmt(s.data[i]) : nf(s.data[i])) + '</b>';
+        if (st === 'zero') valHtml += '<span class="badge-defect">挂零</span>';
+      }
       return '<div><span class="dot" style="background:' + pal[si % pal.length] + '"></span>' + esc(s.name) +
-        ' <b>' + (opt.fmt ? opt.fmt(s.data[i]) : nf(s.data[i])) + '</b></div>';
+        ' ' + valHtml + '</div>';
     }).join('');
     showTip(html, ev.clientX, ev.clientY - 10);
   };
@@ -283,11 +298,49 @@ function ChartDonut(host, opt){
 }
 
 /* ========================= 2. 卡片构造器 ========================= */
+/* 分段切换器：样式复用既有 .seg / .seg button.on（bi.css L108-111）。
+ * opt: {options:[{value,label,disabled,title}], value, onChange, prepend}
+ * disabled 档位置灰不可点（inline opacity，不新增类名/色值）。 */
+function Seg(host, opt){
+  var seg = el('span', 'seg');
+  (opt.options || []).forEach(function(op){
+    var b = el('button', null, esc(op.label));
+    b.type = 'button';
+    if (op.value === opt.value) b.className = 'on';
+    if (op.disabled){
+      b.disabled = true;
+      b.style.opacity = '.45';
+      b.style.cursor = 'default';
+      if (op.title) b.title = op.title;
+    }
+    if (!op.disabled) b.addEventListener('click', function(){
+      Array.prototype.forEach.call(seg.querySelectorAll('button'), function(x){ x.className = ''; });
+      b.className = 'on';
+      if (opt.onChange) opt.onChange(op.value);
+    });
+    seg.appendChild(b);
+  });
+  if (opt.prepend && host.firstChild) host.insertBefore(seg, host.firstChild);
+  else host.appendChild(seg);
+  return seg;
+}
 function CardBox(span, heightClass, title, tag, hint){
   var w = el('div', 'widget ' + span);
   var head = el('div', 'widget__head');
   if (hint) head.appendChild(el('span', 'widget__hint', hint));
-  head.appendChild(el('span', 'widget__drag', '⠿'));
+  /* 批次 B（排序+折叠）：折叠钮 + 拖拽把手。draggable 只挂把手，事件委托
+   * 在 bi-data.js 绑 #grid（replaceWidget 整块替换节点，绑 widget 即失效）。
+   * 折叠钮与 cursor:grab 走 inline（复用把手同色值 #c3cad6，不动 bi.css、
+   * 不加新色值）。 */
+  var col = el('span', 'widget__collapse', '▾');
+  col.title = '折叠';
+  col.style.cssText = 'cursor:pointer;color:#c3cad6;font-size:13px;user-select:none;line-height:1;padding:2px';
+  head.appendChild(col);
+  var drag = el('span', 'widget__drag', '⠿');
+  drag.setAttribute('draggable', 'true');
+  drag.style.cursor = 'grab';
+  drag.title = '拖拽排序 · 点击弹出移动菜单';
+  head.appendChild(drag);
   w.appendChild(head);
   var card = el('div', 'card ' + (heightClass || ''));
   var t = el('div', 'card-title', esc(title) + (tag ? '<span class="tag">' + esc(tag) + '</span>' : ''));
@@ -307,7 +360,7 @@ function CardKpi(o){
   var val = money(o.value), unit = o.unit != null ? (scale ? scale + o.unit : o.unit) : scale;
   var html = '<div class="kpi-row"><div class="kpi-value' + (o.onClick ? ' click' : '') + '">' + val +
     '<span class="u">' + unit + '</span></div></div>';
-  if (o.delta != null) html += '<div class="kpi-sub">日环比 ' + deltaHtml(o.delta) + '</div>';
+  if (o.delta != null) html += '<div class="kpi-sub">' + (o.compare_label || '日环比') + ' ' + deltaHtml(o.delta) + '</div>';
   if (o.progress != null){
     var cls = o.severity && o.severity !== 'ok' ? o.severity : '';
     html += '<div class="progress"><div class="progress-bar ' + cls + '" style="width:' +
@@ -401,7 +454,7 @@ function CardLine(o){
   var b = CardBox(o.span || 'c8', 'h-chart', o.title, o.tag, o.hint);
   b.body.appendChild(el('div', 'legend', legendHtml(o.series, o.pal || PAL)));
   var host = el('div', 'chart-host'); b.body.appendChild(host);
-  drawers.push(function(){ ChartLine(host, {cats: o.cats, series: o.series, fmt: o.fmt, pal: o.pal, area: o.area}); });
+  drawers.push(function(){ ChartLine(host, {cats: o.cats, series: o.series, fmt: o.fmt, pal: o.pal, area: o.area, status: o.status}); });
   return b.widget;
 }
 function CardBar(o){

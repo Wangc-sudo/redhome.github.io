@@ -152,7 +152,10 @@ class MartExtractRepository:
 
     def replace_table(self, target_table, columns, rows):
         dataset = next((d for d in EXTRACT_DATASETS if d.target_table == target_table), None)
-        replace_kinds = ("snapshot", "melt_store_funds", "dim_mirror", "order_line_expand")
+        replace_kinds = (
+            "snapshot", "melt_store_funds", "dim_mirror", "order_line_expand",
+            "stockout_line_expand", "refund_line_expand",
+        )
         if dataset is None or dataset.kind not in replace_kinds:
             raise MartExtractError("unregistered snapshot table")
         allowed = set(dataset.target_columns) | {"synced_at", "sync_run_id"}
@@ -166,6 +169,9 @@ class MartExtractRepository:
         if dataset.kind == "order_line_expand":
             from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
             allowed |= set(_ORDER_LINE_COLUMNS)
+        if dataset.kind in ("stockout_line_expand", "refund_line_expand"):
+            from common.public_data.extract_stock_flow import dataset_columns
+            allowed |= set(dataset_columns(dataset))
         if not columns or len(set(columns)) != len(columns) or set(columns) != allowed:
             raise MartExtractError("invalid snapshot columns")
         params = [tuple(row.get(name) for name in columns) for row in rows]
@@ -505,6 +511,15 @@ def _projector_for_kind(kind):
         return {
             "dim_mirror": project_dim_product_mirror,
             "order_line_expand": project_order_lines,
+        }[kind]
+    if kind in ("stockout_line_expand", "refund_line_expand"):
+        from common.public_data.extract_stock_flow import (
+            project_refund_lines,
+            project_stockout_lines,
+        )
+        return {
+            "stockout_line_expand": project_stockout_lines,
+            "refund_line_expand": project_refund_lines,
         }[kind]
     return None
 
