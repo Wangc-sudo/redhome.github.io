@@ -121,6 +121,13 @@ _COMMAND_TABLE = {
         ],
         "extra_env": {"ROBOT_REGION": "offline_all"},
     },
+    "channel-daily-qudao": {
+        "argv": [
+            "common.daily_robot.mart_cli", "channel-daily",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "qudao"},
+    },
     "pages-hangzhou": {
         "argv": [
             "common.daily_robot.mart_cli", "leaderboard-html",
