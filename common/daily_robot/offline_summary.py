@@ -69,11 +69,16 @@ class ScopeMetrics:
 # ---------------------------------------------------------------------------
 
 def fetch_scope_daily_facts(connection, *, region, person, start, end):
-    """``{date: 销售额}``；person=None 整区域，否则按 responsible_person 过滤。"""
+    """``{date: 销售额}``；person=None 整区域，否则按 responsible_person 过滤。
+
+    名称含「合计」的行一律排除（与 ``mart_leaderboard`` 同口径）——AI 表
+    自带 杭州合计/余杭合计 等合计行，不排则区域汇总双倍计数。
+    """
     sql = (
         "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
         "FROM `fact_daily_report_offline` "
         "WHERE `region` = %s AND `sales_amount` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%合计%' "
         "AND `business_date` BETWEEN %s AND %s"
     )
     params = [region, start, end]
@@ -88,24 +93,30 @@ def fetch_scope_daily_facts(connection, *, region, person, start, end):
 
 
 def fetch_scope_month_target(connection, *, region, person, year, month):
-    """该板块当月目标（MAX，绝不可 SUM）；无 → None。"""
+    """该板块当月目标；无 → None。
+
+    口径：先按人取 MAX（melt 行重复携带，绝不可 SUM），再跨人求和
+    （板块目标 = 成员目标之和）；「合计」行排除（其目标值是行的冗余
+    汇总，混入即虚增）。
+    """
     first, last = month_days(year, month)[0], month_days(year, month)[-1]
     sql = (
-        "SELECT MAX(`monthly_target`) AS `t` FROM `fact_daily_report_offline` "
+        "SELECT `responsible_person` AS `p`, MAX(`monthly_target`) AS `t` "
+        "FROM `fact_daily_report_offline` "
         "WHERE `region` = %s AND `monthly_target` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%合计%' "
         "AND `business_date` BETWEEN %s AND %s"
     )
     params = [region, first, last]
     if person:
         sql += " AND `responsible_person` = %s"
         params.append(person)
+    sql += " GROUP BY `responsible_person`"
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
-        row = cursor.fetchone()
-    if not row:
-        return None
-    value = row["t"] if isinstance(row, dict) else row[0]
-    return float(value) if value is not None else None
+        rows = cursor.fetchall()
+    values = [float(row["t"]) for row in rows if row["t"] is not None]
+    return sum(values) if values else None
 
 
 def upsert_agg_daily(connection, *, stat_date, rows, synced_at):

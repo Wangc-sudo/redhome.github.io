@@ -254,6 +254,7 @@ class _Cursor:
         return None
 
     def execute(self, sql, params=None):
+        self._conn.sql_log.append(sql)
         if "INSERT INTO `agg_offline_daily`" in sql:
             self._conn.agg_rows.append(params)
             self._rows = []
@@ -282,6 +283,7 @@ class _Conn:
         self.facts = facts        # {(region, person): {date: amount}}
         self.targets = targets    # {(region, person): float|None}
         self.agg_rows = []
+        self.sql_log = []
 
     def cursor(self):
         return _Cursor(self)
@@ -382,6 +384,19 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(call["business_date"], date(2026, 9, 1))
         self.assertEqual(call["title"], "线下整体月报")
         self.assertIn("【线下整体月报】2026年9月", call["body_md"])
+
+    def test_queries_exclude_heji_rows(self):
+        """AI 表自带合计行（杭州合计/余杭合计…），查询必须排除，否则双倍计数。"""
+        conn = _task_conn()
+        outbox = _Outbox()
+        run_daily_summary(
+            conn, outbox,
+            business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 20, 30),
+        )
+        select_sql = [s for s in conn.sql_log if "fact_daily_report_offline" in s]
+        self.assertTrue(select_sql)
+        for sql in select_sql:
+            self.assertIn("NOT LIKE '%合计%'", sql)
 
     def test_scope_table_is_config_driven(self):
         keys = [scope for scope, _, _, _ in AGG_SCOPES]
