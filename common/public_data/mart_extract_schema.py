@@ -227,6 +227,28 @@ _FACT_DAILY_REPORT_OFFLINE_DDL = (
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 )
 
+# 线下整体汇总（方案 docs/线下整体销售数据自动汇总方案.md §3.2）：
+# 每日 20:30 汇总任务按 (stat_date, scope) 覆盖写；scope 取值见
+# common/daily_robot/offline_summary.AGG_SCOPES + offline_total。
+_AGG_OFFLINE_DAILY_DDL = (
+    "CREATE TABLE IF NOT EXISTS `agg_offline_daily` (\n"
+    "  `stat_date` DATE NOT NULL,\n"
+    "  `scope` VARCHAR(50) NOT NULL,\n"
+    "  `sales_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `dod_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `dod_rate` DECIMAL(12,6) DEFAULT NULL,\n"
+    "  `wow_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `wow_rate` DECIMAL(12,6) DEFAULT NULL,\n"
+    "  `mom_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `mom_rate` DECIMAL(12,6) DEFAULT NULL,\n"
+    "  `month_completed` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `month_target` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `month_rate` DECIMAL(12,6) DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  PRIMARY KEY (`stat_date`, `scope`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
 _FACT_CHANNEL_DAILY_SALES_DDL = (
     "CREATE TABLE IF NOT EXISTS `fact_channel_daily_sales` (\n"
     "  `source_record_id` VARCHAR(255) NOT NULL,\n"

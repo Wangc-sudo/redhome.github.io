@@ -76,6 +76,21 @@ def build_outbox(conn):
     return OutboxRepository(conn)
 
 
+def run_offline_daily_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_daily_summary
+    return run_daily_summary(conn, outbox, **kwargs)
+
+
+def run_offline_weekly_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_weekly_summary
+    return run_weekly_summary(conn, outbox, **kwargs)
+
+
+def run_offline_monthly_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_monthly_summary
+    return run_monthly_summary(conn, outbox, **kwargs)
+
+
 def mart_collect_data(conn, *, region, business_date):
     from common.daily_robot.mart_leaderboard import mart_collect
     return mart_collect(conn, region=region, business_date=business_date)
@@ -390,6 +405,71 @@ def _handle_channel_daily(args):
         sys.exit(1)
 
 
+def _handle_offline_summary(args, *, period):
+    """线下整体汇总（offline_all 群）：daily/weekly/monthly 三周期 → outbox。
+
+    kind 与业务日：daily=当日；weekly=上周周一；monthly=上月 1 日——
+    幂等键自带周期唯一性，重跑不重复发。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        region = _resolve_region(args)
+        if not region:
+            _print_failure("region_required")
+            sys.exit(1)
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+        if configs.get(region) is None:
+            _print_failure("unknown_region")
+            sys.exit(1)
+
+        now = datetime.now()
+        reference = (
+            date.fromisoformat(args.date) if getattr(args, "date", None)
+            else now.date()
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        if period == "daily":
+            status = run_offline_daily_task(
+                conn, outbox, business_date=reference, now=now
+            )
+        elif period == "weekly":
+            status = run_offline_weekly_task(
+                conn, outbox, reference=reference, now=now
+            )
+        else:
+            status = run_offline_monthly_task(
+                conn, outbox, reference=reference, now=now
+            )
+        conn.commit()
+        print(
+            f"service={service_id} region={region} kind=offline_{period} "
+            f"status={status}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 def _handle_leaderboard_html(args):
     """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
     if not args.confirm_local_test_write:
@@ -465,6 +545,9 @@ def main(argv=None):
         ("once", "Route to remind/check by the current hour"),
         ("leaderboard", "Enqueue the daily leaderboard broadcast"),
         ("channel-daily", "Enqueue the ecom channel daily report (qudao composite)"),
+        ("offline-daily", "Enqueue the offline-all daily summary (20:30)"),
+        ("offline-weekly", "Enqueue the offline-all weekly summary (Mon 09:30)"),
+        ("offline-monthly", "Enqueue the offline-all monthly summary (1st 10:00)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument(
@@ -516,6 +599,9 @@ def main(argv=None):
         return
     if args.command == "channel-daily":
         _handle_channel_daily(args)
+        return
+    if args.command in ("offline-daily", "offline-weekly", "offline-monthly"):
+        _handle_offline_summary(args, period=args.command.split("-", 1)[1])
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

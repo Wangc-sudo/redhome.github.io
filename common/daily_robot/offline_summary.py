@@ -1,0 +1,469 @@
+# -*- coding: utf-8 -*-
+"""线下整体销售汇总（offline_all 汇总群）——日 / 周 / 月报。
+
+数据源：``mart_ops.fact_daily_report_offline``——杭州/绍兴为机器人报数落库，
+省外/线下总经办为 AI 表 melt 同步（region='offline_extra'，按
+``responsible_person`` 区分板块）。
+
+口径铁律（方案 §5）：
+- 月目标 MAX 不 SUM（melt 行重复携带，同人同板块多行只取 MAX）；
+- 达成率一律走 ``common.metrics.daily_report.achievement_rate``；
+- 日环比 = 当日 ÷ 前一自然日；周环比 = 当日 ÷ 上周同星期几；
+  月环比 = 本月 1 日至当日累计 ÷ 上月 1 日至同日日累计；
+- 未报 = 0（与 vanke 回填口径一致）。
+
+表格样式对齐渠道日报（``channel_daily`` 的 ``_fmt_wan`` / ``_fmt_pct``）。
+"""
+
+import contextlib
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+from common.calendar_utils import month_days
+from common.daily_robot.channel_daily import _fmt_pct, _fmt_wan
+from common.metrics.daily_report import achievement_rate
+
+#: 汇总板块：(scope 键, 展示名, fact region 键, 板块键=responsible_person)。
+#: person=None 表示整区域合计；新增板块（如省外建群、李树军单列）只改这里。
+AGG_SCOPES = (
+    ("hangzhou", "杭州", "hangzhou", None),
+    ("shaoxing", "绍兴", "shaoxing", None),
+    ("shengwai", "省外", "offline_extra", "省外"),
+    ("zongjingban", "线下总经办", "offline_extra", "线下总经办"),
+)
+
+TOTAL_SCOPE_KEY = "offline_total"
+TOTAL_LABEL = "线下整体"
+
+DAILY_KIND = "offline_daily"
+WEEKLY_KIND = "offline_weekly"
+MONTHLY_KIND = "offline_monthly"
+
+DAILY_TITLE = "线下整体日报"
+WEEKLY_TITLE = "线下整体周报"
+MONTHLY_TITLE = "线下整体月报"
+
+_WEEKDAYS = "一二三四五六日"
+
+
+@dataclass(frozen=True)
+class ScopeMetrics:
+    """单板块一期（日/周/月）指标；不适用字段为 None。"""
+
+    scope: str
+    label: str
+    sales: float
+    dod_amount: float | None = None
+    dod_rate: float | None = None
+    wow_amount: float | None = None
+    wow_rate: float | None = None
+    mom_amount: float | None = None
+    mom_rate: float | None = None
+    month_completed: float = 0.0
+    month_target: float | None = None
+    month_rate: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# DB 取数（只读 mart_ops；口径判断全在纯函数里）
+# ---------------------------------------------------------------------------
+
+def fetch_scope_daily_facts(connection, *, region, person, start, end):
+    """``{date: 销售额}``；person=None 整区域，否则按 responsible_person 过滤。"""
+    sql = (
+        "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
+        "FROM `fact_daily_report_offline` "
+        "WHERE `region` = %s AND `sales_amount` IS NOT NULL "
+        "AND `business_date` BETWEEN %s AND %s"
+    )
+    params = [region, start, end]
+    if person:
+        sql += " AND `responsible_person` = %s"
+        params.append(person)
+    sql += " GROUP BY `business_date`"
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    return {row["d"]: float(row["s"] or 0) for row in rows}
+
+
+def fetch_scope_month_target(connection, *, region, person, year, month):
+    """该板块当月目标（MAX，绝不可 SUM）；无 → None。"""
+    first, last = month_days(year, month)[0], month_days(year, month)[-1]
+    sql = (
+        "SELECT MAX(`monthly_target`) AS `t` FROM `fact_daily_report_offline` "
+        "WHERE `region` = %s AND `monthly_target` IS NOT NULL "
+        "AND `business_date` BETWEEN %s AND %s"
+    )
+    params = [region, first, last]
+    if person:
+        sql += " AND `responsible_person` = %s"
+        params.append(person)
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+    if not row:
+        return None
+    value = row["t"] if isinstance(row, dict) else row[0]
+    return float(value) if value is not None else None
+
+
+def upsert_agg_daily(connection, *, stat_date, rows, synced_at):
+    """写/覆盖 ``agg_offline_daily``（(stat_date, scope) 幂等）。"""
+    sql = (
+        "INSERT INTO `agg_offline_daily` (`stat_date`, `scope`, `sales_amount`, "
+        "`dod_amount`, `dod_rate`, `wow_amount`, `wow_rate`, `mom_amount`, "
+        "`mom_rate`, `month_completed`, `month_target`, `month_rate`, "
+        "`synced_at`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE "
+        "`sales_amount`=VALUES(`sales_amount`), `dod_amount`=VALUES(`dod_amount`), "
+        "`dod_rate`=VALUES(`dod_rate`), `wow_amount`=VALUES(`wow_amount`), "
+        "`wow_rate`=VALUES(`wow_rate`), `mom_amount`=VALUES(`mom_amount`), "
+        "`mom_rate`=VALUES(`mom_rate`), "
+        "`month_completed`=VALUES(`month_completed`), "
+        "`month_target`=VALUES(`month_target`), `month_rate`=VALUES(`month_rate`), "
+        "`synced_at`=VALUES(`synced_at`)"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        for m in rows:
+            cursor.execute(sql, (
+                stat_date, m.scope, m.sales,
+                m.dod_amount, m.dod_rate, m.wow_amount, m.wow_rate,
+                m.mom_amount, m.mom_rate,
+                m.month_completed, m.month_target, m.month_rate, synced_at,
+            ))
+
+
+# ---------------------------------------------------------------------------
+# 纯口径（无 IO，全部可单测）
+# ---------------------------------------------------------------------------
+
+def _diff_rate(current, base):
+    """(current-base, (current-base)/abs(base))；base 缺失或 0 → (None, None)。"""
+    if not base:
+        return None, None
+    diff = current - base
+    return diff, diff / abs(base)
+
+
+def previous_week(reference):
+    """*reference* 所在周的上一周（周一, 周日）。"""
+    monday = reference - timedelta(days=reference.weekday() + 7)
+    return monday, monday + timedelta(days=6)
+
+
+def previous_month(reference):
+    """*reference* 所在月的上一月（1 日, 末日）。"""
+    last = reference.replace(day=1) - timedelta(days=1)
+    return last.replace(day=1), last
+
+
+def _sum_window(facts, start, end):
+    return sum(amount for d, amount in facts.items() if start <= d <= end)
+
+
+def compute_daily_metrics(scope, label, *, facts, business_date, month_target):
+    """日报指标：当日 + 日/周环比 + 月累计/达成 + 月环比。
+
+    *facts* 须覆盖上月 1 日至 *business_date*（缺日 = 0）。
+    """
+    today = business_date
+    sales = facts.get(today, 0.0)
+    dod_amount, dod_rate = _diff_rate(sales, facts.get(today - timedelta(days=1)))
+    wow_amount, wow_rate = _diff_rate(sales, facts.get(today - timedelta(days=7)))
+
+    month_first = today.replace(day=1)
+    month_completed = _sum_window(facts, month_first, today)
+    prev_first, prev_last = previous_month(today)
+    prev_same_day = min(today.day, prev_last.day)
+    prev_completed = _sum_window(
+        facts, prev_first, prev_first.replace(day=prev_same_day)
+    )
+    mom_amount, mom_rate = _diff_rate(month_completed, prev_completed)
+
+    return ScopeMetrics(
+        scope=scope,
+        label=label,
+        sales=sales,
+        dod_amount=dod_amount,
+        dod_rate=dod_rate,
+        wow_amount=wow_amount,
+        wow_rate=wow_rate,
+        mom_amount=mom_amount,
+        mom_rate=mom_rate,
+        month_completed=month_completed,
+        month_target=month_target,
+        month_rate=achievement_rate(month_completed, month_target),
+    )
+
+
+def compute_weekly_metrics(scope, label, *, facts, week_start, week_end):
+    """周报指标：周合计 + 周环比（对前一周同区间）。"""
+    week_total = _sum_window(facts, week_start, week_end)
+    prev_start = week_start - timedelta(days=7)
+    prev_end = week_end - timedelta(days=7)
+    prev_total = _sum_window(facts, prev_start, prev_end)
+    wow_amount, wow_rate = _diff_rate(week_total, prev_total)
+    return ScopeMetrics(
+        scope=scope, label=label, sales=week_total,
+        wow_amount=wow_amount, wow_rate=wow_rate,
+    )
+
+
+def compute_monthly_metrics(scope, label, *, facts, month_first, month_last, month_target):
+    """月报指标：月合计 + 月环比（对上月）+ 达成率。"""
+    month_total = _sum_window(facts, month_first, month_last)
+    prev_first, prev_last = previous_month(month_first)
+    prev_total = _sum_window(facts, prev_first, prev_last)
+    mom_amount, mom_rate = _diff_rate(month_total, prev_total)
+    return ScopeMetrics(
+        scope=scope,
+        label=label,
+        sales=month_total,
+        mom_amount=mom_amount,
+        mom_rate=mom_rate,
+        month_completed=month_total,
+        month_target=month_target,
+        month_rate=achievement_rate(month_total, month_target),
+    )
+
+
+def merge_facts(facts_list):
+    """多板块 facts 逐日求和（线下整体口径）。"""
+    merged = {}
+    for facts in facts_list:
+        for d, amount in facts.items():
+            merged[d] = merged.get(d, 0.0) + amount
+    return merged
+
+
+def merge_targets(targets):
+    """整体月目标 = 各板块目标之和；全缺 → None。"""
+    values = [t for t in targets if t is not None]
+    return sum(values) if values else None
+
+
+# ---------------------------------------------------------------------------
+# Markdown 渲染（纯函数）
+# ---------------------------------------------------------------------------
+
+def _signed_pct(rate):
+    if rate is None:
+        return "--"
+    return f"{'+' if rate >= 0 else ''}{_fmt_pct(rate)}"
+
+
+def build_daily_markdown(*, business_date, rows, total):
+    d = business_date
+    lines = [
+        f"【线下整体日报】{d.month}月{d.day}日（周{_WEEKDAYS[d.weekday()]}）",
+        f"今日合计：**{_fmt_wan(total.sales)} 元** · "
+        f"日环比 {_signed_pct(total.dod_rate)} · 周环比 {_signed_pct(total.wow_rate)}",
+        "",
+        "| 板块 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for m in (*rows, total):
+        label = f"**{m.label}**" if m.scope == TOTAL_SCOPE_KEY else m.label
+        target_txt = _fmt_wan(m.month_target) if m.month_target else "--"
+        rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
+        lines.append(
+            f"| {label} | {_fmt_wan(m.sales)} | {_signed_pct(m.dod_rate)} "
+            f"| {_signed_pct(m.wow_rate)} | {_fmt_wan(m.month_completed)} "
+            f"| {target_txt} | {rate_txt} |"
+        )
+    return "\n".join(lines)
+
+
+def build_weekly_markdown(*, week_start, week_end, rows, total):
+    def _label(d):
+        return f"{d.month}月{d.day}日（周{_WEEKDAYS[d.weekday()]}）"
+
+    ranked = sorted(rows, key=lambda m: -m.sales)
+    lines = [
+        f"【线下整体周报】{_label(week_start)} ~ {_label(week_end)}",
+        f"全周合计：**{_fmt_wan(total.sales)} 元** · 周环比 {_signed_pct(total.wow_rate)}",
+        "",
+        "| 排名 | 板块 | 周合计 | 周环比 |",
+        "|---|---|---|---|",
+    ]
+    for rank, m in enumerate(ranked, 1):
+        lines.append(
+            f"| {rank} | {m.label} | {_fmt_wan(m.sales)} | {_signed_pct(m.wow_rate)} |"
+        )
+    lines.append(
+        f"|  | **{total.label}** | **{_fmt_wan(total.sales)}** "
+        f"| {_signed_pct(total.wow_rate)} |"
+    )
+    return "\n".join(lines)
+
+
+def build_monthly_markdown(*, month_first, rows, total):
+    ranked = sorted(
+        rows,
+        key=lambda m: (
+            -(m.month_rate if m.month_rate is not None else -1),
+            -m.sales,
+        ),
+    )
+    lines = [
+        f"【线下整体月报】{month_first.year}年{month_first.month}月",
+        f"全月合计：**{_fmt_wan(total.sales)} 元** · 月环比 {_signed_pct(total.mom_rate)}",
+        "",
+        "| 排名 | 板块 | 月合计 | 月目标 | 达成率 | 月环比 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for rank, m in enumerate(ranked, 1):
+        target_txt = _fmt_wan(m.month_target) if m.month_target else "--"
+        rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
+        lines.append(
+            f"| {rank} | {m.label} | {_fmt_wan(m.sales)} | {target_txt} "
+            f"| {rate_txt} | {_signed_pct(m.mom_rate)} |"
+        )
+    lines.append(
+        f"|  | **{total.label}** | **{_fmt_wan(total.sales)}** "
+        f"| {_fmt_wan(total.month_target) if total.month_target else '--'} "
+        f"| {_fmt_pct(total.month_rate) if total.month_rate is not None else '--'} "
+        f"| {_signed_pct(total.mom_rate)} |"
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 任务（connection + outbox 注入，幂等）
+# ---------------------------------------------------------------------------
+
+def _fetch_window(connection, *, region, person, start, end):
+    return fetch_scope_daily_facts(
+        connection, region=region, person=person, start=start, end=end
+    )
+
+
+def run_daily_summary(connection, outbox, *, business_date, now):
+    """每日 20:30：板块当日 + 环比 + 月累计 → agg 落表 + outbox。
+
+    返回 ``"enqueued" | "already_sent"``。
+    """
+    prev_first, _ = previous_month(business_date)
+    facts_by_scope = {}
+    targets = {}
+    for scope, label, region, person in AGG_SCOPES:
+        facts = _fetch_window(
+            connection, region=region, person=person,
+            start=prev_first, end=business_date,
+        )
+        facts_by_scope[scope] = facts
+        targets[scope] = fetch_scope_month_target(
+            connection, region=region, person=person,
+            year=business_date.year, month=business_date.month,
+        )
+
+    rows = [
+        compute_daily_metrics(
+            scope, label,
+            facts=facts_by_scope[scope],
+            business_date=business_date,
+            month_target=targets[scope],
+        )
+        for scope, label, _, _ in AGG_SCOPES
+    ]
+    total = compute_daily_metrics(
+        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
+        business_date=business_date,
+        month_target=merge_targets(targets.values()),
+    )
+
+    upsert_agg_daily(
+        connection, stat_date=business_date, rows=[*rows, total], synced_at=now,
+    )
+    body = build_daily_markdown(business_date=business_date, rows=rows, total=total)
+    enqueued = outbox.enqueue(
+        region="offline_all",
+        kind=DAILY_KIND,
+        business_date=business_date,
+        title=DAILY_TITLE,
+        body_md=body,
+        created_at=now,
+    )
+    return "enqueued" if enqueued else "already_sent"
+
+
+def run_weekly_summary(connection, outbox, *, reference, now):
+    """每周一 09:30：上周周报（周合计/周环比/板块排名）→ outbox。"""
+    week_start, week_end = previous_week(reference)
+    fetch_start = week_start - timedelta(days=7)
+    facts_by_scope = {}
+    for scope, label, region, person in AGG_SCOPES:
+        facts_by_scope[scope] = _fetch_window(
+            connection, region=region, person=person,
+            start=fetch_start, end=week_end,
+        )
+
+    rows = [
+        compute_weekly_metrics(
+            scope, label, facts=facts_by_scope[scope],
+            week_start=week_start, week_end=week_end,
+        )
+        for scope, label, _, _ in AGG_SCOPES
+    ]
+    total = compute_weekly_metrics(
+        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
+        week_start=week_start, week_end=week_end,
+    )
+    body = build_weekly_markdown(
+        week_start=week_start, week_end=week_end, rows=rows, total=total,
+    )
+    enqueued = outbox.enqueue(
+        region="offline_all",
+        kind=WEEKLY_KIND,
+        business_date=week_start,
+        title=WEEKLY_TITLE,
+        body_md=body,
+        created_at=now,
+    )
+    return "enqueued" if enqueued else "already_sent"
+
+
+def run_monthly_summary(connection, outbox, *, reference, now):
+    """每月 1 日 10:00：上月月报（月合计/月环比/达成率榜）→ outbox。"""
+    month_first, month_last = previous_month(reference)
+    prev_first, _ = previous_month(month_first)
+    facts_by_scope = {}
+    targets = {}
+    for scope, label, region, person in AGG_SCOPES:
+        facts_by_scope[scope] = _fetch_window(
+            connection, region=region, person=person,
+            start=prev_first, end=month_last,
+        )
+        targets[scope] = fetch_scope_month_target(
+            connection, region=region, person=person,
+            year=month_first.year, month=month_first.month,
+        )
+
+    rows = [
+        compute_monthly_metrics(
+            scope, label,
+            facts=facts_by_scope[scope],
+            month_first=month_first, month_last=month_last,
+            month_target=targets[scope],
+        )
+        for scope, label, _, _ in AGG_SCOPES
+    ]
+    total = compute_monthly_metrics(
+        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
+        month_first=month_first, month_last=month_last,
+        month_target=merge_targets(targets.values()),
+    )
+    body = build_monthly_markdown(month_first=month_first, rows=rows, total=total)
+    enqueued = outbox.enqueue(
+        region="offline_all",
+        kind=MONTHLY_KIND,
+        business_date=month_first,
+        title=MONTHLY_TITLE,
+        body_md=body,
+        created_at=now,
+    )
+    return "enqueued" if enqueued else "already_sent"

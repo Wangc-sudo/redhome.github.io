@@ -75,6 +75,24 @@ pages-qudao:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard HTML page generation"
+offline-daily-summary:
+  kind: business
+  enabled: true
+  schedule: "30 20 * * *"
+  reads: [mart_ops]
+  description: "offline_all daily aggregation summary (scopes + dod/wow + mtd)"
+offline-weekly-summary:
+  kind: business
+  enabled: true
+  schedule: "30 9 * * 1"
+  reads: [mart_ops]
+  description: "offline_all weekly summary (last week totals + wow + ranking)"
+offline-monthly-summary:
+  kind: business
+  enabled: true
+  schedule: "0 10 1 * *"
+  reads: [mart_ops]
+  description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
 robot-shaoxing:
   kind: business
   enabled: true

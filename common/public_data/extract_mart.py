@@ -39,6 +39,7 @@ _REGION_KEY_BY_DISPLAY = {
     "杭州": "hangzhou",
     "绍兴": "shaoxing",
     "万科&大莲花&团购": "vanke",
+    "线下总经办&省外": "offline_extra",
 }
 
 

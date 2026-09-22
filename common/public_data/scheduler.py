@@ -160,6 +160,27 @@ _COMMAND_TABLE = {
         ],
         "extra_env": {"ROBOT_REGION": "qudao"},
     },
+    "offline-daily-summary": {
+        "argv": [
+            "common.daily_robot.mart_cli", "offline-daily",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "offline_all"},
+    },
+    "offline-weekly-summary": {
+        "argv": [
+            "common.daily_robot.mart_cli", "offline-weekly",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "offline_all"},
+    },
+    "offline-monthly-summary": {
+        "argv": [
+            "common.daily_robot.mart_cli", "offline-monthly",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "offline_all"},
+    },
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable

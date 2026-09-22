@@ -12,6 +12,7 @@ from common.public_data.manual_import.schema import (
     raw_manual_ddl_statements,
 )
 from common.public_data.mart_extract_schema import (
+    _AGG_OFFLINE_DAILY_DDL,
     _DIM_CALENDAR_DDL,
     _DIM_PRODUCT_DDL as _MART_DIM_PRODUCT_DDL,
     _DIM_ROBOT_MEMBER_DDL,
@@ -367,6 +368,11 @@ _MIGRATIONS = (
     ("mart-ops-bi-authz-v1", "mart", _build_mart_bi_authz_ddl()),
     ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
     ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
+    (
+        "mart-ops-agg-offline-daily-v1",
+        "mart",
+        (_AGG_OFFLINE_DAILY_DDL,),
+    ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),
     ("mart-queue-v1", "mart_queue", _build_mart_queue_ddl()),
