@@ -70,5 +70,38 @@ mart 核心表行数（验收值）：`dim_robot_member`=91、`fact_stockout_lin
 ### 结论
 
 **T7 全链路冒烟通过**（dingtalk → wdt → extract-mart 全 completed，三轮稳定性与
-全量通讯录口径验收均关闭，见上）。方案 §3 第 7 步可标 ✅，剩第 8 步（阶段4切换，
-等 B1 regions 真值等运维闸口）。
+全量通讯录口径验收均关闭，见上）。方案 §3 第 7 步可标 ✅，剩第 8 步（阶段4切换）。
+
+---
+
+## B1 regions 真值闭环（19:00–20:30 北京）
+
+**触发**：运维定调新建报数专用机器人、测试群验证后切群（不碰生产应用 HTTP 回调）。
+
+- **新机器人 Stream 4 项实测全过**：长连建立（WSS ticket）、功能验证群 @接收
+  （捕获 ocid/群名/发送人）、`reply_text` 互动回执、`groupMessages/send` 主动发。
+  旧应用（餐饮/杭州/主应用）Stream 均未开通（401，现网走 HTTP 回调），新应用
+  直接 Stream 起步零风险
+- **7 群 ocid 全部 Stream 捕获**（登记表 `e:/repos/credentials/group-conversation-ids.json`）：
+  功能验证群（=阶段4测试群）、万科&大莲花&团购（vanke）、君品雅院（junpin）、
+  线下整体（offline_all）、渠道日报表群（qudao）、线下杭州（hangzhou）、
+  线下绍兴（shaoxing）。**杭州 ocid 与现网 config 登记值逐字一致**（群级标识
+  与机器人无关的交叉验证）
+- **seed 补齐 6 区域**（98b6844，PR #2 CI 全绿合并）：新增 shaoxing/junpin/
+  qudao/offline_all，键名对齐 org.seed.json；qudao/offline_all 键名与 deptOrder
+  暂定，`_备注` 标待运维评审。test_region_config 断言同步更新，本地 1320 例绿
+- **Nacos 发布**：`regions.values.json`（仓库外真源，dops-app /opt/dops/live/
+  600 副本）经 `publish_regions_from_env` 发布 6 条 `region-*.yaml`
+  （group=REGIONS），**回读逐字段比对 READBACK_OK**；seed 文件 scp 同步
+  dops-app/dops-ci
+- **全部 region 统一新机器人**（robotCode=appKey `dingnlvj…`）；tableUrl
+  杭州/绍兴/junpin/offline_all 四处真值（绍兴表地址取自 shaoxing config.example
+  的实 ID）、vanke/qudao 按设计无表占位
+- **去 AI 表格方案成文**：`specs/2026-09-22-de-ai-table-db-single-source.md`
+  （DB 唯一可行源；P1 新区域直接无表启动、P2 杭/绍双轨迁移、P3 表格下线；
+  §7 含四阶段群公告 + 常驻 FAQ，公告零技术词可直接复制）
+- 占位尾巴（不阻塞）：leaderboardUrl ×6、vanke monthlyTargets、qudao/offline_all
+  键名与部门序评审；新区域业务流程接入调度属阶段4后排
+
+**B1–B5 全部关闭。方案 §3 仅剩第 8 步阶段4切换本体（G1–G5 人工闸口 +
+双跑窗口，非单日任务）。**
