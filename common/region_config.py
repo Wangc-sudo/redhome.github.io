@@ -220,8 +220,8 @@ def build_nacos_region_overlay(environ=None):
         nonlocal client
         import yaml
         if client is None:
-            from nacos import NacosClient
-            client = NacosClient(
+            from common.public_data.nacos_client import build_nacos_client
+            client = build_nacos_client(
                 server, namespace=namespace,
                 username=username, password=password,
             )
@@ -280,9 +280,10 @@ def publish_regions_from_env(source_path, *, if_missing=False, environ=None):
     from common.public_data.pipeline_config import ensure_namespace
     ensure_namespace(server, namespace, username=username, password=password)
 
-    from nacos import NacosClient
-    client = NacosClient(server, namespace=namespace,
-                         username=username, password=password)
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server, namespace=namespace, username=username, password=password
+    )
     return publish_region_configs(
         client, load_region_seed(source_path), if_missing=if_missing
     )

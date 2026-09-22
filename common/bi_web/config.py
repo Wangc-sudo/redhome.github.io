@@ -439,8 +439,8 @@ class NacosDashboardSource(DashboardConfigSource):
 
     def _nacos(self):
         if self._client is None:
-            from nacos import NacosClient
-            self._client = NacosClient(
+            from common.public_data.nacos_client import build_nacos_client
+            self._client = build_nacos_client(
                 self._server,
                 namespace=self._namespace,
                 username=self._username,
@@ -564,8 +564,10 @@ def publish_bi_seed_from_env(seed_path, if_missing=False, environ=None):
     from common.public_data.pipeline_config import ensure_namespace
     ensure_namespace(server, namespace, username=username, password=password)
 
-    from nacos import NacosClient
-    client = NacosClient(server, namespace=namespace, username=username, password=password)
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server, namespace=namespace, username=username, password=password
+    )
     return publish_dashboards(
         client, load_seed(seed_path), group=BI_GROUP, if_missing=if_missing
     )
