@@ -29,10 +29,13 @@ from datetime import date, datetime
 from common.daily_robot.mart_tasks import MartTaskError
 from common.metrics.daily_report import (
     elapsed_workdays,
+    fetch_filled_names,
     fetch_member,
     fetch_month_facts,
+    fetch_region_members,
     fetch_workdays,
     summarize_people,
+    unfilled_members,
 )
 
 
@@ -99,7 +102,7 @@ def _resolve_store_fuzzy(word):
 class IntakeOutcome:
     """一条报数消息的处理结果（reply 为给发送者的回执文本）。"""
 
-    status: str  # recorded | not_workday | not_member | no_number
+    status: str  # recorded | not_workday | not_member | no_number | aux
     reply: str
     region: str | None = None
     name: str | None = None
@@ -275,6 +278,331 @@ def region_for_conversation(region_configs, conversation_id):
 # 主流程
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# “/” 辅助指令（2026-09-23 运维定稿）：查询类门禁同报数；
+# /补签 仅 bi_authz_grant admin（管理人代录通道，最长追溯 30 天）。
+# ---------------------------------------------------------------------------
+
+#: 补签可追溯天数上限。
+_AUX_MAX_BACKFILL_DAYS = 30
+
+#: /补签 参数：姓名 [日期] 正文。日期支持 9-20 / 9/20 / 9月20(日) / 0920，
+#: 段间须空白/逗号/冒号分隔（防「12800」被误切出日期段）。
+_AUX_BACKFILL_RE = re.compile(
+    r"^(?P<name>[一-鿿A-Za-z]{2,})[\s,，:：]+"
+    r"(?:(?P<day_token>(?:\d{1,2}\s*[-/月]\s*\d{1,2}日?)|(?:\d{4}))[\s,，:：]+)?"
+    r"(?P<body>\S.*)$"
+)
+
+
+def parse_aux_command(text):
+    """``/`` 辅助指令解析。返回 ``(指令, 参数)``；非 ``/`` 开头 → ``None``。
+
+    未识别的 ``/`` 指令一律落到帮助菜单——不放进报数路径，防误录。
+    """
+    if not text:
+        return None
+    body = text.strip()
+    if not body.startswith("/"):
+        return None
+    body = body[1:].strip()
+    if body in ("未填", "我的", "门店"):
+        return (body, None)
+    if body.startswith("补签"):
+        return ("补签", _AUX_BACKFILL_RE.match(body[2:].strip()))
+    return ("帮助", None)
+
+
+def _parse_backfill_date(token, today):
+    """补签日期：缺省=今天；年份取不晚于今天的最近一次；未来/超 30 天 → None。"""
+    if not token:
+        return today
+    token = token.replace(" ", "")
+    matched = re.fullmatch(r"(\d{1,2})[-/月](\d{1,2})日?", token)
+    if matched:
+        month, day = int(matched.group(1)), int(matched.group(2))
+    elif re.fullmatch(r"\d{4}", token):
+        month, day = int(token[:2]), int(token[2:])
+    else:
+        return None
+    for year in (today.year, today.year - 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate <= today:
+            break
+    else:
+        return None
+    if (today - candidate).days > _AUX_MAX_BACKFILL_DAYS:
+        return None
+    return candidate
+
+
+def build_aux_help(name, store=None, stores=()):
+    """辅助指令菜单 + 按发送人部门个性化的报数示例（复用 B 项口径）。"""
+    lines = [
+        "🤖 辅助指令：",
+        "/帮助 — 本菜单",
+        "/未填 — 今日未填名单",
+        "/我的 — 我的本月进度（累计/目标/完成率）",
+        "/门店 — 各门店本月进度（多门店区域）",
+        "/补签 姓名 [日期] 金额 — 管理人代录（最长 30 天，如 /补签 张三 9-20 12800）",
+        "",
+        build_format_hint(name, store=store, stores=stores),
+    ]
+    return "\n".join(lines)
+
+
+def _build_unfilled_reply(*, month, day, names=None, cells=None):
+    if names is not None:
+        if not names:
+            return f"🎉 {month}月{day}日全部已填报，辛苦了！"
+        return (
+            f"📋 截至现在，{month}月{day}日还有 {len(names)} 位未填报：\n"
+            + "、".join(names)
+        )
+    if not cells:
+        return f"🎉 {month}月{day}日各门店板块全部已报，辛苦了！"
+    return (
+        f"📋 截至现在，{month}月{day}日未报板块：\n" + "、".join(cells)
+    )
+
+
+def _progress_line(label, progress):
+    if progress is None:
+        return None
+    total_disp, target_disp, ratio_str = progress
+    return f"📊 {label} 本月累计 {total_disp} / 目标 {target_disp}，完成 {ratio_str}"
+
+
+def _aux_unfilled(connection, *, region_cfg, business_date):
+    """今日未填：多门店区域按板块格口径，其余区域按成员口径（同 18:30 提醒）。"""
+    members = fetch_region_members(connection, region=region_cfg.region)
+    filled = fetch_filled_names(
+        connection, region=region_cfg.region, business_date=business_date
+    )
+    member_depts = {m.get("dept_name") for m in members}
+    stores = [s for s in _CANONICAL_STORES if s in member_depts]
+    if stores:
+        expected = [f"{s}·{metric}" for s in stores for metric in _METRIC_WORDS]
+        missing = [cell for cell in expected if cell not in filled]
+        return _build_unfilled_reply(
+            month=business_date.month, day=business_date.day, cells=missing
+        )
+    names = [
+        m["name"]
+        for m in unfilled_members(members, filled, aliases=region_cfg.aliases)
+    ]
+    return _build_unfilled_reply(
+        month=business_date.month, day=business_date.day, names=names
+    )
+
+
+def _aux_mine(connection, *, region_cfg, name, sender_dept,
+              business_date, workdays):
+    """我的本月进度：多门店区域给名下两格，其余区域给本人表内用名一格。"""
+    if sender_dept in _CANONICAL_STORES:
+        lines = []
+        for metric in _METRIC_WORDS:
+            cell = f"{sender_dept}·{metric}"
+            line = _progress_line(cell, _progress(
+                connection, region=region_cfg.region, table_name=cell,
+                business_date=business_date, workdays=workdays,
+            ))
+            lines.append(line or f"{cell}：本月暂无数据或无目标")
+        return "\n".join([f"📊 {name} 本月进度："] + lines)
+    table_name = region_cfg.aliases.get(name, name)
+    line = _progress_line(table_name, _progress(
+        connection, region=region_cfg.region, table_name=table_name,
+        business_date=business_date, workdays=workdays,
+    ))
+    if line is None:
+        return f"📊 {name} 本月暂无数据或无目标（表内用名：{table_name}）"
+    return f"{line}（含今天）"
+
+
+def _aux_stores(connection, *, region_cfg, business_date, workdays):
+    """各门店本月进度（只列有有效目标的格；非多门店区域明确提示）。"""
+    lines = []
+    for store in _CANONICAL_STORES:
+        for metric in _METRIC_WORDS:
+            cell = f"{store}·{metric}"
+            line = _progress_line(cell, _progress(
+                connection, region=region_cfg.region, table_name=cell,
+                business_date=business_date, workdays=workdays,
+            ))
+            if line:
+                lines.append(line)
+    if not lines:
+        return "本区域暂无多门店板块数据（可用 /我的 查个人进度）。"
+    return "\n".join(lines)
+
+
+def _record_value(connection, *, region_cfg, member, table_name,
+                  business_date, value, now, workdays, key_suffix=None):
+    """单格写入 + 进度（/补签 复用）。返回 ``(数据格, 金额, 旧值文案|None, progress)``。"""
+    old_value = _write_report(
+        connection,
+        region=region_cfg.region,
+        member=member,
+        table_name=table_name,
+        monthly_target=region_cfg.monthly_targets.get(table_name),
+        business_date=business_date,
+        value=value,
+        now=now,
+        key_suffix=key_suffix,
+    )
+    progress = _progress(
+        connection, region=region_cfg.region, table_name=table_name,
+        business_date=business_date, workdays=workdays,
+    )
+    overwritten = old_value is not None and float(old_value) != float(value)
+    return (
+        table_name,
+        value,
+        _fmt_amount(old_value) if overwritten else None,
+        progress,
+    )
+
+
+def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
+    """管理人代录：/补签 姓名 [日期] 金额（或含门店/指标词的报数正文）。
+
+    署名为目标成员（业务键与本人自报一致，重报走覆盖）；回执注明代录人。
+    """
+    if not _is_admin(connection, sender_uid):
+        return IntakeOutcome(
+            "not_member",
+            "⛔ /补签 仅限管理人使用（需在 bi_authz_grant 持 admin 授权）。",
+            region=region_cfg.region, name=name,
+        )
+    if match is None:
+        return IntakeOutcome(
+            "aux",
+            "补签格式：/补签 姓名 [日期] 金额\n"
+            "例如：/补签 张三 12800（今天），/补签 张三 9-20 12800（指定日期）",
+            region=region_cfg.region, name=name,
+        )
+    today = now.date() if isinstance(now, datetime) else now
+    business_date = _parse_backfill_date(match.group("day_token"), today)
+    if business_date is None:
+        return IntakeOutcome(
+            "aux",
+            f"⛔ 日期超出范围：仅支持今天起 {_AUX_MAX_BACKFILL_DAYS} 天内，"
+            "格式 9-20 / 9/20 / 9月20 / 0920。",
+            region=region_cfg.region, name=name,
+        )
+    target_name = match.group("name")
+    members = fetch_region_members(connection, region=region_cfg.region)
+    targets = [m for m in members if m["name"] == target_name]
+    if len(targets) != 1:
+        return IntakeOutcome(
+            "aux",
+            f"⛔ 未找到成员「{target_name}」（本区域在册实名），请核对姓名。",
+            region=region_cfg.region, name=name,
+        )
+    target = targets[0]
+    workdays = fetch_workdays(
+        connection, year=business_date.year, month=business_date.month
+    )
+    if business_date not in workdays:
+        return IntakeOutcome(
+            "aux",
+            f"{business_date.month}月{business_date.day}日不是工作日，无需补签～",
+            region=region_cfg.region, name=name,
+        )
+    body = match.group("body")
+    writes = []
+    entries = parse_report_metrics(body)
+    if entries is not None:
+        target_dept = target.get("dept_name")
+        for store_label, metric, value, _recognized in entries:
+            store = store_label or target_dept
+            if not store:
+                return IntakeOutcome(
+                    "aux", f"⛔ 无法确定「{target_name}」的门店归属。",
+                    region=region_cfg.region, name=name,
+                )
+            writes.append(_record_value(
+                connection, region_cfg=region_cfg, member=target,
+                table_name=f"{store}·{metric}", business_date=business_date,
+                value=value, now=now, workdays=workdays, key_suffix=metric,
+            ))
+    else:
+        value = parse_report_amount(body)
+        if value is None:
+            return IntakeOutcome(
+                "aux", "⛔ 补签金额未识别（正文须含数字）。",
+                region=region_cfg.region, name=name,
+            )
+        table_name = region_cfg.aliases.get(target["name"], target["name"])
+        writes.append(_record_value(
+            connection, region_cfg=region_cfg, member=target,
+            table_name=table_name, business_date=business_date,
+            value=value, now=now, workdays=workdays,
+        ))
+    lines = [
+        f"✅ 已代录（管理人 {name} 为 {target_name} 补签 "
+        f"{business_date.month}月{business_date.day}日）："
+    ]
+    for cell, value, old_disp, progress in writes:
+        line = f"{cell}：{value}"
+        if old_disp:
+            line += f"（🔁 覆盖旧值 {old_disp}）"
+        lines.append(line)
+        progress_line = _progress_line(cell, progress)
+        if progress_line:
+            lines.append(progress_line)
+    return IntakeOutcome(
+        "recorded", "\n".join(lines),
+        region=region_cfg.region, name=name,
+        value=[w[1] for w in writes],
+        overwritten=any(w[2] is not None for w in writes),
+    )
+
+
+def _handle_aux_command(connection, aux, *, region_cfg, member, sender_uid,
+                        name, sender_dept, root_dept, business_date,
+                        workdays, now):
+    command, arg = aux
+    if command == "帮助":
+        hint_store = sender_dept if sender_dept in _CANONICAL_STORES else None
+        hint_stores = (
+            sorted(set(_STORE_ALIASES.values()))
+            if sender_dept and sender_dept == root_dept and not hint_store
+            else ()
+        )
+        return IntakeOutcome(
+            "aux", build_aux_help(name, store=hint_store, stores=hint_stores),
+            region=region_cfg.region, name=name,
+        )
+    if command == "未填":
+        return IntakeOutcome(
+            "aux",
+            _aux_unfilled(connection, region_cfg=region_cfg,
+                          business_date=business_date),
+            region=region_cfg.region, name=name,
+        )
+    if command == "我的":
+        return IntakeOutcome(
+            "aux",
+            _aux_mine(connection, region_cfg=region_cfg, name=name,
+                      sender_dept=sender_dept, business_date=business_date,
+                      workdays=workdays),
+            region=region_cfg.region, name=name,
+        )
+    if command == "门店":
+        return IntakeOutcome(
+            "aux",
+            _aux_stores(connection, region_cfg=region_cfg,
+                        business_date=business_date, workdays=workdays),
+            region=region_cfg.region, name=name,
+        )
+    return _aux_backfill(connection, arg, region_cfg=region_cfg,
+                         sender_uid=sender_uid, name=name, now=now)
+
+
 def handle_report(connection, *, region_cfg, text, sender_uid, now):
     """处理一条报数消息。不写连接 commit（由调用方提交，与其他流一致）。"""
     business_date = now.date() if isinstance(now, datetime) else now
@@ -302,6 +630,16 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
     name = member["name"]
     sender_dept = member.get("dept_name")
     root_dept = region_cfg.dept_order[0] if region_cfg.dept_order else None
+
+    # “/” 辅助指令优先于报数解析（如「/补签 张三 12800」含数字，不能误录）。
+    aux = parse_aux_command(text)
+    if aux is not None:
+        return _handle_aux_command(
+            connection, aux,
+            region_cfg=region_cfg, member=member, sender_uid=sender_uid,
+            name=name, sender_dept=sender_dept, root_dept=root_dept,
+            business_date=business_date, workdays=workdays, now=now,
+        )
 
     # 多板块报数（vanke 模型：数据格 = 门店 × {零售,团购}，权限 = 部门归属）。
     entries = parse_report_metrics(text)

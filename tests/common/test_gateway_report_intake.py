@@ -6,11 +6,13 @@ from decimal import Decimal
 
 from common.gateway.report_intake import (
     STREAM_RUN_ID,
+    _parse_backfill_date,
     build_format_hint,
     build_multi_recorded_reply,
     build_not_member_reply,
     build_not_workday_reply,
     handle_report,
+    parse_aux_command,
     parse_report_amount,
     parse_report_metrics,
     region_for_conversation,
@@ -593,6 +595,248 @@ class AdminGateTests(unittest.TestCase):
             conn, region_cfg=_cfg(), text="100", sender_uid="u-ghost", now=_NOW,
         )
         self.assertEqual(outcome.status, "not_member")
+
+
+class AuxParseTests(unittest.TestCase):
+
+    def test_non_slash_is_not_aux(self):
+        self.assertIsNone(parse_aux_command("12800"))
+        self.assertIsNone(parse_aux_command("零售 100"))
+        self.assertIsNone(parse_aux_command(None))
+
+    def test_query_commands(self):
+        self.assertEqual(parse_aux_command("/帮助"), ("帮助", None))
+        self.assertEqual(parse_aux_command("/未填"), ("未填", None))
+        self.assertEqual(parse_aux_command("/我的"), ("我的", None))
+        self.assertEqual(parse_aux_command("/门店"), ("门店", None))
+        # 未识别的 / 指令落帮助菜单，不进报数路径
+        self.assertEqual(parse_aux_command("/随便 100"), ("帮助", None))
+
+    def test_backfill_args(self):
+        command, match = parse_aux_command("/补签 张三 12800")
+        self.assertEqual(command, "补签")
+        self.assertEqual(match.group("name"), "张三")
+        self.assertIsNone(match.group("day_token"))
+        self.assertEqual(match.group("body"), "12800")
+        # 金额不被误切出日期段
+        _, match = parse_aux_command("/补签 张三 9-20 12,800")
+        self.assertEqual(match.group("day_token"), "9-20")
+        self.assertEqual(match.group("body"), "12,800")
+        # 参数不齐 → None（走用法提示）
+        self.assertEqual(parse_aux_command("/补签 张三"), ("补签", None))
+
+    def test_backfill_date_parsing(self):
+        today = date(2026, 9, 23)
+        for token in ("9-20", "9/20", "9月20", "9月20日", "0920"):
+            self.assertEqual(_parse_backfill_date(token, today),
+                             date(2026, 9, 20), token)
+        self.assertEqual(_parse_backfill_date(None, today), today)
+        # 恰好 30 天边界
+        self.assertEqual(_parse_backfill_date("8-24", today), date(2026, 8, 24))
+        self.assertIsNone(_parse_backfill_date("8-23", today))
+        # 未来日期 → 落到去年 → 超 30 天拒绝
+        self.assertIsNone(_parse_backfill_date("9-24", today))
+        self.assertIsNone(_parse_backfill_date("12-31", today))
+        self.assertIsNone(_parse_backfill_date("13-01", today))
+
+
+class AuxCommandTests(unittest.TestCase):
+
+    @staticmethod
+    def _inserts(conn):
+        return [p for sql, p in conn.executed if sql.lstrip().startswith("INSERT")]
+
+    def test_help_lists_all_commands(self):
+        conn = _Conn(members=[_member()])
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/帮助", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "aux")
+        for keyword in ("/未填", "/我的", "/门店", "/补签", "报数格式"):
+            self.assertIn(keyword, outcome.reply)
+
+    def test_help_personalized_for_store_member(self):
+        conn = _Conn(members=[_member(user_id="u2", name="张燕芳",
+                                      region="vanke", dept="万科体验馆")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="/帮助", sender_uid="u2",
+            now=_NOW,
+        )
+        self.assertIn("你的门店是万科体验馆", outcome.reply)
+
+    def test_unfilled_member_based(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="张三丰"),
+                     _member(user_id="u4", name="李四")],
+            facts=[{"responsible_person": "老张", "department": "杭中",
+                    "business_date": date(2026, 9, 11), "sales_amount": 100,
+                    "monthly_target": None}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/未填", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "aux")
+        self.assertIn("李四", outcome.reply)
+        self.assertNotIn("张三丰", outcome.reply)
+
+    def test_unfilled_cell_based_for_store_region(self):
+        conn = _Conn(
+            members=[_member(user_id="u2", name="张燕芳", region="vanke",
+                             dept="万科体验馆")],
+            facts=[{"responsible_person": "万科体验馆·零售",
+                    "department": "万科体验馆",
+                    "business_date": date(2026, 9, 11), "sales_amount": 100,
+                    "monthly_target": None}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="/未填", sender_uid="u2",
+            now=_NOW,
+        )
+        self.assertEqual(outcome.status, "aux")
+        self.assertIn("万科体验馆·团购", outcome.reply)
+        self.assertNotIn("万科体验馆·零售、", outcome.reply)
+
+    def test_mine_single_table_region(self):
+        conn = _Conn(
+            members=[_member(name="张三丰")],
+            facts=[{"responsible_person": "老张", "department": "杭中",
+                    "business_date": date(2026, 9, 10), "sales_amount": 500,
+                    "monthly_target": 1000}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/我的", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "aux")
+        self.assertIn("📊", outcome.reply)
+        self.assertIn("老张", outcome.reply)
+
+    def test_mine_without_data(self):
+        conn = _Conn(members=[_member()])
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/我的", sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("暂无数据或无目标", outcome.reply)
+
+    def test_stores_only_for_multi_metric_region(self):
+        conn = _Conn(members=[_member()])
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/门店", sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("暂无多门店板块", outcome.reply)
+
+    def test_backfill_requires_admin(self):
+        conn = _Conn(members=[_member()])  # admin=False
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 12800",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "not_member")
+        self.assertEqual(self._inserts(conn), [])
+
+    def test_backfill_writes_as_target_member(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城"),
+                     _member(user_id="u9", name="张三丰")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 9-10 12800",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        # 署名=目标成员（业务键与本人自报一致）
+        self.assertEqual(inserts[0][0], "stream:hangzhou:u9:2026-09-10")
+        self.assertEqual(inserts[0][2], "老张")  # 经 aliases 映射表内用名
+        self.assertEqual(inserts[0][4], date(2026, 9, 10))
+        self.assertEqual(inserts[0][5], 12800)
+        self.assertIn("已代录", outcome.reply)
+        self.assertIn("王城", outcome.reply)
+        self.assertIn("张三丰", outcome.reply)
+
+    def test_backfill_defaults_to_today(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城"),
+                     _member(user_id="u9", name="张三丰")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 100",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertEqual(self._inserts(conn)[0][4], date(2026, 9, 11))
+
+    def test_backfill_rejects_beyond_30_days(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城"),
+                     _member(user_id="u9", name="张三丰")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 8-10 12800",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "aux")
+        self.assertIn("超出范围", outcome.reply)
+        self.assertEqual(self._inserts(conn), [])
+
+    def test_backfill_rejects_non_workday(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城"),
+                     _member(user_id="u9", name="张三丰")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 9-6 12800",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("不是工作日", outcome.reply)
+        self.assertEqual(self._inserts(conn), [])
+
+    def test_backfill_rejects_unknown_member(self):
+        conn = _Conn(members=[_member(user_id="u1", name="王城")], admin=True)
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 不存在 100",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("未找到成员", outcome.reply)
+        self.assertEqual(self._inserts(conn), [])
+
+    def test_backfill_overwrite_shows_old_value(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城"),
+                     _member(user_id="u9", name="张三丰")],
+            existing={"source_record_id": "stream:hangzhou:u9:2026-09-11",
+                      "sales_amount": 300},
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/补签 张三丰 500",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertTrue(outcome.overwritten)
+        self.assertIn("🔁 覆盖旧值 300", outcome.reply)
+
+    def test_backfill_multi_metric_body(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城", region="vanke",
+                             dept="体验中心"),
+                     _member(user_id="u8", name="林燕山", region="vanke",
+                             dept="莲荷里体验馆")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(),
+            text="/补签 林燕山 莲荷 零售 500", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][0],
+                         "stream:vanke:u8:2026-09-11:零售")
+        self.assertEqual(inserts[0][2], "莲荷里体验馆·零售")
 
 
 if __name__ == "__main__":
