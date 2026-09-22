@@ -44,6 +44,30 @@ STREAM_RUN_ID = "00000000-0000-0000-0000-000000000000"
 
 _AMOUNT_RE = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)")
 
+#: 报数指标词（多板块报数只认这两个，2026-09-22 与运维定稿）。
+_METRIC_WORDS = ("零售", "团购")
+
+#: 门店别名（过渡期）：规范名 = 通讯录部门名（板块名与组织架构绑定）；
+#: 群里的口语写法映射到规范名，填报习惯统一后可移除。
+_STORE_ALIASES = {
+    "万科体验馆": "万科体验馆",
+    "万科": "万科体验馆",
+    "莲荷里体验馆": "莲荷里体验馆",
+    "莲荷里": "莲荷里体验馆",
+    "酱酒体验馆": "莲荷里体验馆",
+    "酱香体验馆": "莲荷里体验馆",
+    "酱酒": "莲荷里体验馆",
+    "酱香": "莲荷里体验馆",
+    "大莲花": "莲荷里体验馆",
+}
+
+#: 多板块报数分词：门店词 / 指标词 / 数字，按序扫描（门店词长词优先）。
+_TOKEN_RE = re.compile(
+    r"(?P<store>" + "|".join(sorted(_STORE_ALIASES, key=len, reverse=True)) + r")"
+    r"|(?P<metric>零售|团购)"
+    r"|(?P<num>-?\d[\d,]*(?:\.\d+)?)"
+)
+
 
 @dataclass(frozen=True)
 class IntakeOutcome:
@@ -76,6 +100,71 @@ def parse_report_amount(text):
     except ValueError:
         return None
     return int(value) if value == int(value) else value
+
+
+def parse_report_metrics(text):
+    """多板块报数解析：``[(门店规范名|None, 指标, 金额), ...]``。
+
+    规则（2026-09-22 与运维定稿）：
+    - 指标只认「零售」「团购」；门店词出现后成为后续数字的归属上下文，
+      直到下一个门店词；
+    - 门店词后直接跟数字 → 该店「零售」（如 ``万科体验馆/7560``）；
+    - 无门店词 → 门店为 ``None``（由调用方按报数人部门补齐）；
+    - 全文不含任何门店/指标词 → 返回 ``None``（走单金额旧路径）。
+    """
+    if not text:
+        return None
+    entries = []
+    saw_label = False
+    ctx_store = None
+    pending_store = False
+    pending_metric = None
+    for m in _TOKEN_RE.finditer(text.replace("，", ",")):
+        if m.group("store"):
+            ctx_store = _STORE_ALIASES[m.group("store")]
+            pending_store = True
+            pending_metric = None
+            saw_label = True
+        elif m.group("metric"):
+            pending_metric = m.group("metric")
+            pending_store = False
+            saw_label = True
+        else:
+            num_str = m.group("num").replace(",", "")
+            try:
+                value = float(num_str)
+            except ValueError:
+                continue
+            value = int(value) if value == int(value) else value
+            metric = pending_metric or "零售"
+            entries.append((ctx_store, metric, value))
+            pending_metric = None
+            pending_store = False
+    if not saw_label or not entries:
+        return None
+    return entries
+
+
+def build_store_denied_reply(name, sender_dept, store):
+    return (
+        f"⛔ {name} 你好，你的部门是{sender_dept}，不能报{store}的数据哦。\n"
+        "如有疑问请联系管理员。"
+    )
+
+
+def build_multi_recorded_reply(*, month, day, weekday, writes):
+    """多板块回执。writes = ``[(数据格, 金额, 旧值|None, progress|None), ...]``。"""
+    lines = [f"✅ 已记录 {month}月{day}日（周{weekday}）："]
+    for cell, value, old_value, progress in writes:
+        line = f"{cell}：{value}"
+        if old_value is not None:
+            line += f"（🔁 覆盖旧值 {old_value}）"
+        lines.append(line)
+        if progress is not None:
+            total_disp, target_disp, ratio_str = progress
+            lines.append(f"📊 {cell} 本月累计 {total_disp} / 目标 {target_disp}，完成 {ratio_str}")
+    lines.append("祝您下班愉快 🎉")
+    return "\n".join(lines)
 
 
 def build_not_member_reply():
@@ -149,6 +238,72 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
                              region=region_cfg.region)
 
     name = member["name"]
+
+    # 多板块报数（vanke 模型：数据格 = 门店 × {零售,团购}，权限 = 部门归属）。
+    entries = parse_report_metrics(text)
+    if entries is not None:
+        root_dept = region_cfg.dept_order[0] if region_cfg.dept_order else None
+        sender_dept = member.get("dept_name")
+        writes = []
+        for store_label, metric, value in entries:
+            store = store_label or sender_dept
+            if not store:
+                return IntakeOutcome(
+                    "no_number", build_format_hint(name),
+                    region=region_cfg.region, name=name,
+                )
+            # 点名门店时：本部门只能报本店；根部门（dept_order[0]）可跨店。
+            if (
+                store_label
+                and sender_dept != root_dept
+                and store_label != sender_dept
+            ):
+                return IntakeOutcome(
+                    "not_member",
+                    build_store_denied_reply(name, sender_dept, store_label),
+                    region=region_cfg.region, name=name,
+                )
+            cell = f"{store}·{metric}"
+            old_value = _write_report(
+                connection,
+                region=region_cfg.region,
+                member=member,
+                table_name=cell,
+                monthly_target=region_cfg.monthly_targets.get(cell),
+                business_date=business_date,
+                value=value,
+                now=now,
+                key_suffix=metric,
+            )
+            progress = _progress(
+                connection,
+                region=region_cfg.region,
+                table_name=cell,
+                business_date=business_date,
+                workdays=workdays,
+            )
+            overwritten = old_value is not None and float(old_value) != float(value)
+            writes.append(
+                (
+                    cell,
+                    value,
+                    _fmt_amount(old_value) if overwritten else None,
+                    progress,
+                )
+            )
+        reply = build_multi_recorded_reply(
+            month=now.month,
+            day=business_date.day,
+            weekday=_WEEKDAYS[business_date.weekday()],
+            writes=writes,
+        )
+        return IntakeOutcome(
+            "recorded", reply,
+            region=region_cfg.region, name=name,
+            value=[w[1] for w in writes],
+            overwritten=any(w[2] is not None for w in writes),
+        )
+
     value = parse_report_amount(text)
     if value is None:
         return IntakeOutcome("no_number", build_format_hint(name),
@@ -204,8 +359,12 @@ def _fetch_one(connection, sql, params):
 
 
 def _write_report(connection, *, region, member, table_name,
-                  monthly_target, business_date, value, now):
-    """业务键优先写入。返回旧值（无旧行或旧值为空 → None）。"""
+                  monthly_target, business_date, value, now, key_suffix=None):
+    """业务键优先写入。返回旧值（无旧行或旧值为空 → None）。
+
+    *key_suffix*：多板块报数时追加到 ``source_record_id`` 末尾（同一成员
+    同日多数据格各一行）；单金额旧路径不传，保持原键格式不变。
+    """
     existing = _fetch_one(
         connection,
         "SELECT `source_record_id`, `sales_amount` "
@@ -232,7 +391,8 @@ def _write_report(connection, *, region, member, table_name,
             "`synced_at`, `sync_run_id`) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
-                f"stream:{region}:{member['user_id']}:{business_date.isoformat()}",
+                f"stream:{region}:{member['user_id']}:{business_date.isoformat()}"
+                + (f":{key_suffix}" if key_suffix else ""),
                 region,
                 table_name,
                 member.get("dept_name"),

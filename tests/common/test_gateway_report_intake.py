@@ -11,6 +11,7 @@ from common.gateway.report_intake import (
     build_not_workday_reply,
     handle_report,
     parse_report_amount,
+    parse_report_metrics,
     region_for_conversation,
 )
 from common.daily_robot.mart_tasks import MartTaskError
@@ -337,6 +338,163 @@ class HandleReportTests(unittest.TestCase):
             conn, region_cfg=_cfg(), text="200", sender_uid="u1", now=_NOW,
         )
         self.assertNotIn("📊", outcome.reply)
+
+
+def _vanke_cfg(monthly_targets=None):
+    return RegionConfig(
+        region="vanke", display="万科&大莲花&团购",
+        table_url="", robot_code="rc", open_conversation_id="conv-vk",
+        aliases={}, cc_user_ids=(),
+        dept_order=("体验中心",),
+        monthly_targets=monthly_targets or {},
+    )
+
+
+class ParseMetricsTests(unittest.TestCase):
+
+    def test_store_colon_metric_pairs(self):
+        self.assertEqual(
+            parse_report_metrics("万科体验馆：零售 0，团购 0"),
+            [("万科体验馆", "零售", 0), ("万科体验馆", "团购", 0)],
+        )
+
+    def test_store_slash_number_defaults_to_retail(self):
+        self.assertEqual(
+            parse_report_metrics("万科体验馆/7560 团购/0"),
+            [("万科体验馆", "零售", 7560), ("万科体验馆", "团购", 0)],
+        )
+
+    def test_metric_only_has_no_store(self):
+        self.assertEqual(
+            parse_report_metrics("零售7560 团购0"),
+            [(None, "零售", 7560), (None, "团购", 0)],
+        )
+        self.assertEqual(parse_report_metrics("团购/134"), [(None, "团购", 134)])
+
+    def test_bare_number_before_metric_defaults_to_retail(self):
+        self.assertEqual(
+            parse_report_metrics("3060。团购/816"),
+            [(None, "零售", 3060), (None, "团购", 816)],
+        )
+
+    def test_store_aliases_map_to_directory_names(self):
+        for spoken in ("酱酒体验馆/400", "酱香体验馆/400", "大莲花/400", "莲荷里/400"):
+            self.assertEqual(
+                parse_report_metrics(spoken),
+                [("莲荷里体验馆", "零售", 400)],
+                spoken,
+            )
+
+    def test_no_label_returns_none_for_legacy_path(self):
+        self.assertIsNone(parse_report_metrics("765"))
+        self.assertIsNone(parse_report_metrics("12800"))
+        self.assertIsNone(parse_report_metrics(""))
+        self.assertIsNone(parse_report_metrics(None))
+
+    def test_grouped_amounts(self):
+        self.assertEqual(
+            parse_report_metrics("零售 12,800"),
+            [(None, "零售", 12800)],
+        )
+
+
+class MultiMetricIntakeTests(unittest.TestCase):
+
+    @staticmethod
+    def _inserts(conn):
+        return [p for sql, p in conn.executed if sql.lstrip().startswith("INSERT")]
+
+    def test_store_member_writes_one_row_per_metric(self):
+        conn = _Conn(members=[_member(user_id="u2", name="张燕芳",
+                                      region="vanke", dept="万科体验馆")])
+        cfg = _vanke_cfg({"万科体验馆·零售": 100000, "万科体验馆·团购": 20000})
+        outcome = handle_report(
+            conn, region_cfg=cfg, text="零售7560 团购0", sender_uid="u2", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 2)
+        self.assertEqual(inserts[0][0], "stream:vanke:u2:2026-09-11:零售")
+        self.assertEqual(inserts[1][0], "stream:vanke:u2:2026-09-11:团购")
+        # responsible_person = 数据格；monthly_target 快照
+        self.assertEqual(inserts[0][2], "万科体验馆·零售")
+        self.assertEqual(inserts[0][6], 100000)
+        self.assertEqual(inserts[1][2], "万科体验馆·团购")
+        self.assertEqual(inserts[1][6], 20000)
+        self.assertEqual(inserts[0][8], STREAM_RUN_ID)
+        self.assertIn("万科体验馆·零售：7560", outcome.reply)
+        self.assertIn("万科体验馆·团购：0", outcome.reply)
+
+    def test_store_name_in_message_scopes_following_metrics(self):
+        conn = _Conn(members=[_member(user_id="u2", name="张燕芳",
+                                      region="vanke", dept="万科体验馆")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(),
+            text="万科体验馆/3060。团购/816", sender_uid="u2", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(
+            [(p[0], p[4], p[5]) for p in inserts],
+            [("stream:vanke:u2:2026-09-11:零售", date(2026, 9, 11), 3060),
+             ("stream:vanke:u2:2026-09-11:团购", date(2026, 9, 11), 816)],
+        )
+
+    def test_alias_store_maps_to_directory_dept(self):
+        conn = _Conn(members=[_member(user_id="u3", name="林燕山",
+                                      region="vanke", dept="莲荷里体验馆")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(),
+            text="酱酒体验馆/1526  团购/0", sender_uid="u3", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        cells = [p[2] for p in self._inserts(conn)]
+        self.assertEqual(cells, ["莲荷里体验馆·零售", "莲荷里体验馆·团购"])
+
+    def test_other_stores_report_is_denied(self):
+        conn = _Conn(members=[_member(user_id="u2", name="张燕芳",
+                                      region="vanke", dept="万科体验馆")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(),
+            text="莲荷里体验馆/400", sender_uid="u2", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "not_member")
+        self.assertIn("不能报莲荷里体验馆", outcome.reply)
+        self.assertEqual(self._inserts(conn), [])
+
+    def test_root_dept_member_may_report_any_store(self):
+        conn = _Conn(members=[_member(user_id="u4", name="吴金澎",
+                                      region="vanke", dept="体验中心")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(),
+            text="万科体验馆：零售 100，团购 50", sender_uid="u4", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        cells = [p[2] for p in self._inserts(conn)]
+        self.assertEqual(cells, ["万科体验馆·零售", "万科体验馆·团购"])
+
+    def test_overwrite_hint_per_cell(self):
+        conn = _Conn(
+            members=[_member(user_id="u2", name="张燕芳",
+                              region="vanke", dept="万科体验馆")],
+            existing={"source_record_id": "s1", "sales_amount": Decimal("100")},
+        )
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="团购200", sender_uid="u2", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertTrue(outcome.overwritten)
+        self.assertIn("覆盖旧值", outcome.reply)
+
+    def test_legacy_single_amount_still_uses_person_cell(self):
+        conn = _Conn(members=[_member(region="vanke", dept="万科体验馆")])
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="765", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(inserts[0][0], "stream:vanke:u1:2026-09-11")
+        self.assertEqual(inserts[0][2], "张三")
 
 
 if __name__ == "__main__":
