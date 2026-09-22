@@ -141,16 +141,16 @@ class ReplyTextTests(unittest.TestCase):
     def test_format_hint(self):
         self.assertEqual(
             build_format_hint("张三"),
-            "张三 你好～报数格式：@提醒事项 数字\n"
-            "例如：@提醒事项 12800（当天无销量报 0）\n"
+            "张三 你好～报数格式：@日报小机器人 数字\n"
+            "例如：@日报小机器人 12800（当天无销量报 0）\n"
             "查看全部功能：/帮助 ｜ 按钮菜单：/菜单",
         )
 
     def test_format_hint_personalized_for_store_member(self):
         self.assertEqual(
             build_format_hint("王城", store="万科体验馆"),
-            "王城 你好～报数格式：@提醒事项 数字\n"
-            "例如：@提醒事项 12800（当天无销量报 0）\n"
+            "王城 你好～报数格式：@日报小机器人 数字\n"
+            "例如：@日报小机器人 12800（当天无销量报 0）\n"
             "查看全部功能：/帮助 ｜ 按钮菜单：/菜单\n"
             "你的门店是万科体验馆，也可以这样报：万科体验馆 零售 7560，"
             "或 万科体验馆 团购 1200",

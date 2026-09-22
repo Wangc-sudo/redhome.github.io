@@ -41,7 +41,7 @@ MENU_MARKDOWN = (
     "也可以 @我 发 `/帮助` 查看全部指令（含管理人 /补签）。"
 )
 
-MENU_TITLE = "提醒事项 辅助菜单"
+MENU_TITLE = "日报小机器人 辅助菜单"
 MENU_TIPS = "报数助手"
 
 

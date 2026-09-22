@@ -78,7 +78,7 @@ class MessageBuilderTests(unittest.TestCase):
             "\n"
             "**张三、李四**\n"
             "\n"
-            "也可直接在群里 **@提醒事项 + 数字** 报数（如 `@提醒事项 12800`，报 0 也行）\n"
+            "也可直接在群里 **@日报小机器人 + 数字** 报数（如 `@日报小机器人 12800`，报 0 也行）\n"
             "\n"
             "[点此填写](https://example.com/table)"
         ))
@@ -105,7 +105,7 @@ class MessageBuilderTests(unittest.TestCase):
             "\n"
             "**张三、李四**\n"
             "\n"
-            "已同步 DING 提醒以上人员，请在群里 @提醒事项 报数或直接填写。\n"
+            "已同步 DING 提醒以上人员，请在群里 @日报小机器人 报数或直接填写。\n"
             "[点此填写](https://example.com/table)"
         ))
 
@@ -115,7 +115,7 @@ class MessageBuilderTests(unittest.TestCase):
                 display="杭州", month=9, day=11, weekday="五", url=_URL,
             ),
             "【销售日报催办】杭州 9月11日（周五）：你还未填写今日销售日报，"
-            "请在群里 @提醒事项 报数或填写表格 https://example.com/table",
+            "请在群里 @日报小机器人 报数或填写表格 https://example.com/table",
         )
 
 
