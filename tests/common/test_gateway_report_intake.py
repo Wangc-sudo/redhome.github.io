@@ -612,6 +612,13 @@ class AuxParseTests(unittest.TestCase):
         # 未识别的 / 指令落帮助菜单，不进报数路径
         self.assertEqual(parse_aux_command("/随便 100"), ("帮助", None))
 
+    def test_at_mention_prefix_is_tolerated(self):
+        # 钉钉投递文本可能保留 @机器人 前缀
+        self.assertEqual(parse_aux_command("@提醒事项 /帮助"), ("帮助", None))
+        command, match = parse_aux_command("@提醒事项 /补签 张三 12800")
+        self.assertEqual(command, "补签")
+        self.assertEqual(match.group("name"), "张三")
+
     def test_backfill_args(self):
         command, match = parse_aux_command("/补签 张三 12800")
         self.assertEqual(command, "补签")

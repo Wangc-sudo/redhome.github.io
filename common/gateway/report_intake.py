@@ -303,6 +303,8 @@ def parse_aux_command(text):
     if not text:
         return None
     body = text.strip()
+    # 钉钉群 @机器人 的消息，投递文本可能保留 @前缀（@提醒事项 /帮助）。
+    body = re.sub(r"^@[^\s]+\s*", "", body)
     if not body.startswith("/"):
         return None
     body = body[1:].strip()
