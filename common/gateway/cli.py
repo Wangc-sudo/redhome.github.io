@@ -50,6 +50,12 @@ def require_gateway_run(settings, *, live_send, confirm_local_test_write):
     )
 
 
+def apply_ipv4_baseline():
+    """IPv4-only 出网基线（须在门禁之后、任何 DNS/HTTP 之前执行）。"""
+    from common.public_data.ipv4_egress import apply_ipv4_baseline as _apply
+    return _apply()
+
+
 def build_pipeline_config_source():
     from common.public_data.pipeline_config import build_config_source
     return build_config_source()
@@ -160,6 +166,7 @@ def _handle_run(args):
             live_send=args.live_send,
             confirm_local_test_write=args.confirm_local_test_write,
         )
+        apply_ipv4_baseline()
         service_id = resolve_service_id(getattr(args, "service", None))
         if not _pipeline_enabled(service_id):
             print(f"service={service_id} status=skipped reason=disabled")
