@@ -3,8 +3,6 @@
 import logging
 from datetime import datetime, timedelta
 
-import pytest
-
 from common.public_data.pipeline_config import StaticConfigSource
 from common.public_data.scheduler import (
     NullLock,

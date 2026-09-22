@@ -41,7 +41,7 @@ jobs:
       # --build 显式重建再测：代码烤在镜像里，复用旧镜像 = 跑旧代码假绿
       # （2026-09-17 本地实测踩过：276 OK 全是旧基线，重建后才是真结果）。
       # runner 虽每次全新，但显式 --build 防未来加镜像缓存后回归此坑。
-      - name: 集成测试（test-runner，448 例）
+      - name: 集成测试（test-runner，全量）
         run: docker compose -f docker-compose.integration.yml run --rm --build test-runner
       - name: 清理 compose 资源
         if: always()
