@@ -455,7 +455,7 @@ class UpsertRowsTests(unittest.TestCase):
         self.assertEqual(stats, {"inserted": 2, "updated": 0})
         self.assertEqual(len(conn.table), 2)
         row = conn.table["ecom:张三:2026-09-10"]
-        self.assertEqual(row["region"], "电商")
+        self.assertEqual(row["region"], "qudao")
         self.assertEqual(row["department"], "天猫")
         self.assertEqual(row["sales_amount"], 12800.0)
         self.assertEqual(row["monthly_target"], 300000.0)
@@ -479,9 +479,9 @@ class UpsertRowsTests(unittest.TestCase):
     def test_existing_business_key_row_is_updated_in_place(self):
         """业务键已存在（PK 不同）时保留其 PK 就地更新，不插新行。"""
         conn = _FakeConnection(table={
-            "stream:电商:u-zhangsan:2026-09-10": {
-                "source_record_id": "stream:电商:u-zhangsan:2026-09-10",
-                "region": "电商",
+            "stream:qudao:u-zhangsan:2026-09-10": {
+                "source_record_id": "stream:qudao:u-zhangsan:2026-09-10",
+                "region": "qudao",
                 "responsible_person": "张三",
                 "business_date": "2026-09-10",
                 "sales_amount": 1.0,
@@ -491,7 +491,7 @@ class UpsertRowsTests(unittest.TestCase):
         stats = upsert_rows(conn, self._rows(), _NOW)
         self.assertEqual(stats, {"inserted": 1, "updated": 1})
         self.assertEqual(len(conn.table), 2)  # 李四新插，张三就地更新
-        row = conn.table["stream:电商:u-zhangsan:2026-09-10"]
+        row = conn.table["stream:qudao:u-zhangsan:2026-09-10"]
         self.assertEqual(row["sales_amount"], 12800.0)
         self.assertEqual(row["monthly_target"], 300000.0)
 

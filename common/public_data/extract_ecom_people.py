@@ -9,7 +9,8 @@
 与「raw 是唯一可重放层」的架构约定一致。
 
 业务口径（与钉钉直连版完全一致）：把店铺负责人按"集合归属"物化进 mart
-（``region='电商'``）：店铺→负责人是 user[] 集合（≤3 人，可随时变）；
+（``region='qudao'``，键口径，原显示名"电商"止于 raw 层）：店铺→负责人
+是 user[] 集合（≤3 人，可随时变）；
 **整店日销售额与整店月目标归到集合里每一位负责人名下**——多人共一店各
 计整店，禁止均摊、禁止只取第一个。
 
@@ -65,9 +66,10 @@ logger = logging.getLogger(__name__)
 #: 默认月份（跨月时用 --month 覆盖；按 ``business_date`` 所在月份过滤）。
 DEFAULT_MONTH = 9
 
-#: 写入事实表与固定列值。
+#: 写入事实表与固定列值。region 列统一为 region 键（同 extract_mart 的
+#: `_REGION_KEY_BY_DISPLAY` 口径：fact 表只存键，显示名止于 raw 层）。
 FACT_TABLE = "fact_daily_report_offline"
-REGION = "电商"
+REGION = "qudao"
 
 #: ecom extract 的固定 run id（非全零）：与 stream 报数写入的全零占位
 #: ``STREAM_RUN_ID`` 区分，便于审计与排查。本 extract 逐日重放同一批行，
