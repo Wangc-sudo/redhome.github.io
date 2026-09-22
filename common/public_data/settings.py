@@ -3,6 +3,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.public_data.deploy_targets import target_profile
+
 
 _REQUIRED_ENVIRONMENT_KEYS = (
     "APP_ENV",
@@ -109,12 +111,19 @@ class Settings:
             if split_name:
                 database_names[key] = split_name
 
+        # 库名后缀铁律改为查 deploy_targets 同一张 profile 表（方案 B），
+        # 同时校验显式 PUBLIC_DATA_TARGET 与 APP_ENV 的一致性。
+        _, target = target_profile(app_env, environment)
+        suffix = target["database_suffix"]
         for database_name in database_names.values():
-            is_test_database = database_name.endswith("_test")
-            if app_env == "test" and not is_test_database:
-                raise ValueError("APP_ENV=test requires database names ending in '_test'")
-            if app_env == "production" and is_test_database:
-                raise ValueError("APP_ENV=production rejects database names ending in '_test'")
+            if suffix is not None and not database_name.endswith(suffix):
+                raise ValueError(
+                    f"APP_ENV={app_env} requires database names ending in '{suffix}'"
+                )
+            if suffix is None and database_name.endswith("_test"):
+                raise ValueError(
+                    f"APP_ENV={app_env} rejects database names ending in '_test'"
+                )
 
         config_path = Path(values["PUBLIC_DATA_CONFIG"])
         try:
