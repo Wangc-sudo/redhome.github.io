@@ -176,6 +176,7 @@ class GatewayStreamModeTests(unittest.TestCase):
              mocks["creds"], mocks["deliverer"], \
              mocks["conn"], mocks["worker"] as build_worker, \
              patch("common.gateway.cli.build_stream_handler") as build_handler, \
+             patch("common.gateway.cli.build_card_callback_handler") as build_card_handler, \
              patch("common.gateway.cli.build_stream_client") as build_client, \
              patch("common.gateway.cli.threading.Thread") as thread_cls:
             with redirect_stdout(output):
@@ -188,6 +189,7 @@ class GatewayStreamModeTests(unittest.TestCase):
         build_handler.assert_called_once()
         build_client.assert_called_once_with(
             "k", "s", build_handler.return_value,
+            card_handler=build_card_handler.return_value,
         )
         thread_cls.assert_called_once()
         self.assertEqual(

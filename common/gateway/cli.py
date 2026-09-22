@@ -124,9 +124,17 @@ def build_stream_handler(*, region_configs, connection_factory):
     )
 
 
-def build_stream_client(app_key, app_secret, handler):
+def build_stream_client(app_key, app_secret, handler, *, card_handler=None):
     from common.gateway.stream_handler import build_stream_client as _build
-    return _build(app_key, app_secret, handler)
+    return _build(app_key, app_secret, handler, card_handler=card_handler)
+
+
+def build_card_callback_handler(*, region_configs, connection_factory):
+    from common.gateway.card_menu import MenuCardCallbackHandler
+    return MenuCardCallbackHandler(
+        region_configs=region_configs,
+        connection_factory=connection_factory,
+    )
 
 
 def publish_regions(source_path, *, if_missing=False):
@@ -196,6 +204,10 @@ def _handle_run(args):
                 credentials["dingtalk"]["app_key"],
                 credentials["dingtalk"]["app_secret"],
                 handler,
+                card_handler=build_card_callback_handler(
+                    region_configs=region_configs,
+                    connection_factory=lambda: connect_mart(settings),
+                ),
             )
             threading.Thread(
                 target=worker.run_forever,

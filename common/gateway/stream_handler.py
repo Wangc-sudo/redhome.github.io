@@ -17,6 +17,7 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
+from common.gateway.card_menu import is_menu_request, send_menu_card
 from common.gateway.report_intake import (
     build_error_reply,
     handle_report,
@@ -24,11 +25,13 @@ from common.gateway.report_intake import (
 )
 
 
-def build_stream_client(app_key, app_secret, handler, *, client_factory=None):
+def build_stream_client(app_key, app_secret, handler, *, client_factory=None,
+                        card_handler=None):
     """构造**单连接** Stream client 并注册报数 handler（spec §9）。
 
     与现行 listener 的接法一致（``Credential`` + ``register_callback_handler``
     + 调用方 ``start_forever``）；*client_factory* 仅供测试注入。
+    *card_handler*：互动卡片按钮回调 handler（同一连接加注册卡片 topic）。
     """
     credential = dingtalk_stream.Credential(app_key, app_secret)
     factory = client_factory or dingtalk_stream.DingTalkStreamClient
@@ -36,6 +39,10 @@ def build_stream_client(app_key, app_secret, handler, *, client_factory=None):
     client.register_callback_handler(
         dingtalk_stream.chatbot.ChatbotMessage.TOPIC, handler
     )
+    if card_handler is not None:
+        client.register_callback_handler(
+            dingtalk_stream.Card_Callback_Router_Topic, card_handler
+        )
     return client
 
 
@@ -67,6 +74,17 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
         if region_cfg is None:
             # 未登记的群：静默 ACK（只记安全日志，不回消息）。
             self._log("unrouted conversation")
+            return AckMessage.STATUS_OK, "OK"
+
+        # 互动卡片菜单（PoC）：/菜单 发按钮卡片；失败降级为文字提示。
+        if is_menu_request(text):
+            try:
+                send_menu_card(self, incoming)
+            except Exception:
+                self._log("menu card send failed")
+                self._safe_reply(
+                    incoming, "菜单卡片发送失败，可直接发 /帮助 使用文字指令。"
+                )
             return AckMessage.STATUS_OK, "OK"
 
         conn = self._connection_factory()
