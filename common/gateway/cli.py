@@ -50,6 +50,12 @@ def require_gateway_run(settings, *, live_send, confirm_local_test_write):
     )
 
 
+def apply_ipv4_baseline():
+    """IPv4-only 出网基线（须在门禁之后、任何 DNS/HTTP 之前执行）。"""
+    from common.public_data.ipv4_egress import apply_ipv4_baseline as _apply
+    return _apply()
+
+
 def build_pipeline_config_source():
     from common.public_data.pipeline_config import build_config_source
     return build_config_source()
@@ -118,9 +124,17 @@ def build_stream_handler(*, region_configs, connection_factory):
     )
 
 
-def build_stream_client(app_key, app_secret, handler):
+def build_stream_client(app_key, app_secret, handler, *, card_handler=None):
     from common.gateway.stream_handler import build_stream_client as _build
-    return _build(app_key, app_secret, handler)
+    return _build(app_key, app_secret, handler, card_handler=card_handler)
+
+
+def build_card_callback_handler(*, region_configs, connection_factory):
+    from common.gateway.card_menu import MenuCardCallbackHandler
+    return MenuCardCallbackHandler(
+        region_configs=region_configs,
+        connection_factory=connection_factory,
+    )
 
 
 def publish_regions(source_path, *, if_missing=False):
@@ -160,6 +174,7 @@ def _handle_run(args):
             live_send=args.live_send,
             confirm_local_test_write=args.confirm_local_test_write,
         )
+        apply_ipv4_baseline()
         service_id = resolve_service_id(getattr(args, "service", None))
         if not _pipeline_enabled(service_id):
             print(f"service={service_id} status=skipped reason=disabled")
@@ -189,6 +204,10 @@ def _handle_run(args):
                 credentials["dingtalk"]["app_key"],
                 credentials["dingtalk"]["app_secret"],
                 handler,
+                card_handler=build_card_callback_handler(
+                    region_configs=region_configs,
+                    connection_factory=lambda: connect_mart(settings),
+                ),
             )
             threading.Thread(
                 target=worker.run_forever,

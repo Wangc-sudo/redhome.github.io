@@ -57,6 +57,30 @@ pages-vanke:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "vanke leaderboard HTML page generation"
+robot-shaoxing:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "shaoxing daily-report robot (mart_ops -> robot_outbox)"
+robot-junpin:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "junpin daily-report robot (mart_ops -> robot_outbox)"
+robot-qudao:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "qudao daily-report robot (mart_ops -> robot_outbox)"
+robot-offline_all:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "offline_all daily-report robot (mart_ops -> robot_outbox)"
 dingtalk-gateway:
   kind: apps
   enabled: true

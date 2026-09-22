@@ -41,6 +41,16 @@ def require_extract_run(settings, *, confirm_local_test_write):
     )
 
 
+def apply_ipv4_baseline():
+    """Apply the IPv4-only egress baseline (no-op when IPv6 is opted in).
+
+    Must run AFTER the safety gates (the IPv6-egress probe reads the raw
+    resolver) and BEFORE any DNS/HTTP work.
+    """
+    from common.public_data.ipv4_egress import apply_ipv4_baseline as _apply
+    return _apply()
+
+
 def load_manifest(path):
     """Parse and validate the source manifest at *path*."""
     from common.public_data.manifest import load_manifest as _load
@@ -432,6 +442,7 @@ def _handle_live_sync(args):
             live_read=args.live_read,
             confirm_local_test_write=args.confirm_local_test_write,
         )
+        apply_ipv4_baseline()
         service_id = resolve_service_id(getattr(args, "service", None))
         if not _pipeline_enabled(service_id):
             print(f"service={service_id} status=skipped reason=disabled")

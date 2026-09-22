@@ -87,7 +87,8 @@ class StreamHandlerTests(unittest.TestCase):
         self.assertEqual(status, _STATUS_OK)
         report_handler.assert_not_called()
         self.assertEqual(replies, [])
-        self.assertEqual(logs, ["unrouted conversation"])
+        self.assertEqual(logs[-1], "unrouted conversation")
+        self.assertTrue(logs[0].startswith("recv conv="))
 
     def test_intake_failure_rolls_back_and_replies_generic_error(self):
         report_handler = Mock(side_effect=RuntimeError("secret-detail"))

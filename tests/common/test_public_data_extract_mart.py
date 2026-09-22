@@ -285,12 +285,13 @@ class RegionKeyNormalizeTests(unittest.TestCase):
         rows = [
             {"region": "杭州", "responsible_person": "余发兴"},
             {"region": "绍兴 ", "responsible_person": "某人"},
+            {"region": "万科&大莲花&团购", "responsible_person": "万科体验馆·零售"},
             {"region": "未登记区域", "responsible_person": "某人"},
         ]
         _normalize_region_keys(self._dataset("daily_report_offline"), rows)
         self.assertEqual(
             [r["region"] for r in rows],
-            ["hangzhou", "shaoxing", "未登记区域"],
+            ["hangzhou", "shaoxing", "vanke", "未登记区域"],
         )
 
     def test_other_datasets_are_untouched(self):
