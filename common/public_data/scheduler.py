@@ -144,6 +144,22 @@ _COMMAND_TABLE = {
         ],
         "extra_env": {"ROBOT_REGION": "vanke"},
     },
+    "pages-shaoxing": {
+        "argv": [
+            "common.daily_robot.mart_cli", "leaderboard-html",
+            "--confirm-local-test-write",
+            "--output", "{output_dir}/shaoxing.html",
+        ],
+        "extra_env": {"ROBOT_REGION": "shaoxing"},
+    },
+    "pages-qudao": {
+        "argv": [
+            "common.daily_robot.mart_cli", "leaderboard-html",
+            "--confirm-local-test-write",
+            "--output", "{output_dir}/qudao.html",
+        ],
+        "extra_env": {"ROBOT_REGION": "qudao"},
+    },
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable
