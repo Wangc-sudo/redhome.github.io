@@ -93,6 +93,34 @@ _COMMAND_TABLE = {
         ],
         "extra_env": {"ROBOT_REGION": "vanke"},
     },
+    "robot-shaoxing": {
+        "argv": [
+            "common.daily_robot.mart_cli", "once",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "shaoxing"},
+    },
+    "robot-junpin": {
+        "argv": [
+            "common.daily_robot.mart_cli", "once",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "junpin"},
+    },
+    "robot-qudao": {
+        "argv": [
+            "common.daily_robot.mart_cli", "once",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "qudao"},
+    },
+    "robot-offline_all": {
+        "argv": [
+            "common.daily_robot.mart_cli", "once",
+            "--confirm-local-test-write",
+        ],
+        "extra_env": {"ROBOT_REGION": "offline_all"},
+    },
     "pages-hangzhou": {
         "argv": [
             "common.daily_robot.mart_cli", "leaderboard-html",
