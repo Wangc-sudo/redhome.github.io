@@ -396,7 +396,8 @@ class TaskTest(unittest.TestCase):
         select_sql = [s for s in conn.sql_log if "fact_daily_report_offline" in s]
         self.assertTrue(select_sql)
         for sql in select_sql:
-            self.assertIn("NOT LIKE '%合计%'", sql)
+            # 代码内为 pymysql % 转义形态（%%合计%%）
+            self.assertIn("NOT LIKE '%%合计%%'", sql)
 
     def test_scope_table_is_config_driven(self):
         keys = [scope for scope, _, _, _ in AGG_SCOPES]

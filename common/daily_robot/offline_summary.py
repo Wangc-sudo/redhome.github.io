@@ -78,7 +78,8 @@ def fetch_scope_daily_facts(connection, *, region, person, start, end):
         "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
         "FROM `fact_daily_report_offline` "
         "WHERE `region` = %s AND `sales_amount` IS NOT NULL "
-        "AND `responsible_person` NOT LIKE '%合计%' "
+        # %% 转义：pymysql 按 % 格式化 SQL，字面量 %合计% 须双写
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
     )
     params = [region, start, end]
@@ -104,7 +105,7 @@ def fetch_scope_month_target(connection, *, region, person, year, month):
         "SELECT `responsible_person` AS `p`, MAX(`monthly_target`) AS `t` "
         "FROM `fact_daily_report_offline` "
         "WHERE `region` = %s AND `monthly_target` IS NOT NULL "
-        "AND `responsible_person` NOT LIKE '%合计%' "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
     )
     params = [region, first, last]
