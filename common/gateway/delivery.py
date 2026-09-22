@@ -37,12 +37,13 @@ class DeliveryErrorCode(str, enum.Enum):
 
 
 #: 群消息类 kind：走 DingTalkClient 的群 Markdown。
-_GROUP_KINDS = frozenset({"remind", "check", "leaderboard"})
+_GROUP_KINDS = frozenset({"remind", "check", "leaderboard", "channel_daily"})
 
 #: 每种 kind 的非泄露错误码（写 outbox.last_error）。
 _ERROR_CODES = {
     "remind": DeliveryErrorCode.GROUP_SEND_FAILED,
     "check": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "channel_daily": DeliveryErrorCode.GROUP_SEND_FAILED,
     "leaderboard": DeliveryErrorCode.GROUP_SEND_FAILED,
     "ding": DeliveryErrorCode.DING_SEND_FAILED,
 }
