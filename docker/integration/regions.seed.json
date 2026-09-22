@@ -30,6 +30,66 @@
       "deptLabel": {},
       "broadcastExclude": [],
       "leaderboardUrl": "<榜单页面地址>"
-    }
-  }
-}
+      },
+      "shaoxing": {
+      "_备注": "线下绍兴日报群（2026-09-22 补录）。deptOrder 为暂定单段，绍兴实际部门序待运维确认后调整；成员组织见 org.seed.json shaoxing 三部门。",
+      "display": "绍兴",
+      "tableUrl": "<日报表访问地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["绍兴"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
+      },
+      "junpin": {
+      "_备注": "君品雅院日报表填写群（2026-09-22 补录，设计稿 2026-09-15-junpin-yayuan-daily-report-design）。成员组织 = 体验中心部门（与 vanke 同部门，按项目区分，见 org.seed.json vanke 部门）。",
+      "display": "君品雅院",
+      "tableUrl": "<日报表访问地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["体验中心"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
+      },
+      "qudao": {
+      "_备注": "渠道日报表群（2026-09-22 补录）。渠道维度报表（电商渠道日销），非部门维度：deptOrder 为名义单段，实际分组按渠道字典。",
+      "display": "渠道日报",
+      "tableUrl": "<无日报表：可填榜单或群公告地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["渠道"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
+      },
+      "offline_all": {
+      "_备注": "线下整体销售日报周报群（2026-09-22 补录）。线下事业部汇总群：deptOrder 暂定为单段，是否按 杭州/绍兴/其它 排序待运维确认；region 键名 offline_all 亦可评审时改。",
+      "display": "线下整体",
+      "tableUrl": "<无日报表：可填榜单或群公告地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["全部"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
+      }
+      }
+      }
