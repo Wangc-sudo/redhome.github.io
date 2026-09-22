@@ -102,6 +102,7 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
                 text=text,
                 sender_uid=sender_uid,
                 now=self._now(),
+                all_region_cfgs=tuple(self._region_configs.values()),
             )
             conn.commit()
         except Exception:

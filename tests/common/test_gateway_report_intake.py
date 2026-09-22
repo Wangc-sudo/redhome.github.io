@@ -47,8 +47,12 @@ class _Cursor:
             self._rows = []
             self._one = self._conn.existing_row
         elif sql.lstrip().startswith("SELECT"):
-            # 月事实查询
-            self._rows = self._conn.fact_rows
+            # 月事实查询（带 region 键的行按查询参数过滤，模拟生产 WHERE）
+            rows = self._conn.fact_rows
+            if params:
+                rows = [r for r in rows
+                        if "region" not in r or r["region"] == params[0]]
+            self._rows = rows
         else:
             self._rows = []
 
@@ -138,7 +142,8 @@ class ReplyTextTests(unittest.TestCase):
         self.assertEqual(
             build_format_hint("张三"),
             "张三 你好～报数格式：@提醒事项 数字\n"
-            "例如：@提醒事项 12800（当天无销量报 0）",
+            "例如：@提醒事项 12800（当天无销量报 0）\n"
+            "查看全部功能：/帮助 ｜ 按钮菜单：/菜单",
         )
 
     def test_format_hint_personalized_for_store_member(self):
@@ -146,6 +151,7 @@ class ReplyTextTests(unittest.TestCase):
             build_format_hint("王城", store="万科体验馆"),
             "王城 你好～报数格式：@提醒事项 数字\n"
             "例如：@提醒事项 12800（当天无销量报 0）\n"
+            "查看全部功能：/帮助 ｜ 按钮菜单：/菜单\n"
             "你的门店是万科体验馆，也可以这样报：万科体验馆 零售 7560，"
             "或 万科体验馆 团购 1200",
         )
@@ -619,6 +625,12 @@ class AuxParseTests(unittest.TestCase):
         self.assertEqual(command, "补签")
         self.assertEqual(match.group("name"), "张三")
 
+    def test_zero_width_and_joined_at_mention_are_tolerated(self):
+        # 客户端插入零宽字符（​）或与指令连写都不得失效
+        self.assertEqual(parse_aux_command("@提醒事项​/帮助"), ("帮助", None))
+        self.assertEqual(parse_aux_command("@提醒事项 /帮助"), ("帮助", None))
+        self.assertEqual(parse_aux_command("​/未填"), ("未填", None))
+
     def test_backfill_args(self):
         command, match = parse_aux_command("/补签 张三 12800")
         self.assertEqual(command, "补签")
@@ -730,6 +742,41 @@ class AuxCommandTests(unittest.TestCase):
             conn, region_cfg=_cfg(), text="/门店", sender_uid="u1", now=_NOW,
         )
         self.assertIn("暂无多门店板块", outcome.reply)
+
+    def test_stores_admin_cross_region_view(self):
+        # 管理员在本区域无多门店数据时，跨区列出有数据的区域
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城")],
+            facts=[{"region": "vanke",
+                    "responsible_person": "万科体验馆·零售",
+                    "department": "万科体验馆",
+                    "business_date": date(2026, 9, 10), "sales_amount": 500,
+                    "monthly_target": 1000}],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/门店", sender_uid="u1", now=_NOW,
+            all_region_cfgs=[_cfg(), _vanke_cfg()],
+        )
+        self.assertEqual(outcome.status, "aux")
+        self.assertIn("管理员跨区视图", outcome.reply)
+        self.assertIn("万科体验馆·零售", outcome.reply)
+
+    def test_stores_non_admin_no_cross_region(self):
+        conn = _Conn(
+            members=[_member()],
+            facts=[{"region": "vanke",
+                    "responsible_person": "万科体验馆·零售",
+                    "department": "万科体验馆",
+                    "business_date": date(2026, 9, 10), "sales_amount": 500,
+                    "monthly_target": 1000}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/门店", sender_uid="u1", now=_NOW,
+            all_region_cfgs=[_cfg(), _vanke_cfg()],
+        )
+        self.assertIn("暂无多门店板块", outcome.reply)
+        self.assertNotIn("万科体验馆", outcome.reply)
 
     def test_backfill_requires_admin(self):
         conn = _Conn(members=[_member()])  # admin=False

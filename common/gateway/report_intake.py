@@ -226,10 +226,12 @@ def build_not_workday_reply():
 
 def build_format_hint(name, store=None, stores=()):
     """格式提示（自动补全 B）：多门店区域按发送人部门个性化——本店成员
-    给本店示例，根部门成员给门店列表示例；其他区域保持通用文案。"""
+    给本店示例，根部门成员给门店列表示例；其他区域保持通用文案。
+    统一附 /辅助指令 入口（2026-09-23 运维要求提示跟上指令时代）。"""
     lines = [
         f"{name} 你好～报数格式：@提醒事项 数字",
         "例如：@提醒事项 12800（当天无销量报 0）",
+        "查看全部功能：/帮助 ｜ 按钮菜单：/菜单",
     ]
     if store:
         lines.append(
@@ -303,8 +305,12 @@ def parse_aux_command(text):
     if not text:
         return None
     body = text.strip()
-    # 钉钉群 @机器人 的消息，投递文本可能保留 @前缀（@提醒事项 /帮助）。
-    body = re.sub(r"^@[^\s]+\s*", "", body)
+    # 钉钉群 @机器人 的消息，投递文本可能保留 @前缀（@提醒事项 /帮助）；
+    # 部分客户端还会插入零宽字符，统一剥离防匹配失效。
+    body = re.sub("[​‌‍⁠﻿]", "", body)
+    body = re.sub(r"^@[^\s/]+\s*", "", body)
+    # 第 1 行字符类为零宽字符：U+200B U+200C U+200D U+2060 U+FEFF；
+    # 第 2 行 @昵称 在空白或 / 前停住（兼容 @机器人/菜单 连写）。
     if not body.startswith("/"):
         return None
     body = body[1:].strip()
@@ -424,21 +430,39 @@ def _aux_mine(connection, *, region_cfg, name, sender_dept,
     return f"{line}（含今天）"
 
 
-def _aux_stores(connection, *, region_cfg, business_date, workdays):
-    """各门店本月进度（只列有有效目标的格；非多门店区域明确提示）。"""
-    lines = []
-    for store in _CANONICAL_STORES:
-        for metric in _METRIC_WORDS:
-            cell = f"{store}·{metric}"
-            line = _progress_line(cell, _progress(
-                connection, region=region_cfg.region, table_name=cell,
-                business_date=business_date, workdays=workdays,
-            ))
-            if line:
-                lines.append(line)
-    if not lines:
-        return "本区域暂无多门店板块数据（可用 /我的 查个人进度）。"
-    return "\n".join(lines)
+def _aux_stores(connection, *, region_cfg, business_date, workdays,
+                all_region_cfgs=None, is_admin=False):
+    """各门店本月进度（只列有有效目标的格；非多门店区域明确提示）。
+
+    管理员覆盖（2026-09-23 运维定稿）：本区域无多门店数据且发送人是
+    admin 时，跨区列出首个有多门店数据的区域（标注管理员视图）。
+    """
+    def _lines_for(region_name):
+        lines = []
+        for store in _CANONICAL_STORES:
+            for metric in _METRIC_WORDS:
+                cell = f"{store}·{metric}"
+                line = _progress_line(cell, _progress(
+                    connection, region=region_name, table_name=cell,
+                    business_date=business_date, workdays=workdays,
+                ))
+                if line:
+                    lines.append(line)
+        return lines
+
+    lines = _lines_for(region_cfg.region)
+    if lines:
+        return "\n".join(lines)
+    if is_admin and all_region_cfgs:
+        for cfg in all_region_cfgs:
+            if cfg.region == region_cfg.region:
+                continue
+            lines = _lines_for(cfg.region)
+            if lines:
+                return "\n".join(
+                    [f"📊 {cfg.display} 各店进度（管理员跨区视图）："] + lines
+                )
+    return "本区域暂无多门店板块数据（可用 /我的 查个人进度）。"
 
 
 def _record_value(connection, *, region_cfg, member, table_name,
@@ -566,7 +590,7 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
 
 def _handle_aux_command(connection, aux, *, region_cfg, member, sender_uid,
                         name, sender_dept, root_dept, business_date,
-                        workdays, now):
+                        workdays, now, all_region_cfgs=None):
     command, arg = aux
     if command == "帮助":
         hint_store = sender_dept if sender_dept in _CANONICAL_STORES else None
@@ -597,15 +621,20 @@ def _handle_aux_command(connection, aux, *, region_cfg, member, sender_uid,
     if command == "门店":
         return IntakeOutcome(
             "aux",
-            _aux_stores(connection, region_cfg=region_cfg,
-                        business_date=business_date, workdays=workdays),
+            _aux_stores(
+                connection, region_cfg=region_cfg,
+                business_date=business_date, workdays=workdays,
+                all_region_cfgs=all_region_cfgs,
+                is_admin=_is_admin(connection, sender_uid),
+            ),
             region=region_cfg.region, name=name,
         )
     return _aux_backfill(connection, arg, region_cfg=region_cfg,
                          sender_uid=sender_uid, name=name, now=now)
 
 
-def handle_report(connection, *, region_cfg, text, sender_uid, now):
+def handle_report(connection, *, region_cfg, text, sender_uid, now,
+                  all_region_cfgs=None):
     """处理一条报数消息。不写连接 commit（由调用方提交，与其他流一致）。"""
     business_date = now.date() if isinstance(now, datetime) else now
     workdays = fetch_workdays(connection, year=now.year, month=now.month)
@@ -641,6 +670,7 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
             region_cfg=region_cfg, member=member, sender_uid=sender_uid,
             name=name, sender_dept=sender_dept, root_dept=root_dept,
             business_date=business_date, workdays=workdays, now=now,
+            all_region_cfgs=all_region_cfgs,
         )
 
     # 多板块报数（vanke 模型：数据格 = 门店 × {零售,团购}，权限 = 部门归属）。

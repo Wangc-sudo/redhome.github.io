@@ -71,9 +71,10 @@ def build_menu_buttons():
 
 
 def is_menu_request(text):
-    """``/菜单`` 判定（兼容 @机器人 前缀）。"""
+    """``/菜单`` 判定（兼容 @机器人 前缀与零宽字符）。"""
     body = (text or "").strip()
-    body = re.sub(r"^@[^\s]+\s*", "", body)
+    body = re.sub("[​‌‍⁠﻿]", "", body)  # U+200B/200C/200D/2060/FEFF
+    body = re.sub(r"^@[^\s/]+\s*", "", body)
     return body.lower() in _MENU_WORDS
 
 
@@ -164,6 +165,7 @@ class MenuCardCallbackHandler(dingtalk_stream.CallbackHandler):
                 text=f"/{aux}",
                 sender_uid=user_id,
                 now=self._now(),
+                all_region_cfgs=tuple(self._region_configs.values()),
             )
             conn.commit()
         except Exception:
