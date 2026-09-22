@@ -734,7 +734,47 @@ class AuxCommandTests(unittest.TestCase):
         outcome = handle_report(
             conn, region_cfg=_cfg(), text="/我的", sender_uid="u1", now=_NOW,
         )
-        self.assertIn("暂无数据或无目标", outcome.reply)
+        self.assertIn("暂无数据", outcome.reply)
+
+    def test_mine_day_week_month_view(self):
+        # _NOW=2026-09-11（周五），本周一=09-07；09-01 不计入本周
+        conn = _Conn(
+            members=[_member(name="张三丰")],
+            facts=[
+                {"responsible_person": "老张", "department": "杭中",
+                 "business_date": date(2026, 9, 11), "sales_amount": 300,
+                 "monthly_target": 1000},
+                {"responsible_person": "老张", "department": "杭中",
+                 "business_date": date(2026, 9, 8), "sales_amount": 200,
+                 "monthly_target": 1000},
+                {"responsible_person": "老张", "department": "杭中",
+                 "business_date": date(2026, 9, 1), "sales_amount": 100,
+                 "monthly_target": 1000},
+            ],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="/我的", sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("今日 300", outcome.reply)
+        self.assertIn("本周 500", outcome.reply)
+        self.assertIn("本月累计 600 / 目标 1000，完成 60.0%", outcome.reply)
+
+    def test_mine_store_member_two_cells_view(self):
+        conn = _Conn(
+            members=[_member(user_id="u2", name="张燕芳", region="vanke",
+                             dept="万科体验馆")],
+            facts=[{"responsible_person": "万科体验馆·零售",
+                    "department": "万科体验馆",
+                    "business_date": date(2026, 9, 11), "sales_amount": 500,
+                    "monthly_target": 10000}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="/我的", sender_uid="u2",
+            now=_NOW,
+        )
+        self.assertIn("今日/本周/本月", outcome.reply)
+        self.assertIn("万科体验馆·零售 今日 500", outcome.reply)
+        self.assertIn("万科体验馆·团购：暂无数据", outcome.reply)
 
     def test_stores_only_for_multi_metric_region(self):
         conn = _Conn(members=[_member()])

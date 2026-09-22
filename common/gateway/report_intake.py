@@ -24,7 +24,7 @@ extract 不再重放这些行，冲突面整体消失。
 import contextlib
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from common.daily_robot.mart_tasks import MartTaskError
 from common.metrics.daily_report import (
@@ -353,8 +353,8 @@ def build_aux_help(name, store=None, stores=()):
         "🤖 辅助指令：",
         "/帮助 — 本菜单",
         "/未填 — 今日未填名单",
-        "/我的 — 我的本月进度（累计/目标/完成率）",
-        "/门店 — 各门店本月进度（多门店区域）",
+        "/我的 — 我的今日/本周/本月进度",
+        "/门店 — 各门店今日/本周/本月一览（多门店区域）",
         "/补签 姓名 [日期] 金额 — 管理人代录（最长 30 天，如 /补签 张三 9-20 12800）",
         "",
         build_format_hint(name, store=store, stores=stores),
@@ -407,27 +407,91 @@ def _aux_unfilled(connection, *, region_cfg, business_date):
     )
 
 
+def _cell_view(connection, *, region, table_name, business_date, workdays):
+    """数据格的 日/周/月 三视图（2026-09-23 运维定稿：周/月为**查询口径**，
+    由日数据自动汇总——本周=周一至今，本月=累计/目标/完成率）。
+
+    返回 ``{"today", "week_sum", "month_sum", "progress"}``：
+    今日无填报 → today=None；无有效目标 → progress=None。
+    """
+    facts = fetch_month_facts(
+        connection, region=region,
+        year=business_date.year, month=business_date.month,
+    )
+    rows = [
+        row for row in facts
+        if str(row.get("responsible_person") or "").strip() == table_name
+    ]
+    today = None
+    week_start = business_date - timedelta(days=business_date.weekday())
+    week_sum = 0.0
+    month_sum = 0.0
+    for row in rows:
+        value = row.get("sales_amount")
+        if value is None:
+            continue
+        amount = float(value)
+        month_sum += amount
+        day = row.get("business_date")
+        if day == business_date:
+            today = value
+        if isinstance(day, date) and week_start <= day <= business_date:
+            week_sum += amount
+    elapsed = elapsed_workdays(workdays, today=business_date, include_today=True)
+    summary = summarize_people(rows, elapsed_days=elapsed).get(table_name)
+    progress = None
+    if summary is not None and summary.rate is not None:
+        progress = (
+            _fmt_amount(summary.completed),
+            _fmt_amount(summary.target),
+            f"{summary.rate * 100:.1f}%",
+        )
+    return {
+        "today": today,
+        "week_sum": week_sum,
+        "month_sum": month_sum,
+        "progress": progress,
+    }
+
+
+def _cell_view_line(label, view):
+    """三视图为单行文案；整格无数据 → ``None``。"""
+    parts = []
+    if view["today"] is not None:
+        parts.append(f"今日 {_fmt_amount(view['today'])}")
+    if view["week_sum"]:
+        parts.append(f"本周 {_fmt_amount(view['week_sum'])}")
+    if view["progress"] is not None:
+        total_disp, target_disp, ratio_str = view["progress"]
+        parts.append(f"本月累计 {total_disp} / 目标 {target_disp}，完成 {ratio_str}")
+    elif view["month_sum"]:
+        parts.append(f"本月累计 {_fmt_amount(view['month_sum'])}")
+    if not parts:
+        return None
+    return f"📊 {label} " + " ｜ ".join(parts)
+
+
 def _aux_mine(connection, *, region_cfg, name, sender_dept,
               business_date, workdays):
-    """我的本月进度：多门店区域给名下两格，其余区域给本人表内用名一格。"""
+    """我的 日/周/月 进度：多门店区域给名下两格，其余区域给本人表内用名一格。"""
     if sender_dept in _CANONICAL_STORES:
         lines = []
         for metric in _METRIC_WORDS:
             cell = f"{sender_dept}·{metric}"
-            line = _progress_line(cell, _progress(
+            line = _cell_view_line(cell, _cell_view(
                 connection, region=region_cfg.region, table_name=cell,
                 business_date=business_date, workdays=workdays,
             ))
-            lines.append(line or f"{cell}：本月暂无数据或无目标")
-        return "\n".join([f"📊 {name} 本月进度："] + lines)
+            lines.append(line or f"{cell}：暂无数据")
+        return "\n".join([f"📊 {name} 今日/本周/本月："] + lines)
     table_name = region_cfg.aliases.get(name, name)
-    line = _progress_line(table_name, _progress(
+    line = _cell_view_line(table_name, _cell_view(
         connection, region=region_cfg.region, table_name=table_name,
         business_date=business_date, workdays=workdays,
     ))
     if line is None:
-        return f"📊 {name} 本月暂无数据或无目标（表内用名：{table_name}）"
-    return f"{line}（含今天）"
+        return f"📊 {name} 本月暂无数据（表内用名：{table_name}）"
+    return line
 
 
 def _aux_stores(connection, *, region_cfg, business_date, workdays,
@@ -442,7 +506,7 @@ def _aux_stores(connection, *, region_cfg, business_date, workdays,
         for store in _CANONICAL_STORES:
             for metric in _METRIC_WORDS:
                 cell = f"{store}·{metric}"
-                line = _progress_line(cell, _progress(
+                line = _cell_view_line(cell, _cell_view(
                     connection, region=region_name, table_name=cell,
                     business_date=business_date, workdays=workdays,
                 ))
