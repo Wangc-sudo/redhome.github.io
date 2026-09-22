@@ -521,6 +521,23 @@ class DingTalkReadGatewayTests(unittest.TestCase):
         ).validate_sheet(currency_sheet)
         self.assertEqual('[{"name":"金额","type":"currency"}]', snapshot.fields_json)
 
+        # AI 表格主列（primaryDoc）为注册类型：按字符串消费（线下总经办&省外表）。
+        primary_doc_sheet = DingTalkSheet(
+            base_id=sheet.base_id,
+            sheet_id=sheet.sheet_id,
+            sheet_name=sheet.sheet_name,
+            dataset=sheet.dataset,
+            target_table=sheet.target_table,
+            max_pages=sheet.max_pages,
+            fields=(FieldMapping("标题", "responsible_person", "primaryDoc"),),
+        )
+        snapshot = self._gateway(
+            [sheet_response, {"fields": [{"name": "标题", "type": "primaryDoc"}]}]
+        ).validate_sheet(primary_doc_sheet)
+        self.assertEqual(
+            '[{"name":"标题","type":"primaryDoc"}]', snapshot.fields_json
+        )
+
         unsupported_type_sheet = DingTalkSheet(
             base_id=sheet.base_id,
             sheet_id=sheet.sheet_id,

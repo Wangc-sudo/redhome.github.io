@@ -13,6 +13,8 @@ class ManifestError(ValueError):
 
 _ALLOWED_SOURCE_TYPES = frozenset({
     "text", "singleSelect", "number", "currency", "date", "user", "multipleSelect", "unidirectionalLink",
+    # AI 表格主列（标题列）：notable records API 按字符串返回标题，按 text 语义消费。
+    "primaryDoc",
 })
 
 _ALLOWED_WDT_METHODS = frozenset({
