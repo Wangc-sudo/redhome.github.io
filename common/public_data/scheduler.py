@@ -416,7 +416,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
     import time
 
     from common.public_data.db import connect
-    from common.public_data.settings import load_settings
+    from common.public_data.settings import Settings
 
     settings = SchedulerSettings.from_env()
     scheduler = Scheduler(
@@ -424,7 +424,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
         service_ids=load_service_ids(),
         runner=SubprocessRunner(),
         lock_factory=build_mysql_lock_factory(
-            connect, load_settings().mart_database
+            connect, Settings.from_environment().mart_database
         ),
         settings=settings,
         poll_seconds=settings.poll_seconds,
