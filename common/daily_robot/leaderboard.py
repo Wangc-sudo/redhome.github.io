@@ -34,7 +34,8 @@ def _fmt_pct(v, digits=1):
     return f"{v*100:.{digits}f}%"
 
 
-def collect(config, include_today=False):
+def collect(config, include_today=False, projects=None):
+    """采集榜单数据。projects 给定时仅统计「项目部 ∈ projects」的责任人。"""
     now = datetime.now()
     calendar = config["calendar"]
     month = calendar["month"]
@@ -56,6 +57,8 @@ def collect(config, include_today=False):
         if not name or "合计" in name:
             continue
         dept = str(f.get("项目部") or "").strip() or "未分组"
+        if projects is not None and dept not in projects:
+            continue
         target = _parse_num(f.get(target_col)) or 0
         completed = 0.0
         unfilled = 0
@@ -140,15 +143,20 @@ def render_bc_markdown(region, calendar, now, elapsed, people, url=None):
     return "\n".join(lines)
 
 
-def build_bc_markdown(config, url=None):
-    """现行入口（签名不变）：钉钉表采集 + :func:`render_bc_markdown`。"""
-    now, elapsed, people = collect(config, include_today=False)
+def build_bc_markdown(config, url=None, projects=None):
+    """现行入口（签名不变）：钉钉表采集 + :func:`render_bc_markdown`。
+
+    projects 给定时仅播报「项目部 ∈ projects」的部门（多群分别播报）。
+    """
+    now, elapsed, people = collect(config, include_today=False, projects=projects)
     return render_bc_markdown(
         config["region"], config["calendar"], now, elapsed, people, url=url
     )
 
 
-def build_html(config, now, elapsed, people):
+def build_html(config, now, elapsed, people, projects=None):
+    if projects is not None:
+        people = [p for p in people if p["dept"] in projects]
     calendar = config["calendar"]
     region = config["region"]
     month = calendar["month"]

@@ -4,28 +4,74 @@
  region 相关常量全部来自 CONFIG["region"]。
 """
 import json
-import re
+import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.dingtalk import DingTalkClient, DingTalkError, send_markdown
+from common.dingtalk import DingTalkClient, send_markdown
 from common.dingtalk.test_group import resolve_target
+
+SKIP_PATTERNS = ("合计",)
+
+_LOG_FMT = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+_LOGGER = logging.getLogger("daily_robot")
+if not _LOGGER.handlers:
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(_LOG_FMT)
+    _LOGGER.addHandler(_sh)
+    _LOGGER.setLevel(logging.INFO)
+    _LOGGER.propagate = False
+
+
+def _is_skip_name(name):
+    return any(p in str(name) for p in SKIP_PATTERNS)
 
 
 def log(log_dir, msg):
+    """统一走 logging；文件 handler 即用即关，避免 Windows 下句柄占用。"""
     log_dir = Path(log_dir)
     log_dir.mkdir(exist_ok=True)
-    now = datetime.now()
-    line = f"{now.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
-    print(line)
-    with open(log_dir / f"reminder_{now:%Y%m}.log", "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    fh = logging.FileHandler(log_dir / f"reminder_{datetime.now():%Y%m}.log", encoding="utf-8")
+    fh.setFormatter(_LOG_FMT)
+    _LOGGER.addHandler(fh)
+    try:
+        _LOGGER.info(msg)
+    finally:
+        _LOGGER.removeHandler(fh)
+        fh.close()
+
+
+def _resolve_group(config, group) -> dict[str, Any]:
+    """group 为 None 时把顶层单群字段包装成隐式 group（杭州/绍兴零回归）。"""
+    if group is not None:
+        return group
+    region = config.get("region", {})
+    return {
+        "key": region.get("name", "default"),
+        "name": region.get("displayName", region.get("name", "")),
+        "projects": None,
+        "robot": config.get("robot", {}),
+        "members": config.get("members", {}),
+        "ccUsers": config.get("ccUsers", {}),
+        "broadcastExclude": region.get("broadcastExclude", []),
+        "totalPrefixes": region.get("totalPrefixes", []),
+    }
+
+
+def iter_groups(config):
+    """统一产出 group 列表：有 groups 走多群，否则包装顶层单群字段。"""
+    groups = config.get("groups")
+    if groups:
+        return list(groups)
+    return [_resolve_group(config, None)]
 
 
 def load_state(state_file):
@@ -53,7 +99,8 @@ def today_info(calendar, now=None):
     return now, day, None
 
 
-def fetch_status(config):
+def fetch_status(config, projects=None):
+    """读取当日填写状态。projects 给定时仅统计「项目部 ∈ projects」的责任人行。"""
     base = config["base"]
     now = datetime.now()
     day = now.day
@@ -69,8 +116,10 @@ def fetch_status(config):
     for rec in records:
         fvals = rec.get("fields") or {}
         name = fvals.get("责任人")
-        if not name or "合计" in str(name):
+        if not name or _is_skip_name(name):
             skipped.append(name or "(空行)")
+            continue
+        if projects is not None and str(fvals.get("项目部") or "").strip() not in projects:
             continue
         name = str(name).strip()
         v = fvals.get(col_name)
@@ -81,8 +130,26 @@ def fetch_status(config):
     return filled, unfilled, len(records), skipped
 
 
-def send_group(config, title, text, at_ids=None):
-    robot = resolve_target(config["robot"])
+def send_group(config, robot_target=None, title=None, text=None, at_ids=None):
+    """发送群消息。robot_target 为具体群的 robot 配置（group["robot"]）。
+
+    兼容旧调用 send_group(config, title, text, at_ids=...)（杭州/绍兴）。
+    TEST_MODE=1 且 config 含 verify 段时，一律重定向 verify 群；
+    否则沿用 resolve_target（test_groups.json）机制。
+    """
+    if text is None and title is not None and isinstance(robot_target, str):
+        robot_target, title, text = None, robot_target, title
+    robot_cfg = dict(robot_target or config.get("robot") or {})
+    if os.environ.get("TEST_MODE") == "1" and config.get("verify"):
+        verify = config["verify"]
+        robot_cfg["mode"] = "groupSend"
+        robot_cfg["openConversationId"] = verify["openConversationId"]
+        robot_cfg["groupName"] = verify.get("groupName", "功能验证群")
+        robot_cfg.pop("webhook", None)
+        robot_cfg.pop("secret", None)
+        robot = robot_cfg
+    else:
+        robot = resolve_target(robot_cfg)
     client = DingTalkClient.from_config(config["dingtalk"])
     r = send_markdown(client, robot, title, text, at_user_ids=at_ids)
     log(Path(config.get("logDir", Path(__file__).parent / "logs")),
@@ -90,22 +157,25 @@ def send_group(config, title, text, at_ids=None):
     return r
 
 
-def do_remind(config, state, now, day):
+def do_remind(config, state, now, day, group=None):
+    group = _resolve_group(config, group)
     log_dir = Path(config.get("logDir", Path(__file__).parent / "logs"))
     key = f"remind_{now:%Y%m%d}"
+    if config.get("groups"):
+        key = f"{key}_{group.get('key') or group.get('name')}"
     if state.get(key):
         log(log_dir, "今日提醒已发过，跳过")
         return
 
-    filled, unfilled, _, _ = fetch_status(config)
-    log(log_dir, f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    filled, unfilled, _, _ = fetch_status(config, projects=group.get("projects"))
+    log(log_dir, f"[{group.get('name')}] 填写状态: 已填{len(filled)} 未填{len(unfilled)}")
     if not unfilled:
         log(log_dir, "全员已填写，不发提醒")
         state[key] = datetime.now().isoformat()
         save_state(config["stateFile"], state)
         return
 
-    members = config["members"]
+    members = group.get("members", {})
     at_ids, missing = [], []
     for name in unfilled:
         uid = members.get(name)
@@ -116,7 +186,7 @@ def do_remind(config, state, now, day):
 
     weekday = "一二三四五六日"[now.weekday()]
     url = config["base"]["tableUrl"]
-    display = config["region"].get("displayName", config["region"]["name"])
+    display = group.get("name") or config.get("region", {}).get("displayName", "")
     lines = [f"### 📋 销售日报填写提醒（{display} {now.month}月{day}日 周{weekday}）", ""]
     lines.append(f"以下 **{len(unfilled)}** 位同事还未填写今日销售日报，请尽快填写：")
     lines.append("")
@@ -128,21 +198,24 @@ def do_remind(config, state, now, day):
     if missing:
         lines.append("")
         lines.append(f"（{'、'.join(missing)} 未在通讯录映射中，无法@，请手动提醒）")
-    send_group(config, "销售日报填写提醒", "\n".join(lines), at_ids=at_ids)
+    send_group(config, group.get("robot"), "销售日报填写提醒", "\n".join(lines), at_ids=at_ids)
     state[key] = datetime.now().isoformat()
     save_state(config["stateFile"], state)
 
 
-def do_check(config, state, now, day):
+def do_check(config, state, now, day, group=None):
+    group = _resolve_group(config, group)
     log_dir = Path(config.get("logDir", Path(__file__).parent / "logs"))
     key = f"check_{now:%Y%m%d}"
+    if config.get("groups"):
+        key = f"{key}_{group.get('key') or group.get('name')}"
     if state.get(key):
         log(log_dir, "今日检查已发过，跳过")
         print("NO_ACTION: 今日检查已发过")
         return
 
-    filled, unfilled, _, _ = fetch_status(config)
-    log(log_dir, f"填写状态: 已填{len(filled)} 未填{len(unfilled)}")
+    filled, unfilled, _, _ = fetch_status(config, projects=group.get("projects"))
+    log(log_dir, f"[{group.get('name')}] 填写状态: 已填{len(filled)} 未填{len(unfilled)}")
     if not unfilled:
         log(log_dir, "全员已填写，不发催办")
         state[key] = datetime.now().isoformat()
@@ -150,8 +223,8 @@ def do_check(config, state, now, day):
         print("NO_ACTION: 全员已填写")
         return
 
-    members = config["members"]
-    cc = config.get("ccUsers", {})
+    members = group.get("members", {})
+    cc = group.get("ccUsers", {})
     ding_ids = [members[n] for n in unfilled if members.get(n)]
     missing = [n for n in unfilled if not members.get(n)]
     weekday = "一二三四五六日"[now.weekday()]
@@ -161,7 +234,7 @@ def do_check(config, state, now, day):
     cc_shen = cc.get("沈聪")
     if cc_shen:
         at_ids.append(cc_shen)
-    display = config["region"].get("displayName", config["region"]["name"])
+    display = group.get("name") or config.get("region", {}).get("displayName", "")
 
     lines = [f"### ⏰ 销售日报未填写（{display} {now.month}月{day}日）", ""]
     lines.append(f"截至 20:00，以下 **{len(unfilled)}** 位同事仍未填写：")
@@ -173,14 +246,14 @@ def do_check(config, state, now, day):
     if missing:
         lines.append("")
         lines.append(f"（{'、'.join(missing)} 未在通讯录映射中，无法@，请手动提醒）")
-    send_group(config, "销售日报未填写", "\n".join(lines), at_ids=at_ids)
+    send_group(config, group.get("robot"), "销售日报未填写", "\n".join(lines), at_ids=at_ids)
     state[key] = datetime.now().isoformat()
     save_state(config["stateFile"], state)
 
     if ding_ids:
         content = (f"【销售日报催办】{display} {now.month}月{day}日（周{weekday}）：你还未填写今日销售日报，"
                    f"请在群里 @提醒事项 报数或填写表格 {url}")
-        cmd = (f'dws ding message send --robot-code {config["robot"]["robotCode"]} '
+        cmd = (f'dws ding message send --robot-code {group["robot"]["robotCode"]} '
                f'--users {",".join(ding_ids)} --content "{content}" --type app --format json')
         print("DING_CMD_START")
         print(cmd)
@@ -268,24 +341,74 @@ def org_sync(config, inputs, active_region):
         config["org"] = org
         return False, []
 
-    members = config["members"]
+    if config.get("groups"):
+        _route_members_to_groups(config, active_updates, active_region, aliases, log_dir)
+    else:
+        members = config["members"]
+        for action, real_name in active_updates:
+            table_name = _apply_alias(real_name, aliases)
+            uid = archives[active_region].get(real_name)
+            if action in ("add", "update"):
+                if members.get(table_name) == uid:
+                    continue
+                members[table_name] = uid
+                log(log_dir, f"催报名单更新: +{table_name} ({uid})")
+            elif action == "remove":
+                if table_name in members:
+                    del members[table_name]
+                    log(log_dir, f"催报名单更新: -{table_name}")
+        config["members"] = members
+
+    org["lastSync"] = datetime.now().isoformat(timespec="seconds")
+    config["org"] = org
+    return True, changes
+
+
+def _fetch_name_projects(config):
+    """读总表，返回 {责任人: 项目部} 映射（用于多群路由）。"""
+    client = DingTalkClient.from_config(config["dingtalk"])
+    base = config["base"]
+    records = client.list_records(base["baseId"], base["tableId"])
+    name2dept = {}
+    for rec in records:
+        fvals = rec.get("fields") or {}
+        name = fvals.get("责任人")
+        if not name or _is_skip_name(name):
+            continue
+        name2dept[str(name).strip()] = str(fvals.get("项目部") or "").strip()
+    return name2dept
+
+
+def _route_members_to_groups(config, active_updates, active_region, aliases, log_dir):
+    """多群模式：按表内「项目部」把人员路由到 projects 匹配的群并更新各群 members。"""
+    archives = config["org"]["archives"]
+    groups = config["groups"]
+    try:
+        name2dept = _fetch_name_projects(config)
+    except Exception as e:
+        log(log_dir, f"读取总表项目部失败，跳过 members 路由（档案已更新）: {e}")
+        return
+
     for action, real_name in active_updates:
         table_name = _apply_alias(real_name, aliases)
         uid = archives[active_region].get(real_name)
         if action in ("add", "update"):
+            dept = name2dept.get(table_name)
+            target = next((g for g in groups if dept and dept in g.get("projects", [])), None)
+            if target is None:
+                log(log_dir, f"路由失败: {table_name} 项目部={dept or '(表中无此行)'} 无匹配群，跳过")
+                continue
+            members = target.setdefault("members", {})
             if members.get(table_name) == uid:
                 continue
             members[table_name] = uid
-            log(log_dir, f"催报名单更新: +{table_name} ({uid})")
+            log(log_dir, f"催报名单更新[{target.get('name')}]: +{table_name} ({uid})")
         elif action == "remove":
-            if table_name in members:
-                del members[table_name]
-                log(log_dir, f"催报名单更新: -{table_name}")
-
-    org["lastSync"] = datetime.now().isoformat(timespec="seconds")
-    config["org"] = org
-    config["members"] = members
-    return True, changes
+            for g in groups:
+                members = g.get("members", {})
+                if table_name in members:
+                    del members[table_name]
+                    log(log_dir, f"催报名单更新[{g.get('name')}]: -{table_name}")
 
 
 def _parse_num(v):
@@ -297,17 +420,26 @@ def _parse_num(v):
         return None
 
 
-def recalc_totals(config):
+def recalc_totals(config, group=None):
+    """重算达成率与合计行。group 给定时仅处理 group.projects 行与 group.totalPrefixes 合计行。"""
     client = DingTalkClient.from_config(config["dingtalk"])
     base = config["base"]
     calendar = config["calendar"]
-    region = config["region"]
+    region = config.get("region", {})
     month = calendar["month"]
     workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
     day_cols = [f"{d}日" for d in workdays]
     target_col = f"{month}月销量目标（万）"
-    total_prefixes = region.get("totalPrefixes", [])
-    all_dept_names = region.get("allDeptNames", total_prefixes)
+    if group is not None:
+        total_prefixes = group.get("totalPrefixes") or group.get("projects", [])
+        all_dept_names = group.get("projects", total_prefixes)
+        projects = set(all_dept_names)
+        all_display = group.get("name", "总")
+    else:
+        total_prefixes = region.get("totalPrefixes", [])
+        all_dept_names = region.get("allDeptNames", total_prefixes)
+        projects = None
+        all_display = region.get("allDisplayName", region.get("displayName", "总"))
 
     records = client.list_records(base["baseId"], base["tableId"])
     updates = []
@@ -317,9 +449,11 @@ def recalc_totals(config):
     for rec in records:
         f = rec.get("fields") or {}
         name = str(f.get("责任人") or "")
-        if not name or "合计" in name:
+        if not name or _is_skip_name(name):
             continue
         dept = str(f.get("项目部") or "?")
+        if projects is not None and dept not in projects:
+            continue
         members_by_dept.setdefault(dept, []).append(f)
 
         day_sum = sum(_parse_num(f.get(c)) or 0 for c in day_cols)
@@ -338,7 +472,7 @@ def recalc_totals(config):
     for rec in records:
         f = rec.get("fields") or {}
         name = str(f.get("责任人") or "")
-        if "合计" not in name or not name:
+        if not name or not _is_skip_name(name):
             continue
         dept = str(f.get("项目部") or "")
         for prefix in total_prefixes:
@@ -346,8 +480,7 @@ def recalc_totals(config):
                 total_rows[prefix] = (rec["id"], f)
                 break
         else:
-            all_name = region.get("allDisplayName", region.get("displayName", "总"))
-            if all_name in name or all_name in dept:
+            if group is None and (all_display in name or all_display in dept):
                 total_rows["ALL"] = (rec["id"], f)
 
     def fix_total_row(rid, tf, members):
@@ -388,7 +521,8 @@ def recalc_totals(config):
     return n_fixed
 
 
-def check_data(config):
+def check_data(config, projects=None):
+    """数据体检。projects 给定时仅检查「项目部 ∈ projects」的责任人行。"""
     client = DingTalkClient.from_config(config["dingtalk"])
     base = config["base"]
     calendar = config["calendar"]
@@ -405,7 +539,9 @@ def check_data(config):
         if not name:
             problems.append(f"[空责任人行] id={rec.get('id')} keys={list(f.keys())[:5]}")
             continue
-        if "合计" in str(name):
+        if _is_skip_name(name):
+            continue
+        if projects is not None and str(f.get("项目部") or "").strip() not in projects:
             continue
 
         for rest in calendar.get("restDays", []):

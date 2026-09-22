@@ -203,7 +203,8 @@ class HandleReportTests(unittest.TestCase):
         self.assertEqual(params[0], "stream:hangzhou:u1:2026-09-11")
         self.assertEqual(params[1:6],
                          ("hangzhou", "张三", "杭中", _DAY, 12800))
-        self.assertEqual(params[7], STREAM_RUN_ID)
+        self.assertIsNone(params[6])  # monthly_target（有表区域由 AI 表行携带）
+        self.assertEqual(params[8], STREAM_RUN_ID)
 
         self.assertIn("✅ 已记录 9月11日（周五）销量：12800", outcome.reply)
         self.assertNotIn("🔁", outcome.reply)
@@ -219,6 +220,51 @@ class HandleReportTests(unittest.TestCase):
         )
         self.assertEqual(params[2], "老张")
         self.assertEqual(outcome.status, "recorded")
+
+    def test_insert_snapshots_the_configured_monthly_target(self):
+        """无 AI 表区域：月目标由 region 配置快照进新事实行。"""
+        cfg = RegionConfig(
+            region="vanke", display="万科&大莲花&团购",
+            table_url="https://example.com/board",
+            robot_code="rc", open_conversation_id="conv-vk",
+            aliases={}, cc_user_ids=(),
+            monthly_targets={"张三": 300000},
+        )
+        conn = _Conn(members=[_member(region="vanke", dept="体验中心")])
+        outcome = handle_report(
+            conn, region_cfg=cfg, text="12800", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        insert_sql, params = next(
+            (s, p) for s, p in conn.executed if s.lstrip().startswith("INSERT")
+        )
+        self.assertIn("`monthly_target`", insert_sql)
+        self.assertEqual(params[1:3], ("vanke", "张三"))
+        self.assertEqual(params[6], 300000)
+
+    def test_update_path_preserves_the_existing_target(self):
+        """业务键原地更新只动 sales_amount，monthly_target 列不被覆盖。"""
+        cfg = RegionConfig(
+            region="vanke", display="万科&大莲花&团购",
+            table_url="https://example.com/board",
+            robot_code="rc", open_conversation_id="conv-vk",
+            aliases={}, cc_user_ids=(),
+            monthly_targets={"张三": 300000},
+        )
+        conn = _Conn(
+            members=[_member(region="vanke", dept="体验中心")],
+            existing={"source_record_id": "stream:vanke:u1:2026-09-11",
+                      "sales_amount": Decimal("100")},
+        )
+        outcome = handle_report(
+            conn, region_cfg=cfg, text="200", sender_uid="u1", now=_NOW,
+        )
+        self.assertTrue(outcome.overwritten)
+        update_sql, params = next(
+            (s, p) for s, p in conn.executed if s.lstrip().startswith("UPDATE")
+        )
+        self.assertNotIn("monthly_target", update_sql)
+        self.assertEqual(params[0], 200)
 
     def test_overwrite_updates_the_existing_row_and_notes_it(self):
         conn = _Conn(

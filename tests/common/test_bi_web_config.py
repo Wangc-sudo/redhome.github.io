@@ -32,6 +32,7 @@ import yaml
 from common.bi_web.cards import REGISTRY, validate_dashboard_config
 from common.bi_web.config import (
     BI_GROUP,
+    KNOWN_FILTER_SOURCES,
     CardPlacement,
     DashboardConfig,
     DashboardConfigError,
@@ -407,6 +408,25 @@ class StageBParseTests(unittest.TestCase):
         self.assertNotIn("SECRET-LEAK-CHECK", str(ctx.exception))
 
 
+class GranularityFilterSourceTests(unittest.TestCase):
+    """日月星粒度批次（执行提示词 §4.1/§6-1）：granularity 进入值域闸词汇表。
+
+    静态值域（不查库），与 regions/months 同级；config/cards/app 三处
+    缺一即红构建，此处钉 config 一侧。
+    """
+
+    def test_granularity_is_a_known_filter_source(self):
+        self.assertIn("granularity", KNOWN_FILTER_SOURCES)
+
+    def test_filter_with_granularity_source_parses(self):
+        config = parse_dashboard_config(
+            "x", {"filters": [{"param": "gran", "source": "granularity"}]}
+        )
+
+        self.assertEqual("gran", config.filters[0].param)
+        self.assertEqual("granularity", config.filters[0].source)
+
+
 class DashboardIdsTests(_SeedFileTestCase):
     """阶段 B 导航枚举：dashboard_ids() 各后端行为。"""
 
@@ -502,7 +522,11 @@ class BiSeedFileTests(unittest.TestCase):
         mapping = load_seed(_REPO_BI_SEED_PATH)
 
         self.assertEqual(
-            {"l1-cockpit", "l2-region", "l2-channel", "l2-people"}, set(mapping)
+            {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
+             "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
+             "l2-dining", "l2-hall", "l2-inventory", "l2-warehouse",
+             "l2-quarter", "l2-yoy", "l2-contract"},
+            set(mapping),
         )
         configs = {
             dashboard_id: parse_dashboard_config(dashboard_id, mapping[dashboard_id])
@@ -516,15 +540,18 @@ class BiSeedFileTests(unittest.TestCase):
         l1 = configs["l1-cockpit"]
         self.assertEqual(0, l1.nav_order)
         self.assertEqual((), l1.filters)
-        self.assertEqual(7, len(l1.cards))
+        # 结果 → 变化 → 风险：本月累计与目标在前，缺口/告警（派生口径）
+        # 紧跟其后，日环比降为条线辅助。
+        self.assertEqual(11, len(l1.cards))
         self.assertEqual(
-            ("kpi_offline_dod", "kpi_channel_dod", "kpi_offline_mtd",
-             "kpi_channel_mtd", "kpi_annual_progress", "trend_region_daily",
-             "bar_channel_mtd"),
+            ("kpi_offline_mtd", "kpi_channel_mtd", "kpi_annual_progress",
+             "trend_region_daily", "bar_channel_mtd", "table_channel_mtd",
+             "pie_sku_mtd", "anomaly_top", "kpi_shortfall",
+             "kpi_offline_dod", "kpi_channel_dod"),
             tuple(placement.card for placement in l1.cards),
         )
         self.assertEqual(
-            (6, 6, 4, 4, 4, 8, 4),
+            (4, 4, 4, 8, 4, 12, 6, 6, 6, 3, 3),
             tuple(placement.span for placement in l1.cards),
         )
 
@@ -563,6 +590,24 @@ class BiSeedFileTests(unittest.TestCase):
             (4, 8, 6, 6), tuple(placement.span for placement in channel.cards)
         )
 
+        product = configs["l2-product"]
+        self.assertEqual(25, product.nav_order)
+        self.assertEqual(
+            (("month", "months", "月份"), ("brand", "brands", "品牌"),
+             ("channel", "sku_channels", "渠道")),
+            tuple(
+                (spec.param, spec.source, spec.label) for spec in product.filters
+            ),
+        )
+        self.assertEqual(
+            ("kpi_sku_mtd", "table_sku_hot_total", "table_sku_hot_brand",
+             "table_sku_hot_channel"),
+            tuple(placement.card for placement in product.cards),
+        )
+        self.assertEqual(
+            (4, 8, 6, 6), tuple(placement.span for placement in product.cards)
+        )
+
         people = configs["l2-people"]
         self.assertEqual(30, people.nav_order)
         self.assertEqual(
@@ -579,6 +624,108 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             (4, 4, 4, 12), tuple(placement.span for placement in people.cards)
         )
+
+        # 电商人员业绩（2026-09-18 P3）：负责人集合归属（钉钉 AI 表 user[]），
+        # 整店日销售额/月目标归集合内每位负责人（不切分、不均摊）；筛选不带
+        # default（seed filters 不支持 default 字段），用户手动选「电商」。
+        ecom_people = configs["l2-ecom-people"]
+        self.assertEqual(55, ecom_people.nav_order)
+        self.assertEqual(
+            (("region", "regions", "区域"), ("month", "months", "月份")),
+            tuple(
+                (spec.param, spec.source, spec.label)
+                for spec in ecom_people.filters
+            ),
+        )
+        self.assertEqual(
+            ("table_people_leaderboard", "anomaly_top", "kpi_shortfall"),
+            tuple(placement.card for placement in ecom_people.cards),
+        )
+        self.assertEqual(
+            (12, 6, 6),
+            tuple(placement.span for placement in ecom_people.cards),
+        )
+
+        # 前后端拉齐 V1（2026-09-16）：全部 15 页 refresh_seconds 统一
+        # 86400（T+1 口径，全站无自动刷新/轮询）。
+        for dashboard_id, config in configs.items():
+            with self.subTest(dashboard=dashboard_id, field="refresh"):
+                self.assertEqual(86400, config.refresh_seconds)
+
+        # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
+        # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡
+        # 收敛为 1 张），页面级挂「公司主体」筛选。
+        fund = configs["l2-fund-safety"]
+        self.assertEqual(40, fund.nav_order)
+        # 静态资源仓链路样例（2026-09-17）：资金页图标为 FTP 仓 SVG 路径；
+        # 分组由后端 group 字段驱动（前端逻辑后端化）。
+        self.assertEqual("/static/icons/fund.svg", fund.icon)
+        self.assertEqual("专项分析", fund.group)
+        self.assertEqual(
+            (("entity", "entities", "公司主体"),),
+            tuple(
+                (spec.param, spec.source, spec.label) for spec in fund.filters
+            ),
+        )
+        self.assertEqual(
+            ("kpi_fin_receivables_overdue",
+             "trend_fin_store_funds_entity",
+             "table_fin_receivables_aging", "table_fin_prepayment_uninvoiced",
+             "table_fin_deposit_status"),
+            tuple(placement.card for placement in fund.cards),
+        )
+        self.assertEqual(
+            (4, 12, 12, 6, 6),
+            tuple(placement.span for placement in fund.cards),
+        )
+
+        # ④⑤⑪ 月报页：单卡整幅、无筛选（卡片 params_schema 留空）。
+        monthly_pages = (
+            ("l2-ecom", 50, "table_manual_ecommerce_monthly"),
+            ("l2-dining", 60, "table_manual_restaurant_monthly"),
+            ("l2-hall", 70, "table_manual_showroom_monthly"),
+        )
+        for dashboard_id, nav_order, card_id in monthly_pages:
+            with self.subTest(dashboard=dashboard_id):
+                config = configs[dashboard_id]
+                self.assertEqual(nav_order, config.nav_order)
+                self.assertEqual((), config.filters)
+                self.assertEqual(
+                    (card_id,),
+                    tuple(placement.card for placement in config.cards),
+                )
+                self.assertEqual(
+                    (12,), tuple(placement.span for placement in config.cards)
+                )
+
+        # 五张 0 占位页：单卡整幅 + 月份筛选（页面级 filters；卡片
+        # params_schema 留空不会 400），标题带「（待接入）」标注。
+        placeholder_pages = (
+            ("l2-inventory", 80, "table_inventory_aging"),
+            ("l2-warehouse", 90, "table_warehouse_ops"),
+            ("l2-quarter", 100, "table_quarter_budget_actual"),
+            ("l2-yoy", 110, "table_yoy_monthly"),
+            ("l2-contract", 120, "table_contract_writeoff"),
+        )
+        for dashboard_id, nav_order, card_id in placeholder_pages:
+            with self.subTest(dashboard=dashboard_id):
+                config = configs[dashboard_id]
+                self.assertEqual(nav_order, config.nav_order)
+                self.assertIn("（待接入）", config.title)
+                self.assertEqual(
+                    (("month", "months", "月份"),),
+                    tuple(
+                        (spec.param, spec.source, spec.label)
+                        for spec in config.filters
+                    ),
+                )
+                self.assertEqual(
+                    (card_id,),
+                    tuple(placement.card for placement in config.cards),
+                )
+                self.assertEqual(
+                    (12,), tuple(placement.span for placement in config.cards)
+                )
 
 
 class FileDashboardSourceTests(_SeedFileTestCase):
@@ -656,6 +803,85 @@ class NacosDashboardSourceTests(unittest.TestCase):
         )
 
         self.assertFalse(source.get_dashboard("l1-cockpit").enabled)
+
+    def test_get_dashboard_is_cached_within_the_ttl(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, len(client.requests))
+
+    def test_get_dashboard_refetches_after_the_ttl(self):
+        now = [0.0]
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): _l1_cockpit_entry_yaml()}
+        )
+        source = NacosDashboardSource(
+            server="nacos:8848", client=client,
+            ttl_seconds=30.0, monotonic=lambda: now[0],
+        )
+
+        source.get_dashboard("l1-cockpit")
+        now[0] = 31.0
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_fallback_resolution_after_a_failed_read_is_cached(self):
+        # Nacos down -> the fallback/minimal default resolution IS cached
+        # within the TTL: a dead registry must cost its connection penalty
+        # at most once per window (that penalty is the 2026-09-14 20s bug).
+        class _FlakyClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_config(self, data_id, group):
+                self.calls += 1
+                raise RuntimeError("connection refused")
+
+        client = _FlakyClient()
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        source.get_dashboard("l1-cockpit")
+        source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(1, client.calls)
+
+    def test_parse_errors_are_never_cached(self):
+        client = _FakeNacosClient(
+            {("l1-cockpit.yaml", BI_GROUP): "cards: [unbalanced\n"}
+        )
+        source = NacosDashboardSource(server="nacos:8848", client=client)
+
+        for _ in range(2):
+            with self.assertRaises(DashboardConfigError):
+                source.get_dashboard("l1-cockpit")
+
+        self.assertEqual(2, len(client.requests))
+
+    def test_dashboard_ids_are_cached(self):
+        class _CountingSource(StaticDashboardSource):
+            def __init__(self, mapping):
+                super().__init__(mapping)
+                self.calls = 0
+
+            def dashboard_ids(self):
+                self.calls += 1
+                return super().dashboard_ids()
+
+        fallback = _CountingSource({"l1-cockpit": {}})
+        source = NacosDashboardSource(
+            server="nacos:8848", client=_FakeNacosClient(), fallback=fallback
+        )
+
+        source.dashboard_ids()
+        source.dashboard_ids()
+
+        self.assertEqual(1, fallback.calls)
 
     def test_minimal_default_when_missing_empty_or_unreachable(self):
         clients = (

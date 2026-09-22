@@ -5,7 +5,40 @@ split: each card id binds a chart kind, the ``run`` function from
 :mod:`common.bi_web.queries` and the URL-parameter whitelist.  Stage A
 placed five parameter-less cards; stage B reuses two of them with
 parameters (``trend_region_daily`` region+month, ``bar_channel_mtd``
-month) and adds eleven cards -- sixteen in all.
+month) and adds eleven cards; the SKU cockpit donut
+(``pie_sku_mtd``, parameter-less) brings the total to seventeen; the
+product-movement board (``l2-product``) adds four more (``kpi_sku_mtd``
+plus the total / per-brand / per-channel hot-SKU tables) for
+twenty-one in all; the derived-metric half of the CubeSchema brings two
+more (``kpi_shortfall`` with the region/month whitelist and the
+parameter-light ``anomaly_top``) for twenty-three; the manual-report
+consumption pair (``table_manual_ecommerce_monthly`` /
+``table_manual_restaurant_monthly``, dataset fixed per card id, no URL
+parameters yet) brings the total to twenty-five; the fund-safety five
+(``kpi_fin_receivables_overdue`` / ``table_fin_receivables_aging`` /
+``table_fin_prepayment_uninvoiced`` / ``table_fin_deposit_status`` /
+``trend_fin_store_funds``, derived via ``fin_derived``), the showroom
+monthly clone (``table_manual_showroom_monthly``) and the five
+placeholder structural cards (``table_inventory_aging`` /
+``table_warehouse_ops`` / ``table_quarter_budget_actual`` /
+``table_yoy_monthly`` / ``table_contract_writeoff``, static ``rows=[]``
+with ``has_fact=false``) bring the total to thirty-six; the per-entity
+view of ``trend_fin_store_funds`` (2026-09-17: 38 stores on one line chart
+is unreadable, and the company entities change over time, so the four
+hard-coded split cards were collapsed into one parameterized card
+``trend_fin_store_funds_entity`` plus the ``entities`` filter source --
+SQL aggregation pushed down, entity bound as ``%s``) brings it to
+thirty-seven.  The day/week/month granularity batch (2026-09-18) keeps
+the count at thirty-seven: three sample cards declare ``grans`` /
+``default_gran`` (``trend_region_daily`` day+week+month default day;
+``kpi_offline_mtd`` month only; ``trend_fin_store_funds_entity`` month
+only) while ``kpi_offline_dod`` stays the undeclared control group --
+cards without a declaration behave exactly as before.  The 2026-09-21
+correction batch (订正方案 §4-A) re-opens ``kpi_offline_mtd`` to
+day/week/month with ``gran`` entering the whitelist: its source table is
+day-grained, so the month-only declaration was a fake control (the seg
+rendered with no ``on`` state and no request ever carried ``gran``);
+``default_gran="month"`` keeps the default path byte-identical.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -24,7 +57,7 @@ from common.bi_web import queries
 from common.bi_web.config import KNOWN_FILTER_SOURCES
 
 #: The chart kinds the front end can render (stage A uses scalar/line/bar).
-KNOWN_CHARTS = ("scalar", "line", "bar", "table")
+KNOWN_CHARTS = ("scalar", "line", "bar", "table", "pie")
 
 
 class CardConfigError(ValueError):
@@ -39,35 +72,58 @@ class Card:
     :mod:`common.bi_web.queries`); ``params_schema`` maps param name ->
     filter source name (``regions``/``channels``/``months``) -- the
     URL-parameter whitelist and its value domain in one mapping.
+    ``grans``/``default_gran`` declare the day/week/month granularity
+    a card accepts (2026-09-18 batch); both default to empty, so every
+    undeclared card keeps its pre-granularity behaviour untouched.
     """
 
     card_id: str
     chart: str
     run: Callable
     params_schema: dict
+    grans: tuple = ()
+    default_gran: str = ""
 
 
-def _card(card_id, chart, run, params_schema=None):
+def _card(card_id, chart, run, params_schema=None, grans=(), default_gran=""):
     """Build one card with both halves import-time validated.
 
     An unknown chart kind or an unknown filter source raises here, at
-    module load -- the same protection class for both.
+    module load -- the same protection class for both.  A declared
+    ``default_gran`` must be one of the declared ``grans``.
     """
     if chart not in KNOWN_CHARTS:
         raise CardConfigError(f"card '{card_id}' has unknown chart '{chart}'")
     schema = dict(params_schema or {})
     if any(source not in KNOWN_FILTER_SOURCES for source in schema.values()):
         raise CardConfigError(f"card '{card_id}' has an unknown filter source")
-    return Card(card_id=card_id, chart=chart, run=run, params_schema=schema)
+    grans = tuple(grans)
+    if default_gran and default_gran not in grans:
+        raise CardConfigError(f"card '{card_id}' default_gran not in grans")
+    return Card(card_id=card_id, chart=chart, run=run, params_schema=schema,
+                grans=grans, default_gran=default_gran)
 
 
 _CARDS = (
-    _card("kpi_offline_mtd", "scalar", queries.run_kpi_offline_mtd),
+    # 粒度批次 A（2026-09-21 订正）：kpi_offline_mtd 开通日/周/月三档——
+    # 源表 fact_daily_report_offline 本就是日粒度，"仅月一档 + 无 gran
+    # 白名单"渲染的是无选中态的假控件。default_gran=month：缺省请求
+    # （app 层注入 gran=month）与开通前逐字节一致；日=水位日当日值、
+    # 周=锚点所在自然周累计（语义见 run_kpi_offline_mtd）。
+    # 批次 A5（同日）：补"年"档（年首→水位，YTD 窗口）——用户口径
+    # 「数据维度改成年月日」，周档保留。
+    _card(
+        "kpi_offline_mtd", "scalar", queries.run_kpi_offline_mtd,
+        {"month": "months", "gran": "granularity"},
+        grans=("day", "week", "month", "year"), default_gran="month",
+    ),
     _card("kpi_channel_mtd", "scalar", queries.run_kpi_channel_mtd),
     _card("kpi_annual_progress", "scalar", queries.run_kpi_annual_progress),
+    # 粒度样板卡：trend_region_daily 三档、默认日（gran=day ≡ 不带参）。
     _card(
         "trend_region_daily", "line", queries.run_trend_region_daily,
-        {"region": "regions", "month": "months"},
+        {"region": "regions", "month": "months", "gran": "granularity"},
+        grans=("day", "week", "month"), default_gran="day",
     ),
     _card(
         "bar_channel_mtd", "bar", queries.run_bar_channel_mtd,
@@ -112,6 +168,77 @@ _CARDS = (
         queries.run_table_people_leaderboard,
         {"region": "regions", "month": "months"},
     ),
+    _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
+    _card(
+        "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
+        {"month": "months"},
+    ),
+    _card(
+        "table_sku_hot_total", "table", queries.run_table_sku_hot_total,
+        {"month": "months"},
+    ),
+    _card(
+        "table_sku_hot_brand", "table", queries.run_table_sku_hot_brand,
+        {"brand": "brands", "month": "months"},
+    ),
+    _card(
+        "table_sku_hot_channel", "table", queries.run_table_sku_hot_channel,
+        {"channel": "sku_channels", "month": "months"},
+    ),
+    _card(
+        "kpi_shortfall", "table", queries.run_kpi_shortfall,
+        {"region": "regions", "month": "months"},
+    ),
+    _card(
+        "anomaly_top", "table", queries.run_anomaly_top,
+        {"region": "regions", "month": "months"},
+    ),
+    _card(
+        "table_manual_ecommerce_monthly", "table",
+        queries.run_table_manual_ecommerce_monthly,
+    ),
+    _card(
+        "table_manual_restaurant_monthly", "table",
+        queries.run_table_manual_restaurant_monthly,
+    ),
+    _card(
+        "table_manual_showroom_monthly", "table",
+        queries.run_table_manual_showroom_monthly,
+    ),
+    # 资金安全页（需求⑩）五卡：SQL 只读 mart fact_fin_*，派生走
+    # fin_derived；params_schema 保守留空（同 ④⑤ 裁决）。
+    _card("kpi_fin_receivables_overdue", "scalar",
+          queries.run_kpi_fin_receivables_overdue),
+    _card("table_fin_receivables_aging", "table",
+          queries.run_table_fin_receivables_aging),
+    _card("table_fin_prepayment_uninvoiced", "table",
+          queries.run_table_fin_prepayment_uninvoiced),
+    _card("table_fin_deposit_status", "table",
+          queries.run_table_fin_deposit_status),
+    _card("trend_fin_store_funds", "line",
+          queries.run_trend_fin_store_funds),
+    # 店铺资金余额趋势的主体参数化版（2026-09-17 P2）：38 家店铺一张图
+    # 不可读，而公司主体会变，故 4 张硬编码分屏卡收敛为 1 张 +
+    # ``entities`` 筛选源（entity 空 = 全主体按渠道汇总）。
+    # 粒度样板卡：trend_fin_store_funds_entity 仅月一档（单档不切换）。
+    _card(
+        "trend_fin_store_funds_entity", "line",
+        queries.run_trend_fin_store_funds_entity,
+        {"entity": "entities", "gran": "granularity"},
+        grans=("month",), default_gran="month",
+    ),
+    # 5 张 0 占位结构卡：run 直接返回静态结构（不查库），
+    # has_fact=false 挂零语义（应接入未接入）。
+    _card("table_inventory_aging", "table",
+          queries.run_table_inventory_aging),
+    _card("table_warehouse_ops", "table",
+          queries.run_table_warehouse_ops),
+    _card("table_quarter_budget_actual", "table",
+          queries.run_table_quarter_budget_actual),
+    _card("table_yoy_monthly", "table",
+          queries.run_table_yoy_monthly),
+    _card("table_contract_writeoff", "table",
+          queries.run_table_contract_writeoff),
 )
 
 #: card_id -> Card, built and import-time validated (chart + filter source).

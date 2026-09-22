@@ -1,10 +1,10 @@
 """Tests for the bi-web card registry (plan Task 3 / stage B Task 7).
 
 The registry is the code-owned half of the ``SQL lives in code, layout
-lives in Nacos`` split: sixteen stage-B cards, each bound to a ``run``
+lives in Nacos`` split: seventeen cards, each bound to a ``run``
 function from ``common.bi_web.queries``, each with a known chart kind
 and a URL-parameter whitelist mapping param name -> filter source (empty
-for the five L1 scalar cards).
+for the parameter-less L1 cards).
 
 ``validate_dashboard_config`` closes the loop with Task 2's
 ``DashboardConfig``: a dashboard that references a card id missing from
@@ -29,7 +29,14 @@ from common.bi_web.config import (
     DashboardConfig,
 )
 
-#: The stage-B card ids: five stage-A cards plus eleven new ones (16 in all).
+#: The registry card ids: seventeen stage-B cards (含 SKU 环形图) 加四张
+#: 商品动销卡（2026-09-15 商渠明细），再加两张派生口径卡（CubeSchema §2
+#: 的缺口/告警与缺口 TOP），再加两张人工报表消费卡（2026-09-16 ④⑤，
+#: dataset 固化、暂无 URL 参数），再加一张体验馆月报克隆卡（⑪）、资金
+#: 安全五卡（需求⑩，fin_derived 派生）与五张 0 占位结构卡（待接入页，
+#: 静态 rows=[] + has_fact=false），再加店铺资金余额趋势的主体参数化卡
+#: （2026-09-17 P2：38 家店铺一张图不可读，且公司主体会变，4 张硬编码
+#: 分屏卡收敛为 1 张 + entities 筛选源），共 37 张。
 STAGE_B_CARD_IDS = (
     "kpi_offline_mtd",
     "kpi_channel_mtd",
@@ -47,15 +54,40 @@ STAGE_B_CARD_IDS = (
     "kpi_people_completed",
     "kpi_people_rate",
     "table_people_leaderboard",
+    "pie_sku_mtd",
+    "kpi_sku_mtd",
+    "table_sku_hot_total",
+    "table_sku_hot_brand",
+    "table_sku_hot_channel",
+    "kpi_shortfall",
+    "anomaly_top",
+    "table_manual_ecommerce_monthly",
+    "table_manual_restaurant_monthly",
+    "table_manual_showroom_monthly",
+    "kpi_fin_receivables_overdue",
+    "table_fin_receivables_aging",
+    "table_fin_prepayment_uninvoiced",
+    "table_fin_deposit_status",
+    "trend_fin_store_funds",
+    "trend_fin_store_funds_entity",
+    "table_inventory_aging",
+    "table_warehouse_ops",
+    "table_quarter_budget_actual",
+    "table_yoy_monthly",
+    "table_contract_writeoff",
 )
 
-#: The five scalar cards the L1 cockpit places without any URL parameter.
+#: The cards the L1 cockpit places without any URL parameter.
+#: 日月星粒度批次（执行提示词 §4.4）：kpi_offline_mtd 作为 3+1 样板卡
+#: 开通 {"month","gran"}，自此退出无参卡名单；当日裁定收敛为
+#: {"month"} 单档（日环比归 kpi_offline_dod 专门卡）后 params_schema
+#: 仍非 {}，故不回本名单。
 L1_PARAMLESS_CARD_IDS = (
-    "kpi_offline_mtd",
     "kpi_channel_mtd",
     "kpi_annual_progress",
     "kpi_offline_dod",
     "kpi_channel_dod",
+    "pie_sku_mtd",
 )
 
 #: card_id -> expected chart kind.
@@ -76,6 +108,27 @@ EXPECTED_CHARTS = {
     "kpi_people_completed": "scalar",
     "kpi_people_rate": "scalar",
     "table_people_leaderboard": "table",
+    "pie_sku_mtd": "pie",
+    "kpi_sku_mtd": "scalar",
+    "table_sku_hot_total": "table",
+    "table_sku_hot_brand": "table",
+    "table_sku_hot_channel": "table",
+    "kpi_shortfall": "table",
+    "anomaly_top": "table",
+    "table_manual_ecommerce_monthly": "table",
+    "table_manual_restaurant_monthly": "table",
+    "table_manual_showroom_monthly": "table",
+    "kpi_fin_receivables_overdue": "scalar",
+    "table_fin_receivables_aging": "table",
+    "table_fin_prepayment_uninvoiced": "table",
+    "table_fin_deposit_status": "table",
+    "trend_fin_store_funds": "line",
+    "trend_fin_store_funds_entity": "line",
+    "table_inventory_aging": "table",
+    "table_warehouse_ops": "table",
+    "table_quarter_budget_actual": "table",
+    "table_yoy_monthly": "table",
+    "table_contract_writeoff": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -96,14 +149,41 @@ EXPECTED_RUN_FUNCTIONS = {
     "kpi_people_completed": queries.run_kpi_people_completed,
     "kpi_people_rate": queries.run_kpi_people_rate,
     "table_people_leaderboard": queries.run_table_people_leaderboard,
+    "pie_sku_mtd": queries.run_pie_sku_mtd,
+    "kpi_sku_mtd": queries.run_kpi_sku_mtd,
+    "table_sku_hot_total": queries.run_table_sku_hot_total,
+    "table_sku_hot_brand": queries.run_table_sku_hot_brand,
+    "table_sku_hot_channel": queries.run_table_sku_hot_channel,
+    "kpi_shortfall": queries.run_kpi_shortfall,
+    "anomaly_top": queries.run_anomaly_top,
+    "table_manual_ecommerce_monthly": queries.run_table_manual_ecommerce_monthly,
+    "table_manual_restaurant_monthly": queries.run_table_manual_restaurant_monthly,
+    "table_manual_showroom_monthly": queries.run_table_manual_showroom_monthly,
+    "kpi_fin_receivables_overdue": queries.run_kpi_fin_receivables_overdue,
+    "table_fin_receivables_aging": queries.run_table_fin_receivables_aging,
+    "table_fin_prepayment_uninvoiced": queries.run_table_fin_prepayment_uninvoiced,
+    "table_fin_deposit_status": queries.run_table_fin_deposit_status,
+    "trend_fin_store_funds": queries.run_trend_fin_store_funds,
+    "trend_fin_store_funds_entity": queries.run_trend_fin_store_funds_entity,
+    "table_inventory_aging": queries.run_table_inventory_aging,
+    "table_warehouse_ops": queries.run_table_warehouse_ops,
+    "table_quarter_budget_actual": queries.run_table_quarter_budget_actual,
+    "table_yoy_monthly": queries.run_table_yoy_monthly,
+    "table_contract_writeoff": queries.run_table_contract_writeoff,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
 EXPECTED_PARAMS_SCHEMA = {
-    "kpi_offline_mtd": {},
+    # 日月星粒度批次样板卡（执行提示词 §4.4 + 2026-09-21 订正批次 A）：
+    # gran 走 granularity 静态值域闸，非法值 400；kpi_offline_dod 为
+    # 对照组，保持 {} 不动。kpi_offline_mtd 订正后 gran 入白名单
+    # （源表是日粒度，此前"仅月一档 + 无 gran"是无选中态的假控件）。
+    "kpi_offline_mtd": {"month": "months", "gran": "granularity"},
     "kpi_channel_mtd": {},
     "kpi_annual_progress": {},
-    "trend_region_daily": {"region": "regions", "month": "months"},
+    "trend_region_daily": {
+        "region": "regions", "month": "months", "gran": "granularity",
+    },
     "bar_channel_mtd": {"month": "months"},
     "kpi_offline_dod": {},
     "kpi_channel_dod": {},
@@ -116,17 +196,57 @@ EXPECTED_PARAMS_SCHEMA = {
     "kpi_people_completed": {"region": "regions", "month": "months"},
     "kpi_people_rate": {"region": "regions", "month": "months"},
     "table_people_leaderboard": {"region": "regions", "month": "months"},
+    "pie_sku_mtd": {},
+    "kpi_sku_mtd": {"month": "months"},
+    "table_sku_hot_total": {"month": "months"},
+    "table_sku_hot_brand": {"brand": "brands", "month": "months"},
+    "table_sku_hot_channel": {"channel": "sku_channels", "month": "months"},
+    "kpi_shortfall": {"region": "regions", "month": "months"},
+    "anomaly_top": {"region": "regions", "month": "months"},
+    # 人工报表两张卡：dataset 固化进卡片 id；month 参数待月份值域重叠
+    # 确认后追加（month_options 不含人工报表独有月份，先留空防 400）。
+    "table_manual_ecommerce_monthly": {},
+    "table_manual_restaurant_monthly": {},
+    # ⑪ 克隆卡同 ④⑤ 裁决：params_schema 留空（month 参数待值域重叠确认）。
+    "table_manual_showroom_monthly": {},
+    # 资金安全五卡与五张占位卡：params_schema 保守留空（筛选挂在页面级
+    # filters，卡片白名单为空不会 400）。
+    "kpi_fin_receivables_overdue": {},
+    "table_fin_receivables_aging": {},
+    "table_fin_prepayment_uninvoiced": {},
+    "table_fin_deposit_status": {},
+    "trend_fin_store_funds": {},
+    # 主体参数化卡（2026-09-17 P2）：entity 走 entities 值域闸，非法值 400。
+    # 日月星粒度批次：单档月卡（grans=("month",)），gran 入白名单。
+    "trend_fin_store_funds_entity": {"entity": "entities", "gran": "granularity"},
+    "table_inventory_aging": {},
+    "table_warehouse_ops": {},
+    "table_quarter_budget_actual": {},
+    "table_yoy_monthly": {},
+    "table_contract_writeoff": {},
+}
+
+#: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
+#: + 2026-09-21 订正批次 A：共 4 张卡开通；其余 33 张（含对照组
+#: kpi_offline_dod）必须保持缺省 () / ""——缺省即旧行为，前端不渲染
+#: 粒度控件。
+EXPECTED_GRANS = {
+    "trend_region_daily": (("day", "week", "month"), "day"),
+    # 批次 A5（2026-09-21）：补"年"档（年首→水位的 YTD 窗口）。
+    "kpi_offline_mtd": (("day", "week", "month", "year"), "month"),
+    "trend_fin_store_funds_entity": (("month",), "month"),
 }
 
 
 def _l1_cockpit():
-    """A valid dashboard placing the seven L1 cockpit cards (Task 10 seed)."""
+    """A valid dashboard placing the eight L1 cockpit cards (Task 10 seed)."""
     l1_card_ids = (
         "kpi_offline_dod",
         "kpi_channel_dod",
         "kpi_offline_mtd",
         "kpi_channel_mtd",
         "kpi_annual_progress",
+        "pie_sku_mtd",
         "trend_region_daily",
         "bar_channel_mtd",
     )
@@ -145,7 +265,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(16, len(REGISTRY))
+        self.assertEqual(37, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 
@@ -195,8 +315,21 @@ class RegistryTests(unittest.TestCase):
                     EXPECTED_RUN_FUNCTIONS[card_id], REGISTRY[card_id].run
                 )
 
-    def test_known_charts_are_the_four_supported_kinds(self):
-        self.assertEqual(("scalar", "line", "bar", "table"), KNOWN_CHARTS)
+    def test_known_charts_are_the_five_supported_kinds(self):
+        self.assertEqual(("scalar", "line", "bar", "table", "pie"), KNOWN_CHARTS)
+
+    def test_granularity_declarations_match_spec(self):
+        # 与白名单测试同款漂移守卫：按注册表 id 集迭代，未登记的开通
+        # （或误开通对照组）立刻红，而不是静默漏测。
+        for card_id in STAGE_B_CARD_IDS:
+            with self.subTest(card_id=card_id):
+                grans, default_gran = EXPECTED_GRANS.get(card_id, ((), ""))
+                self.assertEqual(grans, REGISTRY[card_id].grans)
+                self.assertEqual(default_gran, REGISTRY[card_id].default_gran)
+        # 对照组钉死：kpi_offline_dod 绝不开通（?gran=day 打它必须 400，
+        # 前端不渲染粒度控件，视觉与改动前完全一致）。
+        self.assertEqual((), REGISTRY["kpi_offline_dod"].grans)
+        self.assertEqual("", REGISTRY["kpi_offline_dod"].default_gran)
 
 
 class ValidateDashboardConfigTests(unittest.TestCase):

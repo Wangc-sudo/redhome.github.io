@@ -14,7 +14,26 @@
     {
       "dataset": "wdt_purchase_orders",
       "method": "wms.stockin.Purchase.queryWithDetail",
-      "record_id_path": "purchase_no",
+      "record_id_path": "order_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {},
+      "_note": "行粒度是入库单（order_no=RK…），不是采购单：一张 purchase_no 可多次入库（2026-09-21 实锤 CG202608310004 → RK2609030015/0018 两行）。用 purchase_no 当键会在同页撞重复 ID 杀 run。"
+    },
+    {
+      "dataset": "wdt_stockout_sales",
+      "method": "wms.stockout.Sales.queryWithDetail",
+      "record_id_path": "order_no",
+      "page_size": 100,
+      "max_pages": 1000,
+      "window": "split",
+      "params": {"status_type": 0}
+    },
+    {
+      "dataset": "wdt_stockin_refund",
+      "method": "wms.stockin.Refund.queryWithDetail",
+      "record_id_path": "order_no",
       "page_size": 100,
       "max_pages": 1000,
       "window": "split",

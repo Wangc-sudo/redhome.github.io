@@ -1,0 +1,56 @@
+/** hash 路由：`#/d/{dashboardId}`（ARCHITECTURE §9 已约定 hash，避免服务端配置）。 */
+import { useCallback, useEffect, useState } from 'react';
+
+const HASH_RE = /^#?\/?d\/([^/?#]+)/;
+const PATH_RE = /^\/d\/([^/?#]+)/;
+
+/** '#/d/l1-cockpit' → 'l1-cockpit'；不匹配返回 null。 */
+/**
+ * Hash 路由：# → #/d/{id}
+ *
+ * 用 hash 而非 history.pushState：避免服务端配置，支持静态部署
+ * 与 pathname 取数习惯兼容（hash 里的 id 即 dashboardId）
+ */
+export function parseHash(hash: string): string | null {
+  const m = HASH_RE.exec(hash.trim());
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+export function hrefFor(id: string): string {
+  return `#/d/${encodeURIComponent(id)}`;
+}
+
+/**
+ * 初始路由（仅页面加载时用一次，之后仍由 hashchange 驱动）：
+ * hash 优先；hash 为空且 pathname 是 `/d/{id}`（T5 壳替换后用户直访旧书签）→ 取该 id。
+ */
+function initialId(): string | null {
+  const fromHash = parseHash(window.location.hash);
+  if (fromHash) return fromHash;
+  if (window.location.hash === '') {
+    const m = PATH_RE.exec(window.location.pathname);
+    if (m) return decodeURIComponent(m[1]);
+  }
+  return null;
+}
+
+/**
+ * 当前看板 id + 跳转函数。刷新/分享 URL 都能还原页面（旧实现存 zustand，刷新回首页）。
+ */
+export function useHashRoute(): [string | null, (id: string) => void] {
+  const [id, setId] = useState<string | null>(initialId);
+
+  useEffect(() => {
+    const onHash = () => setId(parseHash(window.location.hash));
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  const navigate = useCallback((next: string) => {
+    const href = hrefFor(next);
+    if (window.location.hash === href) return;
+    window.location.hash = href; // 触发 hashchange → setId
+  }, []);
+
+  return [id, navigate];
+}

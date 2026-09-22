@@ -1,0 +1,142 @@
+/* ============================================================================
+ * bi-react · app.css（仅应用外壳布局）
+ * 设计系统（token / 卡片 / 表格 / 告警）一律来自 ./bi-ui/*，本文件不重复定义。
+ * ========================================================================== */
+
+.app-shell {
+  min-height: 100vh;
+}
+
+/* ---- 左右贯通的视觉流 ---------------------------------------------------
+ * chrome（侧栏）与画布原本是两块各自独立的背景，「拼贴感」由此而来。
+ * 这里在最底层铺一张全宽背景：一条极淡的主色渐变自顶部向下消散，横跨侧栏与内容区。
+ * z-index:-1 → 位于 body 背景之上、所有普通内容之下（不会挡卡片）；
+ * 侧栏改成半透明磨砂后，这张底图会连续地透过侧栏顶部，把左右缝成一体。 */
+.app-shell::before {
+  content: '';
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 260px;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(47, 92, 232, 0.06) 0%,
+    rgba(15, 155, 142, 0.028) 45%,
+    rgba(47, 92, 232, 0) 100%
+  );
+}
+
+/* 侧边栏 fixed（宽度由 tokens --sb-w 统一收口），主区让位 */
+.app-main {
+  margin-left: var(--sb-w);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: 20px 16px 0;
+  max-width: var(--container-max);
+  margin: 0 auto;
+}
+.app-header h1 {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.app-header h1::before {
+  content: '';
+  width: 4px;
+  height: 20px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--primary), #7ba4ff);
+}
+.app-header .breadcrumb {
+  height: auto;
+  border: 0;
+  padding: 0;
+  gap: 0 var(--sp-2);
+}
+
+/* ---- react-grid-layout 容器/卡片 ---------------------------------------- */
+.dashboard-grid {
+  padding: var(--sp-6) var(--sp-6) 56px;
+  max-width: var(--container-max);
+  margin: 0 auto;
+}
+
+.widget {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.widget > .card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.widget__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: 10px;
+  min-height: 20px;
+}
+.widget__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+/* 拖拽把手：平时隐藏，hover/拖拽时浮现，减少静态视觉噪音 */
+.widget__drag {
+  margin-left: auto;
+  cursor: move;
+  color: #c3cad6;
+  font-size: 13px;
+  letter-spacing: -1px;
+  user-select: none;
+  opacity: 0;
+  transition: opacity 0.16s ease, color 0.16s ease;
+}
+.widget:hover .widget__drag,
+.widget__drag:focus-visible { opacity: 1; }
+.widget__drag:hover { color: var(--primary); }
+.react-grid-item.react-draggable-dragging .widget__drag { opacity: 1; }
+/* 缩放手柄（react-resizable）：与卡片圆角同调 */
+.react-grid-item > .react-resizable-handle::after {
+  border-right-color: #c3cad6;
+  border-bottom-color: #c3cad6;
+  width: 7px;
+  height: 7px;
+}
+
+/* 栅格占位（拖动时的背景块） */
+.react-grid-item.react-grid-placeholder {
+  background: var(--primary);
+  opacity: 0.1;
+  border-radius: var(--radius);
+}
+
+/* 滚动区域（表格吸顶需要确定高度容器） */
+.table-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .app-main {
+    margin-left: 0;
+  }
+}

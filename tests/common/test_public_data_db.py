@@ -1,8 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from common.public_data.db import LockUnavailable, connect, named_lock, transaction
-from common.public_data.settings import DatabaseSettings
+from common.public_data.settings import DatabaseSettings, Settings
 
 
 class FakeCursor:
@@ -156,6 +158,68 @@ class DatabaseBoundaryTests(unittest.TestCase):
                     connection.cursor_instance.executed,
                 )
                 self.assertTrue(connection.cursor_instance.closed)
+
+
+class TestDatabaseNamingGate(unittest.TestCase):
+    """门禁：测试库强制 ``*_test`` 命名对 manual 库同样成立。
+
+    既有 settings 测试覆盖了 dingtalk/wdt/mart 三个主库；这里把人工导入
+    库（``PUBLIC_DATA_MANUAL_DATABASE`` 显式配置与默认推导）钉死在同一
+    条铁律上——这是「只连测试库」红线在配置层的最后一道闸。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        config_path = Path(self._tmp.name) / "sources.json"
+        config_path.write_text("{}", encoding="utf-8")
+        self.environ = {
+            "APP_ENV": "test",
+            "PUBLIC_DATA_RDS_HOST": "localhost",
+            "PUBLIC_DATA_RDS_PORT": "3306",
+            "PUBLIC_DATA_RDS_USER": "public_data",
+            "PUBLIC_DATA_RDS_PASSWORD": "super-secret-password",
+            "PUBLIC_DATA_DINGTALK_DATABASE": "raw_dingtalk_test",
+            "PUBLIC_DATA_WDT_DATABASE": "raw_wdt_test",
+            "PUBLIC_DATA_MART_DATABASE": "mart_ops_test",
+            "PUBLIC_DATA_CONFIG": str(config_path),
+        }
+
+    def _production_environ(self):
+        return dict(
+            self.environ,
+            APP_ENV="production",
+            PUBLIC_DATA_DINGTALK_DATABASE="raw_dingtalk",
+            PUBLIC_DATA_WDT_DATABASE="raw_wdt",
+            PUBLIC_DATA_MART_DATABASE="mart_ops",
+        )
+
+    def test_test_env_rejects_explicit_manual_database_without_test_suffix(self):
+        environment = dict(
+            self.environ, PUBLIC_DATA_MANUAL_DATABASE="raw_manual"
+        )
+        with self.assertRaises(ValueError) as raised:
+            Settings.from_environment(environment)
+        self.assertNotIn("super-secret-password", str(raised.exception))
+
+    def test_test_env_derives_manual_database_with_test_suffix(self):
+        settings = Settings.from_environment(self.environ)
+        self.assertTrue(settings.manual_database.name.endswith("_test"))
+        self.assertEqual("raw_manual_test", settings.manual_database.name)
+
+    def test_production_rejects_explicit_manual_database_with_test_suffix(self):
+        environment = dict(
+            self._production_environ(),
+            PUBLIC_DATA_MANUAL_DATABASE="raw_manual_test",
+        )
+        with self.assertRaises(ValueError) as raised:
+            Settings.from_environment(environment)
+        self.assertNotIn("super-secret-password", str(raised.exception))
+
+    def test_production_derives_manual_database_without_test_suffix(self):
+        settings = Settings.from_environment(self._production_environ())
+        self.assertFalse(settings.manual_database.name.endswith("_test"))
+        self.assertEqual("raw_manual", settings.manual_database.name)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
         self.log = log_fn or print
         self._name2rid = None
         self._uid2name = {}
+        self._uid2group = {}
         self._uid2name_ts = 0.0
         self._uid2name_ttl = 300
         self.base_dir = Path(config.get("baseDir", "."))
@@ -44,8 +45,22 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
         if now - self._uid2name_ts > self._uid2name_ttl or not self._uid2name:
             try:
                 cfg = json.loads((self.base_dir / "config.json").read_text(encoding="utf-8"))
-                self._uid2name = {uid_: name for name, uid_ in cfg["members"].items()
-                                  if not name.startswith("_")}
+                if cfg.get("groups"):
+                    # 多群模式：白名单取全部门并集（所有 groups 的 members）
+                    uid2name, uid2group = {}, {}
+                    for g in cfg["groups"]:
+                        gname = g.get("name", "")
+                        for name, uid_ in g.get("members", {}).items():
+                            if name.startswith("_"):
+                                continue
+                            uid2name[uid_] = name
+                            uid2group[uid_] = gname
+                    self._uid2name = uid2name
+                    self._uid2group = uid2group
+                else:
+                    self._uid2name = {uid_: name for name, uid_ in cfg["members"].items()
+                                      if not name.startswith("_")}
+                    self._uid2group = {}
                 self._uid2name_ts = now
                 self.log(f"白名单已重载: {len(self._uid2name)} 人")
             except Exception as e:
@@ -140,7 +155,9 @@ class ReportHandler(dingtalk_stream.ChatbotHandler):
 
         client.update_records(self.config["base"]["baseId"], self.config["base"]["tableId"],
                               [{"id": rid, "fields": {col: str(value)}}])
-        self.log(f"报数入表: {sender_name} {col}={value} (rid={rid}, 旧值={old_value})")
+        group_name = self._uid2group.get(sender_uid)
+        self.log(f"报数入表: {sender_name}{f' [{group_name}]' if group_name else ''} "
+                 f"{col}={value} (rid={rid}, 旧值={old_value})")
 
         month_total, target, ratio_str = self._calc_progress(client, rid)
         weekday = "一二三四五六日"[datetime.now().weekday()]

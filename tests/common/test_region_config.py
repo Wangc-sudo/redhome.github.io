@@ -56,10 +56,18 @@ class ShippedRegionSeedTests(unittest.TestCase):
 
     def test_shipped_seed_defines_hangzhou(self):
         configs = load_region_seed(_SEED_PATH)
-        self.assertEqual(list(configs), ["hangzhou"])
+        self.assertEqual(list(configs), ["hangzhou", "vanke"])
         cfg = configs["hangzhou"]
         self.assertEqual(cfg.display, "杭州")
         self.assertEqual((cfg.remind_hour, cfg.check_hour), (18, 20))
+
+    def test_shipped_seed_defines_vanke_without_a_table(self):
+        """万科&大莲花&团购：无 AI 日报表区域，成员来自体验中心部门。"""
+        cfg = load_region_seed(_SEED_PATH)["vanke"]
+        self.assertEqual(cfg.display, "万科&大莲花&团购")
+        self.assertEqual((cfg.remind_hour, cfg.check_hour), (18, 20))
+        self.assertEqual(cfg.dept_order, ("体验中心",))
+        self.assertEqual(cfg.monthly_targets, {})
 
     def test_shipped_seed_keeps_placeholders_out_of_git(self):
         """真实 robotCode / conversationId 只走 Nacos，不进种子。"""
@@ -126,6 +134,24 @@ class LoadRegionSeedTests(unittest.TestCase):
         self.assertEqual(cfg.dept_label, {})
         self.assertEqual(cfg.broadcast_exclude, ())
         self.assertEqual(cfg.leaderboard_url, "")
+        self.assertEqual(cfg.monthly_targets, {})
+
+    def test_parses_monthly_targets(self):
+        doc = _region_doc(monthlyTargets={"老张": 300000, "老李": 12.5})
+        cfg = load_region_seed(_write_seed(self, {"r1": doc}))["r1"]
+        self.assertEqual(cfg.monthly_targets, {"老张": 300000, "老李": 12.5})
+
+    def test_rejects_bad_monthly_targets(self):
+        for override in (
+            {"monthlyTargets": ["老张"]},
+            {"monthlyTargets": {"老张": "300000"}},
+            {"monthlyTargets": {"老张": True}},
+            {"monthlyTargets": {"老张": -1}},
+            {"monthlyTargets": {"": 300000}},
+        ):
+            path = _write_seed(self, {"r1": _region_doc(**override)})
+            with self.assertRaises(RegionConfigError):
+                load_region_seed(path)
 
     def test_rejects_bad_leaderboard_fields(self):
         for override in (

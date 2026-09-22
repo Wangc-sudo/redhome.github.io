@@ -2,8 +2,29 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from common.public_data.finance_schema import all_table_definitions
-from common.public_data.mart_extract_schema import ddl_statements as extract_ddl
+from common.public_data.bi_authz import bi_authz_ddl_statements
+from common.public_data.finance_schema import (
+    all_table_definitions,
+    table_definition,
+)
+from common.public_data.manual_import.schema import (
+    mart_manual_ddl_statements,
+    raw_manual_ddl_statements,
+)
+from common.public_data.mart_extract_schema import (
+    _DIM_CALENDAR_DDL,
+    _DIM_PRODUCT_DDL as _MART_DIM_PRODUCT_DDL,
+    _DIM_ROBOT_MEMBER_DDL,
+    _FACT_CHANNEL_DAILY_SALES_DDL,
+    _FACT_DAILY_REPORT_OFFLINE_DDL,
+    _FACT_ORDER_LINE_CHANNEL_DDL,
+    _FACT_ORDER_LINE_DDL,
+    legacy_ddl_statements as extract_ddl,
+    finance_ddl_statements,
+    order_line_ddl_statements,
+    order_line_channel_ddl_statements,
+    stock_flow_ddl_statements,
+)
 from common.public_data.db import transaction
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -108,9 +129,18 @@ _MIGRATION_TRACKING_DDL = (
 )
 
 
+# raw-dingtalk-v1 已在 raw_dingtalk 库应用（校验和冻结）：此后注册进
+# finance_schema._TABLES 的新钉钉 raw 表一律不得混入本版本（否则触发
+# checksum drift），须另起迁移版本。channel_monthly_target（2026-09-18
+# 电商月目标表）由 raw-dingtalk-channel-monthly-target-v1 建表。
+_RAW_DINGTALK_V1_EXCLUDES = frozenset({"channel_monthly_target"})
+
+
 def _build_dingtalk_ddl() -> tuple[str, ...]:
     ddls = []
     for table in all_table_definitions():
+        if table.name in _RAW_DINGTALK_V1_EXCLUDES:
+            continue
         ddls.append(_build_finance_table_ddl(table))
     ddls.append(_SCHEMA_SNAPSHOTS_DDL)
     return tuple(ddls)
@@ -163,6 +193,14 @@ def _build_dingtalk_org_ddl() -> tuple[str, ...]:
     return (_DINGTALK_ORG_MEMBER_DDL,)
 
 
+# 电商月目标表（渠道销售目标达成率9，2026-09-18 纳入采集）。DDL 文本复用
+# finance_schema 的表定义生成，与既有 raw 表同构（业务列 + 技术列 +
+# idx_synced_at/idx_sync_run_id）。独立版本而非改写 raw-dingtalk-v1
+# （校验和红线，见 _RAW_DINGTALK_V1_EXCLUDES）。
+def _build_dingtalk_channel_monthly_target_ddl() -> tuple[str, ...]:
+    return (_build_finance_table_ddl(table_definition("channel_monthly_target")),)
+
+
 def _build_wdt_ddl() -> tuple[str, ...]:
     return (_WDT_RECORDS_DDL,)
 
@@ -198,6 +236,21 @@ def _build_mart_ddl() -> tuple[str, ...]:
     return (_SYNC_RUNS_DDL, _SYNC_DATASET_SUMMARY_DDL)
 
 
+# 提取层增量化（2026-09-16）：digest 命中/窗口为空的数据集跳过写入时，
+# 摘要行以 skipped=1 显式标记（records_written=0），审计不丢「没写」的
+# 原因。纯追加列 + 默认值，旧代码读写不受影响；独立版本而非改写
+# mart-ops-v1，避免已应用库的校验和漂移。提取代码侧用
+# information_schema 探测该列，未迁移时降级为普通摘要（fail-open）。
+_SYNC_DATASET_SUMMARY_SKIPPED_DDL = (
+    "ALTER TABLE `sync_dataset_summary`\n"
+    "  ADD COLUMN `skipped` TINYINT(1) NOT NULL DEFAULT 0"
+)
+
+
+def _build_mart_summary_skipped_ddl() -> tuple[str, ...]:
+    return (_SYNC_DATASET_SUMMARY_SKIPPED_DDL,)
+
+
 def _build_mart_outbox_ddl() -> tuple[str, ...]:
     return (_ROBOT_OUTBOX_DDL,)
 
@@ -220,19 +273,103 @@ def _build_mart_dim_target_ddl() -> tuple[str, ...]:
     return (_DIM_TARGET_DDL,)
 
 
+# BI 授权两表（设计稿 2026-09-21 §4.2）：grant 现状 + audit 流水。
+# bi-web 只读、ops-web 唯一写方；独立版本而非改写既有 mart-ops 版本
+# （校验和红线）。
+def _build_mart_bi_authz_ddl() -> tuple[str, ...]:
+    return bi_authz_ddl_statements()
+
+
+def _build_raw_manual_ddl() -> tuple[str, ...]:
+    """人工报表导入通道的 raw 表（C 类数据源，见 docs/manual-import-channel.md）。"""
+    return raw_manual_ddl_statements()
+
+
+def _build_mart_manual_ddl() -> tuple[str, ...]:
+    """人工报表的 mart 窄表 ``fact_manual_report``（bi-web 只读本表）。"""
+    return mart_manual_ddl_statements()
+
+
 def _build_mart_extract_ddl() -> tuple[str, ...]:
     return extract_ddl()
+
+
+# 排查报告（2026-09-17 §1.1）P0：bi-web 最高频查询只按 business_date
+# 过滤，既有 (region,·) / (responsible_person,·) 复合索引按最左前缀全部
+# 失配、退化为全表扫描。独立新版本而非改写 mart-extract-v1（校验和红线）。
+_DAILY_REPORT_DATE_INDEX_DDL = (
+    "ALTER TABLE `fact_daily_report_offline`\n"
+    "  ADD KEY `idx_business_date` (`business_date`)"
+)
+
+
+def _build_mart_daily_report_date_index_ddl() -> tuple[str, ...]:
+    return (_DAILY_REPORT_DATE_INDEX_DDL,)
+
+
+# mart 拆库 M1（设计稿 2026-09-16 §2.3/§2.4）：三个新 schema 的建表版本。
+# 只建表、不搬数据；复用已冻结的 DDL 文本而非改写旧版本（同版本改文本会
+# 被校验和机制判漂移）。应用方为 apply_mart_split_migrations，sync /
+# extract 热路径不感知这三个 target。
+def _build_mart_facts_ddl() -> tuple[str, ...]:
+    # 新 schema 是空库：fact_order_line 先建 v1 表、同版本内紧接着补渠道列
+    # （CREATE + ALTER 顺序执行，等价于直接建最终形态）。尾部同样带上
+    # idx_business_date——mart-facts-v1 尚未在任何库应用过，追加语句不构成
+    # 校验和漂移；一旦应用过就必须像 mart 侧一样另起版本。
+    return (
+        _FACT_DAILY_REPORT_OFFLINE_DDL,
+        _FACT_CHANNEL_DAILY_SALES_DDL,
+    ) + finance_ddl_statements() + (
+        _FACT_ORDER_LINE_DDL,
+        _FACT_ORDER_LINE_CHANNEL_DDL,
+    ) + mart_manual_ddl_statements() + (
+        _DAILY_REPORT_DATE_INDEX_DDL,
+    ) + stock_flow_ddl_statements()
+
+
+def _build_mart_dims_ddl() -> tuple[str, ...]:
+    return (
+        _DIM_CALENDAR_DDL,
+        _MART_DIM_PRODUCT_DDL,
+        _DIM_ROBOT_MEMBER_DDL,
+        _DIM_TARGET_DDL,
+    )
+
+
+def _build_mart_queue_ddl() -> tuple[str, ...]:
+    return (_ROBOT_OUTBOX_DDL,)
 
 
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
+    (
+        "raw-dingtalk-channel-monthly-target-v1",
+        "dingtalk",
+        _build_dingtalk_channel_monthly_target_ddl(),
+    ),
     ("raw-wdt-v1", "wdt", _build_wdt_ddl()),
     ("wdt-dim-product-v1", "wdt", _build_wdt_dim_product_ddl()),
     ("mart-ops-v1", "mart", _build_mart_ddl()),
+    ("mart-ops-summary-skipped-v1", "mart", _build_mart_summary_skipped_ddl()),
     ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
+    ("mart-extract-finance-v1", "mart", finance_ddl_statements()),
+    ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),
+    ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
+    ("mart-extract-stock-flow-v1", "mart", stock_flow_ddl_statements()),
+    (
+        "mart-extract-daily-report-date-index-v1",
+        "mart",
+        _build_mart_daily_report_date_index_ddl(),
+    ),
     ("mart-ops-outbox-v1", "mart", _build_mart_outbox_ddl()),
     ("mart-ops-dim-target-v1", "mart", _build_mart_dim_target_ddl()),
+    ("mart-ops-bi-authz-v1", "mart", _build_mart_bi_authz_ddl()),
+    ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
+    ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
+    ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
+    ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),
+    ("mart-queue-v1", "mart_queue", _build_mart_queue_ddl()),
 )
 
 
@@ -290,18 +427,79 @@ def _apply_to_connection(connection, version_statements, applied_checksums):
         cursor.close()
 
 
+#: 人工报表通道在 mart 侧的版本（与 raw 侧配套，见 _MIGRATIONS）。
+_MANUAL_MART_VERSIONS = ("mart-ops-manual-report-v1",)
+
+
+def apply_manual_migrations(manual_connection, mart_connection, applied_checksums=None):
+    """只应用人工报表导入通道的迁移。
+
+    sync / extract 热路径从不碰 ``raw_manual``，不必为它多开一条连接；
+    通道自己跑（``migrate`` 或 ``import-manual``）时才建表。
+    """
+    manual_versions = [
+        (v, stmts) for v, t, stmts in _MIGRATIONS if t == "manual"
+    ]
+    mart_versions = [
+        (v, stmts) for v, _, stmts in _MIGRATIONS if v in _MANUAL_MART_VERSIONS
+    ]
+    _apply_to_connection(manual_connection, manual_versions, applied_checksums)
+    _apply_to_connection(mart_connection, mart_versions, applied_checksums)
+
+
+def _versions_for(target: str) -> list:
+    return [(v, stmts) for v, t, stmts in _MIGRATIONS if t == target]
+
+
+def apply_mart_split_migrations(
+    facts_connection,
+    dims_connection,
+    queue_connection,
+    applied_checksums=None,
+):
+    """只应用 mart 拆库三个新 schema 的迁移（M1 注册，M2-M4 逐域启用）。
+
+    与 ``apply_live_migrations`` 互不重叠：热路径从不连接新 schema；本函数
+    由拆库各批次（queue → dims → facts，设计稿 §2.6）的运维入口显式调用。
+    ``pd_live_schema_migration`` 跟踪表按连接（即按 schema）各存一份，
+    三个库可独立推进（设计稿 §2.3）。
+    """
+    _apply_to_connection(
+        facts_connection, _versions_for("mart_facts"), applied_checksums
+    )
+    _apply_to_connection(
+        dims_connection, _versions_for("mart_dims"), applied_checksums
+    )
+    _apply_to_connection(
+        queue_connection, _versions_for("mart_queue"), applied_checksums
+    )
+
+
 def apply_live_migrations(
     dingtalk_connection,
     wdt_connection,
     mart_connection,
     applied_checksums=None,
+    *,
+    manual_connection=None,
 ):
+    """Apply every registered migration to its own database.
+
+    *manual_connection* is the optional ``raw_manual`` database for the
+    manual-report import channel.  It is keyword-only and optional so the
+    pre-existing callers (sync / extract, which never touch ``raw_manual``)
+    keep their three-connection signature -- the manual tables are built by
+    ``migrate`` and by ``import-manual``, not by the sync hot path.
+    """
     dingtalk_versions = [
         (v, stmts) for v, t, stmts in _MIGRATIONS if t == "dingtalk"
     ]
     wdt_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "wdt"]
     mart_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "mart"]
+    manual_versions = [(v, stmts) for v, t, stmts in _MIGRATIONS if t == "manual"]
 
     _apply_to_connection(dingtalk_connection, dingtalk_versions, applied_checksums)
     _apply_to_connection(wdt_connection, wdt_versions, applied_checksums)
     _apply_to_connection(mart_connection, mart_versions, applied_checksums)
+    if manual_connection is not None:
+        _apply_to_connection(manual_connection, manual_versions, applied_checksums)

@@ -15,6 +15,21 @@
       "deptLabel": {"杭州运营总监": "运营总监"},
       "broadcastExclude": ["余发兴"],
       "leaderboardUrl": "<榜单页面地址>"
+    },
+    "vanke": {
+      "_备注": "万科&大莲花&团购日报群。无 AI 日报表：报数直接 Stream 落库；当月月目标由 Nacos region-vanke.yaml 的 monthlyTargets（表内用名 → 金额）承载。成员组织 = 体验中心部门（见 org.seed.json）。",
+      "display": "万科&大莲花&团购",
+      "tableUrl": "<无日报表：可填榜单或群公告地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["体验中心"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
     }
   }
 }

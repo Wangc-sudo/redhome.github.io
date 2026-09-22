@@ -318,6 +318,20 @@ _CHANNEL_DAILY_SALES = _t("channel_daily_sales", [
 ])
 
 
+# 电商月目标表（渠道销售目标达成率9，2026-09-18 纳入采集）：channel 字段
+# 表内自带，不需要 transform inject。登记进 _TABLES 后 raw 写入通道
+# （raw_repository.table_definition 白名单）即可识别；DDL 不走
+# raw-dingtalk-v1（已冻结），由独立迁移版本建表。
+_CHANNEL_MONTHLY_TARGET = _t("channel_monthly_target", [
+    _c("store_name", "VARCHAR(255)", "text"),
+    _c("channel", "VARCHAR(50)", "text"),
+    _c("monthly_target", "DECIMAL(20,4)", "currency"),
+    _c("responsible_person", "JSON", "user"),
+], [
+    _idx("idx_channel_store", "channel", "store_name"),
+])
+
+
 _TABLES = {
     "fin_store_commission": _FIN_STORE_COMMISSION,
     "fin_tax_declaration_2026": _FIN_TAX_DECLARATION_2026,
@@ -339,6 +353,7 @@ _TABLES = {
     "fin_offline_deposit_other_receivables": _FIN_OFFLINE_DEPOSIT_OTHER_RECEIVABLES,
     "daily_report_offline": _DAILY_REPORT_OFFLINE,
     "channel_daily_sales": _CHANNEL_DAILY_SALES,
+    "channel_monthly_target": _CHANNEL_MONTHLY_TARGET,
 }
 
 

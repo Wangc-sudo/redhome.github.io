@@ -11,3 +11,8 @@ common/dingtalk/test_groups.json
 logs/
 state/
 *.html
+# bi-react：依赖目录不进构建上下文（体积），但 V1 的 dist 产物必须进镜像
+# （bi-web 的 /d/{id} 壳由它驱动）；上面的 *.html 只匹配根级，这里显式放行。
+frontend/bi-react/node_modules/
+!frontend/bi-react/dist/
+!frontend/bi-react/dist/index.html

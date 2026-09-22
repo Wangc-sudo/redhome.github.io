@@ -1,0 +1,31 @@
+# 通用人工报表模板（**占位起点**，不是成品）。
+# 接入新报表的 SOP 见 docs/manual-import-channel.md 末尾一节。
+#
+# 用法：复制本文件为 <dataset>.yaml → 改 dataset / target_table → 把每列
+# source 换成报表表头原文 → dry-run → --apply。
+# source 仍为「待填-*」时模板会被当场拒绝（占位符不允许 --apply）。
+version: 1
+# dataset 必须全局唯一：raw 与 mart 都按 dataset 归档，同名会互相覆盖。
+dataset: generic
+target_table: manual_generic
+# month | quarter | year 三选一，与 --period 写法一致：
+#   month → 2026-08    quarter → 2026-Q3    year → 2026
+period_type: month
+description: 通用模板占位，复制填写后即可接入（⑥季度预实 / ⑨ / ⑪ / ⑬ 等）
+columns:
+  # 期间列：最多 1 列；source 填表头原文（如「月份」「季度」「年份」）
+  - {source: 待填-期间, field: period, role: period, type: period, required: true}
+  # 维度列：门店 / 渠道 / 板块…取值固定的才设 enum；门店、人员这类不要设
+  - {source: 待填-维度, field: dimension, role: dimension, type: string, required: true}
+  # 指标列：按需增删。field 名即 BI 侧 metric 命名（与口径主线对齐后再定）
+  #   type: decimal → 金额、比率；int → 人数、单量
+  - {source: 待填-指标1, field: metric_1, role: metric, type: decimal, required: true, unit: 元}
+  - {source: 待填-指标2, field: metric_2, role: metric, type: decimal, required: false, unit: 元}
+# 报表带「合计」行就打开下面整段（明细合计 vs 总计行，差异超容差即报错）；
+# 报表没有总计行则删掉本段。
+# total_check:
+#   expression: "sum(metric_1) == total.metric_1"   # 只支持这一种形状，不 eval
+#   total_row: 合计
+#   tolerance: 0.001
+# 单项指标绝对值超过该值时给 warning（单位填错是最常见事故）
+extreme_value_threshold: 100000000

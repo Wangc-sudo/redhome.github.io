@@ -24,73 +24,180 @@ in the app layer.  Money unit is 元.  The low-level queries return
 ``float`` for JSON payloads.
 """
 
+import ast
+import textwrap
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+from common.bi_web import derived, fin_derived
 from common.calendar_utils import month_days
 from common.daily_robot.mart_leaderboard import mart_collect
 from common.daily_robot.mart_tasks import MartTaskError
+from common.metrics.daily_report import fetch_workdays
 
 #: Money unit for every chart payload (元; the front end formats 万).
 _UNIT = "元"
 
-_OFFLINE_MTD_SQL = (
-    "SELECT COALESCE(SUM(sales_amount), 0) "
-    "FROM fact_daily_report_offline "
-    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
-    "AND business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%'"
-)
+#: 线下线归属（B3，2026-09-20 业务裁定）：fact_daily_report_offline 是
+#: 全公司日报，region=电商（直播/天猫/京东/拼多多等部门）归电商线——
+#: 线下口径一律排除该区域，年度达成不再双线各计一次。用单值排除而非
+#: 区域白名单：新区域上线默认计入线下，不会静默丢数。该串无字面 %，
+#: 静态/参数化 SQL 可直接拼接；电商线页面（l2-ecom-people）经 region
+#: 参数显式选择该区域、走人员/缺口查询族，不经过这些线下取数。
+_OFFLINE_LINE_SQL = "AND region <> '电商'"
 
-_OFFLINE_ANNUAL_SQL = (
-    "SELECT COALESCE(SUM(sales_amount), 0) "
-    "FROM fact_daily_report_offline "
-    "WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1) "
-    "AND business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%'"
-)
+# B2（水位批次）：窗口上界由 CURDATE() 改为绑定的真实水位——日报 T+1
+# 未入仓时「本月累计」不再把缺的天假装已入仓。月首锚点仍用 MySQL 时钟
+# （时钟统一是 B6 的活，不在本批）。参数化后字面 % 一律双写：
+# '%%Y-%%m-01'（pymysql sql % params 约定，同 '%%合计%%'）。
+_OFFLINE_MTD_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+    AND business_date <= %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
 
-_CHANNEL_MTD_SQL = (
-    "SELECT COALESCE(SUM(sales_amount), 0) "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
-    "AND business_date <= CURDATE()"
-)
+#: 线下窗口求和（粒度批次 A2/A3）：起止边界一律 %s 绑定、由调用方按
+#: 档位算出（周=周一→锚点、日=锚点当日、月=月首→锚点），合计行与电商线
+#: 排除与 _OFFLINE_MTD_SQL 同口径。边界日期全部来自 DB 侧（水位/param
+#: month），本卡查询族不混用 Python 时钟（B6）。
+_OFFLINE_WINDOW_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
 
-_CHANNEL_ANNUAL_SQL = (
-    "SELECT COALESCE(SUM(sales_amount), 0) "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1) "
-    "AND business_date <= CURDATE()"
-)
+#: 线下年累计（粒度批次 A5 年档）：年首锚点仍用 MySQL 时钟（与
+#: _OFFLINE_MTD_SQL 月首同款），上界 = 绑定的真实水位——与「年度目标
+#: 达成」的 _OFFLINE_ANNUAL_SQL 刻意分开：达成卡要吃到今天（含未入仓
+#: 风险自担），年档 KPI 只算到水位。
+_OFFLINE_YTD_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1)
+    AND business_date <= %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
 
-_ANNUAL_TARGET_SQL = (
-    "SELECT COALESCE(SUM(annual_target), 0) "
-    "FROM dim_target "
-    "WHERE scope = 'line' "
-    "AND scope_key IN ('offline', 'channel') "
-    "AND year = YEAR(CURDATE())"
-)
+_OFFLINE_ANNUAL_SQL = textwrap.dedent(
+    f"""
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_daily_report_offline
+    WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1)
+    AND business_date <= CURDATE()
+    AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
 
-_REGION_DAILY_SQL = (
-    "SELECT business_date, region, SUM(sales_amount) AS total "
-    "FROM fact_daily_report_offline "
-    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
-    "AND business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%' "
-    "GROUP BY business_date, region"
-)
+# 渠道 MTD 窗口上界 = 绑定的真实水位（2026-09-21，与线下 B2 同款）；
+# 参数化后 DATE_FORMAT 字面 % 双写。
+_CHANNEL_MTD_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_channel_daily_sales
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')
+    AND business_date <= %s
+    """
+).strip()
 
-_CHANNEL_RANKING_SQL = (
-    "SELECT channel, SUM(sales_amount) AS total "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
-    "AND business_date <= CURDATE() "
-    "GROUP BY channel "
-    "ORDER BY total DESC"
-)
+#: 渠道真实水位：最新「有数」日。渠道 extract 会提前预填整周
+#: sales_amount=NULL 的空行，``MAX(business_date)``（日环比卡口径，
+#: 意为「最新入仓日」）会把水位虚报到预填末日——MTD 窗口/角标必须
+#: 过滤 NULL。线下日报当前无预填，两侧数值水位一致；若线下未来也
+#: 预填，应对齐为本口径（见 ``offline_latest_date``）。
+_CHANNEL_LATEST_SQL = textwrap.dedent(
+    """
+    SELECT MAX(business_date) AS d
+    FROM fact_channel_daily_sales
+    WHERE business_date <= CURDATE()
+    AND sales_amount IS NOT NULL
+    """
+).strip()
+
+_CHANNEL_ANNUAL_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(sales_amount), 0)
+    FROM fact_channel_daily_sales
+    WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1)
+    AND business_date <= CURDATE()
+    """
+).strip()
+
+#: 年度目标分母按业务线展开（2026-09-21 口径修正）：scope='line' 全部
+#: 业务线（线下/电商渠道/餐饮…），不再只取两线——餐饮线首批无事实
+#: 数据，分子侧按 0 标红（run_kpi_annual_progress 的 lines），分母
+#: 不摘除，否则「找不到数据」的线被静默抹掉。
+_ANNUAL_TARGET_BY_LINE_SQL = textwrap.dedent(
+    """
+    SELECT scope_key, COALESCE(SUM(annual_target), 0) AS target
+    FROM dim_target
+    WHERE scope = 'line'
+    AND year = YEAR(CURDATE())
+    GROUP BY scope_key
+    ORDER BY scope_key
+    """
+).strip()
+
+#: 餐饮线年累计收入：人工月报是唯一进库通道（无系统采集源）。口径同
+#: 月报表卡契约——按整月一次导入、无未来预填行，故不做 CURDATE
+#: 截断，只取当年窗口。空表 ⇒ (0, False)，卡片标红为 0。
+_RESTAURANT_ANNUAL_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(value), 0) AS total, COUNT(*) AS rows_found
+    FROM fact_manual_report
+    WHERE dataset = 'restaurant_monthly'
+    AND metric = 'revenue'
+    AND period_start >= MAKEDATE(YEAR(CURDATE()), 1)
+    """
+).strip()
+
+_REGION_DAILY_SQL = textwrap.dedent(
+    f"""
+    SELECT business_date, region, SUM(sales_amount) AS total
+    FROM fact_daily_report_offline
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+    AND business_date <= CURDATE()
+    AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
+    GROUP BY business_date, region
+    """
+).strip()
+
+_CHANNEL_RANKING_SQL = textwrap.dedent(
+    """
+    SELECT channel, SUM(sales_amount) AS total
+    FROM fact_channel_daily_sales
+    WHERE business_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+    AND business_date <= CURDATE()
+    GROUP BY channel
+    ORDER BY total DESC
+    """
+).strip()
+
+_SKU_MTD_SQL = textwrap.dedent(
+    """
+    SELECT spec_no, goods_name, SUM(paid_amount) AS total
+    FROM fact_order_line
+    WHERE trade_time >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+    AND trade_time < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+    GROUP BY spec_no, goods_name
+    ORDER BY total DESC, spec_no
+    """
+).strip()
 
 _REGION_OPTIONS_SQL = (
     "SELECT DISTINCT region FROM fact_daily_report_offline ORDER BY region"
@@ -100,15 +207,70 @@ _CHANNEL_OPTIONS_SQL = (
     "SELECT DISTINCT channel FROM fact_channel_daily_sales ORDER BY channel"
 )
 
-_MONTH_OPTIONS_SQL = (
-    "SELECT DISTINCT DATE_FORMAT(business_date, '%Y-%m') AS month "
-    "FROM fact_daily_report_offline "
-    "UNION "
-    "SELECT DISTINCT DATE_FORMAT(business_date, '%Y-%m') "
-    "FROM fact_channel_daily_sales "
-    "UNION "
-    "SELECT DATE_FORMAT(CURDATE(), '%Y-%m') "
-    "ORDER BY 1 DESC"
+_MONTH_OPTIONS_SQL = textwrap.dedent(
+    """
+    SELECT DISTINCT DATE_FORMAT(business_date, '%Y-%m') AS month
+    FROM fact_daily_report_offline
+    UNION
+    SELECT DISTINCT DATE_FORMAT(business_date, '%Y-%m')
+    FROM fact_channel_daily_sales
+    UNION
+    SELECT DATE_FORMAT(CURDATE(), '%Y-%m')
+    ORDER BY 1 DESC
+    """
+).strip()
+
+# 商品动销（l2-product）：fact_order_line 的品牌/渠道下拉。渠道为投影时
+# 归一化的店铺渠道（channel_name），与 fact_channel_daily_sales.channel
+# 是两套维度，故筛选 source 分开（brands / sku_channels）。
+_BRAND_OPTIONS_SQL = (
+    "SELECT DISTINCT brand_name FROM fact_order_line ORDER BY brand_name"
+)
+
+_SKU_CHANNEL_OPTIONS_SQL = (
+    "SELECT DISTINCT channel_name FROM fact_order_line ORDER BY channel_name"
+)
+
+# 月内最新成交日（数据截至）；未来预填行以 CURDATE()+1 截断，与既有
+# 事实表查询同口径。
+_SKU_LATEST_DATE_SQL = textwrap.dedent(
+    """
+    SELECT MAX(DATE(trade_time)) AS d
+    FROM fact_order_line
+    WHERE trade_time >= %s AND trade_time < %s
+    AND trade_time < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+    """
+).strip()
+
+# 商品动销核：一个窗口内同时给出月累计、数据日与前一日销售额。
+# ``{group}`` 由调用方注入固定列串（总量/分品牌/分渠道三种分组），
+# 值一律走 %s 绑定；日窗口独立于月窗口，跨月的前一日也能取到。
+_SKU_ROLLUP_SQL = textwrap.dedent(
+    """
+    SELECT {group}
+    SUM(CASE WHEN trade_time >= %s AND trade_time < %s
+             THEN paid_amount ELSE 0 END) AS mtd_amount,
+    SUM(CASE WHEN trade_time >= %s AND trade_time < %s
+             THEN quantity ELSE 0 END) AS mtd_qty,
+    SUM(CASE WHEN trade_time >= %s AND trade_time < %s
+             THEN paid_amount ELSE 0 END) AS latest_amount,
+    SUM(CASE WHEN trade_time >= %s AND trade_time < %s
+             THEN paid_amount ELSE 0 END) AS prev_amount
+    FROM fact_order_line
+    WHERE trade_time >= %s AND trade_time < %s
+    {filters}
+    GROUP BY {group_only}
+    ORDER BY mtd_amount DESC, spec_no
+    """
+).strip()
+
+# 总榜也把 brand_name 放进 SELECT/GROUP BY：品牌来自商品镜像，同一
+# spec_no 的品牌唯一，带上它不影响分组粒度，却能让总榜直接显示品牌。
+_SKU_GROUP_TOTAL = ("brand_name, spec_no, goods_name,", "brand_name, spec_no, goods_name")
+_SKU_GROUP_BRAND = _SKU_GROUP_TOTAL
+_SKU_GROUP_CHANNEL = (
+    "channel_name, spec_no, goods_name,",
+    "channel_name, spec_no, goods_name",
 )
 
 
@@ -138,6 +300,39 @@ def month_options(connection) -> list:
         for row in _fetch_rows(connection, _MONTH_OPTIONS_SQL)
         if row["month"]
     ]
+
+
+def brand_options(connection) -> list:
+    """筛选器「品牌」下拉：fact_order_line DISTINCT brand_name，升序。"""
+    return [row["brand_name"] for row in _fetch_rows(connection, _BRAND_OPTIONS_SQL)
+            if row["brand_name"]]
+
+
+def sku_channel_options(connection) -> list:
+    """筛选器「渠道」下拉（商品口径）：DISTINCT channel_name，升序。"""
+    return [row["channel_name"] for row in _fetch_rows(connection, _SKU_CHANNEL_OPTIONS_SQL)
+            if row["channel_name"]]
+
+
+#: 粒度值域（2026-09-18 批次 A；2026-09-21 批次 A5 增 year）：星=自然周
+#: （周一~周日）；季不进 gran。year 目前只服务标量 KPI（年累计截至
+#: 水位）；折线卡未开通 year——gran=year 打过去会按「未开通档回落
+#: 默认视图」处理（与既有 fallback 语义一致）。
+_GRANULARITY = ("day", "week", "month", "year")
+
+# 粒度语义（§4.6，写进代码注释避免后人误解）：
+#   day   month 参数限定该月内的日序列（与粒度开通前行为完全一致）；
+#         轴 = 月首 → min(月末, 锚点日)。
+#   week  month 参数为窗口截止月，向前 12 个自然周；周一为首，
+#         跨月周归属起始日所在月。
+#   month month 参数为窗口截止月，向前 12 个自然月；轴标签 YYYY-MM。
+#   year  仅标量 KPI：年首（MySQL 时钟）→ min(窗口月末, 数据水位)。
+# gran 未传 → app 层注入卡片 default_gran；非法值 → 值域闸 400。
+
+
+def granularity_options(connection) -> list:
+    """静态值域：与查询型 source 同签名，供 option_sets.contains() 校验。"""
+    return list(_GRANULARITY)
 
 
 def _fetch_scalar(connection, sql, params=None) -> Decimal:
@@ -197,9 +392,32 @@ def month_bounds(month):
     return days[0], days[-1]
 
 
+def _offline_mtd_sum(connection, latest) -> Decimal:
+    """当月 1 号 → 水位日的 Σsales；水位为空（空表）时直接 0，不发起求和。"""
+    if latest is None:
+        return Decimal(0)
+    return _fetch_scalar(connection, _OFFLINE_MTD_SQL, (latest,))
+
+
+def offline_window_sum(connection, *, first_day, last_day) -> Decimal:
+    """线下 [first_day, last_day] 闭区间 Σsales（合计行 + 电商线排除）。
+
+    粒度批次 A3 的共用窗口核：调用方负责按档位算边界（周=周一→锚点、
+    日=锚点当日、月=月首→锚点），本函数不掺任何时钟。
+    """
+    return _fetch_scalar(
+        connection, _OFFLINE_WINDOW_SQL, (first_day, last_day)
+    )
+
+
 def offline_mtd_total(connection) -> Decimal:
-    """线下本月累计销售 (①): month-to-date offline sales, 合计 rows excluded."""
-    return _fetch_scalar(connection, _OFFLINE_MTD_SQL)
+    """线下本月累计销售 (①)：窗口上界 = 真实数据水位（非 CURDATE()）。
+
+    日报 T+1 未入仓时「本月累计」截至最新入仓日；合计行排除不变；
+    水位滞后整月时区间为空、和为 0。B3 起排除 region=电商（归电商线，
+    见 ``_OFFLINE_LINE_SQL``），水位同源（同为线下口径）。
+    """
+    return _offline_mtd_sum(connection, offline_latest_date(connection))
 
 
 def offline_annual_total(connection) -> Decimal:
@@ -207,9 +425,25 @@ def offline_annual_total(connection) -> Decimal:
     return _fetch_scalar(connection, _OFFLINE_ANNUAL_SQL)
 
 
+def channel_latest_date(connection):
+    """渠道数据真实水位：最新有数日（预填 NULL 行不算；空表返回 None）。"""
+    return _fetch_one(connection, _CHANNEL_LATEST_SQL)
+
+
+def _channel_mtd_sum(connection, latest) -> Decimal:
+    """当月 1 号 → 水位日的 Σsales；水位为空（空表/全 NULL）时直接 0。"""
+    if latest is None:
+        return Decimal(0)
+    return _fetch_scalar(connection, _CHANNEL_MTD_SQL, (latest,))
+
+
 def channel_mtd_total(connection) -> Decimal:
-    """电商渠道本月累计销售 (③): month-to-date channel sales."""
-    return _fetch_scalar(connection, _CHANNEL_MTD_SQL)
+    """电商渠道本月累计销售 (③)：窗口上界 = 真实水位（最新有数日）。
+
+    与线下 B2 同款：预填 NULL 空行不算入仓，「本月累计」截至最新
+    有数日；水位滞后整月时区间为空、和为 0。
+    """
+    return _channel_mtd_sum(connection, channel_latest_date(connection))
 
 
 def channel_annual_total(connection) -> Decimal:
@@ -218,36 +452,201 @@ def channel_annual_total(connection) -> Decimal:
 
 
 def annual_target_total(connection) -> Decimal:
-    """年度目标分母: the offline + channel two-line target for this year.
+    """年度目标分母: scope='line' 全部业务线年度目标之和（769,510,000
+    元量级 with the repository seed：线下 21041 万 + 电商渠道 54980 万
+    + 餐饮 930 万）。
 
-    Only ``scope = 'line'`` rows with ``scope_key`` offline/channel are
-    summed (760,210,000 元量级 with the repository seed); the restaurant
-    target has no fact table and is deliberately not counted.
+    2026-09-21 前只取 offline/channel 两线；餐饮线目标从此计入——
+    分子侧找不到数据按 0 标红（:func:`run_kpi_annual_progress`），
+    不是把线从目标里抹掉。
     """
-    return _fetch_scalar(connection, _ANNUAL_TARGET_SQL)
+    return sum(
+        (
+            Decimal(row["target"] or 0)
+            for row in _fetch_rows(connection, _ANNUAL_TARGET_BY_LINE_SQL)
+        ),
+        Decimal(0),
+    )
 
 
-def _align_series_rows(rows, name_key) -> dict:
-    """按升序日期轴对齐各名称序列并零填充（区域/渠道趋势共用核心）。"""
-    dates = sorted({row["business_date"] for row in rows})
-    index_of = {business_date: index for index, business_date in enumerate(dates)}
-    by_name = {}
+def restaurant_annual_revenue(connection):
+    """餐饮线年累计收入（人工月报）：``(Σrevenue, 是否有数据行)``。
+
+    空表 ⇒ ``(0, False)``——「未接入」不是「0 销量」，由卡片标红。
+    """
+    rows = _fetch_rows(connection, _RESTAURANT_ANNUAL_SQL)
+    if not rows:
+        return Decimal(0), False
+    row = rows[0]
+    return Decimal(row["total"] or 0), bool(row["rows_found"])
+
+
+def _align_series_rows(rows, name_key, *, axis, workdays, as_of,
+                       label_fmt="%m-%d", bucket="day",
+                       date_key="business_date") -> dict:
+    """按完整日期窗口对齐各名称序列，逐点判定 ok/zero/missing（三态）。
+
+    ``axis`` 为完整日期窗口（date 列表，升序），由调用方按粒度生成——
+    不再从 rows 反推（全区域都没数据那天也必须进轴）；``workdays`` 为
+    ``dim_calendar`` 工作日集合（复用 :func:`month_workdays`，不另写
+    SQL）；``as_of`` 为锚点日（当前月=今天，历史月=月末，
+    :func:`_shortfall_as_of` 同口径；T+1 未入仓/未来的落点标
+    missing）。逐点规则（2026-09-18 执行提示词 §4.2，按序判定）：
+
+    1. ``d > as_of``（未来 / T+1 未入仓）→ data ``None``，missing；
+    2. 该系列无行 且 该日无任何系列的行 → data ``None``，missing；
+    3. 该系列无行 但 该日有其他系列的行 → data ``0.0``，missing
+       （该区域未上报，不是真实 0）；
+    4. 有行且 ``total > 0`` → data float，ok；
+    5. 有行且 ``total == 0``（或 None）且覆盖段内有营业日 → ``0.0``，zero；
+    6. 有行且 ``total == 0`` 且覆盖段内无营业日（含日历未覆盖）→ ``0.0``，ok。
+
+    周/月档位的「该日」读作桶起始日；营业日判定取「桶 ∩ (-∞, as_of]
+    内是否有工作日」，日档位退化为 ``d in workdays`` 本身。
+    ``dim_calendar`` 未覆盖的月份 workdays 为空 → 一律降级 ok（宁可
+    漏报，不可误报红）。``label_fmt``/``bucket`` 为粒度档位参数，日档
+    缺省即旧口径（MM-DD 标签、按日判定）；``date_key`` 为行内日期键，
+    周/月档传 ``"bucket_start"``（SQL 分桶表达式别名，B1：别名不再与
+    真实列同名，避免 MySQL GROUP BY 解析回真实列导致桶内按天散行）。
+    同 (name, date_key) 多行一律 Decimal 累加——即使上游分桶失效，
+    桶内散行也求和而不是「后者覆盖前者」（桶聚合的第二道防线）。
+    """
+    days_with_rows = {_as_date(row[date_key]) for row in rows}
+    totals = {}
     for row in rows:
         name = row[name_key] or ""
-        index = index_of[row["business_date"]]
-        by_name.setdefault(name, [Decimal(0)] * len(dates))[index] = Decimal(
-            row["total"] or 0
-        )
+        by_day = totals.setdefault(name, {})
+        key = _as_date(row[date_key])
+        by_day[key] = by_day.get(key, Decimal(0)) + Decimal(row["total"] or 0)
+    series = []
+    status = []
+    for name in sorted(totals):
+        by_day = totals[name]
+        data = []
+        states = []
+        for point in axis:
+            value, state = _series_point(
+                by_day, point, days_with_rows, workdays, as_of, bucket
+            )
+            data.append(value)
+            states.append(state)
+        series.append({"name": name, "data": data})
+        status.append(states)
     return {
-        "dates": [_mmdd(business_date) for business_date in dates],
-        "series": [
-            {"name": name, "data": by_name[name]} for name in sorted(by_name)
-        ],
+        "dates": [point.strftime(label_fmt) for point in axis],
+        "series": series,
+        "status": status,
     }
 
 
+def _as_date(value):
+    """DATE 列取值归一为 ``date``（驱动偶发返回 ``datetime``）。"""
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _bucket_end(day, bucket):
+    """桶覆盖区间终点：周=周日，月=月末，日=当天。"""
+    if bucket == "week":
+        return day + timedelta(days=6)
+    if bucket == "month":
+        return month_days(day.year, day.month)[-1]
+    return day
+
+
+def _series_point(by_day, point, days_with_rows, workdays, as_of, bucket):
+    """单点三态判定（规则表见 :func:`_align_series_rows` docstring）。"""
+    if as_of is None or point > as_of:
+        return None, "missing"
+    if point not in by_day:
+        if point in days_with_rows:
+            return 0.0, "missing"
+        return None, "missing"
+    total = by_day[point]
+    if total is not None and Decimal(total) > 0:
+        return float(total), "ok"
+    covered_end = min(_bucket_end(point, bucket), as_of)
+    if any(point <= workday <= covered_end for workday in workdays):
+        return 0.0, "zero"
+    return 0.0, "ok"
+
+
+def _day_axis(first_day, last_day, anchor):
+    """日档位轴：月首 → min(月末, 锚点日)（§4.6：月内日序列）。"""
+    end = min(last_day, anchor)
+    days = []
+    point = first_day
+    while point <= end:
+        days.append(point)
+        point += timedelta(days=1)
+    return days
+
+
+def _week_axis(anchor):
+    """周档位轴：锚点所在自然周起向前 12 个周一（§4.6：month=窗口截止月）。"""
+    last_monday = anchor - timedelta(days=anchor.weekday())
+    return [
+        last_monday - timedelta(days=7 * offset) for offset in range(11, -1, -1)
+    ]
+
+
+def _month_axis(first_day):
+    """月档位轴：截止月（月初）起向前 12 个自然月，升序。"""
+    year, month = first_day.year, first_day.month
+    for _ in range(11):
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    months = []
+    for _ in range(12):
+        months.append(date(year, month, 1))
+        year, month = (year, month + 1) if month < 12 else (year + 1, 1)
+    return months
+
+
+def _window_workdays(connection, first_day, last_day) -> set:
+    """窗口工作日集合：跨月窗口逐月取 :func:`month_workdays` 的并集。"""
+    workdays = set()
+    year, month = first_day.year, first_day.month
+    while (year, month) <= (last_day.year, last_day.month):
+        cursor = date(year, month, 1)
+        workdays |= month_workdays(connection, first_day=cursor, last_day=cursor)
+        year, month = (year, month + 1) if month < 12 else (year + 1, 1)
+    return workdays
+
+
+def _daily_three_state(connection, rows, name_key, first_day, last_day,
+                       *, anchor) -> dict:
+    """日档位三态装配：锚点轴 + 营业日集合 + as_of 下发。
+
+    ``anchor`` 由调用方给定——线下趋势卡传真实数据水位
+    （:func:`_offline_trend_anchor`），渠道趋势卡传
+    :func:`_shortfall_as_of`（当前月=今天，B2 批次不动渠道口径）；
+    轴 = 月首→min(月末, 锚点)，锚点为 None（空表）时轴为空、
+    as_of 为 None。
+    """
+    axis = _day_axis(first_day, last_day, anchor) if anchor is not None else []
+    workdays = _window_workdays(connection, first_day, axis[-1] if axis else last_day)
+    aligned = _align_series_rows(
+        rows, name_key, axis=axis, workdays=workdays, as_of=anchor
+    )
+    aligned["as_of"] = anchor.isoformat() if anchor is not None else None
+    return aligned
+
+
 def region_daily_series(connection) -> dict:
-    return _align_series_rows(_fetch_rows(connection, _REGION_DAILY_SQL), "region")
+    """L1 无参路径：当前月全区域日序列（窗口 SQL 全静态）。
+
+    轴由「有数据的日」改为 月首→min(月末, 锚点) 的完整日窗口（三态：
+    缺失日 null 断线、营业日真实 0 标 zero）；B2 起锚点 = 真实数据
+    水位（多一条静态 MAX 定锚查询），T+1 未入仓的日子不再进轴。
+    """
+    today = datetime.now().date()
+    first_day, last_day = month_bounds(today.strftime("%Y-%m"))
+    anchor = _offline_trend_anchor(connection, first_day, last_day)
+    rows = _fetch_rows(connection, _REGION_DAILY_SQL)
+    return _daily_three_state(
+        connection, rows, "region", first_day, last_day, anchor=anchor
+    )
 
 
 def channel_mtd_ranking(connection) -> dict:
@@ -264,6 +663,128 @@ def channel_mtd_ranking(connection) -> dict:
     }
 
 
+def sku_mtd_distribution(connection) -> list:
+    """SKU 当月销售额分布（静态 SQL 单一版本），按销售额降序。
+
+    口径：fact_order_line.trade_time 为订单成交时间（DATETIME），月内
+    截断用「< 明天」而非「<= 今天」——``<= CURDATE()`` 会漏掉今天
+    00:00:00 之后的行；取消/未付款/退款行已在 extract 层排除，
+    paid_amount 即买家实付。按 spec_no 聚合，展示名取 goods_name，
+    缺失时回退 spec_no。返回 [{"name", "value": Decimal}]。
+    """
+    return [
+        {
+            "name": (row["goods_name"] or "").strip()
+            or (row["spec_no"] or "").strip(),
+            "value": Decimal(row["total"] or 0),
+        }
+        for row in _fetch_rows(connection, _SKU_MTD_SQL)
+    ]
+
+
+# 商品动销榜的行数护栏：总榜取前 N 个 SKU；分品牌/分渠道榜每组取前 N 名
+# （分组榜不设总量上限——品牌/渠道数本身有限，且每组截断后行数可控）。
+_SKU_TOTAL_LIMIT = 50
+_SKU_TOP_PER_GROUP = 5
+
+_SKU_DAILY_WINDOW_SQL = textwrap.dedent(
+    """
+    SELECT DATE(trade_time) AS d, SUM(paid_amount) AS total
+    FROM fact_order_line
+    WHERE trade_time >= %s AND trade_time < %s
+    GROUP BY DATE(trade_time)
+    """
+).strip()
+
+
+def _sku_reference_dates(connection, first_day, exclusive_end):
+    """月内最新成交日与其前一日；无数据 → ``(None, None)``。
+
+    数据截至日以「有成交的最后一天」为准而非字面昨天：订单行是 T+1
+    入仓的字面昨天常无数据，环比对到空日会被读成 -100%。
+    """
+    as_of = _fetch_one(connection, _SKU_LATEST_DATE_SQL, (first_day, exclusive_end))
+    if as_of is None:
+        return None, None
+    return as_of, as_of - timedelta(days=1)
+
+
+def _sku_rollup(connection, *, group, first_day, exclusive_end, as_of,
+                prev_day, brand=None, channel=None) -> list:
+    """商品动销聚合行：月累计、数据日、前一日（分组 + 可选品牌/渠道）。"""
+    group_sql, group_only = group
+    filters = ""
+    extra = []
+    if brand:
+        filters += "AND brand_name = %s "
+        extra.append(brand)
+    if channel:
+        filters += "AND channel_name = %s "
+        extra.append(channel)
+    sql = _SKU_ROLLUP_SQL.format(
+        group=group_sql, filters=filters, group_only=group_only
+    )
+    params = (
+        first_day, exclusive_end,          # 月累计销售额
+        first_day, exclusive_end,          # 月累计销量
+        as_of, as_of + timedelta(days=1),  # 数据日
+        prev_day, prev_day + timedelta(days=1),  # 前一日
+        min(first_day, prev_day), exclusive_end,  # 扫描窗口（含跨月前一日）
+        *extra,
+    )
+    return _fetch_rows(connection, sql, params)
+
+
+def _decimal_total(row, key) -> float:
+    return float(Decimal(row.get(key) or 0))
+
+
+def _sku_entry(row, rank, share_of=None):
+    """一行榜单；环比 = (数据日 − 前一日) ÷ 前一日，前一日为 0 → None。"""
+    sales = _decimal_total(row, "mtd_amount")
+    latest = _decimal_total(row, "latest_amount")
+    prev = _decimal_total(row, "prev_amount")
+    share = None
+    if share_of:
+        share = float(Decimal(sales) / Decimal(share_of))
+    return {
+        "rank": rank,
+        "goods": (row.get("goods_name") or "").strip()
+        or (row.get("spec_no") or "").strip(),
+        "sales": sales,
+        "share": share,
+        "qty": _decimal_total(row, "mtd_qty"),
+        "latest": latest,
+        "delta_pct": None if prev <= 0 else (latest - prev) / prev,
+    }
+
+
+def _sku_total_rows(rows, *, group_key=None, per_group=None) -> list:
+    """按分组取每组前 ``per_group`` 名（不分组即总榜前 ``_SKU_TOTAL_LIMIT``）。"""
+    entries = []
+    if group_key is None:
+        # 占比以全量商品为分母（而非仅前 N 名），截断只影响展示行数。
+        total = sum(Decimal(row.get("mtd_amount") or 0) for row in rows)
+        rows = rows[:_SKU_TOTAL_LIMIT]
+        for index, row in enumerate(rows, start=1):
+            entry = _sku_entry(row, index, total)
+            entry["brand"] = row.get("brand_name") or "未匹配"
+            entries.append(entry)
+        return entries
+    buckets = {}
+    for row in rows:
+        # rows 已按 mtd_amount 降序，组内保序即组内排名。
+        buckets.setdefault(row.get(group_key) or "未分组", []).append(row)
+    for name in sorted(buckets):
+        bucket = buckets[name][:per_group]
+        group_total = sum(Decimal(row.get("mtd_amount") or 0) for row in bucket)
+        for index, row in enumerate(bucket, start=1):
+            entry = _sku_entry(row, index, group_total)
+            entry[group_key] = name
+            entries.append(entry)
+    return entries
+
+
 def _optional_region_filter(region):
     """可选 region 过滤：返回 (SQL 片段, 追加参数元组)；片段为空即全区域。"""
     if region:
@@ -274,18 +795,24 @@ def _optional_region_filter(region):
 def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal:
     """选中区域（缺省全区域）某自然月 Σsales（截断未来 + 排除合计行）。
 
-    带参 SQL 的字面 ``%`` 双写（pymysql ``sql % params`` 约定）：
-    ``'%%合计%%'`` 格式化后 MySQL 收到 ``'%合计%'``。
+    B3 起「全区域」= 线下线全域（排除 region=电商，见
+    ``_OFFLINE_LINE_SQL``）；显式选 region=电商 得空集——该区域归
+    电商线，本查询族不服务。带参 SQL 的字面 ``%`` 双写（pymysql
+    ``sql % params`` 约定）：``'%%合计%%'`` 格式化后 MySQL 收到
+    ``'%合计%'``。
     """
     region_sql, region_params = _optional_region_filter(region)
-    sql = (
-        "SELECT COALESCE(SUM(sales_amount), 0) "
-        "FROM fact_daily_report_offline "
-        "WHERE business_date BETWEEN %s AND %s "
-        f"{region_sql}"
-        "AND business_date <= CURDATE() "
-        "AND responsible_person NOT LIKE '%%合计%%'"
-    )
+    sql = textwrap.dedent(
+        f"""
+        SELECT COALESCE(SUM(sales_amount), 0)
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        """
+    ).strip()
     return _fetch_scalar(connection, sql, (first_day, last_day) + region_params)
 
 
@@ -296,33 +823,39 @@ def region_month_target(connection, *, region=None, first_day, last_day) -> Deci
     预填未来行不影响 MAX，故不做 CURDATE 截断（与取数查询刻意不对称）。
     """
     region_sql, region_params = _optional_region_filter(region)
-    sql = (
-        "SELECT COALESCE(SUM(mx), 0) "
-        "FROM ("
-        "SELECT responsible_person, MAX(monthly_target) AS mx "
-        "FROM fact_daily_report_offline "
-        "WHERE business_date BETWEEN %s AND %s "
-        f"{region_sql}"
-        "AND responsible_person NOT LIKE '%%合计%%' "
-        "GROUP BY responsible_person"
-        ") t"
-    )
+    sql = textwrap.dedent(
+        f"""
+        SELECT COALESCE(SUM(mx), 0)
+        FROM (
+        SELECT responsible_person, MAX(monthly_target) AS mx
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY responsible_person
+        ) t
+        """
+    ).strip()
     return _fetch_scalar(connection, sql, (first_day, last_day) + region_params)
 
 
 def department_mtd_ranking(connection, *, region=None, first_day, last_day) -> dict:
     """选中区域（缺省全区域）某自然月按部门 Σsales 降序；空部门→未分组。"""
     region_sql, region_params = _optional_region_filter(region)
-    sql = (
-        "SELECT department, SUM(sales_amount) AS total "
-        "FROM fact_daily_report_offline "
-        "WHERE business_date BETWEEN %s AND %s "
-        f"{region_sql}"
-        "AND business_date <= CURDATE() "
-        "AND responsible_person NOT LIKE '%%合计%%' "
-        "GROUP BY department "
-        "ORDER BY total DESC"
-    )
+    sql = textwrap.dedent(
+        f"""
+        SELECT department, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY department
+        ORDER BY total DESC
+        """
+    ).strip()
     rows = _fetch_rows(connection, sql, (first_day, last_day) + region_params)
     return {
         "categories": [row["department"] or "未分组" for row in rows],
@@ -336,46 +869,141 @@ def region_month_daily_series(connection, *, region=None, first_day, last_day) -
     L1 无参路径仍走静态 ``region_daily_series``（StaticSqlTests 锁定）。
     """
     region_sql, region_params = _optional_region_filter(region)
-    sql = (
-        "SELECT business_date, region, SUM(sales_amount) AS total "
-        "FROM fact_daily_report_offline "
-        "WHERE business_date BETWEEN %s AND %s "
-        f"{region_sql}"
-        "AND business_date <= CURDATE() "
-        "AND responsible_person NOT LIKE '%%合计%%' "
-        "GROUP BY business_date, region"
-    )
+    sql = textwrap.dedent(
+        f"""
+        SELECT business_date, region, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY business_date, region
+        """
+    ).strip()
     rows = _fetch_rows(connection, sql, (first_day, last_day) + region_params)
-    return _align_series_rows(rows, "region")
+    return _daily_three_state(
+        connection, rows, "region", first_day, last_day,
+        anchor=_offline_trend_anchor(connection, first_day, last_day),
+    )
 
 
-_OFFLINE_DOD_LATEST_SQL = (
-    "SELECT MAX(business_date) AS d "
-    "FROM fact_daily_report_offline "
-    "WHERE business_date <= CURDATE() "
-    "AND responsible_person NOT LIKE '%合计%'"
-)
+def region_weekly_series(connection, *, region=None, month) -> dict:
+    """周档位区域序列：month=窗口截止月，锚点所在自然周起向前 12 周。
 
-_CHANNEL_DOD_LATEST_SQL = (
-    "SELECT MAX(business_date) AS d "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date <= CURDATE()"
-)
+    周一为首、跨月周归属起始日所在月；桶内求和由 SQL 下推（
+    ``DATE_SUB(business_date, INTERVAL WEEKDAY(business_date) DAY)``
+    = 周一），值一律 %s 绑定。三态判定与日档同一核心（桶 ∩ 锚点内
+    有营业日才允许 zero）。
 
-_OFFLINE_DOD_WINDOW_SQL = (
-    "SELECT business_date, SUM(sales_amount) AS total "
-    "FROM fact_daily_report_offline "
-    "WHERE business_date BETWEEN %s AND %s "
-    "AND responsible_person NOT LIKE '%%合计%%' "
-    "GROUP BY business_date"
-)
+    B1：分桶表达式别名 ``bucket_start`` 刻意不与真实列同名——别名
+    撞名时 MySQL 的 GROUP BY 会解析回真实 ``business_date`` 列，桶内
+    按天散行、配合旧的覆盖赋值只留最后一天（P0 假数）；Python 侧
+    同键多行累加兜底（:func:`_align_series_rows`）。B2：锚点改真实
+    数据水位（:func:`_offline_trend_anchor`）。
+    """
+    first_day, last_day = month_bounds(month)
+    as_of = _offline_trend_anchor(connection, first_day, last_day)
+    axis = _week_axis(as_of) if as_of is not None else []
+    workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
+    region_sql, region_params = _optional_region_filter(region)
+    sql = textwrap.dedent(
+        f"""
+        SELECT DATE_SUB(business_date, INTERVAL WEEKDAY(business_date) DAY) AS bucket_start,
+               region, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY bucket_start, region
+        """
+    ).strip()
+    rows = _fetch_rows(
+        connection, sql, (axis[0] if axis else first_day, last_day) + region_params
+    )
+    aligned = _align_series_rows(
+        rows, "region", axis=axis, workdays=workdays, as_of=as_of,
+        bucket="week", date_key="bucket_start",
+    )
+    aligned["as_of"] = as_of.isoformat() if as_of is not None else None
+    return aligned
 
-_CHANNEL_DOD_WINDOW_SQL = (
-    "SELECT business_date, SUM(sales_amount) AS total "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date BETWEEN %s AND %s "
-    "GROUP BY business_date"
-)
+
+def region_monthly_series(connection, *, region=None, month) -> dict:
+    """月档位区域序列：month=窗口截止月，向前 12 个自然月（YYYY-MM 轴）。
+
+    桶键 = 月初日（SQL 下推 ``DAYOFMONTH`` 归一，别名 ``bucket_start``
+    刻意不与真实列同名，B1 同周档），标签 ``%Y-%m``；值一律 %s 绑定。
+    三态判定与日档同一核心；B2 起锚点 = 真实数据水位。
+    """
+    first_day, last_day = month_bounds(month)
+    as_of = _offline_trend_anchor(connection, first_day, last_day)
+    axis = _month_axis(first_day) if as_of is not None else []
+    workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
+    region_sql, region_params = _optional_region_filter(region)
+    sql = textwrap.dedent(
+        f"""
+        SELECT DATE_SUB(business_date, INTERVAL DAYOFMONTH(business_date) - 1 DAY) AS bucket_start,
+               region, SUM(sales_amount) AS total
+        FROM fact_daily_report_offline
+        WHERE business_date BETWEEN %s AND %s
+        {region_sql}
+        AND business_date <= CURDATE()
+        AND responsible_person NOT LIKE '%%合计%%'
+        {_OFFLINE_LINE_SQL}
+        GROUP BY bucket_start, region
+        """
+    ).strip()
+    rows = _fetch_rows(
+        connection, sql, (axis[0] if axis else first_day, last_day) + region_params
+    )
+    aligned = _align_series_rows(
+        rows, "region", axis=axis, workdays=workdays, as_of=as_of,
+        label_fmt="%Y-%m", bucket="month", date_key="bucket_start",
+    )
+    aligned["as_of"] = as_of.isoformat() if as_of is not None else None
+    return aligned
+
+
+_OFFLINE_DOD_LATEST_SQL = textwrap.dedent(
+    f"""
+    SELECT MAX(business_date) AS d
+    FROM fact_daily_report_offline
+    WHERE business_date <= CURDATE()
+    AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
+
+_CHANNEL_DOD_LATEST_SQL = textwrap.dedent(
+    """
+    SELECT MAX(business_date) AS d
+    FROM fact_channel_daily_sales
+    WHERE business_date <= CURDATE()
+    """
+).strip()
+
+_OFFLINE_DOD_WINDOW_SQL = textwrap.dedent(
+    f"""
+    SELECT business_date, SUM(sales_amount) AS total
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
+    GROUP BY business_date
+    """
+).strip()
+
+_CHANNEL_DOD_WINDOW_SQL = textwrap.dedent(
+    """
+    SELECT business_date, SUM(sales_amount) AS total
+    FROM fact_channel_daily_sales
+    WHERE business_date BETWEEN %s AND %s
+    GROUP BY business_date
+    """
+).strip()
 
 
 def _dod_totals(connection, sql, latest):
@@ -411,9 +1039,19 @@ def _dod_core(totals, latest):
     }
 
 
+def offline_latest_date(connection):
+    """线下日报数据水位：最新入仓 business_date（空表 None）。
+
+    与 :func:`offline_dod` 共用 ``_OFFLINE_DOD_LATEST_SQL``（含未来行
+    截断 + 合计行排除）；B2 起 MTD 窗口上界、线下趋势卡锚点与
+    日环比同源。
+    """
+    return _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+
+
 def offline_dod(connection):
     """⑭ 线下日环比核：最新数据日 Σsales、前一自然日、近 7 自然日。"""
-    latest = _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+    latest = offline_latest_date(connection)
     if latest is None:
         return None
     return _dod_core(_dod_totals(connection, _OFFLINE_DOD_WINDOW_SQL, latest), latest)
@@ -427,34 +1065,40 @@ def channel_dod(connection):
     return _dod_core(_dod_totals(connection, _CHANNEL_DOD_WINDOW_SQL, latest), latest)
 
 
-_CHANNEL_MONTH_RANKING_SQL = (
-    "SELECT channel, SUM(sales_amount) AS total "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date BETWEEN %s AND %s "
-    "AND business_date <= CURDATE() "
-    "GROUP BY channel "
-    "ORDER BY total DESC"
-)
+_CHANNEL_MONTH_RANKING_SQL = textwrap.dedent(
+    """
+    SELECT channel, SUM(sales_amount) AS total
+    FROM fact_channel_daily_sales
+    WHERE business_date BETWEEN %s AND %s
+    AND business_date <= CURDATE()
+    GROUP BY channel
+    ORDER BY total DESC
+    """
+).strip()
 
-_CHANNEL_MONTH_DAILY_SQL = (
-    "SELECT business_date, channel, SUM(sales_amount) AS total "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date BETWEEN %s AND %s "
-    "AND business_date <= CURDATE() "
-    "GROUP BY business_date, channel"
-)
+_CHANNEL_MONTH_DAILY_SQL = textwrap.dedent(
+    """
+    SELECT business_date, channel, SUM(sales_amount) AS total
+    FROM fact_channel_daily_sales
+    WHERE business_date BETWEEN %s AND %s
+    AND business_date <= CURDATE()
+    GROUP BY business_date, channel
+    """
+).strip()
 
-_CHANNEL_MTD_COMPARISON_SQL = (
-    "SELECT channel, "
-    "SUM(sales_amount) AS sales, "
-    "SUM(promotion_cost) AS promo, "
-    "COUNT(DISTINCT store_name) AS stores "
-    "FROM fact_channel_daily_sales "
-    "WHERE business_date BETWEEN %s AND %s "
-    "AND business_date <= CURDATE() "
-    "GROUP BY channel "
-    "ORDER BY sales DESC"
-)
+_CHANNEL_MTD_COMPARISON_SQL = textwrap.dedent(
+    """
+    SELECT channel,
+    SUM(sales_amount) AS sales,
+    SUM(promotion_cost) AS promo,
+    COUNT(DISTINCT store_name) AS stores
+    FROM fact_channel_daily_sales
+    WHERE business_date BETWEEN %s AND %s
+    AND business_date <= CURDATE()
+    GROUP BY channel
+    ORDER BY sales DESC
+    """
+).strip()
 
 
 def _optional_channel_filter(channel):
@@ -474,9 +1118,17 @@ def channel_month_ranking(connection, *, first_day, last_day) -> dict:
 
 
 def channel_month_daily_series(connection, *, first_day, last_day) -> dict:
-    """指定月按日 Σsales 分渠道序列（渠道名升序，零填充）。"""
+    """指定月按日 Σsales 分渠道序列（渠道名升序，三态轴）。
+
+    与区域日序列同一核心：轴 = 月首→min(月末, 锚点) 完整日窗口，缺失
+    null 断线、营业日真实 0 标 zero。锚点沿用 ``_shortfall_as_of``
+    （当前月=今天）——B2 的真实水位只切线下侧，渠道口径本批不动。
+    """
     rows = _fetch_rows(connection, _CHANNEL_MONTH_DAILY_SQL, (first_day, last_day))
-    return _align_series_rows(rows, "channel")
+    return _daily_three_state(
+        connection, rows, "channel", first_day, last_day,
+        anchor=_shortfall_as_of(first_day, last_day),
+    )
 
 
 def channel_mtd_comparison(connection, *, first_day, last_day) -> list:
@@ -487,15 +1139,17 @@ def channel_mtd_comparison(connection, *, first_day, last_day) -> list:
 def store_mtd_ranking(connection, *, channel=None, first_day, last_day) -> dict:
     """店铺当月排行：Σsales 降序、服务端名次；无 channel 含渠道列。"""
     channel_sql, channel_params = _optional_channel_filter(channel)
-    sql = (
-        "SELECT store_name, channel, SUM(sales_amount) AS total "
-        "FROM fact_channel_daily_sales "
-        "WHERE business_date BETWEEN %s AND %s "
-        f"{channel_sql}"
-        "AND business_date <= CURDATE() "
-        "GROUP BY store_name, channel "
-        "ORDER BY total DESC"
-    )
+    sql = textwrap.dedent(
+        f"""
+        SELECT store_name, channel, SUM(sales_amount) AS total
+        FROM fact_channel_daily_sales
+        WHERE business_date BETWEEN %s AND %s
+        {channel_sql}
+        AND business_date <= CURDATE()
+        GROUP BY store_name, channel
+        ORDER BY total DESC
+        """
+    ).strip()
     rows = _fetch_rows(connection, sql, (first_day, last_day) + channel_params)
     columns = [{"key": "rank", "title": "排名"}, {"key": "store", "title": "店铺"}]
     if channel is None:
@@ -599,48 +1253,157 @@ def _people_snapshot(connection, region, month):
 
 
 def run_kpi_offline_mtd(connection, params) -> dict:
-    """①线下本月累计销售: scalar KPI, 元."""
+    """①线下本月累计销售: scalar KPI, 元（粒度批次 A：日/周/月三档，默认月）。
+
+    档位语义（``month`` 参数为窗口月，缺省 = 水位所在月）：
+
+    * ``month``  该月 1 号 → 锚点的区间累计——缺省路径（无 month）复用
+      ``_offline_mtd_sum``，与 B2 版载荷逐字节一致；
+    * ``week``   锚点所在自然周（周一为首）→ 锚点的区间累计；
+    * ``day``    锚点当日值；
+    * ``year``   年首（MySQL 时钟）→ 锚点的年度累计（A5；month 参数
+      可把年累计截到该月末，锚点规则不变）。
+
+    锚点 = min(窗口月末, 数据水位)；水位 None（空表）或锚点落在窗口月
+    之前 ⇒ value=0、as_of=None（该月无入仓，不假装有数）。``as_of``
+    恒为数字的真实截止日，前端标量卡角标/页脚直接消费
+    （``payload.date || payload.as_of``）。边界日期全部来自 DB 侧
+    （水位 / param month / SQL 内 CURDATE 月首），本卡不混用 Python
+    时钟（B6）；gran 合法性由 app 层 granularity 值域闸保证。
+    """
+    month = (params.get("month") or "").strip()
+    gran = (params.get("gran") or "month").strip()
+    latest = offline_latest_date(connection)
+    value, as_of = Decimal(0), None
+    if latest is not None:
+        if month:
+            first_day, last_day = month_bounds(month)
+            anchor = min(last_day, latest)
+            if anchor < first_day:
+                anchor = None  # 窗口月整体在水位之后：该月无入仓
+        else:
+            first_day, anchor = None, latest
+        if anchor is not None:
+            if gran == "day":
+                value = offline_window_sum(
+                    connection, first_day=anchor, last_day=anchor
+                )
+            elif gran == "week":
+                monday = anchor - timedelta(days=anchor.weekday())
+                value = offline_window_sum(
+                    connection, first_day=monday, last_day=anchor
+                )
+            elif gran == "year":
+                value = _fetch_scalar(connection, _OFFLINE_YTD_SQL, (anchor,))
+            elif first_day is not None:
+                value = offline_window_sum(
+                    connection, first_day=first_day, last_day=anchor
+                )
+            else:
+                value = _offline_mtd_sum(connection, latest)
+            as_of = anchor
     return {
         "chart": "scalar",
-        "value": float(offline_mtd_total(connection)),
+        "value": float(value),
+        "as_of": as_of.isoformat() if as_of is not None else None,
         "unit": _UNIT,
     }
 
 
 def run_kpi_channel_mtd(connection, params) -> dict:
-    """③电商渠道本月累计销售: scalar KPI, 元."""
+    """③电商渠道本月累计销售: scalar KPI, 元（窗口截至真实水位，as_of 下发）。
+
+    水位定锚只跑一次（``_channel_mtd_sum`` 直接吃定锚结果）；空表时
+    value=0、as_of=None——与线下卡同款契约。
+    """
+    latest = channel_latest_date(connection)
     return {
         "chart": "scalar",
-        "value": float(channel_mtd_total(connection)),
+        "value": float(_channel_mtd_sum(connection, latest)),
+        "as_of": latest.isoformat() if latest is not None else None,
         "unit": _UNIT,
     }
 
 
-def run_kpi_annual_progress(connection, params) -> dict:
-    """⑫年度目标达成进度: two-line annual actuals over the two-line target.
+#: 年度达成卡业务线注册表：dim_target scope_key → (显示名, 取数函数)。
+#: 取数函数返回 ``(年累计, 是否有数据)``。目标里出现注册表没有的线
+#: ⇒ 值 0、has_data=False（标红「未接入」）——绝不只在分母里加目标、
+#: 分子里假装它有数。新增业务线 = 加 dim_target 行 + 注册一行。
+_ANNUAL_LINE_SOURCES = {
+    "offline": ("线下", lambda connection: (offline_annual_total(connection), True)),
+    "channel": ("电商渠道", lambda connection: (channel_annual_total(connection), True)),
+    "restaurant": ("餐饮", restaurant_annual_revenue),
+}
 
-    分子 = 线下 + 电商两线年累计 (same 合计 exclusion and future-row
-    truncation); 分母 = ``dim_target`` 的 offline + channel 两行
-    ``annual_target`` 之和; ``rate = value / target`` (``None`` when the
-    target is 0, computed at float precision for JSON).
+
+def run_kpi_annual_progress(connection, params) -> dict:
+    """⑫年度目标达成进度: 全业务线年累计 ÷ 全业务线年度目标。
+
+    分子 = 各业务线年累计之和（线下=日报、电商渠道=渠道表、餐饮=
+    人工月报，口径与各线卡一致）；分母 = ``dim_target`` scope='line'
+    全部业务线。``lines`` 逐线列出 {name, value, target, has_data}：
+    找不到数据的线值 0、has_data=False——前端标红为 0（「未接入」
+    不是「0 销量」）；rate 为 None 当分母为 0。
     """
-    value = offline_annual_total(connection) + channel_annual_total(connection)
-    target = annual_target_total(connection)
+    targets = {
+        row["scope_key"]: Decimal(row["target"] or 0)
+        for row in _fetch_rows(connection, _ANNUAL_TARGET_BY_LINE_SQL)
+    }
+    lines = []
+    value = Decimal(0)
+    target = Decimal(0)
+    ordered_keys = list(_ANNUAL_LINE_SOURCES) + sorted(
+        key for key in targets if key not in _ANNUAL_LINE_SOURCES
+    )
+    for scope_key in ordered_keys:
+        label, resolver = _ANNUAL_LINE_SOURCES.get(
+            scope_key, (scope_key, lambda connection: (Decimal(0), False))
+        )
+        line_value, has_data = resolver(connection)
+        line_target = targets.get(scope_key, Decimal(0))
+        value += line_value
+        target += line_target
+        lines.append(
+            {
+                "name": label,
+                "value": float(line_value),
+                "target": float(line_target),
+                "has_data": bool(has_data),
+            }
+        )
     rate = None if target == 0 else float(value) / float(target)
     return {
         "chart": "scalar",
         "value": float(value),
         "target": float(target),
         "rate": rate,
+        "lines": lines,
         "unit": _UNIT,
     }
 
 
 def run_trend_region_daily(connection, params) -> dict:
-    """区域日销趋势: L1 无参=当前月全区域（静态）；带参=region/month。"""
+    """区域销售趋势: gran=day 月内日序列（缺省）/ week 12 周 / month 12 月。
+
+    L1 无参=当前月全区域（静态 SQL）；带参=region/month/gran。gran 未传
+    由 app 层注入 default_gran（"day"），故 gran=day 与不带参走同一
+    路径、响应逐字节一致。``status`` 与 ``series`` 一一对应、与
+    ``dates`` 等长；``as_of`` 为事实表数据水位。
+    """
     region = params.get("region")
     month = params.get("month")
-    if region is None and month is None:
+    gran = params.get("gran") or "day"
+    if gran == "week":
+        series = region_weekly_series(
+            connection, region=region,
+            month=month or datetime.now().strftime("%Y-%m"),
+        )
+    elif gran == "month":
+        series = region_monthly_series(
+            connection, region=region,
+            month=month or datetime.now().strftime("%Y-%m"),
+        )
+    elif region is None and month is None:
         series = region_daily_series(connection)
     else:
         month = month or datetime.now().strftime("%Y-%m")
@@ -652,9 +1415,13 @@ def run_trend_region_daily(connection, params) -> dict:
         "chart": "line",
         "dates": series["dates"],
         "series": [
-            {"name": entry["name"], "data": [float(value) for value in entry["data"]]}
+            {"name": entry["name"],
+             "data": [None if value is None else float(value)
+                      for value in entry["data"]]}
             for entry in series["series"]
         ],
+        "status": series["status"],
+        "as_of": series["as_of"],
     }
 
 
@@ -674,6 +1441,193 @@ def run_bar_channel_mtd(connection, params) -> dict:
         "values": [float(value) for value in ranking["values"]],
         "unit": _UNIT,
     }
+
+
+#: 环形图最多单列的 SKU 切片数；其余 SKU 合并为「其他」。
+_PIE_SKU_TOP_LIMIT = 8
+
+
+def run_pie_sku_mtd(connection, params) -> dict:
+    """电商 SKU 当月销售占比: L1 无参环形图（电商本月销售的下钻补充）。
+
+    头部 ``_PIE_SKU_TOP_LIMIT`` 个 SKU 各占一片，长尾合并「其他」——
+    SKU 数随业务增长，切片过多环形图不可读；占比由前端按 items 求和
+    换算（ECharts 内建 percent）。
+    """
+    items = sku_mtd_distribution(connection)
+    top = items[:_PIE_SKU_TOP_LIMIT]
+    rest = items[_PIE_SKU_TOP_LIMIT:]
+    if rest:
+        top.append({"name": "其他", "value": sum(i["value"] for i in rest)})
+    return {
+        "chart": "pie",
+        "items": [{"name": i["name"], "value": float(i["value"])} for i in top],
+        "unit": _UNIT,
+    }
+
+
+_SKU_TOTAL_COLUMNS = (
+    {"key": "rank", "title": "排名"},
+    {"key": "goods", "title": "商品"},
+    {"key": "brand", "title": "品牌"},
+    {"key": "sales", "title": "累计销售额", "format": "wan"},
+    {"key": "share", "title": "销售占比", "format": "percent"},
+    {"key": "qty", "title": "累计销量", "format": "number"},
+    {"key": "latest", "title": "昨日销售额", "format": "wan"},
+    {"key": "delta_pct", "title": "环比", "format": "delta"},
+)
+
+_SKU_GROUPED_MONEY_COLUMNS = (
+    {"key": "sales", "title": "累计销售额", "format": "wan"},
+    {"key": "latest", "title": "昨日销售额", "format": "wan"},
+    {"key": "delta_pct", "title": "环比", "format": "delta"},
+)
+
+
+def _sku_window(params):
+    """(month, 月首, 月末+1 天)：月窗口一律按半开区间，避免丢当天。"""
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    first_day, last_day = month_bounds(month)
+    return month, first_day, last_day + timedelta(days=1)
+
+
+def _sku_trend7(connection, as_of) -> list:
+    """近 7 个自然日的商品销售额（缺数日为 null，前端断线）。"""
+    rows = _fetch_rows(
+        connection,
+        _SKU_DAILY_WINDOW_SQL,
+        (as_of - timedelta(days=6), as_of + timedelta(days=1)),
+    )
+    totals = {row["d"]: row["total"] for row in rows}
+    trend = []
+    for offset in range(6, -1, -1):
+        day = as_of - timedelta(days=offset)
+        value = totals.get(day)
+        trend.append(
+            {
+                "date": day.isoformat(),
+                "value": None if value is None else float(Decimal(value)),
+            }
+        )
+    return trend
+
+
+def _sku_rollup_or_empty(connection, params, group, brand=None, channel=None):
+    """(rows, as_of)：无数据（as_of 为 None）时返回空行，卡片自行占位。"""
+    _, first_day, exclusive_end = _sku_window(params)
+    as_of, prev_day = _sku_reference_dates(connection, first_day, exclusive_end)
+    if as_of is None:
+        return [], None
+    rows = _sku_rollup(
+        connection,
+        group=group,
+        first_day=first_day,
+        exclusive_end=exclusive_end,
+        as_of=as_of,
+        prev_day=prev_day,
+        brand=brand,
+        channel=channel,
+    )
+    return rows, as_of
+
+
+def _sku_grouped_payload(rows, as_of, group_key, group_title) -> dict:
+    """分品牌/分渠道榜共用载荷：分组名 + 组内排名 + 商品 + 金额 + 环比。"""
+    entries = _sku_total_rows(
+        rows, group_key=group_key, per_group=_SKU_TOP_PER_GROUP
+    )
+    return {
+        "chart": "table",
+        "as_of": as_of.isoformat() if as_of else None,
+        "columns": [
+            {"key": group_key, "title": group_title},
+            {"key": "rank", "title": "组内排名"},
+            {"key": "goods", "title": "商品"},
+            *_SKU_GROUPED_MONEY_COLUMNS,
+        ],
+        "rows": entries,
+    }
+
+
+def run_kpi_sku_mtd(connection, params) -> dict:
+    """商品动销 KPI：本月商品累计销售额 + 数据日/前一日/环比 + SKU 数。
+
+    value 为月累计（电商口径，已排除取消/待付/全额退款单）；
+    latest/prev/delta_pct 为「数据截至日 vs 前一日」的日环比（日环比
+    与月累计并列，不做二次换算）；trend7 供卡内迷你趋势。
+    """
+    month, first_day, exclusive_end = _sku_window(params)
+    payload = {
+        "chart": "scalar",
+        "value": 0.0,
+        "date": None,
+        "latest": None,
+        "prev": None,
+        "delta_pct": None,
+        "trend7": [],
+        "sku_count": 0,
+        "active_sku_count": 0,
+        "month": month,
+        "unit": _UNIT,
+    }
+    as_of, prev_day = _sku_reference_dates(connection, first_day, exclusive_end)
+    if as_of is None:
+        return payload
+    rows = _sku_rollup(
+        connection,
+        group=_SKU_GROUP_TOTAL,
+        first_day=first_day,
+        exclusive_end=exclusive_end,
+        as_of=as_of,
+        prev_day=prev_day,
+    )
+    total = sum((Decimal(row["mtd_amount"] or 0) for row in rows), Decimal(0))
+    latest = sum((Decimal(row["latest_amount"] or 0) for row in rows), Decimal(0))
+    prev = sum((Decimal(row["prev_amount"] or 0) for row in rows), Decimal(0))
+    payload.update(
+        {
+            "value": float(total),
+            "date": as_of.isoformat(),
+            "latest": float(latest),
+            "prev": float(prev),
+            "delta_pct": None if prev == 0 else float((latest - prev) / prev),
+            "trend7": _sku_trend7(connection, as_of),
+            "sku_count": len(rows),
+            "active_sku_count": sum(
+                1 for row in rows if Decimal(row["mtd_amount"] or 0) > 0
+            ),
+        }
+    )
+    return payload
+
+
+def run_table_sku_hot_total(connection, params) -> dict:
+    """热销商品总榜：累计销售额降序，含品牌、占比、销量、昨日与环比。"""
+    rows, as_of = _sku_rollup_or_empty(connection, params, _SKU_GROUP_TOTAL)
+    return {
+        "chart": "table",
+        "as_of": as_of.isoformat() if as_of else None,
+        "columns": list(_SKU_TOTAL_COLUMNS),
+        "rows": _sku_total_rows(rows),
+    }
+
+
+def run_table_sku_hot_brand(connection, params) -> dict:
+    """分品牌热销商品：每个品牌内按销售额取前 ``_SKU_TOP_PER_GROUP`` 名。"""
+    brand = params.get("brand")
+    rows, as_of = _sku_rollup_or_empty(
+        connection, params, _SKU_GROUP_BRAND, brand=brand
+    )
+    return _sku_grouped_payload(rows, as_of, "brand_name", "品牌")
+
+
+def run_table_sku_hot_channel(connection, params) -> dict:
+    """分渠道热销商品：每个店铺渠道内取前 ``_SKU_TOP_PER_GROUP`` 名。"""
+    channel = params.get("channel")
+    rows, as_of = _sku_rollup_or_empty(
+        connection, params, _SKU_GROUP_CHANNEL, channel=channel
+    )
+    return _sku_grouped_payload(rows, as_of, "channel_name", "渠道")
 
 
 def run_kpi_region_mtd(connection, params) -> dict:
@@ -755,9 +1709,13 @@ def run_trend_channel_daily(connection, params) -> dict:
         "chart": "line",
         "dates": series["dates"],
         "series": [
-            {"name": entry["name"], "data": [float(value) for value in entry["data"]]}
+            {"name": entry["name"],
+             "data": [None if value is None else float(value)
+                      for value in entry["data"]]}
             for entry in series["series"]
         ],
+        "status": series["status"],
+        "as_of": series["as_of"],
     }
 
 
@@ -842,6 +1800,333 @@ def run_kpi_people_rate(connection, params) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 缺口 / 四级告警（CubeSchema §2：派生口径后端化）
+#
+# SQL 只取**事实**（name / target / done）；shortfall、required_daily、
+# severity 全部交给 :mod:`common.bi_web.derived` 的纯函数 —— 口径可单测、
+# 前端不得重算一遍。
+#
+# 目标取值纪律与 ``region_month_target`` 逐字相同：月目标 = Σ各人员
+# MAX(monthly_target)，**绝不跨行 SUM**（melt 后每行重复携带月目标）。
+# 取 MAX 的子查询刻意**不做** CURDATE 截断（月目标是月级常量，预填未来行
+# 不影响 MAX）；取 done 的子查询按惯例 ``business_date <= CURDATE()``
+# 截断未来预填行。
+# ---------------------------------------------------------------------------
+
+#: 事实表 grain → 卡面/下钻粒度标识（people 的前端 grain 是 person）。
+_SHORTFALL_GRAINS = ("people", "region")
+_SHORTFALL_FRONT_GRAIN = {"people": "person", "region": "region"}
+_DEFAULT_SHORTFALL_GRAIN = "people"
+
+#: 人员粒度：每人一行目标（MAX 子查询）+ 已完成（截断子查询）。
+#:
+#: ``has_fact``（§5 第 5 类缺陷）由 **LEFT JOIN 右表主键是否为空**判定，
+#: 不靠 ``done == 0`` 反推：**没有事实行 ≠ 挂零**，两者的告警语义相反。
+_SHORTFALL_PEOPLE_SQL = textwrap.dedent(
+    """
+    SELECT t.person AS name, MAX(t.department) AS dept,
+    SUM(t.mx) AS target, COALESCE(SUM(d.done), 0) AS done,
+    (MAX(d.person) IS NOT NULL) AS has_fact
+    FROM (
+    SELECT responsible_person AS person, MAX(department) AS department,
+    MAX(monthly_target) AS mx
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    {region_sql}
+    AND responsible_person NOT LIKE '%%合计%%'
+    GROUP BY responsible_person
+    ) t
+    LEFT JOIN (
+    SELECT responsible_person AS person, SUM(sales_amount) AS done
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND business_date <= CURDATE()
+    {region_sql}
+    AND responsible_person NOT LIKE '%%合计%%'
+    GROUP BY responsible_person
+    ) d ON d.person <=> t.person
+    GROUP BY t.person
+    ORDER BY target DESC, t.person
+    """
+).strip()
+
+#: 区域粒度：区域目标是该区域内各人员 MAX(monthly_target) 之和，而不是
+#: 区域内所有行的 SUM（同一人的月目标在 melt 后每行重复携带，只计一次）。
+_SHORTFALL_REGION_SQL = textwrap.dedent(
+    """
+    SELECT t.region AS name, SUM(t.mx) AS target,
+    COALESCE(SUM(d.done), 0) AS done,
+    (MAX(d.responsible_person) IS NOT NULL) AS has_fact
+    FROM (
+    SELECT region, responsible_person, MAX(monthly_target) AS mx
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND responsible_person NOT LIKE '%%合计%%'
+    GROUP BY region, responsible_person
+    ) t
+    LEFT JOIN (
+    SELECT region, responsible_person, SUM(sales_amount) AS done
+    FROM fact_daily_report_offline
+    WHERE business_date BETWEEN %s AND %s
+    AND business_date <= CURDATE()
+    AND responsible_person NOT LIKE '%%合计%%'
+    GROUP BY region, responsible_person
+    ) d ON d.region <=> t.region
+    AND d.responsible_person <=> t.responsible_person
+    GROUP BY t.region
+    ORDER BY target DESC, t.region
+    """
+).strip()
+
+#: AnomalyList 的服务端截断行数（也是 card 的契约：最多 N 行）。
+_ANOMALY_TOP_N = 10
+
+
+def shortfall_facts(connection, *, grain="people", region=None,
+                    first_day, last_day) -> list:
+    """只读事实：``[{name, target, done}]``（金额与 ``_unit`` 同为元）。
+
+    **不含任何派生列** —— 派生一律走 :mod:`common.bi_web.derived`，这是
+    「口径后端化」的可测边界。``grain`` 为 ``people``（人员，含部门）或
+    ``region``（区域汇总）；``region`` 参数只对人员粒度生效。
+    """
+    if grain not in _SHORTFALL_GRAINS:
+        grain = _DEFAULT_SHORTFALL_GRAIN
+    if grain == "region":
+        return _fetch_rows(
+            connection, _SHORTFALL_REGION_SQL,
+            (first_day, last_day, first_day, last_day),
+        )
+    region_sql, region_params = _optional_region_filter(region)
+    sql = _SHORTFALL_PEOPLE_SQL.replace("{region_sql}", region_sql)
+    return _fetch_rows(
+        connection, sql,
+        (first_day, last_day) + region_params
+        + (first_day, last_day) + region_params,
+    )
+
+
+def _has_fact(fact) -> bool:
+    """诊断标记：``has_fact`` 由 SQL 的 LEFT JOIN 右表主键是否为空给出。
+
+    **不参与 severity 判定**：在这张卡里左表由 target 驱动（有目标才出现在
+    结果集），右表为空 == 「有目标、本月截至今日无销单」== 挂零，与
+    ``done == 0`` 是同一批人。把它当成「数据缺失」降级，就是把挂零粉饰成
+    没数据 —— 漏报比错报严重。真正的第 5 类缺陷需要**独立的人员状态信号**
+    （离职/未启用/数据源未接入），目前不存在，不能靠 JOIN 空值倒推。
+
+    字段缺失（旧调用方/老夹具）时按 ``True`` 处理以保持既有行为；SQL 侧
+    ``(MAX(d.person) IS NOT NULL)`` 返回 0/1，这里统一转成 ``bool``。
+    """
+    value = fact.get("has_fact")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def shortfall_rows(facts, *, total_workdays, elapsed_workdays,
+                   remaining_workdays) -> list:
+    """纯组装：事实行 → CubeSchema §2 行（派生列全部在此调用 derived）。
+
+    排序键只有 ``shortfall``（降序，§2.1「默认排序键」），缺口不可算的行
+    （``shortfall`` 为 ``None``：无目标）排末尾 —— 它们是数据缺陷，不是
+    落后人员。
+
+    ``has_fact`` 是**纯诊断字段**（``False`` = 本月截至今日无销单行），原值
+    透传给前端做角标，**不参与任何派生计算**：无论它真假，``done`` 都按事实
+    行的聚合值（缺失即 0）走 §2.3 分级，该 p0 就 p0。
+    """
+    rows = []
+    for fact in facts:
+        target = fact.get("target")
+        done = fact.get("done")
+        required = derived.required_daily(target, total_workdays)
+        gap = derived.shortfall(target, done)
+        row = {
+            key: value for key, value in fact.items()
+            if key not in ("target", "done", "has_fact")
+        }
+        row.update(
+            {
+                "target": None if target is None else float(target),
+                "done": float(done or 0),
+                "shortfall": None if gap is None else float(gap),
+                "rate": derived.rate(done, target),
+                "required_daily": None if required is None else float(required),
+                "severity": derived.severity(
+                    done, gap, required, remaining_workdays, elapsed_workdays
+                ),
+                # 纯诊断字段（不参与上面的任何计算）：False = 本月截至今日
+                # 无销单行，与 done == 0 同义，前端可据此渲染「本月无销单」角标。
+                "has_fact": _has_fact(fact),
+                "remaining_workdays": remaining_workdays,
+                "elapsed_workdays": elapsed_workdays,
+            }
+        )
+        rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            row["shortfall"] is None,
+            -(row["shortfall"] or 0.0),
+            row.get("name") or "",
+        )
+    )
+    return rows
+
+
+def month_workdays(connection, *, first_day, last_day) -> set:
+    """当月工作日集合（``dim_calendar.is_workday=1``，日报机器人同口径）。"""
+    return fetch_workdays(connection, year=first_day.year, month=first_day.month)
+
+
+def _shortfall_as_of(first_day, last_day):
+    """锚点日：当前月=今天（含当天），历史月=月末（``_people_as_of`` 同款）。"""
+    today = datetime.now().date()
+    if first_day <= today <= last_day:
+        return today
+    return last_day
+
+
+def _offline_trend_anchor(connection, first_day, last_day):
+    """线下趋势卡锚点：当前月=真实数据水位，历史月=月末。
+
+    与缺口口径 :func:`_shortfall_as_of`（当前月=今天）刻意分开：
+    趋势图不应把 T+1 未入仓的日子画进轴、把「未入仓」标成
+    missing（两者不要混用——缺口/所需日均仍按今天算）。空表返回
+    None（轴为空、as_of 不下发）；水位滞后整月时锚在月首前一天
+    （轴同样为空）。历史月锚点必然月末，不查水位，省一条 MAX。
+    """
+    today = datetime.now().date()
+    if not (first_day <= today <= last_day):
+        return last_day
+    latest = offline_latest_date(connection)
+    if latest is None:
+        return None
+    return max(min(latest, last_day), first_day - timedelta(days=1))
+
+
+def shortfall_calendar(connection, *, first_day, last_day) -> dict:
+    """缺口径的日历上下文：``total/elapsed/remaining_workdays``。
+
+    已闭月（今天不在该月内）→ ``remaining_workdays`` 为 ``None``：历史月
+    的「剩余产能」没有意义，p1 随之不可判（``derived.severity`` 退到
+    p2），而不是把上个月的每个人都标成 p1。
+    """
+    workdays = month_workdays(connection, first_day=first_day, last_day=last_day)
+    as_of = _shortfall_as_of(first_day, last_day)
+    today = datetime.now().date()
+    return {
+        "total_workdays": derived.total_workdays(workdays),
+        "elapsed_workdays": derived.elapsed_workdays(workdays, as_of),
+        "remaining_workdays": (
+            derived.remaining_workdays(workdays, as_of)
+            if first_day <= today <= last_day else None
+        ),
+    }
+
+
+def shortfall_columns(grain) -> list:
+    """卡面列定义（Schema 驱动渲染：前端按 format 格式化，不做换算）。"""
+    label = "姓名" if grain == "people" else "区域"
+    columns = [{"key": "name", "title": label}]
+    if grain == "people":
+        columns.append({"key": "dept", "title": "部门"})
+    columns.extend(
+        [
+            {"key": "target", "title": "月目标", "format": "wan"},
+            {"key": "done", "title": "已完成", "format": "wan"},
+            {"key": "shortfall", "title": "缺口", "format": "wan"},
+            {"key": "rate", "title": "完成率", "format": "percent"},
+            {"key": "required_daily", "title": "所需日均", "format": "wan"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ]
+    )
+    return columns
+
+
+def _shortfall_window(params):
+    """run 层共用解析：month（缺省当前月）+ 月界（``month_bounds``）。"""
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    first_day, last_day = month_bounds(month)
+    return month, first_day, last_day
+
+
+def run_kpi_shortfall(connection, params) -> dict:
+    """⑮ 目标缺口与告警表（CubeSchema §2）: target/done/shortfall/rate/
+    required_daily/severity，**全部后端派生**。
+
+    region/month 可选；内部已支持 ``grain=region`` 的区域汇总。URL 暂不放
+    开 grain 参数：新增一个筛选 source 就要改 ``app._FILTER_SOURCE_QUERIES``
+    与 ``config.KNOWN_FILTER_SOURCES``，而 app 层本批冻结，留给下一批增量。
+    """
+    grain = params.get("grain") or _DEFAULT_SHORTFALL_GRAIN
+    if grain not in _SHORTFALL_GRAINS:
+        grain = _DEFAULT_SHORTFALL_GRAIN
+    month, first_day, last_day = _shortfall_window(params)
+    facts = shortfall_facts(
+        connection,
+        grain=grain,
+        region=params.get("region"),
+        first_day=first_day,
+        last_day=last_day,
+    )
+    calendar = shortfall_calendar(
+        connection, first_day=first_day, last_day=last_day
+    )
+    rows = shortfall_rows(facts, **calendar)
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "month": month,
+        "grain": _SHORTFALL_FRONT_GRAIN[grain],
+        "as_of": _shortfall_as_of(first_day, last_day).isoformat(),
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": shortfall_columns(grain),
+        "rows": rows,
+    }
+
+
+def run_anomaly_top(connection, params) -> dict:
+    """⑯ 缺口 TOP N（AnomalyList）: 与 ⑮ 同口径，服务端按缺口降序截断。
+
+    无目标的行（缺口不可算）**不参与**排序（§5 数据缺陷显式化）；名次由
+    服务端给出（``rank`` 1..N），前端不重排。
+    """
+    month, first_day, last_day = _shortfall_window(params)
+    facts = shortfall_facts(
+        connection, grain=_DEFAULT_SHORTFALL_GRAIN,
+        region=params.get("region"),
+        first_day=first_day, last_day=last_day,
+    )
+    calendar = shortfall_calendar(
+        connection, first_day=first_day, last_day=last_day
+    )
+    ranked = [row for row in shortfall_rows(facts, **calendar)
+              if row["shortfall"] is not None][:_ANOMALY_TOP_N]
+    for index, row in enumerate(ranked, start=1):
+        row["rank"] = index
+    columns = [{"key": "rank", "title": "名次"}] + shortfall_columns(
+        _DEFAULT_SHORTFALL_GRAIN
+    )
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "month": month,
+        "grain": _SHORTFALL_FRONT_GRAIN[_DEFAULT_SHORTFALL_GRAIN],
+        "as_of": _shortfall_as_of(first_day, last_day).isoformat(),
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "limit": _ANOMALY_TOP_N,
+        "columns": columns,
+        "rows": ranked,
+    }
+
+
 def run_table_people_leaderboard(connection, params) -> dict:
     """人员榜: 服务端名次；未完成缺口=未填工作日数（spec §3.4）。"""
     region, month = _people_params(params)
@@ -871,3 +2156,668 @@ def run_table_people_leaderboard(connection, params) -> dict:
         ],
         "rows": rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# 人工报表消费（需求 ④⑤：fact_manual_report 窄表 → 月度经营对比表）
+#
+# 契约：docs/superpowers/specs/2026-09-16-manual-report-consumption.md。
+# 与业务事实表的三处关键差异（契约 §2.2，违反即错数）：
+#   * **不做 CURDATE 截断** —— 人工月报按整个期间一次导入，无未来预填行，
+#     历史月就该看到全月数；
+#   * **不做「合计」过滤** —— 总计行只用于导入对账，不入窄表；
+#   * **value 为 NULL = 选填未填**，绝不替换成 0（前端显示「—」）。
+# SQL 只取窄行事实；metric 名绝不写死（模板加一列指标，卡片 SQL 不跟着改），
+# 窄行 → 宽行的展开与派生（毛利率）全部在 Python 侧完成。
+# ---------------------------------------------------------------------------
+
+#: 人工报表窄行：一个 dataset 一个期间的全部维度×指标行（契约 §3.2）。
+_MANUAL_REPORT_ROWS_SQL = (
+    "SELECT dim_scope, dimension_value, metric, value, unit "
+    "FROM fact_manual_report "
+    "WHERE dataset = %s AND period_start = %s"
+)
+
+#: 两张卡固化的 dataset → 维度口径（dataset 不做 URL 参数：新增 filter
+#: source 要同步改 config/app 两层，而 app 层本批冻结 —— 与
+#: ``run_kpi_shortfall`` 的 grain 同处置）。params_schema 留空同理：
+#: month_options 的选项来自两张业务事实表的 DISTINCT 月，人工报表独有
+#: 月份（餐饮无系统采集源）不在值域内会被 app 层判 400；集成库暂无人工
+#: 报表数据可验证重叠，先走保守分支，确认重叠后再**追加** month 参数。
+_MANUAL_MONTHLY_DATASETS = {
+    "ecommerce_monthly": {"dim_scope": "channel", "dim_label": "渠道"},
+    "restaurant_monthly": {"dim_scope": "store", "dim_label": "门店"},
+    # ⑪ 体验馆月报（克隆 ⑤ 模式）：门店粒度，维度标题「体验馆」。
+    "showroom_monthly": {"dim_scope": "store", "dim_label": "体验馆"},
+}
+
+#: 指标键 → 列标题（纯展示映射；模板新增指标时以键名兜底显示，代码零改动，
+#: 与「metric 不写死」纪律一致 —— 这里不是 SQL 列展开）。
+_MANUAL_METRIC_LABELS = {
+    "revenue": "收入",
+    "gross_profit": "毛利",
+    "expense": "费用",
+}
+
+
+def manual_report_rows(connection, *, dataset, period_start) -> list:
+    """只读事实：某 dataset 某期间的窄行列表（契约 §3.2）。
+
+    ``period_start`` 由调用方按 period_type 推导（month → 月首，复用
+    ``month_bounds`` 的日历口径）。返回
+    ``[{dim_scope, dimension_value, metric, value(Decimal|None), unit}]``，
+    **不含任何派生列**（同 ``shortfall_facts`` 的可测边界）。
+    """
+    return _fetch_rows(
+        connection, _MANUAL_REPORT_ROWS_SQL, (dataset, period_start)
+    )
+
+
+def pivot_manual_rows(rows, *, dim_scope) -> list:
+    """窄行 → 宽行：``[{name, <metric>: Decimal|None, ...}]``（契约 §3.3）。
+
+    * 只保留 ``dim_scope`` 匹配的行（防御多维模板混入）；
+    * 同一 ``(dimension_value, metric)`` 在表内唯一（唯一键保证），直接
+      取值，**绝不 SUM**（无 melt 陷阱）；
+    * 缺失指标 → **键不存在**（消费方按 None 处理，显示「—」）；``value``
+      为 NULL 的行保留 ``None``，不补 0；
+    * 保持 ``Decimal``，``float`` 转换只在 ``run_*`` 边界做。
+    """
+    grouped = {}
+    order = []
+    for row in rows:
+        if row.get("dim_scope") != dim_scope:
+            continue
+        name = row.get("dimension_value")
+        metric = row.get("metric")
+        if name is None or metric is None:
+            continue
+        if name not in grouped:
+            grouped[name] = {"name": name}
+            order.append(name)
+        grouped[name][metric] = row.get("value")
+    return [grouped[name] for name in order]
+
+
+def _manual_monthly_payload(connection, *, dataset, month) -> dict:
+    """④⑤ 月度经营对比表载荷：维度 × 指标（动态展开）+ 毛利率派生列。
+
+    指标列由当月实际出现的 metric 集合驱动（模板加列 → 卡片自动多一列）；
+    毛利率列只在 revenue 与 gross_profit 同时存在时出现，派生走
+    :func:`derived.margin`（分母 0/None → None，不静默补 0）。
+    """
+    meta = _MANUAL_MONTHLY_DATASETS[dataset]
+    first_day, _last_day = month_bounds(month)
+    rows = manual_report_rows(connection, dataset=dataset, period_start=first_day)
+    wide = pivot_manual_rows(rows, dim_scope=meta["dim_scope"])
+    metrics = []
+    for row in wide:
+        for key in row:
+            if key != "name" and key not in metrics:
+                metrics.append(key)
+    columns = [{"key": "name", "title": meta["dim_label"]}]
+    columns.extend(
+        {
+            "key": metric,
+            "title": _MANUAL_METRIC_LABELS.get(metric, metric),
+            "format": "wan",
+        }
+        for metric in metrics
+    )
+    with_margin = {"revenue", "gross_profit"} <= set(metrics)
+    if with_margin:
+        columns.append({"key": "margin", "title": "毛利率", "format": "percent"})
+    table_rows = []
+    for row in wide:
+        out = {"name": row["name"]}
+        for metric in metrics:
+            value = row.get(metric)
+            out[metric] = None if value is None else float(value)
+        if with_margin:
+            out["margin"] = derived.margin(
+                row.get("gross_profit"), row.get("revenue")
+            )
+        table_rows.append(out)
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "month": month,
+        "dataset": dataset,
+        "columns": columns,
+        "rows": table_rows,
+    }
+
+
+def run_table_manual_ecommerce_monthly(connection, params) -> dict:
+    """④ 电商月度经营表: dataset 固化 ecommerce_monthly，渠道×指标+毛利率。
+
+    params_schema 为空（month 缺省当前月）：月报整月一次导入，历史月
+    不做 CURDATE 截断；month 参数待月份值域重叠确认后追加（见
+    ``_MANUAL_MONTHLY_DATASETS`` 注释）。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="ecommerce_monthly", month=month
+    )
+
+
+def run_table_manual_restaurant_monthly(connection, params) -> dict:
+    """⑤ 餐饮月度经营表: dataset 固化 restaurant_monthly，门店×指标+毛利率。
+
+    餐饮板块无系统采集源（人工模板是唯一进库通道），其余口径与
+    :func:`run_table_manual_ecommerce_monthly` 相同。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="restaurant_monthly", month=month
+    )
+
+
+def run_table_manual_showroom_monthly(connection, params) -> dict:
+    """⑪ 体验馆月度经营表: dataset 固化 showroom_monthly（克隆 ⑤ 模式）。
+
+    维度粒度与餐饮月报同为门店（dim_scope=store），列标题「体验馆」；
+    未首填则自然挂零（空行 + 仅维度列）。params_schema 留空，与 ④⑤
+    同裁决（month 参数待月份值域重叠确认后追加）。
+    """
+    month = params.get("month") or datetime.now().strftime("%Y-%m")
+    return _manual_monthly_payload(
+        connection, dataset="showroom_monthly", month=month
+    )
+
+
+# ---------------------------------------------------------------------------
+# 资金安全页（需求⑩）：五张 fact_fin_* 真卡
+#
+# 方案：docs/superpowers/specs/2026-09-16-fund-safety-draft.md §3.1–3.5。
+# 铁律沿用：SQL 只取事实（只读 mart），派生一律走
+# :mod:`common.bi_web.fin_derived`（超期阈值 >60 天为行业默认值，
+# 待财务确认）；金额单位一律元，SQL 不做万换算；分量缺失不静默补 0。
+# severity 三档用法见 fin_derived 模块 docstring（p0 保留给挂零语义，
+# fin 卡不用）。
+# ---------------------------------------------------------------------------
+
+#: 应收逾期总览（draft §3.1）：Σ逾期金额、Σ期末余额（静态 SQL）。
+_FIN_RECEIVABLES_OVERDUE_SQL = textwrap.dedent(
+    """
+    SELECT COALESCE(SUM(overdue_amount), 0) AS overdue,
+           COALESCE(SUM(ending_balance), 0) AS balance
+    FROM fact_fin_receivables_aging
+    """
+).strip()
+
+#: 应收账龄明细（draft §3.2）：按往来单位一行，逾期金额降序。
+_FIN_RECEIVABLES_AGING_SQL = textwrap.dedent(
+    """
+    SELECT counterparty_name, receivable_category, company_entity,
+           ending_balance, overdue_amount, aging_0_30, aging_31_60,
+           updated_date
+    FROM fact_fin_receivables_aging
+    ORDER BY overdue_amount DESC, counterparty_name
+    """
+).strip()
+
+#: 预付/未到票明细（draft §3.3）：未到票金额降序。
+_FIN_PREPAYMENT_UNINVOICED_SQL = textwrap.dedent(
+    """
+    SELECT supplier_name, company_entity, prepayment_ledger_amount,
+           ap_estimated_amount, ledger_reconciliation_status,
+           uninvoiced_amount, statement_date
+    FROM fact_fin_prepayment_invoice
+    ORDER BY uninvoiced_amount DESC, supplier_name
+    """
+).strip()
+
+#: 保证金合一（draft §3.4）：线下 + 平台 UNION ALL，余额降序。
+_FIN_DEPOSIT_STATUS_SQL = textwrap.dedent(
+    """
+    SELECT company_entity, supplier_name AS counterparty, project_name,
+           cooperation_status AS status, deposit_balance, updated_at,
+           '线下' AS source
+    FROM fact_fin_offline_deposit
+    UNION ALL
+    SELECT company_entity, store_name AS counterparty, project_name,
+           store_operating_status AS status, deposit_balance, NULL AS updated_at,
+           '平台' AS source
+    FROM fact_fin_platform_deposit
+    ORDER BY deposit_balance DESC
+    """
+).strip()
+
+#: 店铺资金余额月度趋势（draft §3.5）：melt 窄表，月升序。
+_FIN_STORE_FUNDS_SQL = textwrap.dedent(
+    """
+    SELECT month, store_name, channel, balance
+    FROM fact_fin_store_funds
+    ORDER BY month, store_name
+    """
+).strip()
+
+
+def _iso_or_none(value):
+    """date/datetime → ISO 字符串；None 原样透传（不猜日期）。"""
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _float_or_none(value):
+    """Decimal → float；None 原样透传（§5：不静默补 0）。"""
+    return None if value is None else float(value)
+
+
+def run_kpi_fin_receivables_overdue(connection, params) -> dict:
+    """⑩ 应收逾期总览: Σ逾期金额(value) / Σ期末余额(target) / 逾期占比(rate)。
+
+    rate = overdue ÷ balance，后端除法 + 除零护栏（balance 为 0 → None，
+    前端「—」）；聚合查询恒有一行，COALESCE 兜底空表为 0。
+    """
+    rows = _fetch_rows(connection, _FIN_RECEIVABLES_OVERDUE_SQL)
+    row = rows[0] if rows else {}
+    overdue = Decimal(row.get("overdue") or 0)
+    balance = Decimal(row.get("balance") or 0)
+    rate = None if balance == 0 else float(overdue) / float(balance)
+    return {
+        "chart": "scalar",
+        "value": float(overdue),
+        "target": float(balance),
+        "rate": rate,
+        "unit": _UNIT,
+    }
+
+
+def run_table_fin_receivables_aging(connection, params) -> dict:
+    """⑩ 应收账龄明细: 含差额推导的 >60 天桶与超期告警。
+
+    ``aging_over_60`` 与 ``severity`` 由 :mod:`fin_derived` 派生（SQL 不碰）；
+    ``updated_date`` 原样透传（账龄表编制日期，页面角标用）。
+    """
+    rows = _fetch_rows(connection, _FIN_RECEIVABLES_AGING_SQL)
+    table_rows = []
+    for row in rows:
+        over_60 = fin_derived.aging_over_60(
+            row.get("ending_balance"), row.get("aging_0_30"),
+            row.get("aging_31_60"),
+        )
+        table_rows.append(
+            {
+                "counterparty": row.get("counterparty_name"),
+                "category": row.get("receivable_category"),
+                "entity": row.get("company_entity"),
+                "ending_balance": _float_or_none(row.get("ending_balance")),
+                "overdue_amount": _float_or_none(row.get("overdue_amount")),
+                "aging_0_30": _float_or_none(row.get("aging_0_30")),
+                "aging_31_60": _float_or_none(row.get("aging_31_60")),
+                "aging_over_60": over_60,
+                "updated_date": _iso_or_none(row.get("updated_date")),
+                "severity": fin_derived.aging_severity(
+                    over_60, row.get("overdue_amount")
+                ),
+            }
+        )
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "counterparty", "title": "往来单位"},
+            {"key": "category", "title": "应收类别"},
+            {"key": "entity", "title": "公司主体"},
+            {"key": "ending_balance", "title": "期末余额", "format": "wan"},
+            {"key": "overdue_amount", "title": "逾期金额", "format": "wan"},
+            {"key": "aging_0_30", "title": "账龄0-30天", "format": "wan"},
+            {"key": "aging_31_60", "title": "账龄31-60天", "format": "wan"},
+            {"key": "aging_over_60", "title": "账龄>60天", "format": "wan"},
+            {"key": "updated_date", "title": "编制日期"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_table_fin_prepayment_uninvoiced(connection, params) -> dict:
+    """⑩ 预付与未到票: 挂账天数（>60 天告警）与未到票金额。
+
+    ``days_outstanding`` = 今天 − 对账日（自然日），对账日不可解析
+    → None（不猜日期）；``ledger_reconciliation_status`` 原样透传
+    （账账核对枚举清单待财务给，登记不阻塞）。
+    """
+    today = datetime.now().date()
+    rows = _fetch_rows(connection, _FIN_PREPAYMENT_UNINVOICED_SQL)
+    table_rows = []
+    for row in rows:
+        days = fin_derived.days_outstanding(row.get("statement_date"), today)
+        table_rows.append(
+            {
+                "supplier": row.get("supplier_name"),
+                "entity": row.get("company_entity"),
+                "prepayment": _float_or_none(row.get("prepayment_ledger_amount")),
+                "ap_estimated": _float_or_none(row.get("ap_estimated_amount")),
+                "reconciliation": row.get("ledger_reconciliation_status"),
+                "uninvoiced": _float_or_none(row.get("uninvoiced_amount")),
+                "statement_date": _iso_or_none(row.get("statement_date")),
+                "days_outstanding": days,
+                "severity": fin_derived.uninvoiced_severity(
+                    row.get("uninvoiced_amount"), days
+                ),
+            }
+        )
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "supplier", "title": "供应商"},
+            {"key": "entity", "title": "公司主体"},
+            {"key": "prepayment", "title": "预付账款", "format": "wan"},
+            {"key": "ap_estimated", "title": "应付暂估", "format": "wan"},
+            {"key": "reconciliation", "title": "账账核对"},
+            {"key": "uninvoiced", "title": "未到票金额", "format": "wan"},
+            {"key": "statement_date", "title": "对账日期"},
+            {"key": "days_outstanding", "title": "挂账天数", "format": "number"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_table_fin_deposit_status(connection, params) -> dict:
+    """⑩ 保证金状态: 线下 + 平台合一，状态原文透传（枚举不固化）。
+
+    severity：非正常合作/运营状态 → p2 关注（可退未退），正常 → ok；
+    判定规则保守化在 :func:`fin_derived.deposit_severity`（「正常」取值
+    清单待财务/运营确认）。
+    """
+    rows = _fetch_rows(connection, _FIN_DEPOSIT_STATUS_SQL)
+    table_rows = [
+        {
+            "entity": row.get("company_entity"),
+            "counterparty": row.get("counterparty"),
+            "project": row.get("project_name"),
+            "status": row.get("status"),
+            "deposit": _float_or_none(row.get("deposit_balance")),
+            "updated_at": _iso_or_none(row.get("updated_at")),
+            "source": row.get("source"),
+            "severity": fin_derived.deposit_severity(row.get("status")),
+        }
+        for row in rows
+    ]
+    return {
+        "chart": "table",
+        "unit": _UNIT,
+        "severity_domain": list(derived.SEVERITY_DOMAIN),
+        "columns": [
+            {"key": "entity", "title": "公司主体"},
+            {"key": "counterparty", "title": "往来对象"},
+            {"key": "project", "title": "项目"},
+            {"key": "status", "title": "状态"},
+            {"key": "deposit", "title": "保证金余额", "format": "wan"},
+            {"key": "updated_at", "title": "更新时间"},
+            {"key": "source", "title": "来源"},
+            {"key": "severity", "title": "告警", "format": "severity"},
+        ],
+        "rows": table_rows,
+    }
+
+
+def run_trend_fin_store_funds(connection, params) -> dict:
+    """⑩ 店铺资金余额趋势: 月升序轴 × 店铺系列（零填充）。
+
+    与 ``_align_series_rows`` 同款零填充思路：轴为窄表去重后的全部月份
+    （``YYYY-MM`` 字符串，天然可排序），店铺在某月无行 → 0。
+    """
+    rows = _fetch_rows(connection, _FIN_STORE_FUNDS_SQL)
+    months = sorted({row["month"] for row in rows if row.get("month")})
+    index_of = {month: index for index, month in enumerate(months)}
+    by_store = {}
+    for row in rows:
+        month = row.get("month")
+        if month is None:
+            continue
+        name = row.get("store_name") or ""
+        by_store.setdefault(name, [Decimal(0)] * len(months))[
+            index_of[month]
+        ] = Decimal(row.get("balance") or 0)
+    return {
+        "chart": "line",
+        "dates": months,
+        "series": [
+            {"name": name, "data": [float(value) for value in by_store[name]]}
+            for name in sorted(by_store)
+        ],
+        "unit": _UNIT,
+    }
+
+
+#: 店铺资金余额按公司主体聚合（2026-09-17 SQL 下推）：WHERE + GROUP BY
+#: 在 SQL 侧完成，不再把 300 行全表拉回 Python 过滤；entity 一律 %s 绑定，
+#: 值绝不拼进 SQL 文本。零填充（缺月补 0）不可下推（无月份维表可
+#: LEFT JOIN），仍在 Python 侧做。
+_FIN_STORE_FUNDS_ENTITY_SQL = textwrap.dedent(
+    """
+    SELECT month, channel, SUM(balance) AS balance
+    FROM fact_fin_store_funds
+    WHERE company_entity = %s
+    GROUP BY month, channel
+    ORDER BY month
+    """
+).strip()
+
+#: 不带 WHERE 的同款聚合：entity 为空 = 全主体按渠道汇总。空语义走另一条
+#: SQL，绝不传 ``("%",)`` 之类的恒真通配值。
+_FIN_STORE_FUNDS_CHANNEL_SQL = textwrap.dedent(
+    """
+    SELECT month, channel, SUM(balance) AS balance
+    FROM fact_fin_store_funds
+    GROUP BY month, channel
+    ORDER BY month
+    """
+).strip()
+
+#: 筛选器「公司主体」下拉（l2-fund-safety 页面筛选）：DISTINCT 升序，
+#: 全静态 SQL。主体新增/改名/下线后选项自动跟随事实表。
+_FIN_STORE_ENTITY_OPTIONS_SQL = textwrap.dedent(
+    """
+    SELECT DISTINCT company_entity
+    FROM fact_fin_store_funds
+    ORDER BY company_entity
+    """
+).strip()
+
+
+def entity_options(connection) -> list:
+    """筛选器「公司主体」下拉：DISTINCT company_entity，升序。"""
+    return [
+        row["company_entity"]
+        for row in _fetch_rows(connection, _FIN_STORE_ENTITY_OPTIONS_SQL)
+        if row["company_entity"]
+    ]
+
+
+def clean_channel_label(value) -> str:
+    """钉钉 singleSelect 落库是 Python dict 字面量（``{'name': '拼多多', 'id': '…'}``）。
+
+    取 ``name`` 作为可读渠道名；解析失败或本就是纯文本则原样返回。空值
+    返回空串，由调用方归一成「未分类」——不猜、不丢弃。
+    """
+    raw = (value or "").strip()
+    if not raw or not raw.startswith("{"):
+        return raw
+    try:
+        parsed = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return raw
+    if isinstance(parsed, dict):
+        name = parsed.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return raw
+
+
+def _funds_channel_trend_payload(rows) -> dict:
+    """(month, channel, Σbalance) 聚合行 → 渠道多系列趋势载荷（零填充）。
+
+    与 ``_align_series_rows`` 同款思路：轴为去重后的全部月份
+    （``YYYY-MM`` 字符串，天然可排序），渠道在某月无行 → 0；渠道名先经
+    :func:`clean_channel_label` 清洗（钉钉 singleSelect dict 字面量）。
+    """
+    months = sorted({row["month"] for row in rows if row.get("month")})
+    index_of = {month: index for index, month in enumerate(months)}
+    by_channel = {}
+    for row in rows:
+        month = row.get("month")
+        if month is None:
+            continue
+        key = clean_channel_label(row.get("channel")) or "未分类"
+        bucket = by_channel.setdefault(key, [Decimal(0)] * len(months))
+        bucket[index_of[month]] += Decimal(row.get("balance") or 0)
+    return {
+        "chart": "line",
+        "dates": months,
+        "series": [
+            {"name": name,
+             "data": [None if value is None else float(value)
+                      for value in by_channel[name]]}
+            for name in sorted(by_channel)
+        ],
+        "unit": _UNIT,
+    }
+
+
+def run_trend_fin_store_funds_entity(connection, params) -> dict:
+    """⑩ 店铺资金余额趋势（主体参数化）: entity 单主体 / 空=全主体，按渠道汇总。
+
+    38 家店铺画在一张图上 = 38 条 series，完全不可读；公司主体会变
+    （新增/改名/下线），故 4 张硬编码分屏卡收敛为本参数化卡 +
+    ``entities`` 筛选源（2026-09-17 P2）。聚合（WHERE + GROUP BY）已
+    下推 SQL，Python 只留渠道名清洗与缺月零填充；entity 经 app 层
+    ``entities`` 值域闸校验，非法值 400。
+    """
+    entity = (params.get("entity") or "").strip()
+    if entity:
+        rows = _fetch_rows(connection, _FIN_STORE_FUNDS_ENTITY_SQL, (entity,))
+    else:
+        rows = _fetch_rows(connection, _FIN_STORE_FUNDS_CHANNEL_SQL)
+    return _funds_channel_trend_payload(rows)
+
+
+# ---------------------------------------------------------------------------
+# 0 占位卡（需求 ③⑦⑥⑧⑨⑬ 的待接入页）：挂零语义。
+#
+# 契约（与前端已约定，逐字遵守）：
+# ``{"chart": "table", "columns": [...], "rows": [], "has_fact": false,
+#   "unit": "元"}``。run 函数直接返回静态结构，**不查库**（connection
+# 形参仅为 Card.run 契约存在，绝不执行任何 SQL）；不建临时表、不造
+# 临时口径；列结构按需求表（preview.html 对应页）一次到位。
+# ---------------------------------------------------------------------------
+
+
+def _placeholder_payload(columns) -> dict:
+    """0 占位：has_fact=false，应接入未接入，不建临时表。"""
+    return {
+        "chart": "table",
+        "columns": columns,
+        "rows": [],
+        "has_fact": False,
+        "unit": _UNIT,
+    }
+
+
+def run_table_inventory_aging(connection, params) -> dict:
+    """③⑦ 库存/库龄表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    列结构参照需求表库存页（库龄分桶 0-90/91-180/181-365/>365，
+    **非效期口径**）。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "sku", "title": "SKU"},
+            {"key": "warehouse", "title": "仓库"},
+            {"key": "qty", "title": "库存量", "format": "number"},
+            {"key": "amount", "title": "库存金额", "format": "wan"},
+            {"key": "aging_0_90", "title": "库龄0-90天", "format": "wan"},
+            {"key": "aging_91_180", "title": "库龄91-180天", "format": "wan"},
+            {"key": "aging_181_365", "title": "库龄181-365天", "format": "wan"},
+            {"key": "aging_over_365", "title": "库龄>365天", "format": "wan"},
+            {"key": "severity", "title": "状态", "format": "severity"},
+        ]
+    )
+
+
+def run_table_warehouse_ops(connection, params) -> dict:
+    """⑧ 仓储运作表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    列结构含超时六类原因（缺货待补/拣货积压/待揽收/打包瓶颈/系统故障/
+    人力不足，原文透传）+ 48h/24h 分段 SLA。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "order_no", "title": "订单号"},
+            {"key": "channel", "title": "渠道"},
+            {"key": "item", "title": "品项"},
+            {"key": "reason", "title": "超时原因"},
+            {"key": "hours", "title": "超时时长", "format": "number"},
+            {"key": "sla_band", "title": "SLA分段"},
+            {"key": "severity", "title": "状态", "format": "severity"},
+        ]
+    )
+
+
+def run_table_quarter_budget_actual(connection, params) -> dict:
+    """⑥ 季度预实表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    三板块（线下/电商/餐饮）收入/毛利/费用的预算 vs 实际结构一次到位。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "board", "title": "板块"},
+            {"key": "revenue_budget", "title": "预算收入", "format": "wan"},
+            {"key": "revenue_actual", "title": "实际收入", "format": "wan"},
+            {"key": "revenue_rate", "title": "收入达成", "format": "percent"},
+            {"key": "profit_budget", "title": "预算毛利", "format": "wan"},
+            {"key": "profit_actual", "title": "实际毛利", "format": "wan"},
+            {"key": "profit_rate", "title": "毛利达成", "format": "percent"},
+            {"key": "expense_budget", "title": "预算费用", "format": "wan"},
+            {"key": "expense_actual", "title": "实际费用", "format": "wan"},
+            {"key": "expense_rate", "title": "费用执行", "format": "percent"},
+        ]
+    )
+
+
+def run_table_yoy_monthly(connection, params) -> dict:
+    """⑬ 月度同比表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    同比率列 format 'pct'；无基数/除零 → null 显示「—」（口径见
+    :func:`derived.yoy_rate`），绝不 0%/-100%。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "board", "title": "板块"},
+            {"key": "brand", "title": "品牌"},
+            {"key": "current", "title": "当月", "format": "wan"},
+            {"key": "previous", "title": "去年同月", "format": "wan"},
+            {"key": "diff", "title": "增减额", "format": "wan"},
+            {"key": "yoy", "title": "同比", "format": "pct"},
+            {"key": "cum_yoy", "title": "1-当月累计同比", "format": "pct"},
+            {"key": "severity", "title": "预警", "format": "severity"},
+        ]
+    )
+
+
+def run_table_contract_writeoff(connection, params) -> dict:
+    """⑨ 合同核销表（0 占位：has_fact=false，应接入未接入，不建临时表）。
+
+    品牌 × 渠道核销进度表结构（合同/已核销/待核销/超期/进度/预警）。
+    """
+    return _placeholder_payload(
+        [
+            {"key": "brand", "title": "品牌"},
+            {"key": "channel", "title": "渠道"},
+            {"key": "total", "title": "合同金额", "format": "wan"},
+            {"key": "done", "title": "已核销", "format": "wan"},
+            {"key": "pending", "title": "待核销", "format": "wan"},
+            {"key": "overdue", "title": "超期金额", "format": "wan"},
+            {"key": "rate", "title": "核销进度", "format": "percent"},
+            {"key": "severity", "title": "预警", "format": "severity"},
+        ]
+    )

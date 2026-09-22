@@ -143,6 +143,78 @@ class FetchPendingTests(unittest.TestCase):
             with self.assertRaises(OutboxError):
                 repo.fetch_pending(limit=bad)
 
+    def test_fetch_pending_claims_rows_with_skip_locked_by_default(self):
+        repo, cursor = _repo(_Cursor())
+        repo.fetch_pending()
+        self.assertIn("FOR UPDATE SKIP LOCKED", cursor.executed[0][0])
+
+    def test_fetch_pending_skip_locked_can_be_disabled(self):
+        repo, cursor = _repo(_Cursor())
+        repo.fetch_pending(skip_locked=False)
+        self.assertNotIn("FOR UPDATE SKIP LOCKED", cursor.executed[0][0])
+
+    def test_skip_locked_leaves_the_single_consumer_query_identical(self):
+        """锁子句是纯后缀：WHERE/ORDER/LIMIT/参数与开关前逐字节一致。"""
+        repo, cursor = _repo(_Cursor())
+        repo.fetch_pending(skip_locked=False)
+        base_sql, base_params = cursor.executed[0]
+
+        repo2, cursor2 = _repo(_Cursor())
+        repo2.fetch_pending()
+        locked_sql, locked_params = cursor2.executed[0]
+
+        self.assertEqual(locked_sql, base_sql + " FOR UPDATE SKIP LOCKED")
+        self.assertEqual(locked_params, base_params)
+
+
+class ListFailedTests(unittest.TestCase):
+
+    def test_list_failed_queries_observability_fields_only(self):
+        rows = [{
+            "dedupe_key": "hangzhou:remind:2026-09-11",
+            "region": "hangzhou",
+            "kind": "remind",
+            "business_date": _DAY,
+            "attempts": 5,
+            "last_error": "group_send_failed",
+            "created_at": _NOW,
+        }]
+        repo, cursor = _repo(_Cursor(rows=rows))
+        result = repo.list_failed()
+
+        sql, params = cursor.executed[0]
+        self.assertIn("`status` = 'failed'", sql)
+        self.assertIn("`attempts`", sql)
+        self.assertIn("`last_error`", sql)
+        self.assertNotIn("`body_md`", sql)
+        self.assertEqual(params, (100,))
+        self.assertEqual(result[0]["attempts"], 5)
+        self.assertEqual(result[0]["last_error"], "group_send_failed")
+
+    def test_list_failed_validates_limit(self):
+        repo, _ = _repo(_Cursor())
+        for bad in (0, 1001, "100"):
+            with self.assertRaises(OutboxError):
+                repo.list_failed(limit=bad)
+
+
+class RequeueTests(unittest.TestCase):
+
+    def test_requeue_resets_only_failed_rows(self):
+        repo, cursor = _repo(_Cursor(rowcount=1))
+        self.assertTrue(repo.requeue("k"))
+
+        sql, params = cursor.executed[0]
+        self.assertIn("`status` = 'pending'", sql)
+        self.assertIn("`attempts` = 0", sql)
+        self.assertIn("`last_error` = NULL", sql)
+        self.assertIn("WHERE `dedupe_key` = %s AND `status` = 'failed'", sql)
+        self.assertEqual(params, ("k",))
+
+    def test_requeue_is_idempotent_for_non_failed_rows(self):
+        repo, _ = _repo(_Cursor(rowcount=0))
+        self.assertFalse(repo.requeue("k"))
+
 
 class DeliveryStateTests(unittest.TestCase):
 

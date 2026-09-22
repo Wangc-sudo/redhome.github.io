@@ -113,6 +113,16 @@ class OrgReadGatewayTests(unittest.TestCase):
         with self.assertRaises(OrgReadError):
             gateway.list_user_ids(5)
 
+    def test_listid_accepts_the_observed_userid_list_shape(self):
+        """实测 /topapi/user/listid 返回 userid_list 全量、无分页字段。"""
+        gateway, calls = self._gateway(
+            lambda url, body: {"errcode": 0, "result": {
+                "userid_list": ["u1", "u2"],
+            }}
+        )
+        self.assertEqual(gateway.list_user_ids(5), ["u1", "u2"])
+        self.assertEqual(len(calls), 1)
+
     def test_get_user_returns_the_detail_dict(self):
         def handler(url, body):
             self.assertEqual(body, {"userid": "u1", "language": "zh_CN"})
@@ -155,10 +165,12 @@ class ShippedOrgSeedTests(unittest.TestCase):
     """真正发版的种子：区域顺序即优先级，兜底的 other 必须在最后。"""
 
     def test_shipped_seed_regions_in_priority_order(self):
+        # hq（总部子树，2026-09-21 随 BI 免登 admin 自举加入）排在 other
+        # 兜底之前——总部成员归 hq，不被 other 的根部门展开吞掉。
         regions = load_org_seed(_SEED_PATH)
         self.assertEqual(
             [region for region, _ in regions],
-            ["hangzhou", "shaoxing", "other"],
+            ["hangzhou", "shaoxing", "vanke", "hq", "other"],
         )
 
     def test_shipped_seed_dept_ids_match_the_robot_config(self):
@@ -170,6 +182,10 @@ class ShippedOrgSeedTests(unittest.TestCase):
         self.assertEqual(
             regions["shaoxing"], (1050416052, 1049663672, 1050408252),
         )
+        # vanke（万科&大莲花&团购日报群）组织上对应体验中心部门。
+        self.assertEqual(regions["vanke"], (1050251442,))
+        # hq（总部子树，含总经办/财务部，BI 免登 admin 所在区域）。
+        self.assertEqual(regions["hq"], (1050143465,))
         # other 含根部门 1050135497，递归展开即全公司——靠顺序兜底。
         self.assertIn(1050135497, regions["other"])
 
@@ -219,16 +235,24 @@ class LoadOrgSeedTests(unittest.TestCase):
 class _FakeGateway:
     """In-memory directory: subtree + member listings + user details."""
 
-    def __init__(self, *, sub_depts=None, users=None, details=None):
+    def __init__(self, *, sub_depts=None, users=None, details=None, dept_names=None):
         self._sub_depts = sub_depts or {}
         self._users = users or {}
         self._details = details or {}
+        self._dept_names = dept_names or {}
         self.listsub_calls = []
         self.listid_calls = []
+        self.get_dept_calls = []
 
     def list_sub_departments(self, dept_id):
         self.listsub_calls.append(dept_id)
         return list(self._sub_depts.get(dept_id, []))
+
+    def get_department_name(self, dept_id):
+        self.get_dept_calls.append(dept_id)
+        if dept_id not in self._dept_names:
+            raise OrgReadError("org read failed")
+        return self._dept_names[dept_id]
 
     def list_user_ids(self, dept_id):
         self.listid_calls.append(dept_id)
@@ -244,6 +268,7 @@ class CollectMembersTests(unittest.TestCase):
         return _FakeGateway(
             sub_depts={1: [(2, "子部门")], 2: []},
             users={1: ["u1"], 2: ["u1", "u2"]},
+            dept_names={1: "根部门"},
             details={
                 "u1": {"userid": "u1", "name": "张三"},
                 "u2": {"userid": "u2", "name": "李四"},
@@ -251,13 +276,16 @@ class CollectMembersTests(unittest.TestCase):
         )
 
     def test_expands_subtree_and_dedupes_members(self):
-        records = collect_members(self._gateway(), (("r", (1,)),))
+        gateway = self._gateway()
+        records = collect_members(gateway, (("r", (1,)),))
         self.assertEqual([r.user_id for r in records], ["u1", "u2"])
         by_id = {r.user_id: r for r in records}
         self.assertEqual(by_id["u1"].dept_id, 1)
-        self.assertIsNone(by_id["u1"].dept_name)
+        self.assertEqual(by_id["u1"].dept_name, "根部门")
         self.assertEqual(by_id["u2"].dept_id, 2)
         self.assertEqual(by_id["u2"].dept_name, "子部门")
+        # 只有根部门经 department/get 解析名字，子部门名来自 listsub。
+        self.assertEqual(gateway.get_dept_calls, [1])
 
     def test_records_carry_region_and_payload(self):
         records = collect_members(self._gateway(), (("hangzhou", (1,)),))
@@ -268,6 +296,7 @@ class CollectMembersTests(unittest.TestCase):
         gateway = _FakeGateway(
             sub_depts={1: [(2, "b"), (3, "c")], 2: [(3, "c")], 3: []},
             users={1: ["u1"]},
+            dept_names={1: "根部门"},
             details={"u1": {"userid": "u1", "name": "张三"}},
         )
         collect_members(gateway, (("r", (1,)),))
@@ -277,6 +306,7 @@ class CollectMembersTests(unittest.TestCase):
         gateway = _FakeGateway(
             sub_depts={1: [], 2: []},
             users={1: ["u1"], 2: ["u1", "u2"]},
+            dept_names={1: "根部门", 2: "根部门乙"},
             details={
                 "u1": {"userid": "u1", "name": "张三"},
                 "u2": {"userid": "u2", "name": "李四"},
@@ -292,13 +322,14 @@ class CollectMembersTests(unittest.TestCase):
         self.assertEqual(by_id["u2"].region, "other")
 
     def test_zero_members_raises(self):
-        gateway = _FakeGateway(users={1: []})
+        gateway = _FakeGateway(users={1: []}, dept_names={1: "根部门"})
         with self.assertRaisesRegex(OrgReadError, "zero members"):
             collect_members(gateway, (("r", (1,)),))
 
     def test_member_without_a_name_raises(self):
         gateway = _FakeGateway(
             users={1: ["u1"]},
+            dept_names={1: "根部门"},
             details={"u1": {"userid": "u1"}},
         )
         with self.assertRaises(OrgReadError):
@@ -309,6 +340,7 @@ class CollectMembersTests(unittest.TestCase):
         gateway = _FakeGateway(
             sub_depts={n: [(n + 1, f"d{n + 1}")] for n in range(1, 10)},
             users={1: ["u1"]},
+            dept_names={1: "根部门"},
             details={"u1": {"userid": "u1", "name": "张三"}},
         )
         with self.assertRaisesRegex(OrgReadError, "too deep"):

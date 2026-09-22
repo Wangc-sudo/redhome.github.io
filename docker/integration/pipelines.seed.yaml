@@ -45,6 +45,18 @@ pages-hangzhou:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "hangzhou leaderboard HTML page generation"
+robot-vanke:
+  kind: business
+  enabled: true
+  schedule: "0 18,20 * * *"
+  reads: [mart_ops]
+  description: "vanke daily-report robot (mart_ops -> robot_outbox)"
+pages-vanke:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "vanke leaderboard HTML page generation"
 dingtalk-gateway:
   kind: apps
   enabled: true
@@ -61,3 +73,8 @@ bi-web:
   enabled: true
   reads: [mart_ops]
   description: "BI dashboards (L1/L2), read-only on mart_ops"
+scheduler:
+  kind: apps
+  enabled: true
+  reads: [raw_dingtalk, raw_wdt, mart_ops]
+  description: "fires registered pipelines on their registry cron schedules (no own schedule)"

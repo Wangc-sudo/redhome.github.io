@@ -23,11 +23,18 @@ consumers.
 """
 
 import os
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 
 BI_GROUP = "BI"
+
+#: How long a resolved dashboard config stays cached before the next
+#: Nacos read (2026-09-14 cache spec; the same staleness budget as the
+#: app's 30 s pipeline gate).
+_DEFAULT_CACHE_TTL_SECONDS = 30.0
 
 DEFAULT_REFRESH_SECONDS = 300
 MIN_REFRESH_SECONDS = 60
@@ -38,7 +45,8 @@ MAX_SPAN = 12
 DEFAULT_NAV_ORDER = 0
 
 _ALLOWED_DASHBOARD_KEYS = frozenset(
-    {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters", "_说明"}
+    {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters",
+     "icon", "group", "required_scope", "_说明"}
 )
 _ALLOWED_CARD_KEYS = frozenset({"card", "title", "span", "on_click", "_说明"})
 _ALLOWED_FILTER_KEYS = frozenset({"param", "source", "label", "_说明"})
@@ -46,7 +54,13 @@ _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 
 #: 筛选器 ``source`` 可指向的维表查询名；与 ``app._FILTER_SOURCE_QUERIES``
 #: 的键集合由测试对拍保持一致（漂移=红构建，而非运行期 KeyError）。
-KNOWN_FILTER_SOURCES = frozenset({"regions", "channels", "months"})
+#: 商品口径的品牌/渠道来自 fact_order_line（店铺渠道），与
+#: ``channels``（fact_channel_daily_sales 的业务渠道）是两套维度，故分开。
+#: ``entities``（fact_fin_store_funds 的公司主体）供资金安全页主体筛选。
+KNOWN_FILTER_SOURCES = frozenset(
+    {"regions", "channels", "months", "brands", "sku_channels", "entities",
+     "granularity"}
+)
 
 
 class DashboardConfigError(ValueError):
@@ -100,8 +114,18 @@ class DashboardConfig:
     enabled: bool = True
     refresh_seconds: int = DEFAULT_REFRESH_SECONDS
     nav_order: int = DEFAULT_NAV_ORDER
-    cards: tuple = ()
-    filters: tuple = ()
+    cards: tuple[CardPlacement, ...] = ()
+    filters: tuple[FilterSpec, ...] = ()
+    #: 导航图标：emoji 短文本或 ``/static/`` 静态资源路径（FTP 资源仓，
+    #: 2026-09-17）；空串 = 前端回退默认图标。展示逻辑归属后端配置层，
+    #: 前端只渲染（「前端逻辑后端化」裁决）。
+    icon: str = ""
+    #: 导航分组名（侧栏 nav-group 标题，如 经营驾驶舱/专项分析）；空串 =
+    #: 前端防御性回退。分组归属同 icon 裁决。
+    group: str = ""
+    #: 页面级权限声明（设计稿 2026-09-21 §4.1）：``None`` = 已准入即可见
+    #: （旧格式看板零影响）；声明后需 viewer 持同名 scope grant（admin 恒过）。
+    required_scope: str | None = None
 
 
 def parse_dashboard_config(dashboard_id, data):
@@ -124,6 +148,27 @@ def parse_dashboard_config(dashboard_id, data):
     if not isinstance(title, str):
         raise DashboardConfigError(
             f"dashboard '{dashboard_id}' field 'title' must be a string"
+        )
+
+    icon = data.get("icon", "")
+    if not isinstance(icon, str):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'icon' must be a string"
+        )
+
+    group = data.get("group", "")
+    if not isinstance(group, str):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'group' must be a string"
+        )
+
+    required_scope = data.get("required_scope")
+    if required_scope is not None and (
+        not isinstance(required_scope, str) or not required_scope
+    ):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' field 'required_scope' must be "
+            "a non-empty string"
         )
 
     enabled = data.get("enabled", True)
@@ -182,6 +227,9 @@ def parse_dashboard_config(dashboard_id, data):
         nav_order=nav_order,
         cards=parsed_cards,
         filters=parsed_filters,
+        icon=icon,
+        group=group,
+        required_scope=required_scope,
     )
 
 
@@ -361,10 +409,21 @@ class NacosDashboardSource(DashboardConfigSource):
     built-in minimal default, when the entry is missing or Nacos is
     unreachable -- the cockpit should not blank out just because the
     registry is momentarily down.
+
+    Resolved configs are cached for ``ttl_seconds`` (2026-09-14 cache spec):
+    without it, every page render pays one Nacos read for the page itself
+    plus one per navigation entry (the ``_nav_entries`` N+1), which is a
+    ~4 s penalty per read when the registry is unreachable.  The TTL is
+    the same staleness budget as the app's pipeline gate.  A resolution
+    reached through the fallback (unreachable client or empty content)
+    IS cached -- that dead-registry penalty is exactly what the cache
+    exists to bound; only a corrupt entry (a parse error, answered 503
+    per request) is never cached, so the next call retries the read.
     """
 
     def __init__(self, *, server, namespace="", group=BI_GROUP,
-                 username=None, password=None, fallback=None, client=None):
+                 username=None, password=None, fallback=None, client=None,
+                 ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS, monotonic=None):
         self._server = server
         self._namespace = namespace or ""
         self._group = group or BI_GROUP
@@ -372,11 +431,16 @@ class NacosDashboardSource(DashboardConfigSource):
         self._password = password
         self._fallback = fallback
         self._client = client  # injectable for tests
+        self._ttl_seconds = ttl_seconds
+        self._monotonic = time.monotonic if monotonic is None else monotonic
+        self._lock = threading.Lock()
+        self._cache = {}
+        self._ids_cache = None
 
     def _nacos(self):
         if self._client is None:
-            from nacos import NacosClient
-            self._client = NacosClient(
+            from common.public_data.nacos_client import build_nacos_client
+            self._client = build_nacos_client(
                 self._server,
                 namespace=self._namespace,
                 username=self._username,
@@ -384,7 +448,7 @@ class NacosDashboardSource(DashboardConfigSource):
             )
         return self._client
 
-    def get_dashboard(self, dashboard_id):
+    def _fetch(self, dashboard_id):
         data_id = f"{dashboard_id}.yaml"
         try:
             content = self._nacos().get_config(data_id, self._group)
@@ -398,10 +462,28 @@ class NacosDashboardSource(DashboardConfigSource):
             dashboard_id, _load_yaml(content, f"nacos config {data_id}")
         )
 
+    def get_dashboard(self, dashboard_id):
+        # The lock covers the fetch (same semantics as app._TTLGate):
+        # concurrent first reads of one key collapse to a single fetch.
+        with self._lock:
+            now = self._monotonic()
+            cached = self._cache.get(dashboard_id)
+            if cached is not None and now - cached[0] < self._ttl_seconds:
+                return cached[1]
+            dashboard = self._fetch(dashboard_id)
+            self._cache[dashboard_id] = (now, dashboard)
+            return dashboard
+
     def dashboard_ids(self):
-        if self._fallback is not None:
-            return self._fallback.dashboard_ids()
-        return ()
+        with self._lock:
+            now = self._monotonic()
+            if (self._ids_cache is not None
+                    and now - self._ids_cache[0] < self._ttl_seconds):
+                return self._ids_cache[1]
+            ids = (self._fallback.dashboard_ids()
+                   if self._fallback is not None else ())
+            self._ids_cache = (now, ids)
+            return ids
 
 
 def build_dashboard_config_source(environ=None):
@@ -482,8 +564,10 @@ def publish_bi_seed_from_env(seed_path, if_missing=False, environ=None):
     from common.public_data.pipeline_config import ensure_namespace
     ensure_namespace(server, namespace, username=username, password=password)
 
-    from nacos import NacosClient
-    client = NacosClient(server, namespace=namespace, username=username, password=password)
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server, namespace=namespace, username=username, password=password
+    )
     return publish_dashboards(
         client, load_seed(seed_path), group=BI_GROUP, if_missing=if_missing
     )

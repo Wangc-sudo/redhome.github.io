@@ -4,6 +4,7 @@ import unittest
 from datetime import date, datetime, timezone
 from unittest.mock import Mock, patch
 
+from common.calendar_utils import month_days
 from common.public_data.extract_mart import (
     CALENDAR_DATASET,
     EXTRACT_SOURCE_NAME,
@@ -13,9 +14,16 @@ from common.public_data.extract_mart import (
 )
 from common.public_data.mart_extract_schema import (
     DIM_CALENDAR,
+    DIM_ROBOT_MEMBER,
     EXTRACT_DATASETS,
+    ExtractDataset,
     FACT_CHANNEL_DAILY_SALES,
     FACT_DAILY_REPORT_OFFLINE,
+    FACT_FIN_OFFLINE_DEPOSIT,
+    FACT_FIN_PLATFORM_DEPOSIT,
+    FACT_FIN_PREPAYMENT_INVOICE,
+    FACT_FIN_RECEIVABLES_AGING,
+    FACT_FIN_STORE_FUNDS,
     dataset_by_name,
     ddl_statements,
 )
@@ -75,11 +83,49 @@ class _FakeConnection:
 
 class ExtractSchemaTests(unittest.TestCase):
 
-    def test_registered_datasets_target_the_extract_tables(self):
+    def test_registered_datasets_match_stage_b1_scope(self):
         targets = {d.dataset: d.target_table for d in EXTRACT_DATASETS}
-        self.assertEqual(targets["daily_report_offline"], FACT_DAILY_REPORT_OFFLINE)
-        self.assertEqual(targets["channel_daily_sales"], FACT_CHANNEL_DAILY_SALES)
-        self.assertEqual(len(EXTRACT_DATASETS), 2)
+        self.assertEqual(targets, {
+            "daily_report_offline": FACT_DAILY_REPORT_OFFLINE,
+            "channel_daily_sales": FACT_CHANNEL_DAILY_SALES,
+            "fin_offline_receivables_aging": FACT_FIN_RECEIVABLES_AGING,
+            "fin_ecommerce_prepayment_supplier_invoice": FACT_FIN_PREPAYMENT_INVOICE,
+            "fin_offline_deposit_other_receivables": FACT_FIN_OFFLINE_DEPOSIT,
+            "fin_ecommerce_platform_deposit": FACT_FIN_PLATFORM_DEPOSIT,
+            "fin_ecommerce_store_funds_balance": FACT_FIN_STORE_FUNDS,
+            "wdt_dim_product_mirror": "dim_product",
+            "wdt_order_line_fact": "fact_order_line",
+            "wdt_stockout_line_fact": "fact_stockout_line",
+            "wdt_refund_line_fact": "fact_refund_line",
+        })
+
+        self.assertEqual(dataset_by_name("daily_report_offline").kind, "fact")
+        self.assertEqual(dataset_by_name("daily_report_offline").source, "dingtalk")
+        for name in (
+            "fin_offline_receivables_aging",
+            "fin_ecommerce_prepayment_supplier_invoice",
+            "fin_offline_deposit_other_receivables",
+            "fin_ecommerce_platform_deposit",
+        ):
+            self.assertEqual(dataset_by_name(name).kind, "snapshot")
+        self.assertEqual(
+            dataset_by_name("fin_ecommerce_store_funds_balance").kind,
+            "melt_store_funds",
+        )
+        dim_mirror = dataset_by_name("wdt_dim_product_mirror")
+        self.assertEqual(dim_mirror.kind, "dim_mirror")
+        self.assertEqual(dim_mirror.source, "wdt")
+        self.assertEqual(dim_mirror.source_table, "dim_product")
+        order_line = dataset_by_name("wdt_order_line_fact")
+        self.assertEqual(order_line.kind, "order_line_expand")
+        self.assertEqual(order_line.source, "wdt")
+        self.assertEqual(order_line.source_table, "wdt_records")
+        # 注册顺序即执行顺序：镜像必须先于订单行展开（品牌反查依赖）。
+        names = [d.dataset for d in EXTRACT_DATASETS]
+        self.assertLess(
+            names.index("wdt_dim_product_mirror"),
+            names.index("wdt_order_line_fact"),
+        )
 
     def test_retired_and_technical_columns_are_not_projected(self):
         """The projection is an allow-list, so dropped columns cannot leak in."""
@@ -99,9 +145,56 @@ class ExtractSchemaTests(unittest.TestCase):
     def test_ddl_covers_every_extract_table(self):
         statements = ddl_statements()
         joined = "\n".join(statements)
-        for table in (FACT_DAILY_REPORT_OFFLINE, FACT_CHANNEL_DAILY_SALES,
-                      DIM_CALENDAR, "dim_robot_member"):
+        for table in (
+            FACT_DAILY_REPORT_OFFLINE,
+            FACT_CHANNEL_DAILY_SALES,
+            FACT_FIN_RECEIVABLES_AGING,
+            FACT_FIN_PREPAYMENT_INVOICE,
+            FACT_FIN_OFFLINE_DEPOSIT,
+            FACT_FIN_PLATFORM_DEPOSIT,
+            FACT_FIN_STORE_FUNDS,
+            DIM_CALENDAR,
+            "dim_robot_member",
+            "dim_product",
+            "fact_order_line",
+            "fact_stockout_line",
+            "fact_refund_line",
+        ):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS `{table}`", joined)
+        for column in (
+            "ending_balance",
+            "ap_estimated_amount",
+            "uninvoiced_amount",
+            "statement_date",
+            "month",
+            "paid_amount",
+            "platform_subsidy",
+            "shop_subsidy",
+            "line_no",
+            "brand_name",
+        ):
+            self.assertIn(f"`{column}`", joined)
+        projection_tables = (
+            FACT_FIN_RECEIVABLES_AGING,
+            FACT_FIN_PREPAYMENT_INVOICE,
+            FACT_FIN_OFFLINE_DEPOSIT,
+            FACT_FIN_PLATFORM_DEPOSIT,
+            FACT_FIN_STORE_FUNDS,
+            "dim_product",
+            "fact_order_line",
+        )
+        for table in projection_tables:
+            ddl = next(
+                statement for statement in statements
+                if f"CREATE TABLE IF NOT EXISTS `{table}`" in statement
+            )
+            self.assertIn("`synced_at`", ddl)
+            self.assertIn("`sync_run_id`", ddl)
+        order_line_ddl = next(
+            statement for statement in statements
+            if "CREATE TABLE IF NOT EXISTS `fact_order_line`" in statement
+        )
+        self.assertIn("PRIMARY KEY (`trade_no`, `line_no`)", order_line_ddl)
         # The extract line brings its own summary value into the shared table.
         self.assertIn("ENUM('dingtalk','wdt','extract')", joined)
 
@@ -145,9 +238,12 @@ class MartExtractRepositoryTests(unittest.TestCase):
             synced_at=_NOW,
         )
 
-        sql, params = self.mart.cursor_instance.executed[0]
+        # executemany 批量写入（排查报告 §2.1 P1）：单次 round-trip。
+        self.assertEqual(self.mart.cursor_instance.executed, [])
+        (sql, sequence), = self.mart.cursor_instance.executemany_calls
         self.assertIn("ON DUPLICATE KEY UPDATE", sql)
         self.assertNotIn("`source_record_id` = VALUES(`source_record_id`)", sql)
+        (params,) = sequence
         self.assertEqual(params[0], "r1")
         self.assertEqual(params[1], "hangzhou")
         self.assertEqual(params[-2], _NOW)
@@ -232,6 +328,7 @@ class MartExtractServiceTests(unittest.TestCase):
     def test_calendar_is_skipped_without_a_seed(self, _lock, _txn):
         service = self._service(datasets=[dataset_by_name("daily_report_offline")])
         service.extract()
+        self.repository.upsert_dim_calendar.assert_not_called()
         self.repository.replace_dim_calendar.assert_not_called()
 
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
@@ -243,7 +340,7 @@ class MartExtractServiceTests(unittest.TestCase):
         )
         service.extract()
 
-        rows = self.repository.replace_dim_calendar.call_args.args[0]
+        rows = self.repository.upsert_dim_calendar.call_args.args[0]
         self.assertEqual(len(rows), 30)
         by_day = {business_date.day: is_workday
                   for business_date, is_workday, _, _ in rows}
@@ -266,7 +363,7 @@ class MartExtractServiceTests(unittest.TestCase):
             calendar_months=[(2024, 2, [], "local")],
         )
         service.extract()
-        rows = self.repository.replace_dim_calendar.call_args.args[0]
+        rows = self.repository.upsert_dim_calendar.call_args.args[0]
         self.assertEqual(len(rows), 29)
 
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
@@ -390,8 +487,8 @@ class OrgMemberExtractTests(unittest.TestCase):
         }])
         result = service.extract()
 
-        self.repository.replace_dim_robot_member.assert_called_once()
-        rows = self.repository.replace_dim_robot_member.call_args.args[0]
+        self.repository.upsert_dim_robot_member.assert_called_once()
+        rows = self.repository.upsert_dim_robot_member.call_args.args[0]
         self.assertEqual(rows[0]["region"], "hangzhou")
 
         kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
@@ -406,7 +503,7 @@ class OrgMemberExtractTests(unittest.TestCase):
         service = self._service([])
         result = service.extract()
 
-        self.repository.replace_dim_robot_member.assert_not_called()
+        self.repository.upsert_dim_robot_member.assert_not_called()
         self.mart_repository.save_dataset_summary.assert_not_called()
         self.mart_repository.mark_completed.assert_called_once()
         self.assertEqual(result.datasets, [])
@@ -424,6 +521,437 @@ class OrgMemberExtractTests(unittest.TestCase):
 
         self.mart_repository.mark_projection_pending.assert_called_once()
         self.mart_repository.mark_completed.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Incremental extraction
+# ---------------------------------------------------------------------------
+
+class IncrementalRepositoryTests(unittest.TestCase):
+
+    def _repo(self, rows=()):
+        self.raw = _FakeConnection(rows)
+        self.mart = _FakeConnection(rows)
+        return MartExtractRepository(self.raw, self.mart)
+
+    def test_read_dataset_applies_the_window_filter(self):
+        repo = self._repo()
+        repo.read_dataset(dataset_by_name("daily_report_offline"), since=_NOW)
+
+        sql, params = self.raw.cursor_instance.executed[0]
+        self.assertIn("WHERE `synced_at` >= %s", sql)
+        self.assertEqual(params, (_NOW,))
+
+    def test_read_dataset_without_a_window_scans_the_full_table(self):
+        repo = self._repo()
+        repo.read_dataset(dataset_by_name("daily_report_offline"))
+
+        sql, params = self.raw.cursor_instance.executed[0]
+        self.assertNotIn("WHERE", sql)
+        self.assertIsNone(params)
+
+    def test_last_extract_started_at_scopes_to_the_extract_line(self):
+        repo = self._repo(rows=[{"started_at": _NOW}])
+        self.assertEqual(
+            repo.last_extract_started_at("daily_report_offline"), _NOW
+        )
+
+        sql, params = self.mart.cursor_instance.executed[0]
+        self.assertIn("FROM `sync_runs`", sql)
+        self.assertIn("JOIN `sync_dataset_summary`", sql)
+        self.assertIn("ORDER BY r.`started_at` DESC", sql)
+        self.assertEqual(params, (EXTRACT_SOURCE_NAME, "daily_report_offline"))
+
+    def test_last_extract_started_at_returns_none_without_history(self):
+        repo = self._repo(rows=[])
+        self.assertIsNone(repo.last_extract_started_at("daily_report_offline"))
+
+    def test_last_summary_digest_returns_the_latest_digest(self):
+        repo = self._repo(rows=[{"record_id_digest": "d" * 64}])
+        self.assertEqual(
+            repo.last_summary_digest("daily_report_offline"), "d" * 64
+        )
+
+        sql, params = self.mart.cursor_instance.executed[0]
+        self.assertIn("ORDER BY `completed_at` DESC", sql)
+        self.assertEqual(params, (EXTRACT_SOURCE_NAME, "daily_report_offline"))
+
+    def test_upsert_dim_calendar_upserts_then_prunes_stale_dates(self):
+        repo = self._repo()
+        repo.upsert_dim_calendar(
+            [(date(2026, 9, 5), 1, "local", None)],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
+        self.assertIn("INSERT INTO `dim_calendar`", insert_sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", insert_sql)
+        self.assertEqual(
+            sequence, [(date(2026, 9, 5), 1, "local", None, _NOW, _RUN_ID)]
+        )
+        delete_sql, delete_params = self.mart.cursor_instance.executed[0]
+        self.assertIn(f"DELETE FROM `{DIM_CALENDAR}`", delete_sql)
+        self.assertIn("`business_date` NOT IN", delete_sql)
+        self.assertEqual(delete_params, (date(2026, 9, 5),))
+
+    def test_upsert_dim_calendar_prunes_rows_missing_from_a_shrunk_seed(self):
+        """源集缩小方向：种子缩容后，残留日期必须被 NOT IN 剪枝删除。"""
+        repo = self._repo()
+        # 第一次写入 9/5 与 9/6；第二次种子只剩 9/6。
+        repo.upsert_dim_calendar(
+            [(date(2026, 9, 5), 1, "local", None),
+             (date(2026, 9, 6), 0, "local", None)],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+        repo.upsert_dim_calendar(
+            [(date(2026, 9, 6), 0, "local", None)],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        delete_sql, delete_params = self.mart.cursor_instance.executed[-1]
+        self.assertIn("`business_date` NOT IN", delete_sql)
+        # 剪枝集合只含新种子：不在其中的 9/5 会被删除，目标表无残留。
+        self.assertEqual(delete_params, (date(2026, 9, 6),))
+
+    def test_upsert_dim_robot_member_prunes_members_missing_from_a_shrunk_snapshot(self):
+        """源集缩小方向：快照缩容后，离职成员必须被 NOT IN 剪枝删除。"""
+        repo = self._repo()
+        repo.upsert_dim_robot_member(
+            [
+                {"user_id": "u1", "name": "张三", "region": "hangzhou"},
+                {"user_id": "u2", "name": "李四", "region": "hangzhou"},
+            ],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+        repo.upsert_dim_robot_member(
+            [{"user_id": "u2", "name": "李四", "region": "hangzhou"}],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        delete_sql, delete_params = self.mart.cursor_instance.executed[-1]
+        self.assertIn("`user_id` NOT IN", delete_sql)
+        # 剪枝集合只含在职成员：u1 会被删除，目标表无残留。
+        self.assertEqual(delete_params, ("u2",))
+
+    def test_upsert_dim_calendar_with_empty_rows_clears_the_dim(self):
+        repo = self._repo()
+        repo.upsert_dim_calendar([], sync_run_id=_RUN_ID, synced_at=_NOW)
+
+        sql, _ = self.mart.cursor_instance.executed[0]
+        self.assertEqual(sql, f"DELETE FROM `{DIM_CALENDAR}`")
+        self.assertEqual(self.mart.cursor_instance.executemany_calls, [])
+
+    def test_upsert_dim_robot_member_upserts_then_prunes_departed(self):
+        repo = self._repo()
+        repo.upsert_dim_robot_member(
+            [{
+                "user_id": "u1",
+                "name": "张三",
+                "region": "hangzhou",
+                "dept_id": "1049728636",
+                "dept_name": "杭中",
+            }],
+            sync_run_id=_RUN_ID,
+            synced_at=_NOW,
+        )
+
+        insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
+        self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", insert_sql)
+        self.assertEqual(sequence, [(
+            "u1", "张三", "hangzhou", "1049728636", "杭中", 1, _NOW, _RUN_ID,
+        )])
+        delete_sql, delete_params = self.mart.cursor_instance.executed[0]
+        self.assertIn(f"DELETE FROM `{DIM_ROBOT_MEMBER}`", delete_sql)
+        self.assertIn("`user_id` NOT IN", delete_sql)
+        self.assertEqual(delete_params, ("u1",))
+
+    def test_save_skipped_summary_writes_zero_written_and_the_flag(self):
+        repo = self._repo()
+        repo.save_skipped_summary(
+            sync_run_id=_RUN_ID,
+            dataset_name="daily_report_offline",
+            records_read=3,
+            record_id_digest="d" * 64,
+            completed_at=_NOW,
+        )
+
+        sql, params = self.mart.cursor_instance.executed[0]
+        self.assertIn("`skipped`", sql)
+        self.assertEqual(
+            params,
+            (_RUN_ID, EXTRACT_SOURCE_NAME, "daily_report_offline",
+             3, 0, "d" * 64, _NOW, 1),
+        )
+
+
+class IncrementalExtractTests(unittest.TestCase):
+
+    def _service(
+        self, *, rows, since=None, previous_digest=None,
+        datasets=None, has_skipped=True, full_rebuild=False,
+    ):
+        self.repository = Mock()
+        self.repository.read_dataset.return_value = list(rows)
+        self.repository.read_org_members.return_value = []
+        self.repository.last_extract_started_at.return_value = since
+        self.repository.last_summary_digest.return_value = previous_digest
+        self.repository.has_skipped_column.return_value = has_skipped
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(
+                [dataset_by_name("daily_report_offline")]
+                if datasets is None else datasets
+            ),
+            full_rebuild=full_rebuild,
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_unchanged_digest_skips_the_write_and_marks_the_summary(
+        self, _lock, _txn,
+    ):
+        """digest 命中历史摘要：不写 mart，摘要 records_written=0/skipped。"""
+        rows = [{"source_record_id": "r1", "region": "hangzhou"}]
+        digest = MartExtractService._compute_digest(["r1"])
+        service = self._service(rows=rows, since=None, previous_digest=digest)
+
+        result = service.extract()
+
+        self.repository.upsert_fact.assert_not_called()
+        self.mart_repository.save_dataset_summary.assert_not_called()
+        kwargs = self.repository.save_skipped_summary.call_args.kwargs
+        self.assertEqual(kwargs["dataset_name"], "daily_report_offline")
+        self.assertEqual(kwargs["records_read"], 1)
+        self.assertEqual(kwargs["record_id_digest"], digest)
+        self.assertTrue(result.datasets[0]["skipped"])
+        self.assertEqual(result.datasets[0]["raw_records_written"], 0)
+        self.mart_repository.mark_completed.assert_called_once()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_missing_skipped_column_falls_back_to_a_plain_summary(
+        self, _lock, _txn,
+    ):
+        """skipped 列未迁移：降级写普通摘要（fail-open），run 不失败。"""
+        rows = [{"source_record_id": "r1", "region": "hangzhou"}]
+        digest = MartExtractService._compute_digest(["r1"])
+        service = self._service(
+            rows=rows, since=None, previous_digest=digest, has_skipped=False,
+        )
+
+        with self.assertLogs(
+            "common.public_data.extract_mart", level="WARNING"
+        ) as captured:
+            service.extract()
+
+        self.repository.save_skipped_summary.assert_not_called()
+        kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["raw_records_written"], 0)
+        self.assertTrue(any("skipped" in line for line in captured.output))
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_window_filter_passes_the_watermark_to_the_read(
+        self, _lock, _txn,
+    ):
+        service = self._service(
+            rows=[{"source_record_id": "r1", "region": "hangzhou"}],
+            since=_NOW,
+        )
+
+        service.extract()
+
+        self.assertEqual(
+            self.repository.read_dataset.call_args.kwargs["since"], _NOW
+        )
+        self.repository.upsert_fact.assert_called_once()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_empty_window_skips_the_write(self, _lock, _txn):
+        service = self._service(rows=[], since=_NOW)
+
+        result = service.extract()
+
+        self.repository.upsert_fact.assert_not_called()
+        kwargs = self.repository.save_skipped_summary.call_args.kwargs
+        self.assertEqual(kwargs["records_read"], 0)
+        self.assertTrue(result.datasets[0]["skipped"])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_dataset_without_a_watermark_column_degrades_with_an_audit_trail(
+        self, _lock, _txn,
+    ):
+        """无水位列的数据集：显式降级全量 + WARNING 记录原因，不静默。"""
+        unknown = ExtractDataset(
+            dataset="mystery",
+            source_table="mystery_raw",
+            target_table="fact_mystery",
+            columns=(("region", "region"),),
+        )
+        service = self._service(
+            rows=[{"source_record_id": "r1", "region": "hangzhou"}],
+            since=_NOW,
+            datasets=[unknown],
+        )
+
+        with self.assertLogs(
+            "common.public_data.extract_mart", level="WARNING"
+        ) as captured:
+            service.extract()
+
+        self.assertIsNone(
+            self.repository.read_dataset.call_args.kwargs["since"]
+        )
+        self.repository.upsert_fact.assert_called_once()
+        self.assertTrue(any("降级" in line for line in captured.output))
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_full_rebuild_reads_everything_and_never_skips(self, _lock, _txn):
+        """一键回退：full_rebuild 关闭窗口与 digest 跳过。"""
+        rows = [{"source_record_id": "r1", "region": "hangzhou"}]
+        digest = MartExtractService._compute_digest(["r1"])
+        service = self._service(
+            rows=rows, previous_digest=digest, full_rebuild=True,
+        )
+
+        service.extract()
+
+        self.assertIsNone(
+            self.repository.read_dataset.call_args.kwargs["since"]
+        )
+        self.repository.upsert_fact.assert_called_once()
+        self.repository.save_skipped_summary.assert_not_called()
+
+
+class IncrementalCalendarTests(unittest.TestCase):
+
+    def _service(self, *, previous_digest=None, full_rebuild=False):
+        self.repository = Mock()
+        self.repository.read_org_members.return_value = []
+        self.repository.last_summary_digest.return_value = previous_digest
+        self.repository.has_skipped_column.return_value = True
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(),
+            calendar_months=[(2024, 2, [], "local")],
+            full_rebuild=full_rebuild,
+        )
+
+    @staticmethod
+    def _expected_digest():
+        return MartExtractService._content_digest(
+            f"{day.isoformat()}|1|local|" for day in month_days(2024, 2)
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_unchanged_calendar_skips_the_write(self, _lock, _txn):
+        service = self._service(previous_digest=self._expected_digest())
+
+        result = service.extract()
+
+        self.repository.upsert_dim_calendar.assert_not_called()
+        self.repository.replace_dim_calendar.assert_not_called()
+        kwargs = self.repository.save_skipped_summary.call_args.kwargs
+        self.assertEqual(kwargs["dataset_name"], CALENDAR_DATASET)
+        self.assertEqual(kwargs["records_read"], 29)
+        self.assertTrue(result.datasets[0]["skipped"])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_changed_calendar_is_upserted(self, _lock, _txn):
+        service = self._service(previous_digest="0" * 64)
+
+        service.extract()
+
+        self.repository.upsert_dim_calendar.assert_called_once()
+        self.repository.replace_dim_calendar.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_full_rebuild_keeps_the_replace_semantics(self, _lock, _txn):
+        service = self._service(
+            previous_digest=self._expected_digest(), full_rebuild=True,
+        )
+
+        service.extract()
+
+        self.repository.replace_dim_calendar.assert_called_once()
+        self.repository.upsert_dim_calendar.assert_not_called()
+
+
+class IncrementalOrgMemberTests(unittest.TestCase):
+
+    _ROWS = [{
+        "user_id": "u1",
+        "name": "张三",
+        "region": "hangzhou",
+        "dept_id": "1049728636",
+        "dept_name": "杭中",
+    }]
+
+    def _service(self, *, previous_digest=None):
+        self.repository = Mock()
+        self.repository.read_org_members.return_value = list(self._ROWS)
+        self.repository.last_summary_digest.return_value = previous_digest
+        self.repository.has_skipped_column.return_value = True
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(),
+            calendar_months=(),
+        )
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_unchanged_org_snapshot_skips_the_write(self, _lock, _txn):
+        digest = MartExtractService._content_digest(
+            ["u1|张三|hangzhou|1049728636|杭中"]
+        )
+        service = self._service(previous_digest=digest)
+
+        result = service.extract()
+
+        self.repository.upsert_dim_robot_member.assert_not_called()
+        kwargs = self.repository.save_skipped_summary.call_args.kwargs
+        self.assertEqual(kwargs["dataset_name"], DIM_ROBOT_MEMBER)
+        self.assertTrue(result.datasets[0]["skipped"])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_changed_org_snapshot_is_upserted(self, _lock, _txn):
+        service = self._service(previous_digest="0" * 64)
+
+        service.extract()
+
+        self.repository.upsert_dim_robot_member.assert_called_once()
+        self.repository.replace_dim_robot_member.assert_not_called()
 
 
 if __name__ == "__main__":

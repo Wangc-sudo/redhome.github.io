@@ -1,0 +1,116 @@
+{
+  "_说明": "dim_threshold 种子【草案】——勿重命名为 *.seed.json，以免被正式 seed 加载链捡拾。默认值全部来自 docs/bi-需求落地对照-2026-09-15.md §5.1（行业默认先行，业务确认或改数后转正）。version=0 表示草案；转正时 version 置 1 并补 loader + live_migrations DDL（表结构建议：threshold_key PK / module / scope / scope_key / params JSON / source / confirmed_by / status / synced_at）。",
+  "version": 0,
+  "thresholds": [
+    {
+      "key": "sales_volatility_dod",
+      "module": "①",
+      "name": "波动预警阈值（日环比）",
+      "scope": "line",
+      "scope_key": "*",
+      "params": {
+        "sales_amount_dod_warn_pct": 0.20,
+        "order_count_dod_warn_pct": 0.30,
+        "promo_period_basis": "yoy",
+        "_promo_note": "大促期间切同比口径（周期性业务同比优于环比）"
+      },
+      "source": "BI 预警惯例：周期性业务同比优于环比",
+      "confirmed_by": "总经理+板块",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "inventory_safety_stock",
+      "module": "③",
+      "name": "安全库存/补货点",
+      "scope": "warehouse",
+      "scope_key": "*",
+      "params": {
+        "sales_window_days": 30,
+        "safety_stock_days": 15,
+        "safety_stock_formula": "近30天日均动销 × 15天",
+        "reorder_point_formula": "日均动销 × 采购周期 + 安全库存",
+        "procurement_lead_days": "<待填：采购确认各仓采购周期>"
+      },
+      "source": "供应链通用公式（WDT StockSpec.search2 动销字段直接支持，2026-09-15 探针验证）",
+      "confirmed_by": "采购",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "inventory_age_bucket",
+      "module": "⑦",
+      "name": "库龄分桶与滞销线",
+      "scope": "warehouse",
+      "scope_key": "*",
+      "params": {
+        "buckets_days": ["0-90", "91-180", "181-365", ">365"],
+        "yellow_rule": "库龄>180天金额占比 > 20% 亮黄",
+        "red_rule": "库龄>365天金额占比 > 10% 亮红并自动生成滞销清单",
+        "yellow_share_gt180": 0.20,
+        "red_share_gt365": 0.10,
+        "expiry_alert": "不设（白酒酒精度≥10%vol 按 GB 7718 免标保质期，效期字段仅留批次追溯）",
+        "_adjust_note": "白酒行业库存周转 600-900 天为背景，确认时可上调分桶"
+      },
+      "source": "帆软《全面库存管理方案》+ FineBI 账龄预警惯例",
+      "confirmed_by": "采购",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "fulfillment_timeout",
+      "module": "⑧",
+      "name": "发货/揽收超时",
+      "scope": "channel",
+      "scope_key": "*",
+      "params": {
+        "pay_to_ship_hours": 48,
+        "ship_to_collect_hours": 24
+      },
+      "source": "天猫/京东/抖音/拼多多现货规则（付款→发货>48h 发货超时、发货→揽收>24h 揽收超时）",
+      "confirmed_by": "仓管",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "warehouse_stage_sla",
+      "module": "⑧",
+      "name": "仓内分段 SLA",
+      "scope": "warehouse",
+      "scope_key": "*",
+      "params": {
+        "review_hours": 4,
+        "pick_hours": 4,
+        "pack_hours": 2,
+        "ship_hours": 12,
+        "_field_note": "WDT wms.stockout.Sales.queryWithDetail 118 字段含拣货/打包/验货/分拣人，可拆分段（2026-09-15 探针验证）"
+      },
+      "source": "平台规则默认的分段拆解（需求对照 §5.1）",
+      "confirmed_by": "仓管",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "timeout_reason_enum",
+      "module": "⑧",
+      "name": "超时原因枚举",
+      "scope": "global",
+      "scope_key": "*",
+      "params": {
+        "reasons": ["缺货", "爆单产能不足", "揽收延迟", "系统或面单异常", "地址修改拦截", "预售未到期"],
+        "_note": "仓管可增删，确认后转正"
+      },
+      "source": "平台超时原因默认六类（需求对照 §5.1）",
+      "confirmed_by": "仓管",
+      "status": "default_pending_confirm"
+    },
+    {
+      "key": "receivable_overdue",
+      "module": "⑩",
+      "name": "账期/超期标准",
+      "scope": "global",
+      "scope_key": "*",
+      "params": {
+        "overdue_days": "<待填：财务定义，如 >60 天>"
+      },
+      "source": "<待填：应收账龄表已在 mart（81 行），超期线待财务定>",
+      "confirmed_by": "财务",
+      "status": "pending_business_input"
+    }
+  ]
+}

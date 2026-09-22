@@ -14,6 +14,13 @@
     python -m common.gateway.cli run --once --live-send --confirm-local-test-write \
         --source-credentials /run/live-input/source-credentials.json
 
+    # 死信巡检（dry-run 默认，只读）
+    python -m common.gateway.cli requeue --all
+
+    # 死信重投（显式确认才写库）
+    python -m common.gateway.cli requeue --dedupe-key hangzhou:remind:2026-09-11 \
+        --execute --confirm-local-test-write
+
 输出只有安全摘要行（service / delivered / failed 计数与状态码），绝不打
 印凭据、消息载荷或异常原文。
 """
@@ -185,7 +192,10 @@ def _handle_run(args):
             )
             threading.Thread(
                 target=worker.run_forever,
-                kwargs={"interval_seconds": args.interval},
+                kwargs={
+                    "interval_seconds": args.interval,
+                    "after_batch": conn.commit,
+                },
                 daemon=True,
             ).start()
             print(
@@ -205,7 +215,48 @@ def _handle_run(args):
             )
             return
 
-        worker.run_forever(interval_seconds=args.interval)
+        worker.run_forever(
+            interval_seconds=args.interval, after_batch=conn.commit
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        print("status=failed code=gateway_error")
+        sys.exit(1)
+
+
+def _handle_requeue(args):
+    """死信重投：dry-run 默认（只列不写），``--execute`` 才真正重置。"""
+    if args.execute and not args.confirm_local_test_write:
+        sys.exit(1)
+    if not args.all and not args.dedupe_key:
+        # 必须显式圈定范围，拒绝"无参全量"误操作。
+        sys.exit(1)
+    try:
+        settings = load_settings()
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+
+        rows = outbox.list_failed(limit=1000)
+        if not args.all:
+            wanted = set(args.dedupe_key)
+            rows = [row for row in rows if row["dedupe_key"] in wanted]
+
+        for row in rows:
+            # 只打可观测字段：dedupe_key / attempts / 错误码（last_error
+            # 按约定是非泄露错误码）。载荷、region 路由信息不外泄。
+            print(
+                f"dedupe_key={row['dedupe_key']} attempts={row['attempts']} "
+                f"last_error={row['last_error']}"
+            )
+
+        if not args.execute:
+            print(f"status=dry-run matched={len(rows)}")
+            return
+
+        requeued = sum(1 for row in rows if outbox.requeue(row["dedupe_key"]))
+        conn.commit()
+        print(f"status=completed requeued={requeued} matched={len(rows)}")
     except SystemExit:
         raise
     except Exception:
@@ -261,6 +312,27 @@ def main(argv=None):
     )
     run.add_argument("--live-read", action="store_true", default=False)
 
+    # -- requeue ---------------------------------------------------------------
+    requeue = subparsers.add_parser(
+        "requeue",
+        help="Requeue dead-lettered outbox rows (dry-run by default)",
+    )
+    requeue.add_argument(
+        "--dedupe-key", action="append", default=None,
+        help="requeue only these dedupe keys (repeatable)",
+    )
+    requeue.add_argument(
+        "--all", action="store_true", default=False,
+        help="requeue every failed row",
+    )
+    requeue.add_argument(
+        "--execute", action="store_true", default=False,
+        help="actually reset rows to pending (default: dry-run, read-only)",
+    )
+    requeue.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False,
+    )
+
     # -- publish-regions -------------------------------------------------------
     publish = subparsers.add_parser(
         "publish-regions",
@@ -273,6 +345,10 @@ def main(argv=None):
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "requeue":
+        _handle_requeue(args)
+        return
 
     if args.command == "publish-regions":
         _handle_publish_regions(args)

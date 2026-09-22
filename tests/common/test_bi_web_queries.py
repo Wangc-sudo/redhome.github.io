@@ -16,13 +16,48 @@ import os
 import threading
 import time
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# qa-guard 日月星粒度批次（执行提示词 §6）「断言 → 预期改动」映射：
+#
+# 已预同步（本文件，规格可直接推导）：
+# * OfflineSqlShapeTests.test_region_daily_series_sql_shape —— L1 无参路径
+#   三态改造后多一条 dim_calendar 营业日查询（month_workdays 复用），
+#   形态断言从「唯一一条」改为「事实表语句唯一」。
+# * StaticSqlTests —— 同上：dim_calendar 语句允许绑定纯日期窗口参数，
+#   事实表语句仍须全静态。
+# * RegionDailySeriesTests / RunPayloadTests.test_run_trend_region_daily_
+#   payload / RegionRunPayloadTests 两条趋势 / ChannelRunPayloadTests 趋势
+#   —— 轴由数据行反推改为「月首 → min(月末, as_of)」完整窗口，缺失日
+#   None+missing、营业日真实 0 为 0.0+zero；载荷增 status/as_of。
+# * 新增 GranularityOptionsTests / ThreeStateTrendTests（§6-5 三态夹具）。
+#
+# 待阶段二按 backend-dev 实现校准：
+# * BiWebQueriesIntegrationTests.test_region_daily_series_alignment_and_
+#   zero_fill（L2946 附近）：zero-fill 语义变为三态；biweb乙 昨日从
+#   Decimal(0) 变为 0.0+missing（当日其他系列有行）或 None。
+# * as_of 确切口径（date.today() vs SQL CURDATE()）若与预写不符，逐条校准。
+#
+# B1+B2 批次（2026-09-20，订正方案 §4-B1/§4-B2）「断言 → 预期改动」映射：
+# * B1（P0 桶聚合）：周/月档 SQL 别名改 bucket_start + GROUP BY 修正、
+#   _align_series_rows 覆盖赋值改 Decimal 累加 → 新增
+#   BucketAggregationTests（SQL 形状 + 累加 + 三档对拍）与真库回归
+#   test_week_and_month_gran_sum_to_the_day_total。
+# * B2（水位）：offline_mtd_total 窗口上界 CURDATE()→真实水位（静态
+#   MAX 定锚 + 参数化求和）→ OfflineSqlShapeTests 改两条语句、
+#   StaticSqlTests/ScalarTotalTests 移出 offline_mtd_total；
+#   run_kpi_offline_mtd 增 as_of → RunPayloadTests 两条；线下趋势卡
+#   锚点改真实水位 → RegionDailySeriesTests 重写、L1 静态路径与
+#   region_month_daily 形状测试各多一条静态 MAX 语句。
+# ---------------------------------------------------------------------------
 
 from common.bi_web import queries as bi_web_queries
 from common.bi_web.queries import (
     annual_target_total,
+    brand_options,
     channel_annual_total,
     channel_dod,
     channel_month_daily_series,
@@ -32,17 +67,28 @@ from common.bi_web.queries import (
     channel_mtd_total,
     channel_options,
     department_mtd_ranking,
+    entity_options,
+    granularity_options,
+    manual_report_rows,
     month_bounds,
     month_options,
     offline_annual_total,
     offline_dod,
     offline_mtd_total,
+    pivot_manual_rows,
     region_daily_series,
     region_month_daily_series,
     region_month_target,
+    region_monthly_series,
+    region_weekly_series,
     region_mtd_total,
     region_options,
+    restaurant_annual_revenue,
     run_bar_channel_mtd,
+    run_kpi_sku_mtd,
+    run_table_sku_hot_brand,
+    run_table_sku_hot_channel,
+    run_table_sku_hot_total,
     run_bar_department_mtd,
     run_kpi_annual_progress,
     run_kpi_channel_dod,
@@ -53,11 +99,29 @@ from common.bi_web.queries import (
     run_kpi_people_count,
     run_kpi_people_rate,
     run_kpi_region_mtd,
+    run_pie_sku_mtd,
     run_table_channel_mtd,
+    run_table_manual_ecommerce_monthly,
+    run_table_manual_restaurant_monthly,
+    run_table_manual_showroom_monthly,
+    run_kpi_fin_receivables_overdue,
+    run_table_fin_receivables_aging,
+    run_table_fin_prepayment_uninvoiced,
+    run_table_fin_deposit_status,
+    run_trend_fin_store_funds,
+    run_trend_fin_store_funds_entity,
+    run_table_inventory_aging,
+    run_table_warehouse_ops,
+    run_table_quarter_budget_actual,
+    run_table_yoy_monthly,
+    run_table_contract_writeoff,
     run_table_people_leaderboard,
     run_table_store_mtd,
     run_trend_channel_daily,
     run_trend_region_daily,
+    shortfall_facts,
+    sku_channel_options,
+    sku_mtd_distribution,
     store_mtd_ranking,
 )
 from common.daily_robot.mart_leaderboard import mart_collect
@@ -81,6 +145,10 @@ _SUMMARY_EXCLUSION = "responsible_person NOT LIKE '%合计%'"
 #: The parametrized-query form -- pymysql formats ``sql % params`` when
 #: parameters are passed, so every literal ``%`` must be doubled there.
 _PARAM_SUMMARY_EXCLUSION = "responsible_person NOT LIKE '%%合计%%'"
+
+#: 线下线归属排除（B3，2026-09-20 业务裁定）：region=电商 归电商线，
+#: 线下口径一律排除。串内无字面 %，静态/参数化语句同形。
+_LINE_EXCLUSION = "region <> '电商'"
 
 
 class FakeCursor:
@@ -114,9 +182,15 @@ class FakeConnection:
     _TABLES = (
         "fact_daily_report_offline",
         "fact_channel_daily_sales",
+        "fact_order_line",
         "dim_target",
         "months",  # 伪表键：month_options 的 UNION 查询横跨两张事实表
         "dim_calendar",  # l2-people: fetch_workdays 的日历查询
+        "fact_manual_report",  # ④⑤⑪ 人工报表窄表
+        "fact_fin_receivables_aging",  # ⑩ 应收账龄
+        "fact_fin_prepayment_invoice",  # ⑩ 预付与未到票
+        "fact_fin_store_funds",  # ⑩ 店铺资金余额
+        "fact_fin_offline_deposit",  # ⑩ 保证金（线下+平台 UNION ALL）
     )
 
     def __init__(self, scalars=None, rowsets=None):
@@ -128,6 +202,10 @@ class FakeConnection:
         return FakeCursor(self)
 
     def _table_of(self, sql):
+        # 保证金合一查询是「线下 UNION ALL 平台」，先于通用 UNION→months
+        # 规则归到线下键（该串不会出现在任何既有 SQL 中，行为零回归）。
+        if "fact_fin_offline_deposit" in sql:
+            return "fact_fin_offline_deposit"
         if "UNION" in sql:
             return "months"
         for table in self._TABLES:
@@ -141,6 +219,29 @@ class FakeConnection:
 
     def scripted_fetchall(self, sql):
         return [dict(row) for row in self._rowsets.get(self._table_of(sql), [])]
+
+
+class _DodFakeConnection(FakeConnection):
+    """DoD/水位卡两条 SQL 读同一张表：按 SQL 内容分流。
+
+    MAX(business_date) 定锚查询走 ``latest``（未给时回落 scalars，
+    保持 DoD 既有用法；None=空表，返回 None 行），窗口 GROUP BY
+    查询照常走 rowsets，Σ 汇总走 scalars——B2 起 offline_mtd_total
+    的定锚（date）与求和（Decimal）同表不同型，必须分开喂。
+    """
+
+    def __init__(self, scalars=None, rowsets=None, latest=None):
+        super().__init__(scalars, rowsets)
+        self._latest = None if latest is None else dict(latest)
+
+    def scripted_fetchone(self, sql):
+        if "MAX(business_date)" in sql:
+            source = self._scalars if self._latest is None else self._latest
+            value = source.get(self._table_of(sql))
+            if value is None:
+                return None
+            return {"d": value}
+        return super().scripted_fetchone(sql)
 
 
 class SqlShapeTestCase(unittest.TestCase):
@@ -157,17 +258,48 @@ class OfflineSqlShapeTests(SqlShapeTestCase):
     """The three offline-side queries: 合计 excluded, future rows truncated."""
 
     def test_offline_mtd_total_sql_shape(self):
-        connection = FakeConnection(
-            scalars={"fact_daily_report_offline": Decimal("1")}
+        connection = _DodFakeConnection(
+            scalars={"fact_daily_report_offline": Decimal("1")},
+            latest={"fact_daily_report_offline": date(2026, 9, 16)},
         )
 
-        offline_mtd_total(connection)
+        total = offline_mtd_total(connection)
 
-        sql = self.sole_static_sql(connection)
-        self.assertIn("FROM fact_daily_report_offline", sql)
-        self.assertIn(_SUMMARY_EXCLUSION, sql)
-        self.assertIn(_MONTH_START, sql)
-        self.assertIn(_TRUNCATION, sql)
+        # B2（水位批次）两条语句：静态 MAX 水位定锚 + 参数化窗口求和
+        # （上界=真实水位；月首锚点仍 MySQL 时钟，时钟统一是 B6 的活）。
+        self.assertEqual(Decimal("1"), total)
+        self.assertEqual(2, len(connection.executed))
+        latest_sql, latest_params = connection.executed[0]
+        sum_sql, sum_params = connection.executed[1]
+        self.assertIsNone(latest_params)
+        self.assertIn("MAX(business_date)", latest_sql)
+        self.assertIn("FROM fact_daily_report_offline", latest_sql)
+        self.assertIn(_TRUNCATION, latest_sql)
+        self.assertIn(_SUMMARY_EXCLUSION, latest_sql)
+        self.assertIn(_LINE_EXCLUSION, latest_sql)
+        self.assertIn("FROM fact_daily_report_offline", sum_sql)
+        # 参数化语句的字面 % 必须双写（pymysql sql % params），
+        # 残留单 % 审计与 sole_parameterized_sql 同款。
+        self.assertIn(
+            "business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')", sum_sql
+        )
+        self.assertIn("business_date <= %s", sum_sql)
+        self.assertIn(_PARAM_SUMMARY_EXCLUSION, sum_sql)
+        self.assertIn(_LINE_EXCLUSION, sum_sql)
+        self.assertNotIn(_TRUNCATION, sum_sql)
+        self.assertEqual(0, sum_sql.replace("%%", "").replace("%s", "").count("%"))
+        self.assertEqual((date(2026, 9, 16),), sum_params)
+
+    def test_offline_mtd_total_empty_water_level_short_circuits(self):
+        connection = _DodFakeConnection(
+            latest={"fact_daily_report_offline": None}
+        )
+
+        self.assertEqual(Decimal(0), offline_mtd_total(connection))
+
+        # 空表（水位 None）只发定锚一条，窗口求和短路、不发起。
+        self.assertEqual(1, len(connection.executed))
+        self.assertIn("MAX(business_date)", connection.executed[0][0])
 
     def test_offline_annual_total_sql_shape(self):
         connection = FakeConnection(
@@ -179,19 +311,36 @@ class OfflineSqlShapeTests(SqlShapeTestCase):
         sql = self.sole_static_sql(connection)
         self.assertIn("FROM fact_daily_report_offline", sql)
         self.assertIn(_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
         self.assertIn(_YEAR_START, sql)
         self.assertIn(_TRUNCATION, sql)
 
     def test_region_daily_series_sql_shape(self):
-        connection = FakeConnection(
-            rowsets={"fact_daily_report_offline": []}
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": []},
+            latest={"fact_daily_report_offline": date(2026, 9, 16)},
         )
 
         region_daily_series(connection)
 
-        sql = self.sole_static_sql(connection)
+        # B2（水位批次）：当前月锚点=真实水位，事实表语句两条——静态
+        # MAX 定锚 + 静态窗口序列；另加 dim_calendar 营业日查询
+        # （month_workdays 复用）。两条事实语句均全静态。
+        fact_statements = [
+            (sql, parameters)
+            for sql, parameters in connection.executed
+            if "fact_daily_report_offline" in sql
+        ]
+        self.assertEqual(2, len(fact_statements))
+        latest_sql, latest_params = fact_statements[0]
+        self.assertIsNone(latest_params)
+        self.assertIn("MAX(business_date)", latest_sql)
+        self.assertIn(_LINE_EXCLUSION, latest_sql)
+        sql, parameters = fact_statements[1]
+        self.assertIsNone(parameters)
         self.assertIn("FROM fact_daily_report_offline", sql)
         self.assertIn(_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
         self.assertIn(_MONTH_START, sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn("GROUP BY business_date, region", sql)
@@ -201,17 +350,41 @@ class ChannelSqlShapeTests(SqlShapeTestCase):
     """The channel-side queries: truncation only, never a 合计 filter."""
 
     def test_channel_mtd_total_sql_shape(self):
-        connection = FakeConnection(
-            scalars={"fact_channel_daily_sales": Decimal("1")}
+        connection = _DodFakeConnection(
+            scalars={"fact_channel_daily_sales": Decimal("1")},
+            latest={"fact_channel_daily_sales": date(2026, 9, 15)},
         )
 
-        channel_mtd_total(connection)
+        total = channel_mtd_total(connection)
 
-        sql = self.sole_static_sql(connection)
-        self.assertIn("FROM fact_channel_daily_sales", sql)
-        self.assertIn(_MONTH_START, sql)
-        self.assertIn(_TRUNCATION, sql)
-        self.assertNotIn("合计", sql)
+        # 2026-09-21（渠道水位批次）两条语句：静态 MAX 真实水位定锚
+        # （过滤预填 NULL 行）+ 参数化窗口求和；渠道侧无合计行过滤。
+        self.assertEqual(Decimal("1"), total)
+        self.assertEqual(2, len(connection.executed))
+        latest_sql, latest_params = connection.executed[0]
+        sum_sql, sum_params = connection.executed[1]
+        self.assertIsNone(latest_params)
+        self.assertIn("MAX(business_date)", latest_sql)
+        self.assertIn("FROM fact_channel_daily_sales", latest_sql)
+        self.assertIn(_TRUNCATION, latest_sql)
+        self.assertIn("sales_amount IS NOT NULL", latest_sql)
+        self.assertNotIn("合计", latest_sql)
+        self.assertIn("FROM fact_channel_daily_sales", sum_sql)
+        self.assertIn("business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01')", sum_sql)
+        self.assertIn("business_date <= %s", sum_sql)
+        self.assertNotIn(_TRUNCATION, sum_sql)
+        self.assertNotIn("合计", sum_sql)
+        self.assertEqual(0, sum_sql.replace("%%", "").replace("%s", "").count("%"))
+        self.assertEqual((date(2026, 9, 15),), sum_params)
+
+    def test_channel_mtd_total_empty_water_level_short_circuits(self):
+        connection = _DodFakeConnection(
+            latest={"fact_channel_daily_sales": None}
+        )
+
+        self.assertEqual(Decimal(0), channel_mtd_total(connection))
+
+        self.assertEqual(1, len(connection.executed))
 
     def test_channel_annual_total_sql_shape(self):
         connection = FakeConnection(
@@ -246,34 +419,40 @@ class AnnualTargetSqlShapeTests(SqlShapeTestCase):
     """The target denominator is the two-line scope, current year only."""
 
     def test_annual_target_total_sql_shape(self):
-        connection = FakeConnection(scalars={"dim_target": Decimal("1")})
+        connection = FakeConnection(rowsets={"dim_target": []})
 
         annual_target_total(connection)
 
         sql = self.sole_static_sql(connection)
         self.assertIn("FROM dim_target", sql)
         self.assertIn("scope = 'line'", sql)
-        self.assertIn("scope_key IN ('offline', 'channel')", sql)
         self.assertIn("year = YEAR(CURDATE())", sql)
+        self.assertIn("GROUP BY scope_key", sql)
+        # 2026-09-21 起分母 = 全业务线（含餐饮），不再只取两线。
+        self.assertNotIn("scope_key IN", sql)
 
 
 class StaticSqlTests(unittest.TestCase):
-    """SQL 全静态: no query ever binds or splices a value."""
+    """SQL 全静态: no query ever binds or splices a value.
+
+    B2（水位批次）起 ``offline_mtd_total`` 移出本表：窗口上界改绑定
+    真实水位（参数化），其形状由 OfflineSqlShapeTests 锁定；水位
+    定锚（MAX）与窗口序列本身仍是静态语句，留在表内一并校验。
+    """
 
     _QUERY_FUNCTIONS = (
-        offline_mtd_total,
         offline_annual_total,
-        channel_mtd_total,
         channel_annual_total,
         annual_target_total,
         region_daily_series,
         channel_mtd_ranking,
+        sku_mtd_distribution,
     )
 
     def test_every_query_executes_static_sql_without_parameters(self):
         for function in self._QUERY_FUNCTIONS:
             with self.subTest(query=function.__name__):
-                connection = FakeConnection(
+                connection = _DodFakeConnection(
                     scalars={
                         "fact_daily_report_offline": Decimal("0"),
                         "fact_channel_daily_sales": Decimal("0"),
@@ -283,6 +462,9 @@ class StaticSqlTests(unittest.TestCase):
                         "fact_daily_report_offline": [],
                         "fact_channel_daily_sales": [],
                     },
+                    # region_daily_series 的水位定锚需要一个真日期；
+                    # 钉当天 ⇒ 轴端点与旧口径（锚点=今天）一致。
+                    latest={"fact_daily_report_offline": date.today()},
                 )
 
                 function(connection)
@@ -290,6 +472,15 @@ class StaticSqlTests(unittest.TestCase):
                 self.assertTrue(connection.executed)
                 for sql, parameters in connection.executed:
                     self.assertIsInstance(sql, str)
+                    if "dim_calendar" in sql:
+                        # 三态改造（执行提示词 §4.2⑥）：营业日判定复用
+                        # month_workdays，只允许绑定计算所得的日期窗口，
+                        # 绝无用户输入——与「全静态」同一保护级别。
+                        self.assertIsNotNone(parameters)
+                        self.assertTrue(
+                            all(isinstance(value, date) for value in parameters)
+                        )
+                        continue
                     # No bound parameters and no %s placeholder: nothing
                     # user-controlled can ever enter the SQL text.
                     self.assertIsNone(parameters)
@@ -300,10 +491,14 @@ class ScalarTotalTests(unittest.TestCase):
     """The total queries return the scripted Decimal."""
 
     def test_scalar_totals_return_decimal(self):
+        # B2：offline_mtd_total 改水位窗口（定锚 date + 求和 Decimal
+        # 同表不同型），Decimal 透传断言移至 OfflineSqlShapeTests。
+        # 2026-09-21：annual_target_total 改行查询（按线展开）、
+        # channel_mtd_total 改水位窗口（同 offline B2），透传断言分别
+        # 移至 RunPayloadTests 与 ChannelSqlShapeTests。
         cases = (
-            ("fact_daily_report_offline", (offline_mtd_total, offline_annual_total)),
-            ("fact_channel_daily_sales", (channel_mtd_total, channel_annual_total)),
-            ("dim_target", (annual_target_total,)),
+            ("fact_daily_report_offline", (offline_annual_total,)),
+            ("fact_channel_daily_sales", (channel_annual_total,)),
         )
         for table, functions in cases:
             for function in functions:
@@ -314,33 +509,80 @@ class ScalarTotalTests(unittest.TestCase):
 
 
 class RegionDailySeriesTests(unittest.TestCase):
-    """Date alignment, ascending order, MM-DD labels, zero-fill."""
+    """三态轴 + 水位锚点（§4.2 / B2）：轴=月首→min(月末, 水位) 完整窗口。
 
-    def test_aligns_dates_ascending_and_zero_fills_missing_points(self):
+    B2 起当前月锚点 = 事实表 MAX(business_date)（最新入仓日）：T+1
+    未入仓的日子不进轴、as_of 即水位。水位钉当天时轴与旧口径
+    （锚点=今天）逐点一致；夹具时钟相对，轴端点随水位走。
+    """
+
+    def test_complete_axis_and_missing_points_are_none_not_zero_filled(self):
+        today = date.today()
+        month_first = today.replace(day=1)
         rows = [
-            {"business_date": date(2026, 9, 2), "region": "杭州", "total": Decimal("20")},
-            {"business_date": date(2026, 9, 1), "region": "杭州", "total": Decimal("10")},
-            {"business_date": date(2026, 9, 2), "region": "绍兴", "total": Decimal("5")},
+            {"business_date": month_first, "region": "杭州", "total": Decimal("10")},
         ]
-        connection = FakeConnection(rowsets={"fact_daily_report_offline": rows})
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": rows},
+            latest={"fact_daily_report_offline": today},
+        )
 
         result = region_daily_series(connection)
 
-        self.assertEqual(
-            {
-                "dates": ["09-01", "09-02"],
-                "series": [
-                    {"name": "杭州", "data": [Decimal("10"), Decimal("20")]},
-                    {"name": "绍兴", "data": [Decimal("0"), Decimal("5")]},
-                ],
-            },
-            result,
+        # 完整轴：月首 → 水位（钉今天），无数据日也在轴上（修复前根本不进轴）。
+        self.assertEqual(today.day, len(result["dates"]))
+        self.assertEqual(month_first.strftime("%m-%d"), result["dates"][0])
+        self.assertEqual(today.strftime("%m-%d"), result["dates"][-1])
+        self.assertEqual(today.isoformat(), result["as_of"])
+        self.assertEqual(["杭州"], [entry["name"] for entry in result["series"]])
+        data = result["series"][0]["data"]
+        self.assertEqual(10.0, data[0])
+        # 缺失日 None（断线），绝不用 0 表示「没数据」。
+        self.assertEqual([None] * (today.day - 1), data[1:])
+        status = result["status"][0]
+        self.assertEqual("ok", status[0])
+        self.assertEqual(["missing"] * (today.day - 1), status[1:])
+
+    def test_axis_ends_at_water_level_not_today(self):
+        # B2 核心：水位滞后 4 天时轴到水位为止——缺的天不再进轴标
+        # missing（旧口径把它们画进轴、页脚却报「截至今天」）。
+        today = date.today()
+        if today.day < 5:
+            self.skipTest("月初样本不足：水位需滞后 4 天且仍在月内")
+        latest = today - timedelta(days=4)
+        rows = [
+            {"business_date": latest, "region": "杭州", "total": Decimal("10")},
+        ]
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": rows},
+            latest={"fact_daily_report_offline": latest},
         )
 
-    def test_empty_fact_rows_yield_empty_axis_and_series(self):
-        connection = FakeConnection(rowsets={"fact_daily_report_offline": []})
+        result = region_daily_series(connection)
 
-        self.assertEqual({"dates": [], "series": []}, region_daily_series(connection))
+        self.assertEqual(latest.day, len(result["dates"]))
+        self.assertEqual(latest.strftime("%m-%d"), result["dates"][-1])
+        self.assertEqual(latest.isoformat(), result["as_of"])
+        # 水位日有行 → ok；轴内缺失日仍 None+missing。
+        self.assertEqual(10.0, result["series"][0]["data"][-1])
+        self.assertEqual("ok", result["status"][0][-1])
+        self.assertIsNone(result["series"][0]["data"][-2])
+        self.assertEqual("missing", result["status"][0][-2])
+
+    def test_empty_water_level_yields_empty_axis(self):
+        # 空表（水位 None）：轴为空、as_of 不下发（前端无角标），
+        # 不再虚构「截至今天」的完整轴。
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": []},
+            latest={"fact_daily_report_offline": None},
+        )
+
+        result = region_daily_series(connection)
+
+        self.assertEqual([], result["dates"])
+        self.assertEqual([], result["series"])
+        self.assertEqual([], result["status"])
+        self.assertIsNone(result["as_of"])
 
 
 class ChannelMtdRankingTests(unittest.TestCase):
@@ -359,6 +601,298 @@ class ChannelMtdRankingTests(unittest.TestCase):
             {"categories": ["天猫", "京东"], "values": [Decimal("300"), Decimal("100")]},
             result,
         )
+
+
+class SkuMtdDistributionTests(SqlShapeTestCase):
+    """SKU 当月分布：trade_time 月内截断 + spec 聚合 + 名称回退。"""
+
+    def test_sku_mtd_distribution_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_order_line": []})
+
+        sku_mtd_distribution(connection)
+
+        sql = self.sole_static_sql(connection)
+        self.assertIn("FROM fact_order_line", sql)
+        # DATETIME 口径：月首起、「< 明天」截断（「<= 今天」会漏当日行）。
+        self.assertIn(
+            "trade_time >= DATE_FORMAT(CURDATE(), '%Y-%m-01')", sql
+        )
+        self.assertIn("trade_time < DATE_ADD(CURDATE(), INTERVAL 1 DAY)", sql)
+        self.assertIn("GROUP BY spec_no, goods_name", sql)
+        self.assertIn("ORDER BY total DESC", sql)
+
+    def test_distribution_shapes_names_and_decimal_values(self):
+        rows = [
+            {
+                "spec_no": "SKU-1",
+                "goods_name": "冻干草莓",
+                "total": Decimal("300"),
+            },
+            {"spec_no": "SKU-2", "goods_name": "黄桃罐头", "total": Decimal("100")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        self.assertEqual(
+            [
+                {"name": "冻干草莓", "value": Decimal("300")},
+                {"name": "黄桃罐头", "value": Decimal("100")},
+            ],
+            sku_mtd_distribution(connection),
+        )
+
+    def test_name_falls_back_to_spec_no_when_goods_name_missing(self):
+        rows = [
+            {"spec_no": "SKU-9", "goods_name": None, "total": Decimal("7")},
+            {"spec_no": "SKU-8", "goods_name": "  ", "total": Decimal("5")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        self.assertEqual(
+            [
+                {"name": "SKU-9", "value": Decimal("7")},
+                {"name": "SKU-8", "value": Decimal("5")},
+            ],
+            sku_mtd_distribution(connection),
+        )
+
+
+class FakeSkuConnection(FakeConnection):
+    """商品动销的脚本化连接：同一张事实表上的三次查询分开喂数。
+
+    数据截至日（``MAX(DATE(trade_time))``）走 fetchone，月内日汇总与
+    商品聚合走 fetchall——按 SQL 特征区分，与调用顺序无关。
+    """
+
+    def __init__(self, as_of=None, rollup_rows=None, trend_rows=None):
+        super().__init__(rowsets={"fact_order_line": rollup_rows or []})
+        self.as_of = as_of
+        self.trend_rows = trend_rows or []
+
+    def scripted_fetchone(self, sql):
+        if "MAX(DATE(trade_time))" in sql:
+            return {"d": self.as_of}
+        return super().scripted_fetchone(sql)
+
+    def scripted_fetchall(self, sql):
+        if "GROUP BY DATE(trade_time)" in sql:
+            return [dict(row) for row in self.trend_rows]
+        return super().scripted_fetchall(sql)
+
+
+class SkuHotRankingTests(unittest.TestCase):
+    """商品动销（l2-product）：总榜 / 分品牌 / 分渠道榜单 + KPI。"""
+
+    _AS_OF = date(2026, 9, 14)
+
+    @staticmethod
+    def _row(spec_no, goods, brand, mtd, qty, latest, prev):
+        return {
+            "spec_no": spec_no,
+            "goods_name": goods,
+            "brand_name": brand,
+            "channel_name": "抖音",
+            "mtd_amount": Decimal(str(mtd)),
+            "mtd_qty": Decimal(str(qty)),
+            "latest_amount": Decimal(str(latest)),
+            "prev_amount": Decimal(str(prev)),
+        }
+
+    def test_total_ranking_shapes_rows_with_share_qty_and_delta(self):
+        rows = [
+            self._row("S1", "冻干草莓", "良品铺子", 300, 30, 120, 100),
+            self._row("S2", "黄桃罐头", "良品铺子", 100, 10, 50, 0),
+        ]
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("2026-09-14", payload["as_of"])
+        self.assertEqual(
+            ["排名", "商品", "品牌", "累计销售额", "销售占比", "累计销量",
+             "昨日销售额", "环比"],
+            [column["title"] for column in payload["columns"]],
+        )
+        first, second = payload["rows"]
+        self.assertEqual(
+            (1, "冻干草莓", "良品铺子"),
+            (first["rank"], first["goods"], first["brand"]),
+        )
+        self.assertEqual(300.0, first["sales"])
+        self.assertEqual(0.75, first["share"])
+        self.assertEqual(30.0, first["qty"])
+        self.assertEqual(120.0, first["latest"])
+        self.assertAlmostEqual(0.2, first["delta_pct"])
+        # 前一日为 0 → 环比不可算，给 null 而不是 0%（前端显示「—」）。
+        self.assertIsNone(second["delta_pct"])
+        self.assertEqual(0.25, second["share"])
+
+    def test_rollup_binds_month_and_day_windows_as_parameters(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        latest_sql, latest_params = connection.executed[0]
+        self.assertIn("MAX(DATE(trade_time))", latest_sql)
+        self.assertEqual((date(2026, 9, 1), date(2026, 10, 1)), latest_params)
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("FROM fact_order_line", rollup_sql)
+        self.assertIn("GROUP BY brand_name, spec_no, goods_name", rollup_sql)
+        # 月累计 / 月销量 / 数据日 / 前一日 / 扫描窗口，十个绑定值。
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 10, 1),
+             date(2026, 9, 1), date(2026, 10, 1),
+             date(2026, 9, 14), date(2026, 9, 15),
+             date(2026, 9, 13), date(2026, 9, 14),
+             date(2026, 9, 1), date(2026, 10, 1)),
+            rollup_params,
+        )
+
+    def test_prev_day_before_month_start_widens_the_scan_window(self):
+        # 数据截至 9/1 → 前一日是 8/31，扫描窗口必须跨到上月才取得到。
+        connection = FakeSkuConnection(as_of=date(2026, 9, 1))
+
+        run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        _, rollup_params = connection.executed[1]
+        self.assertEqual(date(2026, 8, 31), rollup_params[-2])
+        self.assertEqual(date(2026, 10, 1), rollup_params[-1])
+
+    def test_empty_month_yields_empty_rows_and_no_as_of(self):
+        connection = FakeSkuConnection(as_of=None)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        self.assertEqual([], payload["rows"])
+        self.assertIsNone(payload["as_of"])
+
+    def test_brand_ranking_keeps_top_five_per_brand(self):
+        rows = [
+            self._row(f"S{index}", f"商品{index}", "A", 100 - index, 1, 10, 5)
+            for index in range(7)
+        ]
+        rows.append(self._row("T1", "黄桃罐头", "B", 50, 1, 5, 4))
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_brand(connection, {"month": "2026-09"})
+
+        self.assertEqual(
+            ["品牌", "组内排名", "商品", "累计销售额", "昨日销售额", "环比"],
+            [column["title"] for column in payload["columns"]],
+        )
+        # A 组 7 个截断到 5，B 组 1 个全留。
+        self.assertEqual(6, len(payload["rows"]))
+        self.assertEqual(
+            [1, 2, 3, 4, 5],
+            [row["rank"] for row in payload["rows"] if row["brand_name"] == "A"],
+        )
+        self.assertEqual(
+            [1], [row["rank"] for row in payload["rows"] if row["brand_name"] == "B"]
+        )
+        self.assertEqual("B", payload["rows"][-1]["brand_name"])
+
+    def test_brand_ranking_binds_the_selected_brand(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_brand(
+            connection, {"month": "2026-09", "brand": "良品铺子"}
+        )
+
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("AND brand_name = %s", rollup_sql)
+        self.assertIn("GROUP BY brand_name, spec_no, goods_name", rollup_sql)
+        self.assertEqual("良品铺子", rollup_params[-1])
+
+    def test_total_share_uses_the_whole_month_as_denominator(self):
+        # 榜只展示前 N 名，但占比分母是全部商品，否则「占比」合计会超过 100%。
+        rows = [
+            self._row(f"S{index}", f"商品{index}", "A", 100 - index, 1, 10, 5)
+            for index in range(60)
+        ]
+        connection = FakeSkuConnection(as_of=self._AS_OF, rollup_rows=rows)
+
+        payload = run_table_sku_hot_total(connection, {"month": "2026-09"})
+
+        # 60 个商品销售额 100..41，合计 4230；榜上前 50 的占比仍以此为分母。
+        self.assertEqual(50, len(payload["rows"]))
+        self.assertAlmostEqual(100 / 4230, payload["rows"][0]["share"], places=6)
+
+    def test_channel_ranking_binds_the_selected_channel(self):
+        connection = FakeSkuConnection(as_of=self._AS_OF)
+
+        run_table_sku_hot_channel(connection, {"month": "2026-09", "channel": "抖音"})
+
+        rollup_sql, rollup_params = connection.executed[1]
+        self.assertIn("AND channel_name = %s", rollup_sql)
+        self.assertIn("GROUP BY channel_name, spec_no, goods_name", rollup_sql)
+        self.assertEqual("抖音", rollup_params[-1])
+
+    def test_kpi_sku_mtd_sums_month_and_day_windows(self):
+        rows = [
+            self._row("S1", "冻干草莓", "A", 300, 30, 120, 100),
+            self._row("S2", "黄桃罐头", "A", 100, 10, 30, 50),
+        ]
+        connection = FakeSkuConnection(
+            as_of=self._AS_OF,
+            rollup_rows=rows,
+            trend_rows=[
+                {"d": date(2026, 9, 13), "total": Decimal("100")},
+                {"d": date(2026, 9, 14), "total": Decimal("150")},
+            ],
+        )
+
+        payload = run_kpi_sku_mtd(connection, {"month": "2026-09"})
+
+        self.assertEqual("scalar", payload["chart"])
+        self.assertEqual(400.0, payload["value"])
+        self.assertEqual("2026-09-14", payload["date"])
+        self.assertEqual(150.0, payload["prev"])
+        self.assertAlmostEqual(0.0, payload["delta_pct"])
+        self.assertEqual(2, payload["sku_count"])
+        self.assertEqual(2, payload["active_sku_count"])
+        # 趋势固定 7 天，缺数日为 null（前端断线而不是连到 0）。
+        self.assertEqual(7, len(payload["trend7"]))
+        self.assertEqual("2026-09-08", payload["trend7"][0]["date"])
+        self.assertIsNone(payload["trend7"][0]["value"])
+        self.assertEqual(150.0, payload["trend7"][-1]["value"])
+
+    def test_kpi_sku_mtd_without_data_stays_zero(self):
+        connection = FakeSkuConnection(as_of=None)
+
+        payload = run_kpi_sku_mtd(connection, {"month": "2026-09"})
+
+        self.assertEqual(0.0, payload["value"])
+        self.assertIsNone(payload["date"])
+        self.assertIsNone(payload["prev"])
+        self.assertIsNone(payload["delta_pct"])
+        self.assertEqual([], payload["trend7"])
+        self.assertEqual(0, payload["sku_count"])
+
+    def test_brand_options_drop_nulls(self):
+        connection = FakeConnection(
+            rowsets={"fact_order_line": [
+                {"brand_name": "良品铺子"}, {"brand_name": None},
+            ]}
+        )
+
+        self.assertEqual(["良品铺子"], brand_options(connection))
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT brand_name FROM fact_order_line", sql)
+        self.assertIn("ORDER BY brand_name", sql)
+        self.assertIsNone(parameters)
+
+    def test_sku_channel_options_drop_nulls(self):
+        connection = FakeConnection(
+            rowsets={"fact_order_line": [
+                {"channel_name": "抖音"}, {"channel_name": ""},
+            ]}
+        )
+
+        self.assertEqual(["抖音"], sku_channel_options(connection))
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT channel_name FROM fact_order_line", sql)
+        self.assertIn("ORDER BY channel_name", sql)
+        self.assertIsNone(parameters)
 
 
 class DimensionOptionsTests(unittest.TestCase):
@@ -423,36 +957,489 @@ class DimensionOptionsTests(unittest.TestCase):
         self.assertEqual(["2026-09", "2026-08"], options)
 
 
+class GranularityOptionsTests(unittest.TestCase):
+    """granularity 静态值域（执行提示词 §4.2①/§6-5；2026-09-21 批次 A5
+    增 year）：与查询型 source 同签名但不查库，供 option_sets.contains()
+    值域闸校验。"""
+
+    def test_returns_the_gran_domain(self):
+        connection = FakeConnection()
+
+        self.assertEqual(
+            ["day", "week", "month", "year"], granularity_options(connection)
+        )
+
+    def test_static_domain_never_touches_the_database(self):
+        connection = FakeConnection()
+
+        granularity_options(connection)
+
+        self.assertEqual([], connection.executed)
+
+
+class ThreeStateTrendTests(unittest.TestCase):
+    """折线三态夹具（执行提示词 §3/§4.2②/§6-5）：ok / zero / missing。
+
+    全部钉历史月 2026-08（31 天完整轴，与运行日无关）；dim_calendar
+    行集即营业日集合（month_workdays 复用，不另写 SQL）。
+    """
+
+    def _payload(self, fact_rows, workdays=()):
+        connection = FakeConnection(
+            rowsets={
+                "fact_daily_report_offline": fact_rows,
+                "dim_calendar": [{"business_date": day} for day in workdays],
+            }
+        )
+        payload = run_trend_region_daily(connection, {"month": "2026-08"})
+        self.assertEqual(31, len(payload["dates"]))  # 完整月轴
+        return payload
+
+    def test_all_missing_day_breaks_the_line(self):
+        # 全 missing 日：全日任何系列都无行 → data=None（断线位置）、
+        # status=missing，绝不用 0 表示「没数据」。
+        payload = self._payload(
+            [{"business_date": date(2026, 8, 3), "region": "杭州",
+              "total": Decimal("10")}]
+        )
+
+        index = payload["dates"].index("08-04")
+        self.assertIsNone(payload["series"][0]["data"][index])
+        self.assertEqual("missing", payload["status"][0][index])
+        ok_index = payload["dates"].index("08-03")
+        self.assertEqual(10.0, payload["series"][0]["data"][ok_index])
+        self.assertEqual("ok", payload["status"][0][ok_index])
+
+    def test_real_zero_on_a_workday_is_zero_status_not_missing(self):
+        # 真实 0 日：营业日 + 有行 + total=0 → data=0.0（红点位置）、
+        # status=zero；非营业日（日历未覆盖）的 0 → 0.0+ok 不标红。
+        workday = date(2026, 8, 3)  # 周一
+        payload = self._payload(
+            [
+                {"business_date": workday, "region": "杭州", "total": Decimal("0")},
+                {"business_date": date(2026, 8, 1), "region": "杭州",
+                 "total": Decimal("0")},  # 周六，不在 dim_calendar 行集内
+            ],
+            workdays=(workday,),
+        )
+
+        zero_index = payload["dates"].index("08-03")
+        self.assertEqual(0.0, payload["series"][0]["data"][zero_index])
+        self.assertEqual("zero", payload["status"][0][zero_index])
+        weekend_index = payload["dates"].index("08-01")
+        self.assertEqual(0.0, payload["series"][0]["data"][weekend_index])
+        self.assertEqual("ok", payload["status"][0][weekend_index])
+
+    def test_normal_day_is_ok_and_series_gap_is_not_a_zero(self):
+        # 正常日：有行 total>0 → ok。本系列无行但当日其他系列有行 →
+        # 0.0+missing（该区域未上报，既不是营业 0 也不是断线 None）。
+        payload = self._payload(
+            [
+                {"business_date": date(2026, 8, 3), "region": "杭州",
+                 "total": Decimal("10")},
+                {"business_date": date(2026, 8, 3), "region": "绍兴",
+                 "total": Decimal("5")},
+                {"business_date": date(2026, 8, 4), "region": "杭州",
+                 "total": Decimal("6")},
+            ]
+        )
+
+        index = payload["dates"].index("08-04")
+        hangzhou, shaoxing = payload["series"]
+        self.assertEqual(6.0, hangzhou["data"][index])
+        self.assertEqual("ok", payload["status"][0][index])
+        self.assertEqual(0.0, shaoxing["data"][index])
+        self.assertEqual("missing", payload["status"][1][index])
+        # 轴完整：两系列与 dates 等长，as_of 一并下发。
+        self.assertIn("as_of", payload)
+        for entry in payload["series"]:
+            self.assertEqual(31, len(entry["data"]))
+        self.assertEqual([31, 31], [len(row) for row in payload["status"]])
+
+
+class _TrendFakeConnection(_DodFakeConnection):
+    """三档对拍的脚本化连接：日/周/月三条事实查询按分桶表达式分流。
+
+    周档（WEEKDAY）与月档（DAYOFMONTH）各自喂 ``bucket_start`` 行，
+    日档照常走 rowsets——与真实库中「同一批日行被 SQL 分桶」的
+    产物一一对应，从而能对拍「同窗口三档合计相等」（B1 回归）。
+    """
+
+    def __init__(self, *args, week_rows=(), month_rows=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self._week_rows = [dict(row) for row in week_rows]
+        self._month_rows = [dict(row) for row in month_rows]
+
+    def scripted_fetchall(self, sql):
+        if "WEEKDAY" in sql:
+            return [dict(row) for row in self._week_rows]
+        if "DAYOFMONTH" in sql:
+            return [dict(row) for row in self._month_rows]
+        return super().scripted_fetchall(sql)
+
+
+class BucketAggregationTests(unittest.TestCase):
+    """B1（P0 桶聚合）：周/月档必须是区间累计，不是「桶内最后一天」。
+
+    两道防线分别锁定：SQL 侧分桶表达式别名 ``bucket_start`` 不再与
+    真实列同名（MySQL GROUP BY 不再解析回 business_date 导致桶内
+    按天散行）；Python 侧同 (series, bucket) 多行 Decimal 累加
+    （旧的覆盖赋值会让「桶内最后一天胜出」）。
+    """
+
+    def _connection(self, *, daily_rows=(), week_rows=(), month_rows=(),
+                    latest=None):
+        return _TrendFakeConnection(
+            rowsets={
+                "fact_daily_report_offline": list(daily_rows),
+                "dim_calendar": [],
+            },
+            week_rows=week_rows,
+            month_rows=month_rows,
+            latest={"fact_daily_report_offline": latest or date.today()},
+        )
+
+    def test_weekly_sql_groups_by_bucket_alias_not_real_column(self):
+        connection = self._connection()
+
+        region_weekly_series(connection, month=date.today().strftime("%Y-%m"))
+
+        fact_sql = next(sql for sql, _ in connection.executed if "WEEKDAY" in sql)
+        self.assertIn("AS bucket_start", fact_sql)
+        self.assertIn("GROUP BY bucket_start, region", fact_sql)
+        self.assertIn(_LINE_EXCLUSION, fact_sql)
+        self.assertNotIn("GROUP BY business_date, region", fact_sql)
+
+    def test_monthly_sql_groups_by_bucket_alias_not_real_column(self):
+        connection = self._connection()
+
+        region_monthly_series(connection, month=date.today().strftime("%Y-%m"))
+
+        fact_sql = next(sql for sql, _ in connection.executed if "DAYOFMONTH" in sql)
+        self.assertIn("AS bucket_start", fact_sql)
+        self.assertIn("GROUP BY bucket_start, region", fact_sql)
+        self.assertIn(_LINE_EXCLUSION, fact_sql)
+        self.assertNotIn("GROUP BY business_date, region", fact_sql)
+
+    def test_duplicate_bucket_rows_accumulate_instead_of_overwrite(self):
+        # 第二道防线：即使上游分桶失效（同桶散行，修复前 SQL 的产出
+        # 形态），同 (region, bucket_start) 多行也必须求和——修复前
+        # 是「桶内最后一天胜出」。
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        connection = self._connection(
+            week_rows=[
+                {"bucket_start": monday, "region": "杭州", "total": Decimal("10")},
+                {"bucket_start": monday, "region": "杭州", "total": Decimal("5")},
+            ],
+            latest=today,
+        )
+
+        payload = run_trend_region_daily(connection, {"gran": "week"})
+
+        index = payload["dates"].index(monday.strftime("%m-%d"))
+        entry = payload["series"][0]
+        self.assertEqual("杭州", entry["name"])
+        self.assertEqual(15.0, entry["data"][index])
+        self.assertEqual("ok", payload["status"][0][index])
+
+    def test_day_week_month_grans_reconcile_on_the_same_window(self):
+        # 最强回归：同一份日行，三档合计必须相等（修复前实测 9 月：
+        # 日档 35,467,393.88 vs 月档落点 1,643,879.37 = 9-16 单日值）。
+        today = date.today()
+        month_first = today.replace(day=1)
+        days = [
+            month_first + timedelta(days=offset)
+            for offset in range(min(3, today.day))
+        ]
+        values = [Decimal("10"), Decimal("20"), Decimal("5")][: len(days)]
+        total = sum(values)
+        expected = float(total)
+        monday = today - timedelta(days=today.weekday())
+        connection = self._connection(
+            daily_rows=[
+                {"business_date": day, "region": "杭州", "total": value}
+                for day, value in zip(days, values)
+            ],
+            week_rows=[
+                {"bucket_start": monday, "region": "杭州", "total": total}
+            ],
+            month_rows=[
+                {"bucket_start": month_first, "region": "杭州", "total": total}
+            ],
+            latest=today,
+        )
+
+        day_payload = run_trend_region_daily(connection, {})
+        week_payload = run_trend_region_daily(connection, {"gran": "week"})
+        month_payload = run_trend_region_daily(connection, {"gran": "month"})
+
+        day_total = sum(
+            value for value in day_payload["series"][0]["data"]
+            if value is not None
+        )
+        week_index = week_payload["dates"].index(monday.strftime("%m-%d"))
+        month_index = month_payload["dates"].index(month_first.strftime("%Y-%m"))
+        week_total = week_payload["series"][0]["data"][week_index]
+        month_total = month_payload["series"][0]["data"][month_index]
+        self.assertEqual(expected, day_total)
+        self.assertEqual(day_total, week_total)
+        self.assertEqual(day_total, month_total)
+        # 三档 as_of 同为水位日（B2）。
+        for payload in (day_payload, week_payload, month_payload):
+            self.assertEqual(today.isoformat(), payload["as_of"])
+
+
+class OfflineLineExclusionTests(unittest.TestCase):
+    """B3（2026-09-20 业务裁定）：region=电商 归电商线，线下取数族一律
+    排除——漏任何一条都是「同一笔电商销售两条线各计一次」。全族扫描
+    守门：新增线下查询忘了带排除时本测试即红。"""
+
+    def test_every_offline_line_query_excludes_ecom_region(self):
+        today = date.today()
+        month = today.strftime("%Y-%m")
+        first_day, last_day = month_bounds(month)
+
+        def dod_fake():
+            return _DodFakeConnection(
+                scalars={"fact_daily_report_offline": Decimal("0")},
+                rowsets={"fact_daily_report_offline": [], "dim_calendar": []},
+                latest={"fact_daily_report_offline": today},
+            )
+
+        def scalar_fake():
+            return FakeConnection(
+                scalars={"fact_daily_report_offline": Decimal("0")}
+            )
+
+        cases = {
+            "offline_mtd_total": (dod_fake, offline_mtd_total),
+            "offline_annual_total": (scalar_fake, offline_annual_total),
+            "offline_dod": (dod_fake, offline_dod),
+            "region_daily_series": (dod_fake, region_daily_series),
+            "region_month_daily_series": (
+                dod_fake,
+                lambda c: region_month_daily_series(
+                    c, first_day=first_day, last_day=last_day
+                ),
+            ),
+            "region_weekly_series": (
+                dod_fake, lambda c: region_weekly_series(c, month=month)
+            ),
+            "region_monthly_series": (
+                dod_fake, lambda c: region_monthly_series(c, month=month)
+            ),
+            "region_mtd_total": (
+                scalar_fake,
+                lambda c: region_mtd_total(
+                    c, first_day=first_day, last_day=last_day
+                ),
+            ),
+            "region_month_target": (
+                scalar_fake,
+                lambda c: region_month_target(
+                    c, first_day=first_day, last_day=last_day
+                ),
+            ),
+            "department_mtd_ranking": (
+                lambda: FakeConnection(
+                    rowsets={"fact_daily_report_offline": []}
+                ),
+                lambda c: department_mtd_ranking(
+                    c, first_day=first_day, last_day=last_day
+                ),
+            ),
+            "run_kpi_offline_mtd": (dod_fake, lambda c: run_kpi_offline_mtd(c, {})),
+        }
+        for name, (make_connection, run) in cases.items():
+            with self.subTest(query=name):
+                connection = make_connection()
+                run(connection)
+                fact_sqls = [
+                    sql for sql, _ in connection.executed
+                    if "fact_daily_report_offline" in sql
+                ]
+                self.assertTrue(fact_sqls)
+                for sql in fact_sqls:
+                    self.assertIn(_LINE_EXCLUSION, sql)
+
+
 class RunPayloadTests(unittest.TestCase):
     """The run_* wrappers produce the plan's chart-ready payload shapes."""
 
     def test_run_kpi_offline_mtd_payload(self):
-        connection = FakeConnection(
-            scalars={"fact_daily_report_offline": Decimal("10.5")}
+        connection = _DodFakeConnection(
+            scalars={"fact_daily_report_offline": Decimal("10.5")},
+            latest={"fact_daily_report_offline": date(2026, 9, 16)},
         )
 
         payload = run_kpi_offline_mtd(connection, {})
 
-        self.assertEqual({"chart": "scalar", "value": 10.5, "unit": "元"}, payload)
+        # B2：窗口截至真实水位，as_of 随载荷下发（前端标量卡角标）。
+        self.assertEqual(
+            {
+                "chart": "scalar",
+                "value": 10.5,
+                "as_of": "2026-09-16",
+                "unit": "元",
+            },
+            payload,
+        )
         self.assertIsInstance(payload["value"], float)
 
+    def test_run_kpi_offline_mtd_empty_table_payload(self):
+        connection = _DodFakeConnection(
+            latest={"fact_daily_report_offline": None}
+        )
+
+        payload = run_kpi_offline_mtd(connection, {})
+
+        self.assertEqual(0.0, payload["value"])
+        self.assertIsNone(payload["as_of"])
+
+    # --- 粒度批次 A（2026-09-21 订正）：kpi_offline_mtd 日/周/月三档 --------
+    # 定锚水位 2026-09-16（周三）；断言窗口边界与 as_of，而不是数值真假
+    # （数值由 scalars 脚本喂，窗口对不对看 SQL 参数）。
+
+    def _offline_gran_connection(self):
+        return _DodFakeConnection(
+            scalars={"fact_daily_report_offline": Decimal("3")},
+            latest={"fact_daily_report_offline": date(2026, 9, 16)},
+        )
+
+    def test_run_kpi_offline_mtd_day_gran_is_the_anchor_day_value(self):
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(connection, {"gran": "day"})
+
+        self.assertEqual(3.0, payload["value"])
+        self.assertEqual("2026-09-16", payload["as_of"])
+        self.assertEqual(2, len(connection.executed))
+        sum_sql, sum_params = connection.executed[1]
+        self.assertIn("business_date BETWEEN %s AND %s", sum_sql)
+        self.assertIn(_LINE_EXCLUSION, sum_sql)
+        self.assertEqual(0, sum_sql.replace("%%", "").replace("%s", "").count("%"))
+        self.assertEqual((date(2026, 9, 16), date(2026, 9, 16)), sum_params)
+
+    def test_run_kpi_offline_mtd_week_gran_starts_on_monday(self):
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(connection, {"gran": "week"})
+
+        self.assertEqual(3.0, payload["value"])
+        self.assertEqual("2026-09-16", payload["as_of"])
+        # 2026-09-16 是周三 → 周一 2026-09-14。
+        self.assertEqual(
+            (date(2026, 9, 14), date(2026, 9, 16)),
+            connection.executed[1][1],
+        )
+
+    def test_run_kpi_offline_mtd_month_gran_with_month_param(self):
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(
+            connection, {"gran": "month", "month": "2026-08"}
+        )
+
+        self.assertEqual(3.0, payload["value"])
+        # 历史月锚点 = 月末（min(月末, 水位)）。
+        self.assertEqual("2026-08-31", payload["as_of"])
+        self.assertEqual(
+            (date(2026, 8, 1), date(2026, 8, 31)),
+            connection.executed[1][1],
+        )
+
+    def test_run_kpi_offline_mtd_month_beyond_watermark_is_zero(self):
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(
+            connection, {"gran": "month", "month": "2026-10"}
+        )
+
+        # 窗口月整体在水位之后：该月无入仓，0 且不假装有截止日。
+        self.assertEqual(0.0, payload["value"])
+        self.assertIsNone(payload["as_of"])
+        # 只发定锚一条，窗口求和短路。
+        self.assertEqual(1, len(connection.executed))
+        self.assertIn("MAX(business_date)", connection.executed[0][0])
+
+    def test_run_kpi_offline_mtd_year_gran_is_ytd_to_the_watermark(self):
+        # A5 年档：年首锚点吃 MySQL 时钟（MAKEDATE），上界 = 绑定的
+        # 真实水位——与「年度目标达成」的 CURDATE 上界刻意分开。
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(connection, {"gran": "year"})
+
+        self.assertEqual(3.0, payload["value"])
+        self.assertEqual("2026-09-16", payload["as_of"])
+        self.assertEqual(2, len(connection.executed))
+        sum_sql, sum_params = connection.executed[1]
+        self.assertIn("MAKEDATE(YEAR(CURDATE()), 1)", sum_sql)
+        self.assertIn("business_date <= %s", sum_sql)
+        self.assertIn(_LINE_EXCLUSION, sum_sql)
+        self.assertEqual(0, sum_sql.replace("%%", "").replace("%s", "").count("%"))
+        self.assertEqual((date(2026, 9, 16),), sum_params)
+
+    def test_run_kpi_offline_mtd_year_gran_with_month_param_anchor(self):
+        # year + month：锚点 = min(窗口月末, 水位)——年累计截到该月末。
+        connection = self._offline_gran_connection()
+
+        payload = run_kpi_offline_mtd(
+            connection, {"gran": "year", "month": "2026-08"}
+        )
+
+        self.assertEqual(3.0, payload["value"])
+        self.assertEqual("2026-08-31", payload["as_of"])
+        self.assertEqual((date(2026, 8, 31),), connection.executed[1][1])
+
     def test_run_kpi_channel_mtd_payload(self):
-        connection = FakeConnection(
-            scalars={"fact_channel_daily_sales": Decimal("7")}
+        connection = _DodFakeConnection(
+            scalars={"fact_channel_daily_sales": Decimal("7")},
+            latest={"fact_channel_daily_sales": date(2026, 9, 15)},
         )
 
         payload = run_kpi_channel_mtd(connection, {})
 
-        self.assertEqual({"chart": "scalar", "value": 7.0, "unit": "元"}, payload)
+        # 2026-09-21：窗口截至真实水位（最新有数日），as_of 随载荷下发。
+        self.assertEqual(
+            {
+                "chart": "scalar",
+                "value": 7.0,
+                "as_of": "2026-09-15",
+                "unit": "元",
+            },
+            payload,
+        )
         self.assertIsInstance(payload["value"], float)
 
-    def test_run_kpi_annual_progress_combines_both_lines(self):
+    def test_run_kpi_channel_mtd_empty_table_payload(self):
+        connection = _DodFakeConnection(
+            latest={"fact_channel_daily_sales": None}
+        )
+
+        payload = run_kpi_channel_mtd(connection, {})
+
+        self.assertEqual(0.0, payload["value"])
+        self.assertIsNone(payload["as_of"])
+
+    def test_run_kpi_annual_progress_combines_all_lines(self):
+        # 2026-09-21 口径：全业务线年累计 ÷ 全业务线目标，lines 逐线
+        # 列出；餐饮线取人工月报（有数 → has_data=True）。
         connection = FakeConnection(
             scalars={
                 "fact_daily_report_offline": Decimal("1000"),
                 "fact_channel_daily_sales": Decimal("234"),
-                "dim_target": Decimal("760210000"),
-            }
+            },
+            rowsets={
+                "dim_target": [
+                    {"scope_key": "channel", "target": Decimal("500")},
+                    {"scope_key": "offline", "target": Decimal("300")},
+                    {"scope_key": "restaurant", "target": Decimal("200")},
+                ],
+                "fact_manual_report": [
+                    {"total": Decimal("66"), "rows_found": 3}
+                ],
+            },
         )
 
         payload = run_kpi_annual_progress(connection, {})
@@ -460,9 +1447,17 @@ class RunPayloadTests(unittest.TestCase):
         self.assertEqual(
             {
                 "chart": "scalar",
-                "value": 1234.0,
-                "target": 760210000.0,
-                "rate": 1234.0 / 760210000.0,
+                "value": 1300.0,
+                "target": 1000.0,
+                "rate": 1.3,
+                "lines": [
+                    {"name": "线下", "value": 1000.0, "target": 300.0,
+                     "has_data": True},
+                    {"name": "电商渠道", "value": 234.0, "target": 500.0,
+                     "has_data": True},
+                    {"name": "餐饮", "value": 66.0, "target": 200.0,
+                     "has_data": True},
+                ],
                 "unit": "元",
             },
             payload,
@@ -470,6 +1465,44 @@ class RunPayloadTests(unittest.TestCase):
         self.assertIsInstance(payload["value"], float)
         self.assertIsInstance(payload["target"], float)
         self.assertIsInstance(payload["rate"], float)
+
+    def test_run_kpi_annual_progress_missing_line_is_zero_and_flagged(self):
+        # 「找不到数据标红为 0」：餐饮月报空表 → 值 0、has_data=False；
+        # 目标里出现注册表没有的线（showroom）同样 0 标红，绝不只在
+        # 分母里加目标。
+        connection = FakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("1000"),
+                "fact_channel_daily_sales": Decimal("234"),
+            },
+            rowsets={
+                "dim_target": [
+                    {"scope_key": "channel", "target": Decimal("500")},
+                    {"scope_key": "offline", "target": Decimal("300")},
+                    {"scope_key": "restaurant", "target": Decimal("200")},
+                    {"scope_key": "showroom", "target": Decimal("100")},
+                ],
+                "fact_manual_report": [],
+            },
+        )
+
+        payload = run_kpi_annual_progress(connection, {})
+
+        self.assertEqual(1234.0, payload["value"])
+        self.assertEqual(1100.0, payload["target"])
+        self.assertEqual(
+            [
+                {"name": "线下", "value": 1000.0, "target": 300.0,
+                 "has_data": True},
+                {"name": "电商渠道", "value": 234.0, "target": 500.0,
+                 "has_data": True},
+                {"name": "餐饮", "value": 0.0, "target": 200.0,
+                 "has_data": False},
+                {"name": "showroom", "value": 0.0, "target": 100.0,
+                 "has_data": False},
+            ],
+            payload["lines"],
+        )
 
     def test_run_kpi_annual_progress_rate_is_none_when_target_is_zero(self):
         connection = FakeConnection(
@@ -487,25 +1520,33 @@ class RunPayloadTests(unittest.TestCase):
         self.assertEqual(1000.0, payload["value"])
 
     def test_run_trend_region_daily_payload(self):
+        # 夹具钉历史月（2026-08）：轴=完整 31 天，与运行日无关（三态改造
+        # 后轴不再由数据行反推，执行提示词 §4.2②③⑤）。
         rows = [
-            {"business_date": date(2026, 9, 1), "region": "杭州", "total": Decimal("10")},
-            {"business_date": date(2026, 9, 2), "region": "杭州", "total": Decimal("20")},
-            {"business_date": date(2026, 9, 2), "region": "绍兴", "total": Decimal("5")},
+            {"business_date": date(2026, 8, 1), "region": "杭州", "total": Decimal("10")},
+            {"business_date": date(2026, 8, 2), "region": "杭州", "total": Decimal("20")},
+            {"business_date": date(2026, 8, 2), "region": "绍兴", "total": Decimal("5")},
         ]
         connection = FakeConnection(rowsets={"fact_daily_report_offline": rows})
 
-        payload = run_trend_region_daily(connection, {})
+        payload = run_trend_region_daily(connection, {"month": "2026-08"})
 
+        self.assertEqual("line", payload["chart"])
+        self.assertIn("as_of", payload)
+        self.assertEqual(31, len(payload["dates"]))
+        self.assertEqual("08-01", payload["dates"][0])
+        self.assertEqual("08-31", payload["dates"][-1])
+        hangzhou, shaoxing = payload["series"]
+        self.assertEqual("杭州", hangzhou["name"])
+        self.assertEqual("绍兴", shaoxing["name"])
+        self.assertEqual([10.0, 20.0] + [None] * 29, hangzhou["data"])
+        # 绍兴 08-01：本系列无行但当日杭州有行 → 0.0+missing（该区域未
+        # 上报，不是零也不是断线）；08-03 起全日无任何行 → None+missing。
+        self.assertEqual([0.0, 5.0] + [None] * 29, shaoxing["data"])
         self.assertEqual(
-            {
-                "chart": "line",
-                "dates": ["09-01", "09-02"],
-                "series": [
-                    {"name": "杭州", "data": [10.0, 20.0]},
-                    {"name": "绍兴", "data": [0.0, 5.0]},
-                ],
-            },
-            payload,
+            [["ok", "ok"] + ["missing"] * 29,
+             ["missing", "ok"] + ["missing"] * 29],
+            payload["status"],
         )
 
     def test_run_bar_channel_mtd_payload(self):
@@ -527,6 +1568,62 @@ class RunPayloadTests(unittest.TestCase):
             payload,
         )
 
+    def test_run_pie_sku_mtd_payload(self):
+        rows = [
+            {"spec_no": "SKU-1", "goods_name": "冻干草莓", "total": Decimal("300")},
+            {"spec_no": "SKU-2", "goods_name": "黄桃罐头", "total": Decimal("100")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        self.assertEqual(
+            {
+                "chart": "pie",
+                "items": [
+                    {"name": "冻干草莓", "value": 300.0},
+                    {"name": "黄桃罐头", "value": 100.0},
+                ],
+                "unit": "元",
+            },
+            payload,
+        )
+
+    def test_run_pie_sku_mtd_merges_tail_into_others(self):
+        rows = [
+            {"spec_no": f"SKU-{index}", "goods_name": f"商品{index}",
+             "total": Decimal(1000 - index)}
+            for index in range(10)
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        # 头部 8 片单列，第 9、10 名合并「其他」且排在最后。
+        self.assertEqual(9, len(payload["items"]))
+        self.assertEqual(
+            [f"商品{index}" for index in range(8)] + ["其他"],
+            [item["name"] for item in payload["items"]],
+        )
+        self.assertEqual(
+            float(Decimal(1000 - 8) + Decimal(1000 - 9)),
+            payload["items"][-1]["value"],
+        )
+        self.assertTrue(
+            all(isinstance(item["value"], float) for item in payload["items"])
+        )
+
+    def test_run_pie_sku_mtd_without_tail_has_no_others_slice(self):
+        rows = [
+            {"spec_no": "SKU-1", "goods_name": "冻干草莓", "total": Decimal("300")},
+        ]
+        connection = FakeConnection(rowsets={"fact_order_line": rows})
+
+        payload = run_pie_sku_mtd(connection, {})
+
+        self.assertEqual(1, len(payload["items"]))
+        self.assertNotIn("其他", [item["name"] for item in payload["items"]])
+
 
 class ParameterizedSqlShapeTests(unittest.TestCase):
     """阶段 B 参数化查询共用断言：恰好一条语句 + 参数元组逐位相等。
@@ -536,9 +1633,17 @@ class ParameterizedSqlShapeTests(unittest.TestCase):
     ``%s`` 占位符数量必须与参数元组长度一致。
     """
 
-    def sole_parameterized_sql(self, connection, expected_params):
-        self.assertEqual(1, len(connection.executed))
-        sql, parameters = connection.executed[0]
+    def sole_parameterized_sql(self, connection, expected_params, *, table=None):
+        # 三态改造（执行提示词 §4.2）：趋势序列多了 dim_calendar 营业日
+        # 查询——传 table 时「恰好一条」收缩为该事实表语句，参数/%% 审计
+        # 口径不变；不传 table 保持原语义（全部语句恰好一条）。
+        statements = [
+            (sql, parameters)
+            for sql, parameters in connection.executed
+            if table is None or table in sql
+        ]
+        self.assertEqual(1, len(statements))
+        sql, parameters = statements[0]
         self.assertEqual(tuple(expected_params), parameters)
         self.assertEqual(0, sql.replace("%%", "").replace("%s", "").count("%"))
         self.assertEqual(sql.count("%s"), len(parameters))
@@ -566,6 +1671,7 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         self.assertIn("region = %s", sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
 
     def test_region_mtd_total_without_region_omits_region_filter(self):
         connection = FakeConnection(scalars={"fact_daily_report_offline": Decimal("1")})
@@ -580,6 +1686,7 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         self.assertNotIn("region = %s", sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
 
     def test_region_mtd_total_returns_zero_when_no_rows(self):
         connection = FakeConnection()
@@ -607,6 +1714,7 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         self.assertIn("MAX(monthly_target)", sql)
         self.assertIn("GROUP BY responsible_person", sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
         # 月目标是月级属性：与 summarize_people 同口径取全月行 MAX，
         # 刻意不做 CURDATE 截断（预填未来行不影响 MAX）。
         self.assertNotIn(_TRUNCATION, sql)
@@ -633,14 +1741,16 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         self.assertIn("ORDER BY total DESC", sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
         self.assertEqual(["零售一组", "未分组"], ranking["categories"])
         self.assertEqual([Decimal("30"), Decimal("10")], ranking["values"])
 
     def test_region_month_daily_series_sql_shape(self):
-        connection = FakeConnection(
+        connection = _DodFakeConnection(
             rowsets={"fact_daily_report_offline": [
                 {"business_date": date(2026, 9, 2), "region": "杭州", "total": Decimal("5")},
-            ]}
+            ]},
+            latest={"fact_daily_report_offline": date(2026, 9, 16)},
         )
 
         region_month_daily_series(
@@ -650,15 +1760,56 @@ class RegionParamTests(ParameterizedSqlShapeTests):
             last_day=date(2026, 9, 30),
         )
 
-        sql = self.sole_parameterized_sql(
-            connection, (date(2026, 9, 1), date(2026, 9, 30), "杭州")
+        # B2（水位批次）：窗口落在当前月时多一条静态 MAX 水位定锚
+        # （运行日越过 2026-09 则不发起）——滤掉定锚语句后，参数化
+        # 窗口语句仍唯一，口径断言不变。
+        window_statements = [
+            (sql, parameters)
+            for sql, parameters in connection.executed
+            if "fact_daily_report_offline" in sql
+            and "MAX(business_date)" not in sql
+        ]
+        self.assertEqual(1, len(window_statements))
+        sql, parameters = window_statements[0]
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 9, 30), "杭州"), parameters
         )
         self.assertIn("FROM fact_daily_report_offline", sql)
         self.assertIn("business_date BETWEEN %s AND %s", sql)
         self.assertIn("region = %s", sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
         self.assertIn("GROUP BY business_date, region", sql)
+
+
+class ShortfallRegionGrainTests(ParameterizedSqlShapeTests):
+    """region 汇总粒度（``grain="region"``）SQL 形状：``has_fact`` 列必须引用
+    右表真实存在的列 ``d.responsible_person``，而非 people 版别名 ``d.person``
+    （后者在 region 子查询中不存在，会导致 MySQL ``Unknown column`` 崩溃）。"""
+
+    def test_region_grain_sql_uses_real_join_column_for_has_fact(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": []}
+        )
+
+        shortfall_facts(
+            connection, grain="region",
+            first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+        )
+
+        sql = self.sole_parameterized_sql(
+            connection,
+            (date(2026, 9, 1), date(2026, 9, 30),
+             date(2026, 9, 1), date(2026, 9, 30)),
+        )
+        self.assertIn("FROM fact_daily_report_offline", sql)
+        self.assertIn("GROUP BY region, responsible_person", sql)
+        # 关键回归守门：has_fact 基于右表主键 responsible_person
+        self.assertIn(
+            "(MAX(d.responsible_person) IS NOT NULL) AS has_fact", sql
+        )
+        self.assertNotIn("d.person", sql)
 
 
 class MonthBoundsTests(unittest.TestCase):
@@ -727,28 +1878,32 @@ class RegionRunPayloadTests(unittest.TestCase):
         self.assertEqual(first_day, last_day.replace(day=1))
 
     def test_run_trend_region_daily_with_region_single_series(self):
+        # 三态完整轴（执行提示词 §4.2）：历史月 2026-08 钉死 31 天窗口。
         rows = [
-            {"business_date": date(2026, 9, 2), "region": "杭州", "total": Decimal("5")},
-            {"business_date": date(2026, 9, 3), "region": "杭州", "total": Decimal("6")},
+            {"business_date": date(2026, 8, 2), "region": "杭州", "total": Decimal("5")},
+            {"business_date": date(2026, 8, 3), "region": "杭州", "total": Decimal("6")},
         ]
         connection = FakeConnection(rowsets={"fact_daily_report_offline": rows})
 
         payload = run_trend_region_daily(
-            connection, {"region": "杭州", "month": "2026-09"}
+            connection, {"region": "杭州", "month": "2026-08"}
         )
 
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual(31, len(payload["dates"]))
+        self.assertEqual("08-01", payload["dates"][0])
+        self.assertEqual("08-31", payload["dates"][-1])
         self.assertEqual(
-            {
-                "chart": "line",
-                "dates": ["09-02", "09-03"],
-                "series": [{"name": "杭州", "data": [5.0, 6.0]}],
-            },
-            payload,
+            [{"name": "杭州", "data": [None, 5.0, 6.0] + [None] * 28}],
+            payload["series"],
+        )
+        self.assertEqual(
+            [["missing", "ok", "ok"] + ["missing"] * 28], payload["status"]
         )
         sql, parameters = connection.executed[0]
         self.assertIn("region = %s", sql)
         self.assertIn("GROUP BY business_date, region", sql)
-        self.assertEqual((date(2026, 9, 1), date(2026, 9, 30), "杭州"), parameters)
+        self.assertEqual((date(2026, 8, 1), date(2026, 8, 31), "杭州"), parameters)
 
     def test_run_trend_region_daily_month_without_region_two_series(self):
         rows = [
@@ -759,25 +1914,44 @@ class RegionRunPayloadTests(unittest.TestCase):
 
         payload = run_trend_region_daily(connection, {"month": "2026-08"})
 
-        self.assertEqual(["08-02"], payload["dates"])
+        self.assertEqual(31, len(payload["dates"]))
+        self.assertEqual("08-01", payload["dates"][0])
+        self.assertEqual("08-31", payload["dates"][-1])
         self.assertEqual(
             [
-                {"name": "杭州", "data": [5.0]},
-                {"name": "绍兴", "data": [3.0]},
+                {"name": "杭州", "data": [None, 5.0] + [None] * 29},
+                {"name": "绍兴", "data": [None, 3.0] + [None] * 29},
             ],
             payload["series"],
+        )
+        self.assertEqual(
+            [["missing", "ok"] + ["missing"] * 29] * 2, payload["status"]
         )
         sql, parameters = connection.executed[0]
         self.assertNotIn("region = %s", sql)
         self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)), parameters)
 
     def test_run_trend_region_daily_without_params_keeps_static_l1_path(self):
-        connection = FakeConnection(rowsets={"fact_daily_report_offline": []})
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": []},
+            latest={"fact_daily_report_offline": date.today()},
+        )
 
         run_trend_region_daily(connection, {})
 
-        self.assertEqual(1, len(connection.executed))
-        sql, parameters = connection.executed[0]
+        # B2（水位批次）：当前月锚点=真实水位，事实表语句两条（静态
+        # MAX 定锚 + 静态窗口序列），外加 dim_calendar 营业日查询；
+        # 参数化语句一条都没有（StaticSqlTests 同款口径）。
+        fact_statements = [
+            (sql, parameters)
+            for sql, parameters in connection.executed
+            if "fact_daily_report_offline" in sql
+        ]
+        self.assertEqual(2, len(fact_statements))
+        latest_sql, latest_params = fact_statements[0]
+        self.assertIsNone(latest_params)
+        self.assertIn("MAX(business_date)", latest_sql)
+        sql, parameters = fact_statements[1]
         self.assertIsNone(parameters)
         self.assertIn(_MONTH_START, sql)
 
@@ -801,22 +1975,6 @@ class RegionRunPayloadTests(unittest.TestCase):
         sql, parameters = connection.executed[0]
         self.assertIn("GROUP BY department", sql)
         self.assertEqual((date(2026, 8, 1), date(2026, 8, 31), "杭州"), parameters)
-
-
-class _DodFakeConnection(FakeConnection):
-    """DoD 卡两条 SQL 读同一张表：按 SQL 内容分流。
-
-    MAX(business_date) 定锚查询走 scalars（None=空表，返回 None 行），
-    窗口 GROUP BY 查询照常走 rowsets。
-    """
-
-    def scripted_fetchone(self, sql):
-        if "MAX(business_date)" in sql:
-            value = self._scalars.get(self._table_of(sql))
-            if value is None:
-                return None
-            return {"d": value}
-        return super().scripted_fetchone(sql)
 
 
 class DodShapeTests(unittest.TestCase):
@@ -844,9 +2002,11 @@ class DodShapeTests(unittest.TestCase):
         self.assertIn("FROM fact_daily_report_offline", latest_sql)
         self.assertIn(_TRUNCATION, latest_sql)
         self.assertIn(_SUMMARY_EXCLUSION, latest_sql)
+        self.assertIn(_LINE_EXCLUSION, latest_sql)
         self.assertIn("FROM fact_daily_report_offline", window_sql)
         self.assertIn("BETWEEN %s AND %s", window_sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, window_sql)
+        self.assertIn(_LINE_EXCLUSION, window_sql)
         self.assertIn("GROUP BY business_date", window_sql)
 
     def test_channel_dod_sql_shape(self):
@@ -1012,7 +2172,8 @@ class ChannelMonthParamTests(ParameterizedSqlShapeTests):
         )
 
         sql = self.sole_parameterized_sql(
-            connection, (date(2026, 9, 1), date(2026, 9, 30))
+            connection, (date(2026, 9, 1), date(2026, 9, 30)),
+            table="fact_channel_daily_sales",
         )
         self.assertIn("GROUP BY business_date, channel", sql)
         self.assertIn(_TRUNCATION, sql)
@@ -1072,28 +2233,36 @@ class ChannelRunPayloadTests(unittest.TestCase):
     """l2-channel 四卡载荷：trend / bar(month) / 渠道对比表 / 店铺排行表。"""
 
     def test_run_trend_channel_daily_payload(self):
+        # 三态完整轴（_align_series_rows 三处共用，执行提示词 §4.2②）：
+        # 历史月 2026-08 钉死 31 天窗口，缺失日 None+missing。
         rows = [
-            {"business_date": date(2026, 9, 2), "channel": "天猫", "total": Decimal("5")},
-            {"business_date": date(2026, 9, 2), "channel": "京东", "total": Decimal("3")},
-            {"business_date": date(2026, 9, 3), "channel": "天猫", "total": Decimal("7")},
+            {"business_date": date(2026, 8, 2), "channel": "天猫", "total": Decimal("5")},
+            {"business_date": date(2026, 8, 2), "channel": "京东", "total": Decimal("3")},
+            {"business_date": date(2026, 8, 3), "channel": "天猫", "total": Decimal("7")},
         ]
         connection = FakeConnection(rowsets={"fact_channel_daily_sales": rows})
 
-        payload = run_trend_channel_daily(connection, {"month": "2026-09"})
+        payload = run_trend_channel_daily(connection, {"month": "2026-08"})
 
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual(31, len(payload["dates"]))
+        self.assertEqual("08-01", payload["dates"][0])
+        self.assertEqual("08-31", payload["dates"][-1])
         self.assertEqual(
-            {
-                "chart": "line",
-                "dates": ["09-02", "09-03"],
-                "series": [
-                    {"name": "京东", "data": [3.0, 0.0]},
-                    {"name": "天猫", "data": [5.0, 7.0]},
-                ],
-            },
-            payload,
+            [
+                # 京东 08-03：本系列无行但当日天猫有行 → 0.0+missing。
+                {"name": "京东", "data": [None, 3.0, 0.0] + [None] * 28},
+                {"name": "天猫", "data": [None, 5.0, 7.0] + [None] * 28},
+            ],
+            payload["series"],
+        )
+        self.assertEqual(
+            [["missing", "ok", "missing"] + ["missing"] * 28,
+             ["missing", "ok", "ok"] + ["missing"] * 28],
+            payload["status"],
         )
         sql, parameters = connection.executed[0]
-        self.assertEqual((date(2026, 9, 1), date(2026, 9, 30)), parameters)
+        self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)), parameters)
 
     def test_run_bar_channel_mtd_with_month_uses_parameterized_path(self):
         rows = [{"channel": "天猫", "total": Decimal("300")}]
@@ -1487,6 +2656,622 @@ class PeopleRunTests(unittest.TestCase):
         self.assertEqual([], conn_b.executed)
 
 
+class ManualReportSqlShapeTests(unittest.TestCase):
+    """人工报表窄行查询的形态钉死（消费契约 §2.2 的三处关键差异）。
+
+    该查询绑定 dataset/period_start 两个参数（%s 占位、值绝不拼进 SQL），
+    形态不符「全静态」，故不进 ``StaticSqlTests._QUERY_FUNCTIONS`` —— 这里
+    以同等强度钉它的带参形态。
+    """
+
+    def test_manual_report_rows_binds_dataset_and_period_start(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        manual_report_rows(
+            connection, dataset="ecommerce_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIn("FROM fact_manual_report", sql)
+        self.assertIn("dataset = %s", sql)
+        self.assertIn("period_start = %s", sql)
+        self.assertEqual(("ecommerce_monthly", date(2026, 8, 1)), parameters)
+
+    def test_manual_report_sql_has_no_truncation_summary_or_case_when(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        manual_report_rows(
+            connection, dataset="restaurant_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        sql, _ = connection.executed[0]
+        # 无未来预填行 → 不做 CURDATE 截断（历史月要看全月数）。
+        self.assertNotIn("CURDATE()", sql)
+        # 总计行不入库 → 不做「合计」过滤（与线下日报表的关键差异）。
+        self.assertNotIn("合计", sql)
+        # metric 不写死 → 无 CASE WHEN 列展开（模板加列不改 SQL）。
+        self.assertNotIn("CASE", sql.upper())
+
+
+class ManualReportRowsTests(unittest.TestCase):
+    """只读事实层：窄行原样取回，Decimal 不透改、NULL 不补 0。"""
+
+    def test_rows_are_returned_as_is(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("100.5"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "expense", "value": None, "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        result = manual_report_rows(
+            connection, dataset="ecommerce_monthly",
+            period_start=date(2026, 8, 1),
+        )
+
+        self.assertEqual(rows, result)
+        self.assertIsInstance(result[0]["value"], Decimal)  # 低层保持 Decimal
+        self.assertIsNone(result[1]["value"])  # 选填未填 = None，绝不补 0
+
+
+class PivotManualRowsTests(unittest.TestCase):
+    """窄行→宽行：dim_scope 过滤、缺失指标=键不存在、直接取值不 SUM。"""
+
+    def test_pivot_groups_metrics_by_dimension_value(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("100"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "gross_profit", "value": Decimal("30"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "京东",
+             "metric": "revenue", "value": Decimal("50"), "unit": "元"},
+        ]
+
+        wide = pivot_manual_rows(rows, dim_scope="channel")
+
+        self.assertEqual(
+            [
+                {"name": "天猫", "revenue": Decimal("100"),
+                 "gross_profit": Decimal("30")},
+                {"name": "京东", "revenue": Decimal("50")},
+            ],
+            wide,
+        )
+        # 缺失指标 = 键不存在（消费方按 None 处理），不是 0。
+        self.assertNotIn("gross_profit", wide[1])
+
+    def test_pivot_drops_other_dim_scopes_and_keeps_null_values(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "天猫",
+             "metric": "revenue", "value": Decimal("999"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": "expense", "value": None, "unit": "元"},
+        ]
+
+        wide = pivot_manual_rows(rows, dim_scope="channel")
+
+        self.assertEqual([{"name": "天猫", "expense": None}], wide)
+
+    def test_pivot_skips_rows_without_name_or_metric(self):
+        rows = [
+            {"dim_scope": "channel", "dimension_value": None,
+             "metric": "revenue", "value": Decimal("1"), "unit": "元"},
+            {"dim_scope": "channel", "dimension_value": "天猫",
+             "metric": None, "value": Decimal("1"), "unit": "元"},
+        ]
+
+        self.assertEqual([], pivot_manual_rows(rows, dim_scope="channel"))
+
+
+class RunTableManualMonthlyTests(unittest.TestCase):
+    """④⑤ 两张人工月报表卡：载荷形状、float 边界、派生列与空值护栏。"""
+
+    _ROWS = (
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "revenue", "value": Decimal("200"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "gross_profit", "value": Decimal("60"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "天猫",
+         "metric": "expense", "value": None, "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "京东",
+         "metric": "revenue", "value": Decimal("100"), "unit": "元"},
+        {"dim_scope": "channel", "dimension_value": "京东",
+         "metric": "gross_profit", "value": Decimal("-25"), "unit": "元"},
+    )
+
+    def test_ecommerce_payload_shape_and_margin(self):
+        connection = FakeConnection(
+            rowsets={"fact_manual_report": [dict(row) for row in self._ROWS]}
+        )
+
+        payload = run_table_manual_ecommerce_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual("2026-08", payload["month"])
+        self.assertEqual("ecommerce_monthly", payload["dataset"])
+        self.assertEqual(
+            ["name", "revenue", "gross_profit", "expense", "margin"],
+            [column["key"] for column in payload["columns"]],
+        )
+        self.assertEqual("渠道", payload["columns"][0]["title"])
+        self.assertEqual(
+            "percent",
+            [c for c in payload["columns"] if c["key"] == "margin"][0]["format"],
+        )
+        rows = {row["name"]: row for row in payload["rows"]}
+        tmall = rows["天猫"]
+        self.assertEqual(200.0, tmall["revenue"])
+        self.assertIsInstance(tmall["revenue"], float)  # run_* 边界转 float
+        self.assertIsNone(tmall["expense"])  # NULL → None（前端「—」），不补 0
+        self.assertAlmostEqual(0.3, tmall["margin"], delta=1e-9)
+        jingdong = rows["京东"]
+        self.assertIsNone(jingdong["expense"])  # 缺失指标按 None 处理
+        self.assertAlmostEqual(-0.25, jingdong["margin"], delta=1e-9)  # 负值照实
+
+    def test_period_start_is_the_month_first_day(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        run_table_manual_restaurant_monthly(connection, {"month": "2026-08"})
+
+        _sql, parameters = connection.executed[0]
+        self.assertEqual(("restaurant_monthly", date(2026, 8, 1)), parameters)
+
+    def test_margin_column_absent_without_revenue_and_gross_profit(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb门店甲",
+             "metric": "expense", "value": Decimal("10"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_restaurant_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual("restaurant_monthly", payload["dataset"])
+        self.assertEqual(
+            ["name", "expense"],
+            [column["key"] for column in payload["columns"]],
+        )
+        self.assertEqual("门店", payload["columns"][0]["title"])
+        self.assertEqual(
+            [{"name": "biweb门店甲", "expense": 10.0}], payload["rows"]
+        )
+
+    def test_unknown_metric_falls_back_to_key_as_title(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb门店甲",
+             "metric": "tax", "value": Decimal("3"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_restaurant_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        # 模板新增指标：列自动出现、键名兜底作标题，代码零改动。
+        self.assertEqual(
+            {"key": "tax", "title": "tax", "format": "wan"},
+            payload["columns"][1],
+        )
+
+    def test_empty_month_yields_only_the_dimension_column(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        payload = run_table_manual_ecommerce_monthly(
+            connection, {"month": "2026-08"}
+        )
+
+        self.assertEqual([{"key": "name", "title": "渠道"}], payload["columns"])
+        self.assertEqual([], payload["rows"])
+
+
+class RunTableManualShowroomMonthlyTests(unittest.TestCase):
+    """⑪ 体验馆月报卡：克隆 ④⑤ 模式，dataset 固化 + 维度标题「体验馆」。"""
+
+    def test_binds_showroom_dataset_and_month_first_day(self):
+        connection = FakeConnection(rowsets={"fact_manual_report": []})
+
+        payload = run_table_manual_showroom_monthly(connection, {"month": "2026-08"})
+
+        _sql, parameters = connection.executed[0]
+        self.assertEqual(("showroom_monthly", date(2026, 8, 1)), parameters)
+        self.assertEqual("showroom_monthly", payload["dataset"])
+        self.assertEqual("2026-08", payload["month"])
+        self.assertEqual([{"key": "name", "title": "体验馆"}], payload["columns"])
+        self.assertEqual([], payload["rows"])  # 未首填自然挂零
+
+    def test_payload_uses_store_scope_with_hall_label(self):
+        rows = [
+            {"dim_scope": "store", "dimension_value": "biweb万科馆",
+             "metric": "revenue", "value": Decimal("80"), "unit": "元"},
+            {"dim_scope": "store", "dimension_value": "biweb万科馆",
+             "metric": "gross_profit", "value": Decimal("20"), "unit": "元"},
+        ]
+        connection = FakeConnection(rowsets={"fact_manual_report": rows})
+
+        payload = run_table_manual_showroom_monthly(connection, {"month": "2026-08"})
+
+        self.assertEqual("体验馆", payload["columns"][0]["title"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(
+            [{"name": "biweb万科馆", "revenue": 80.0, "gross_profit": 20.0,
+              "margin": 0.25}],
+            payload["rows"],
+        )
+
+
+class FinSqlShapeTests(unittest.TestCase):
+    """资金安全五卡 SQL 形态钉死（fund-safety-draft §3.1–3.5）。
+
+    全部只读 mart ``fact_fin_*``、全静态（本批无 URL 参数）；快照表整表
+    替换、无未来预填行，故**不做 CURDATE 截断**；>60 天桶/挂账天数是
+    后端差额推导，SQL 里不得出现 CASE/日期差派生。
+    """
+
+    def _sole_static_sql(self, connection, run):
+        run(connection, {})
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIsNone(parameters)
+        self.assertNotIn("CURDATE()", sql)
+        return sql
+
+    def test_kpi_overdue_sql_shape(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("1"), "balance": Decimal("2")}
+            ]}
+        )
+
+        sql = self._sole_static_sql(connection, run_kpi_fin_receivables_overdue)
+
+        self.assertIn("FROM fact_fin_receivables_aging", sql)
+        self.assertIn("SUM(overdue_amount)", sql)
+        self.assertIn("SUM(ending_balance)", sql)
+
+    def test_aging_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_fin_receivables_aging": []})
+
+        sql = self._sole_static_sql(connection, run_table_fin_receivables_aging)
+
+        self.assertIn("FROM fact_fin_receivables_aging", sql)
+        self.assertIn("aging_0_30", sql)
+        self.assertIn("aging_31_60", sql)
+        self.assertIn("updated_date", sql)  # 编制日期原样透传
+        self.assertIn("ORDER BY overdue_amount DESC", sql)
+        # >60 天桶是后端差额推导（draft §2.3 缺口），SQL 不得派生。
+        self.assertNotIn("CASE", sql.upper())
+
+    def test_prepayment_sql_shape(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_prepayment_invoice": []}
+        )
+
+        sql = self._sole_static_sql(
+            connection, run_table_fin_prepayment_uninvoiced
+        )
+
+        self.assertIn("FROM fact_fin_prepayment_invoice", sql)
+        self.assertIn("statement_date", sql)
+        self.assertIn("ORDER BY uninvoiced_amount DESC", sql)
+
+    def test_deposit_sql_shape_unions_offline_and_platform(self):
+        connection = FakeConnection(rowsets={"fact_fin_offline_deposit": []})
+
+        sql = self._sole_static_sql(connection, run_table_fin_deposit_status)
+
+        self.assertIn("FROM fact_fin_offline_deposit", sql)
+        self.assertIn("UNION ALL", sql)
+        self.assertIn("FROM fact_fin_platform_deposit", sql)
+        self.assertIn("'线下'", sql)
+        self.assertIn("'平台'", sql)
+        self.assertIn("ORDER BY deposit_balance DESC", sql)
+
+    def test_store_funds_sql_shape(self):
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": []})
+
+        sql = self._sole_static_sql(connection, run_trend_fin_store_funds)
+
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("ORDER BY month, store_name", sql)
+
+
+class FinEntityTrendTests(unittest.TestCase):
+    """⑩ 店铺资金余额趋势的主体参数化卡（2026-09-17 P1 下推 + P2 参数化）。
+
+    形态钉死：entity 非空 → WHERE company_entity = %s 绑定（值绝不拼进
+    SQL）；entity 空 → 不带 WHERE 的全主体聚合（绝不传恒真通配值）。
+    载荷钉死：渠道名清洗（钉钉 dict 字面量）+ 缺月零填充。
+    """
+
+    def test_entity_path_binds_company_entity(self):
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": []})
+
+        run_trend_fin_store_funds_entity(connection, {"entity": "biweb主体A"})
+
+        self.assertEqual(1, len(connection.executed))
+        sql, parameters = connection.executed[0]
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("WHERE company_entity = %s", sql)
+        self.assertIn("GROUP BY month, channel", sql)
+        self.assertIn("SUM(balance)", sql)
+        self.assertEqual(("biweb主体A",), parameters)
+        self.assertNotIn("biweb主体A", sql)  # 值绝不拼进 SQL 文本
+
+    def test_blank_entity_uses_the_where_free_aggregate(self):
+        for params in ({}, {"entity": ""}, {"entity": "   "}):
+            with self.subTest(params=params):
+                connection = FakeConnection(
+                    rowsets={"fact_fin_store_funds": []}
+                )
+
+                run_trend_fin_store_funds_entity(connection, params)
+
+                self.assertEqual(1, len(connection.executed))
+                sql, parameters = connection.executed[0]
+                self.assertIn("FROM fact_fin_store_funds", sql)
+                self.assertNotIn("WHERE", sql)  # 空语义走另一条 SQL
+                self.assertIsNone(parameters)  # 绝不传 ("%",) 之类
+
+    def test_payload_cleans_channel_labels_and_zero_fills(self):
+        rows = [
+            {"month": "2026-01",
+             "channel": "{'name': '拼多多', 'id': 'x'}",
+             "balance": Decimal("10")},
+            {"month": "2026-02",
+             "channel": "{'name': '拼多多', 'id': 'x'}",
+             "balance": Decimal("30")},
+            {"month": "2026-02", "channel": "京东", "balance": Decimal("20")},
+        ]
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": rows})
+
+        payload = run_trend_fin_store_funds_entity(
+            connection, {"entity": "biweb主体A"}
+        )
+
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(["2026-01", "2026-02"], payload["dates"])
+        series = {entry["name"]: entry["data"] for entry in payload["series"]}
+        self.assertEqual({"拼多多": [10.0, 30.0], "京东": [0.0, 20.0]}, series)
+
+    def test_entity_options_sql_shape_and_values(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_store_funds": [
+                {"company_entity": "biweb主体A"}, {"company_entity": None},
+            ]}
+        )
+
+        options = entity_options(connection)
+
+        self.assertEqual(["biweb主体A"], options)
+        sql, parameters = connection.executed[0]
+        self.assertIn("SELECT DISTINCT company_entity", sql)
+        self.assertIn("FROM fact_fin_store_funds", sql)
+        self.assertIn("ORDER BY company_entity", sql)
+        self.assertIsNone(parameters)
+
+
+class FinRunPayloadTests(unittest.TestCase):
+    """资金安全五卡载荷：派生列（>60 桶/挂账天数/severity）与空值护栏。"""
+
+    def test_kpi_overdue_payload_and_divide_by_zero_guard(self):
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("300"), "balance": Decimal("1000")}
+            ]}
+        )
+
+        payload = run_kpi_fin_receivables_overdue(connection, {})
+
+        self.assertEqual("scalar", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(300.0, payload["value"])
+        self.assertEqual(1000.0, payload["target"])
+        self.assertAlmostEqual(0.3, payload["rate"], delta=1e-9)
+
+        zero = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": [
+                {"overdue": Decimal("0"), "balance": Decimal("0")}
+            ]}
+        )
+        # 除零护栏：balance 为 0 → rate None（前端「—」），绝不 ±∞。
+        self.assertIsNone(run_kpi_fin_receivables_overdue(zero, {})["rate"])
+
+    def test_aging_payload_derives_over_60_and_severity(self):
+        rows = [
+            {"counterparty_name": "biweb甲公司", "receivable_category": "货款",
+             "company_entity": "biweb主体A", "ending_balance": Decimal("1000"),
+             "overdue_amount": Decimal("0"), "aging_0_30": Decimal("300"),
+             "aging_31_60": Decimal("200"), "updated_date": date(2026, 9, 15)},
+            {"counterparty_name": "biweb乙公司", "receivable_category": "货款",
+             "company_entity": "biweb主体A", "ending_balance": Decimal("800"),
+             "overdue_amount": Decimal("10"), "aging_0_30": None,
+             "aging_31_60": Decimal("100"), "updated_date": None},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_receivables_aging": rows}
+        )
+
+        payload = run_table_fin_receivables_aging(connection, {})
+
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(("p0", "p1", "p2", "ok"),
+                         tuple(payload["severity_domain"]))
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertIn("aging_over_60", keys)
+        self.assertEqual(
+            "severity",
+            [c for c in payload["columns"] if c["key"] == "severity"][0]["format"],
+        )
+        first, second = payload["rows"]
+        self.assertEqual(500.0, first["aging_over_60"])  # 1000−300−200 差额推导
+        self.assertIsInstance(first["ending_balance"], float)  # run_* 边界转 float
+        self.assertEqual("p1", first["severity"])
+        self.assertEqual("2026-09-15", first["updated_date"])  # 透传为 ISO 字符串
+        self.assertIsNone(second["aging_over_60"])  # 分量缺失 → None，不补 0
+        self.assertEqual("p2", second["severity"])  # 不可算 → p2
+        self.assertIsNone(second["updated_date"])
+
+    def test_prepayment_payload_derives_days_and_severity(self):
+        today = datetime.now().date()
+        rows = [
+            {"supplier_name": "biweb供应商甲", "company_entity": "biweb主体A",
+             "prepayment_ledger_amount": Decimal("500"),
+             "ap_estimated_amount": Decimal("400"),
+             "ledger_reconciliation_status": "相符",
+             "uninvoiced_amount": Decimal("100"),
+             "statement_date": today - timedelta(days=61)},
+            {"supplier_name": "biweb供应商乙", "company_entity": "biweb主体A",
+             "prepayment_ledger_amount": Decimal("300"),
+             "ap_estimated_amount": None,
+             "ledger_reconciliation_status": "待核",
+             "uninvoiced_amount": Decimal("50"),
+             "statement_date": None},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_prepayment_invoice": rows}
+        )
+
+        payload = run_table_fin_prepayment_uninvoiced(connection, {})
+
+        first, second = payload["rows"]
+        self.assertEqual(61, first["days_outstanding"])  # 挂账 61 天 > 60
+        self.assertEqual("p1", first["severity"])
+        self.assertEqual(
+            (today - timedelta(days=61)).isoformat(), first["statement_date"]
+        )
+        self.assertIsNone(second["days_outstanding"])  # 对账日不可解析，不猜日期
+        self.assertIsNone(second["statement_date"])
+        self.assertEqual("p2", second["severity"])  # 不可算 → p2
+        self.assertEqual("待核", second["reconciliation"])  # 账账核对原文透传
+
+    def test_deposit_payload_passthrough_status_and_severity(self):
+        rows = [
+            {"company_entity": "biweb主体A", "counterparty": "biweb供应商甲",
+             "project_name": "biweb项目X", "status": "正常合作",
+             "deposit_balance": Decimal("200"),
+             "updated_at": datetime(2026, 9, 1, 12, 0), "source": "线下"},
+            {"company_entity": "biweb主体B", "counterparty": "biweb店铺乙",
+             "project_name": "biweb项目Y", "status": "已终止",
+             "deposit_balance": Decimal("300"),
+             "updated_at": None, "source": "平台"},
+        ]
+        connection = FakeConnection(
+            rowsets={"fact_fin_offline_deposit": rows}
+        )
+
+        payload = run_table_fin_deposit_status(connection, {})
+
+        first, second = payload["rows"]
+        self.assertEqual("正常合作", first["status"])  # 状态枚举不固化，原文透传
+        self.assertEqual("ok", first["severity"])
+        self.assertEqual("线下", first["source"])
+        self.assertEqual("2026-09-01T12:00:00", first["updated_at"])
+        self.assertEqual("已终止", second["status"])
+        self.assertEqual("p2", second["severity"])  # 非正常状态 → p2 关注
+        self.assertEqual("平台", second["source"])
+        self.assertIsNone(second["updated_at"])  # 平台侧无更新时间列 → None
+
+    def test_store_funds_trend_zero_fills_missing_months(self):
+        rows = [
+            {"month": "2026-02", "store_name": "biweb店A", "channel": "天猫",
+             "balance": Decimal("10")},
+            {"month": "2026-01", "store_name": "biweb店B", "channel": "京东",
+             "balance": Decimal("20")},
+            {"month": "2026-02", "store_name": "biweb店B", "channel": "京东",
+             "balance": Decimal("30")},
+        ]
+        connection = FakeConnection(rowsets={"fact_fin_store_funds": rows})
+
+        payload = run_trend_fin_store_funds(connection, {})
+
+        self.assertEqual("line", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertEqual(["2026-01", "2026-02"], payload["dates"])  # 月升序轴
+        series = {entry["name"]: entry["data"] for entry in payload["series"]}
+        self.assertEqual([0.0, 10.0], series["biweb店A"])  # 缺月零填充
+        self.assertEqual([20.0, 30.0], series["biweb店B"])
+
+    def test_empty_tables_yield_empty_payloads(self):
+        connection = FakeConnection()
+
+        aging = run_table_fin_receivables_aging(connection, {})
+        trend = run_trend_fin_store_funds(connection, {})
+
+        self.assertEqual([], aging["rows"])
+        self.assertEqual([], trend["dates"])
+        self.assertEqual([], trend["series"])
+
+
+class PlaceholderCardTests(unittest.TestCase):
+    """五张 0 占位结构卡（待接入页）：不查库、rows 空、has_fact=false。
+
+    契约逐字遵守：``{"chart": "table", "columns": [...], "rows": [],
+    "has_fact": false, "unit": "元"}``；run 函数直接返回静态结构，
+    ``connection`` 绝不被触碰（``executed`` 必须为空）。
+    """
+
+    #: card run 函数 → 钉死的列结构（key, format|None 有序对）。
+    _PLACEHOLDER_CARDS = (
+        (run_table_inventory_aging, (
+            ("sku", None), ("warehouse", None), ("qty", "number"),
+            ("amount", "wan"), ("aging_0_90", "wan"), ("aging_91_180", "wan"),
+            ("aging_181_365", "wan"), ("aging_over_365", "wan"),
+            ("severity", "severity"),
+        )),
+        (run_table_warehouse_ops, (
+            ("order_no", None), ("channel", None), ("item", None),
+            ("reason", None), ("hours", "number"), ("sla_band", None),
+            ("severity", "severity"),
+        )),
+        (run_table_quarter_budget_actual, (
+            ("board", None), ("revenue_budget", "wan"),
+            ("revenue_actual", "wan"), ("revenue_rate", "percent"),
+            ("profit_budget", "wan"), ("profit_actual", "wan"),
+            ("profit_rate", "percent"), ("expense_budget", "wan"),
+            ("expense_actual", "wan"), ("expense_rate", "percent"),
+        )),
+        (run_table_yoy_monthly, (
+            ("board", None), ("brand", None), ("current", "wan"),
+            ("previous", "wan"), ("diff", "wan"), ("yoy", "pct"),
+            ("cum_yoy", "pct"), ("severity", "severity"),
+        )),
+        (run_table_contract_writeoff, (
+            ("brand", None), ("channel", None), ("total", "wan"),
+            ("done", "wan"), ("pending", "wan"), ("overdue", "wan"),
+            ("rate", "percent"), ("severity", "severity"),
+        )),
+    )
+
+    def test_payload_contract_and_no_sql(self):
+        for run, expected_columns in self._PLACEHOLDER_CARDS:
+            with self.subTest(card=run.__name__):
+                connection = FakeConnection()
+
+                payload = run(connection, {})
+
+                # 0 占位卡不得执行任何 SQL。
+                self.assertEqual([], connection.executed)
+                self.assertEqual("table", payload["chart"])
+                self.assertEqual([], payload["rows"])
+                self.assertIs(False, payload["has_fact"])  # 挂零语义，非 falsy 巧合
+                self.assertEqual("元", payload["unit"])
+                self.assertEqual(
+                    list(expected_columns),
+                    [(column["key"], column.get("format"))
+                     for column in payload["columns"]],
+                )
+
+
 # ---------------------------------------------------------------------------
 # Integration layer: the real Docker Compose MySQL, via the difference method
 # ---------------------------------------------------------------------------
@@ -1523,6 +3308,21 @@ _CHANNEL_CLEANUP_SQL = (
     "DELETE FROM `fact_channel_daily_sales` "
     "WHERE `source_record_id` LIKE 'biweb-test:%' "
     "OR `channel` = 'biweb测试渠道'"
+)
+
+_ORDER_LINE_INSERT_SQL = (
+    "INSERT INTO `fact_order_line` "
+    "(`trade_no`, `line_no`, `trade_time`, `trade_status`, `spec_no`, "
+    "`goods_name`, `brand_name`, `quantity`, `paid_amount`, "
+    "`platform_subsidy`, `shop_subsidy`, `raw_json`, `synced_at`, "
+    "`sync_run_id`) "
+    "VALUES (%s, 1, %s, '110', %s, %s, 'biweb测试品牌', 1, %s, 0, 0, "
+    "'{}', NOW(6), %s)"
+)
+
+_ORDER_LINE_CLEANUP_SQL = (
+    "DELETE FROM `fact_order_line` "
+    "WHERE `trade_no` LIKE 'biweb-test:%' OR `brand_name` = 'biweb测试品牌'"
 )
 
 
@@ -1565,6 +3365,7 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
             with self.mart_connection.cursor() as cursor:
                 cursor.execute(_OFFLINE_CLEANUP_SQL)
                 cursor.execute(_CHANNEL_CLEANUP_SQL)
+                cursor.execute(_ORDER_LINE_CLEANUP_SQL)
         # dim_target always ends up mirroring the version-controlled seed.
         replace_dim_target(
             self.mart_connection, load_target_seed(REPO_SEED_PATH)
@@ -1661,6 +3462,31 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
                     ],
                 )
 
+    def _insert_order_line_rows(self, rows):
+        """rows: (suffix, spec_no, goods_name, trade_time, paid_amount)。"""
+        with transaction(self.mart_connection):
+            with self.mart_connection.cursor() as cursor:
+                cursor.executemany(
+                    _ORDER_LINE_INSERT_SQL,
+                    [
+                        (
+                            _FIXTURE_PREFIX + suffix,
+                            trade_time,
+                            spec_no,
+                            goods_name,
+                            paid_amount,
+                            _SYNC_RUN_ID,
+                        )
+                        for (
+                            suffix,
+                            spec_no,
+                            goods_name,
+                            trade_time,
+                            paid_amount,
+                        ) in rows
+                    ],
+                )
+
     def _current_month_bounds(self):
         """服务器时钟的当前月 → (month 串, (月首, 月末))。"""
         month = self._server_month_start().strftime("%Y-%m")
@@ -1690,13 +3516,15 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
 
     # -- tests ----------------------------------------------------------------
 
-    def test_annual_target_total_matches_repo_seed_two_line_sum(self):
+    def test_annual_target_total_matches_repo_seed_all_line_sum(self):
+        # 2026-09-21 起分母 = 全业务线：210,410,000 + 549,800,000
+        # + 9,300,000 = 769,510,000（餐饮线目标计入，分子侧 0 标红）。
         replace_dim_target(
             self.mart_connection, load_target_seed(REPO_SEED_PATH)
         )
 
         self.assertEqual(
-            Decimal("760210000"), annual_target_total(self.mart_connection)
+            Decimal("769510000"), annual_target_total(self.mart_connection)
         )
 
     def test_channel_mtd_ranking_and_bar_payload(self):
@@ -1736,6 +3564,64 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
         self.assertEqual(
             payload["values"], sorted(payload["values"], reverse=True)
         )
+
+    def test_sku_mtd_distribution_and_pie_payload(self):
+        """DATETIME 截断口径：今日计入、明日与上月排除（差值法）。"""
+        today = self._server_today()
+        tomorrow = today + timedelta(days=1)
+        last_month = self._server_month_start() - timedelta(days=1)
+        noon = datetime.combine(today, datetime.min.time()).replace(hour=12)
+        before = {
+            item["name"]: item["value"]
+            for item in sku_mtd_distribution(self.mart_connection)
+        }
+        prior = before.get("biweb测试商品", Decimal("0"))
+
+        self._insert_order_line_rows(
+            [
+                ("sku-a", "biweb-spec-a", "biweb测试商品", noon, Decimal("100")),
+                ("sku-b", "biweb-spec-a", "biweb测试商品", noon, Decimal("23")),
+                (
+                    "sku-future",
+                    "biweb-spec-a",
+                    "biweb测试商品",
+                    datetime.combine(tomorrow, datetime.min.time()),
+                    Decimal("888"),
+                ),
+                (
+                    "sku-last-month",
+                    "biweb-spec-a",
+                    "biweb测试商品",
+                    datetime.combine(last_month, datetime.min.time()),
+                    Decimal("777"),
+                ),
+            ]
+        )
+
+        distribution = sku_mtd_distribution(self.mart_connection)
+        names = [item["name"] for item in distribution]
+        self.assertIn("biweb测试商品", names)
+        values = [item["value"] for item in distribution]
+        self.assertEqual(values, sorted(values, reverse=True))
+        after = dict(zip(names, values))
+        # 同 spec 两行聚合为一片；明日/上月行不得改变差值。
+        self.assertEqual(Decimal("123"), after["biweb测试商品"] - prior)
+
+        payload = run_pie_sku_mtd(self.mart_connection, {})
+        self.assertEqual("pie", payload["chart"])
+        self.assertEqual("元", payload["unit"])
+        self.assertLessEqual(len(payload["items"]), 9)
+        self.assertTrue(
+            all(
+                isinstance(item["name"], str)
+                and isinstance(item["value"], float)
+                for item in payload["items"]
+            )
+        )
+        payload_values = [item["value"] for item in payload["items"][:-1]]
+        self.assertEqual(payload_values, sorted(payload_values, reverse=True))
+        if len(payload["items"]) == 9:
+            self.assertEqual("其他", payload["items"][-1]["name"])
 
     def test_run_kpi_annual_progress_two_line_numerator_and_rate(self):
         replace_dim_target(
@@ -1793,9 +3679,20 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
         self.assertIsInstance(payload["value"], float)
         self.assertIsInstance(payload["target"], float)
         self.assertIsInstance(payload["rate"], float)
-        self.assertEqual(float(numerator_after), payload["value"])
-        self.assertEqual(760210000.0, payload["target"])
+        # 2026-09-21 起分子 = 线下 + 电商渠道 + 餐饮（人工月报，无数据
+        # 即 0），分母 = 全业务线目标 769,510,000。
+        restaurant_value, _has_data = restaurant_annual_revenue(
+            self.mart_connection
+        )
+        self.assertEqual(
+            float(numerator_after + restaurant_value), payload["value"]
+        )
+        self.assertEqual(769510000.0, payload["target"])
         self.assertEqual(payload["value"] / payload["target"], payload["rate"])
+        self.assertEqual(
+            {"线下", "电商渠道", "餐饮"},
+            {line["name"] for line in payload["lines"]},
+        )
 
     def test_offline_mtd_total_excludes_summary_and_future_rows(self):
         today = self._server_today()
@@ -1813,6 +3710,122 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
 
         q1 = offline_mtd_total(self.mart_connection)
         self.assertEqual(Decimal("300"), q1 - q0)
+
+    def test_week_and_month_gran_sum_to_the_day_total(self):
+        # B1 真库回归（订正方案 §5 验收第一条）：同一区域同一窗口，
+        # 周/月档合计必须等于日档合计（修复前月档落点 = 桶内最后一天
+        # 的单日值）。独立区域隔离既有数据，无需差值法。
+        today = self._server_today()
+        if today.day < 3:
+            self.skipTest("月初样本不足：需要月内至少 3 个已过去的日子")
+        self._insert_offline_rows(
+            [
+                ("bucket-1", "biweb桶", "biweb桶人员",
+                 today - timedelta(days=2), Decimal("10")),
+                ("bucket-2", "biweb桶", "biweb桶人员",
+                 today - timedelta(days=1), Decimal("20")),
+                ("bucket-3", "biweb桶", "biweb桶人员", today, Decimal("5")),
+            ]
+        )
+        month = today.strftime("%Y-%m")
+
+        def region_total(payload):
+            entry = next(
+                entry for entry in payload["series"] if entry["name"] == "biweb桶"
+            )
+            return sum(value for value in entry["data"] if value is not None)
+
+        day_total = region_total(run_trend_region_daily(self.mart_connection, {}))
+        week_total = region_total(
+            run_trend_region_daily(
+                self.mart_connection, {"gran": "week", "month": month}
+            )
+        )
+        month_total = region_total(
+            run_trend_region_daily(
+                self.mart_connection, {"gran": "month", "month": month}
+            )
+        )
+        self.assertEqual(35.0, day_total)
+        self.assertEqual(day_total, week_total)
+        self.assertEqual(day_total, month_total)
+
+    def test_kpi_offline_mtd_grans_reconcile_with_the_day_series(self):
+        # 粒度批次 A 真库回归：KPI 三档与独立路径（区域日序列）逐点对
+        # 拍——日档 = 日序列末日；周档 = 锚点周一→锚点的日序列子段；
+        # 月档 = 整段日序列。插入今日 fixture 使水位锚定今天后再对拍
+        # （差值法在此不适用：水位随动时窗口会移动）。
+        today = self._server_today()
+        self._insert_offline_rows(
+            [
+                ("gran-a", "biweb粒", "biweb粒人员", today, Decimal("100")),
+                ("gran-b", "biweb粒", "biweb粒人员", today, Decimal("200")),
+            ]
+        )
+
+        trend = run_trend_region_daily(
+            self.mart_connection, {"month": today.strftime("%Y-%m")}
+        )
+        daily = [
+            sum(value for value in values if value is not None)
+            for values in zip(*[series["data"] for series in trend["series"]])
+        ]
+        kpi = {
+            gran: run_kpi_offline_mtd(self.mart_connection, {"gran": gran})
+            for gran in ("day", "week", "month")
+        }
+        if not daily or kpi["month"]["as_of"] is None:
+            self.skipTest("水位不在当前月，日序列轴为空")
+
+        # 三档锚点一致，且与日序列末日同（同为真实水位）。
+        self.assertEqual(trend["as_of"], kpi["day"]["as_of"])
+        self.assertEqual(kpi["day"]["as_of"], kpi["week"]["as_of"])
+        self.assertEqual(kpi["week"]["as_of"], kpi["month"]["as_of"])
+        anchor = date.fromisoformat(kpi["day"]["as_of"])
+
+        self.assertAlmostEqual(daily[-1], kpi["day"]["value"], places=2)
+        self.assertAlmostEqual(
+            sum(daily[-(anchor.weekday() + 1):]),
+            kpi["week"]["value"],
+            places=2,
+        )
+        self.assertAlmostEqual(sum(daily), kpi["month"]["value"], places=2)
+
+        # A5 年档：水位 = 今天（刚插入今日行）时，YTD 窗口与
+        # offline_annual_total（CURDATE 上界）同窗口，值必须相等；
+        # 且年累计 ≥ 月累计（窗口包含）。
+        year = run_kpi_offline_mtd(self.mart_connection, {"gran": "year"})
+        self.assertEqual(kpi["month"]["as_of"], year["as_of"])
+        self.assertAlmostEqual(
+            float(offline_annual_total(self.mart_connection)),
+            year["value"],
+            places=2,
+        )
+        self.assertLessEqual(kpi["month"]["value"], year["value"])
+
+    def test_ecom_region_rows_never_enter_the_offline_line(self):
+        # B3 真库守门（差值法）：电商区域行对线下族全部不可见——MTD、
+        # 年累计、日环比在插入电商行前后逐分不差。
+        today = self._server_today()
+        mtd_before = offline_mtd_total(self.mart_connection)
+        annual_before = offline_annual_total(self.mart_connection)
+        dod_before = offline_dod(self.mart_connection)
+
+        self._insert_offline_rows(
+            [("line-ecom", "电商", "biweb电商人员", today, Decimal("777777"))]
+        )
+
+        self.assertEqual(mtd_before, offline_mtd_total(self.mart_connection))
+        self.assertEqual(annual_before, offline_annual_total(self.mart_connection))
+        dod_after = offline_dod(self.mart_connection)
+        self.assertEqual(
+            None if dod_before is None else dod_before["date"],
+            None if dod_after is None else dod_after["date"],
+        )
+        self.assertEqual(
+            None if dod_before is None else dod_before["value"],
+            None if dod_after is None else dod_after["value"],
+        )
 
     def test_region_daily_series_alignment_and_zero_fill(self):
         today = self._server_today()
@@ -2092,10 +4105,22 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
             self.mart_connection, region="biweb甲", first_day=first_day, last_day=last_day
         )
         self.assertEqual(["biweb甲"], [entry["name"] for entry in series["series"]])
-        self.assertEqual([today.strftime("%m-%d")], series["dates"])
+        # 三态完整轴（执行提示词 §4.2）：月首 → min(月末, 锚点日)，无数据
+        # 日 None+missing，不再只取有数据的日。
+        expected_dates = [
+            (first_day + timedelta(days=offset)).strftime("%m-%d")
+            for offset in range(today.day)
+        ]
+        self.assertEqual(expected_dates, series["dates"])
         self.assertEqual(len(series["dates"]), len(series["series"][0]["data"]))
-        # 合计行被 `%%合计%%` 排除（这条 SQL 是双写证明点之一）。
-        self.assertEqual([Decimal("100")], series["series"][0]["data"])
+        # 合计行被 `%%合计%%` 排除（这条 SQL 是双写证明点之一）：fixture
+        # 当日 100，此前日 None。
+        self.assertEqual(
+            [None] * (today.day - 1) + [100.0], series["series"][0]["data"]
+        )
+        self.assertEqual(
+            ["missing"] * (today.day - 1) + ["ok"], series["status"][0]
+        )
 
     def test_people_cards_reconcile_with_mart_collect_on_real_calendar(self):
         month_end = self._server_month_start() - timedelta(days=1)

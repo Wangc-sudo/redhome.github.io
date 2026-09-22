@@ -12,6 +12,19 @@ from unittest.mock import Mock, patch
 from common.public_data.cli import load_source_credentials, main
 
 
+class BuildExtractServiceTests(unittest.TestCase):
+    @patch("common.public_data.live_migrations.apply_live_migrations")
+    @patch("common.public_data.db.connect")
+    def test_passes_local_wdt_connection_to_repository(self, connect, migrate):
+        from common.public_data.cli import build_extract_service
+
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        connect.side_effect = [raw, wdt, mart]
+        service = build_extract_service(Mock())
+        self.assertIs(service._repository.wdt_connection, wdt)
+        migrate.assert_called_once_with(raw, wdt, mart)
+
+
 class LoadSourceCredentialsTests(unittest.TestCase):
     """Tests for credential file validation."""
 

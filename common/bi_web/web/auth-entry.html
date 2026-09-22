@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>访问提示 · BI 看板</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; background: #f5f6f8;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #333;
+  }
+  .card {
+    background: #fff; border-radius: 12px; padding: 40px 48px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.08); max-width: 420px;
+    text-align: center;
+  }
+  .card h1 { font-size: 20px; margin: 0 0 12px; }
+  .card p { font-size: 14px; line-height: 1.8; margin: 0; color: #666; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">需要登录</h1>
+  <p id="message">请从钉钉工作台打开本看板。</p>
+</div>
+<script>
+  // reason 只切换固定文案，绝不回填到 DOM——提示页无反射面。
+  var messages = {
+    login: ["需要登录", "请从钉钉工作台打开本看板。"],
+    unauthorized: ["暂未授权", "您还没有看板访问权限，请联系管理员开通。"],
+    forbidden: ["无权访问此页", "该看板需要额外权限，请联系管理员开通。"],
+    loggedout: ["已退出", "您已安全退出。重新访问请从钉钉工作台打开。"]
+  };
+  var params = new URLSearchParams(location.search);
+  var entry = messages[params.get("reason")] || messages.login;
+  document.getElementById("title").textContent = entry[0];
+  document.getElementById("message").textContent = entry[1];
+</script>
+</body>
+</html>

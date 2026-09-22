@@ -35,3 +35,13 @@ config-local/public-data/
 
 # 测试群真实配置（含 openConversationId）
 common/dingtalk/test_groups.json
+
+# env-file（本机专属路径/潜在密钥，不入库；模板 *.example 除外）
+.env*
+!.env*.example
+
+# 本地运行产物与缓存（不入库）
+pip/
+outputs/
+_tmp_*.py
+_local_regions.*.json

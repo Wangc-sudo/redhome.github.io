@@ -16,6 +16,7 @@
 import hashlib
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -27,7 +28,8 @@ class WdtError(RuntimeError):
 
 
 class WdtClient:
-    def __init__(self, sid, appkey, appsecret, base_url="http://wdt.wangdian.cn/openapi", timeout=30):
+    def __init__(self, sid, appkey, appsecret, base_url="http://wdt.wangdian.cn/openapi", timeout=30,
+                 rate_limit_retries=5, rate_limit_wait=65, sleep=time.sleep):
         self.sid = sid
         self.key = appkey
         parts = appsecret.split(":")
@@ -36,6 +38,15 @@ class WdtClient:
         self.secret, self.salt = parts
         self.base_url = base_url
         self.timeout = timeout
+        # 限流/瞬时超时重试：status=100「超过每分钟最大调用频率限制」与
+        # URLError 超时都在每分钟配额窗口后自愈（2026-09-18 回补实测）。
+        self.rate_limit_retries = rate_limit_retries
+        self.rate_limit_wait = rate_limit_wait
+        self._sleep = sleep
+
+    @staticmethod
+    def _is_rate_limited(data):
+        return data.get("status") == 100 and "频率限制" in str(data.get("message", ""))
 
     def _sign(self, params):
         arr = [self.secret]
@@ -48,28 +59,42 @@ class WdtClient:
         return hashlib.md5("".join(arr).encode("utf-8")).hexdigest()
 
     def call(self, method, params, page_size=None, page_no=0, calc_total=0):
-        """调用接口，返回解析后的 JSON dict。params 为业务参数 dict。"""
-        body = json.dumps([params], ensure_ascii=False)
-        req = {
-            "sid": self.sid, "key": self.key, "salt": self.salt,
-            "method": method, "timestamp": int(time.time()) - TS_OFFSET, "v": "1.0",
-        }
-        if page_size is not None:
-            req["page_size"] = page_size
-            req["page_no"] = page_no
-            req["calc_total"] = calc_total
-        req["body"] = body
-        req["sign"] = self._sign(req)
-        del req["body"]
+        """调用接口，返回解析后的 JSON dict。params 为业务参数 dict。
 
-        qs = urllib.parse.urlencode(req)
-        r = urllib.request.Request(f"{self.base_url}?{qs}", data=body.encode("utf-8"), method="POST")
-        r.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(r, timeout=self.timeout) as resp:
-            data = json.loads(resp.read().decode())
-        if data.get("status") != 0:
+        限流（status=100 频率限制）与瞬时超时按 ``rate_limit_wait`` 退避重试，
+        timestamp/sign 每次重试重算（120 秒有效期可能已跨过）。
+        """
+        body = json.dumps([params], ensure_ascii=False)
+        for attempt in range(self.rate_limit_retries + 1):
+            req = {
+                "sid": self.sid, "key": self.key, "salt": self.salt,
+                "method": method, "timestamp": int(time.time()) - TS_OFFSET, "v": "1.0",
+            }
+            if page_size is not None:
+                req["page_size"] = page_size
+                req["page_no"] = page_no
+                req["calc_total"] = calc_total
+            req["body"] = body
+            req["sign"] = self._sign(req)
+            del req["body"]
+
+            qs = urllib.parse.urlencode(req)
+            r = urllib.request.Request(f"{self.base_url}?{qs}", data=body.encode("utf-8"), method="POST")
+            r.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(r, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode())
+            except urllib.error.URLError:
+                if attempt < self.rate_limit_retries:
+                    self._sleep(self.rate_limit_wait)
+                    continue
+                raise
+            if data.get("status") == 0:
+                return data
+            if self._is_rate_limited(data) and attempt < self.rate_limit_retries:
+                self._sleep(self.rate_limit_wait)
+                continue
             raise WdtError(f"WDT {method} 失败: {json.dumps(data, ensure_ascii=False)[:300]}")
-        return data
 
     def call_paged(self, method, params, page_size=40, max_pages=50):
         """分页拉全量：自动翻页合并 data.order / data列表"""
