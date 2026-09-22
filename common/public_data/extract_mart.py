@@ -31,6 +31,27 @@ from common.public_data.mart_extract_schema import (
 )
 
 
+#: fact 表 region 列统一为 region 键（组织架构口径）：AI 表原值是显示名，
+#: raw 层保持源值不动，归一在投影落 mart 前完成（2026-09-22 双跑实测发现
+#: 键/显示名撞车：事实行存"杭州"、查询端用 'hangzhou' → 榜单/未填全空）。
+#: 未登记的显示名原样保留（新区域上线时先进本表，代码评审）。
+_REGION_KEY_BY_DISPLAY = {
+    "杭州": "hangzhou",
+    "绍兴": "shaoxing",
+}
+
+
+def _normalize_region_keys(dataset, rows):
+    """daily_report_offline 投影行的 region 显示名 → region 键（就地修改）。"""
+    if dataset.dataset != "daily_report_offline":
+        return rows
+    for row in rows:
+        display = str(row.get("region") or "").strip()
+        if display in _REGION_KEY_BY_DISPLAY:
+            row["region"] = _REGION_KEY_BY_DISPLAY[display]
+    return rows
+
+
 EXTRACT_SOURCE_NAME = "extract"
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -642,6 +663,7 @@ class MartExtractService:
             if degrade_reason:
                 logger.warning("dataset=%s %s", dataset.dataset, degrade_reason)
             rows = self._repository.read_dataset(dataset, since=since)
+            rows = _normalize_region_keys(dataset, rows)
             record_ids = [row.get("source_record_id") for row in rows]
             digest = self._compute_digest(record_ids)
             skipped = self._should_skip_dataset(

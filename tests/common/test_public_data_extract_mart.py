@@ -11,6 +11,7 @@ from common.public_data.extract_mart import (
     MartExtractRepository,
     MartExtractService,
     MartExtractError,
+    _normalize_region_keys,
 )
 from common.public_data.mart_extract_schema import (
     DIM_CALENDAR,
@@ -272,6 +273,31 @@ class MartExtractRepositoryTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
+
+class RegionKeyNormalizeTests(unittest.TestCase):
+    """fact 表 region 列统一为键：AI 表显示名止于 raw 层（2026-09-22 双跑发现）。"""
+
+    @staticmethod
+    def _dataset(name):
+        return next(d for d in EXTRACT_DATASETS if d.dataset == name)
+
+    def test_display_names_map_to_region_keys(self):
+        rows = [
+            {"region": "杭州", "responsible_person": "余发兴"},
+            {"region": "绍兴 ", "responsible_person": "某人"},
+            {"region": "未登记区域", "responsible_person": "某人"},
+        ]
+        _normalize_region_keys(self._dataset("daily_report_offline"), rows)
+        self.assertEqual(
+            [r["region"] for r in rows],
+            ["hangzhou", "shaoxing", "未登记区域"],
+        )
+
+    def test_other_datasets_are_untouched(self):
+        rows = [{"region": "杭州"}]
+        _normalize_region_keys(self._dataset("channel_daily_sales"), rows)
+        self.assertEqual(rows[0]["region"], "杭州")
+
 
 class MartExtractServiceTests(unittest.TestCase):
 
