@@ -68,6 +68,13 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
         conversation_id = getattr(incoming, "conversation_id", "") or ""
         sender_uid = incoming.sender_staff_id or ""
 
+        # 临时可见性（PoC 排障）：每条入站消息记录路由键与前缀repr，
+        # 便于区分「消息未投递」与「解析未命中」。稳定后可移除。
+        self._log(
+            f"recv conv={'set' if conversation_id else 'unset'} "
+            f"len={len(text)} head={text[:6]!r}"
+        )
+
         region_cfg = region_for_conversation(
             self._region_configs, conversation_id
         )
