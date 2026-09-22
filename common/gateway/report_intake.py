@@ -61,12 +61,38 @@ _STORE_ALIASES = {
     "大莲花": "莲荷里体验馆",
 }
 
-#: 多板块报数分词：门店词 / 指标词 / 数字，按序扫描（门店词长词优先）。
+#: 规范门店名（去重保序）。
+_CANONICAL_STORES = tuple(dict.fromkeys(_STORE_ALIASES.values()))
+
+#: 多板块报数分词：门店词 / 指标词 / 数字 / 其他中文字，按序扫描
+#: （门店词长词优先；单字指标「团」「零」仅在后随数字/空白/逗号时成立，
+#: 防「零食」「团队」之类误判；未命中门店的词进入 word 组做模糊补全）。
 _TOKEN_RE = re.compile(
     r"(?P<store>" + "|".join(sorted(_STORE_ALIASES, key=len, reverse=True)) + r")"
-    r"|(?P<metric>零售|团购)"
+    r"|(?P<metric>零售|团购|团(?=[\d\s,])|零(?=[\d\s,]))"
     r"|(?P<num>-?\d[\d,]*(?:\.\d+)?)"
+    r"|(?P<word>[一-鿿]+)"
 )
+
+
+def _resolve_store_fuzzy(word):
+    """门店词模糊补全（自动补全 A）：与规范名/别名前缀互含且候选唯一才认。
+
+    返回 ``(规范名, 原词)``；候选不唯一或无命中、词长 <2 → ``None``。
+    """
+    if not word or len(word) < 2:
+        return None
+    targets = {
+        _STORE_ALIASES.get(candidate, candidate)
+        for candidate in tuple(_STORE_ALIASES) + _CANONICAL_STORES
+        if candidate.startswith(word) or word.startswith(candidate)
+    }
+    if len(targets) != 1:
+        return None
+    canonical = next(iter(targets))
+    if canonical == word:
+        return None
+    return canonical, word
 
 
 @dataclass(frozen=True)
@@ -103,12 +129,14 @@ def parse_report_amount(text):
 
 
 def parse_report_metrics(text):
-    """多板块报数解析：``[(门店规范名|None, 指标, 金额), ...]``。
+    """多板块报数解析：``[(门店规范名|None, 指标, 金额, 识别原词|None), ...]``。
 
-    规则（2026-09-22 与运维定稿）：
-    - 指标只认「零售」「团购」；门店词出现后成为后续数字的归属上下文，
-      直到下一个门店词；
+    规则（2026-09-22 与运维定稿；2026-09-23 增补自动补全）：
+    - 指标认「零售」「团购」，单字「团」「零」仅在后随数字/空白/逗号时容错；
+    - 门店词出现后成为后续数字的归属上下文，直到下一个门店词；
     - 门店词后直接跟数字 → 该店「零售」（如 ``万科体验馆/7560``）；
+    - 不在别名表的中性词做模糊补全（前缀互含+候选唯一），命中时第 4 元素
+      记录原词用于回执回显（如 ``莲荷`` → ``莲荷里体验馆``）；
     - 无门店词 → 门店为 ``None``（由调用方按报数人部门补齐）；
     - 全文不含任何门店/指标词 → 返回 ``None``（走单金额旧路径）。
     """
@@ -117,18 +145,28 @@ def parse_report_metrics(text):
     entries = []
     saw_label = False
     ctx_store = None
+    ctx_recognized = None
     pending_store = False
     pending_metric = None
     for m in _TOKEN_RE.finditer(text.replace("，", ",")):
         if m.group("store"):
             ctx_store = _STORE_ALIASES[m.group("store")]
+            ctx_recognized = None
             pending_store = True
             pending_metric = None
             saw_label = True
         elif m.group("metric"):
-            pending_metric = m.group("metric")
+            token = m.group("metric")
+            pending_metric = {"团": "团购", "零": "零售"}.get(token, token)
             pending_store = False
             saw_label = True
+        elif m.group("word"):
+            resolved = _resolve_store_fuzzy(m.group("word"))
+            if resolved is not None:
+                ctx_store, ctx_recognized = resolved
+                pending_store = True
+                pending_metric = None
+                saw_label = True
         else:
             num_str = m.group("num").replace(",", "")
             try:
@@ -137,7 +175,7 @@ def parse_report_metrics(text):
                 continue
             value = int(value) if value == int(value) else value
             metric = pending_metric or "零售"
-            entries.append((ctx_store, metric, value))
+            entries.append((ctx_store, metric, value, ctx_recognized))
             pending_metric = None
             pending_store = False
     if not saw_label or not entries:
@@ -153,10 +191,15 @@ def build_store_denied_reply(name, sender_dept, store):
 
 
 def build_multi_recorded_reply(*, month, day, weekday, writes):
-    """多板块回执。writes = ``[(数据格, 金额, 旧值|None, progress|None), ...]``。"""
+    """多板块回执。writes = ``[(数据格, 金额, 旧值|None, progress|None, 识别备注|None), ...]``
+    （兼容 4 元组：无识别备注）。"""
     lines = [f"✅ 已记录 {month}月{day}日（周{weekday}）："]
-    for cell, value, old_value, progress in writes:
+    for write in writes:
+        cell, value, old_value, progress = write[:4]
+        note = write[4] if len(write) > 4 else None
         line = f"{cell}：{value}"
+        if note:
+            line += note
         if old_value is not None:
             line += f"（🔁 覆盖旧值 {old_value}）"
         lines.append(line)
@@ -178,11 +221,23 @@ def build_not_workday_reply():
     return "今天不是销售日报工作日，无需报数～"
 
 
-def build_format_hint(name):
-    return (
-        f"{name} 你好～报数格式：@提醒事项 数字\n"
-        f"例如：@提醒事项 12800（当天无销量报 0）"
-    )
+def build_format_hint(name, store=None, stores=()):
+    """格式提示（自动补全 B）：多门店区域按发送人部门个性化——本店成员
+    给本店示例，根部门成员给门店列表示例；其他区域保持通用文案。"""
+    lines = [
+        f"{name} 你好～报数格式：@提醒事项 数字",
+        "例如：@提醒事项 12800（当天无销量报 0）",
+    ]
+    if store:
+        lines.append(
+            f"你的门店是{store}，也可以这样报：{store} 零售 7560，"
+            f"或 {store} 团购 1200"
+        )
+    elif stores:
+        lines.append(
+            "多门店报数示例：" + "；".join(f"{s} 零售 7560" for s in stores)
+        )
+    return "\n".join(lines)
 
 
 def build_error_reply():
@@ -245,14 +300,14 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
                              region=region_cfg.region)
 
     name = member["name"]
+    sender_dept = member.get("dept_name")
+    root_dept = region_cfg.dept_order[0] if region_cfg.dept_order else None
 
     # 多板块报数（vanke 模型：数据格 = 门店 × {零售,团购}，权限 = 部门归属）。
     entries = parse_report_metrics(text)
     if entries is not None:
-        root_dept = region_cfg.dept_order[0] if region_cfg.dept_order else None
-        sender_dept = member.get("dept_name")
         writes = []
-        for store_label, metric, value in entries:
+        for store_label, metric, value, recognized_from in entries:
             store = store_label or sender_dept
             if not store:
                 return IntakeOutcome(
@@ -290,12 +345,14 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
                 workdays=workdays,
             )
             overwritten = old_value is not None and float(old_value) != float(value)
+            note = f"（识别：{recognized_from}）" if recognized_from else None
             writes.append(
                 (
                     cell,
                     value,
                     _fmt_amount(old_value) if overwritten else None,
                     progress,
+                    note,
                 )
             )
         reply = build_multi_recorded_reply(
@@ -313,8 +370,18 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
 
     value = parse_report_amount(text)
     if value is None:
-        return IntakeOutcome("no_number", build_format_hint(name),
-                             region=region_cfg.region, name=name)
+        # 个性化格式提示（自动补全 B）：本店成员给本店示例，根部门给门店列表。
+        hint_store = sender_dept if sender_dept in _CANONICAL_STORES else None
+        hint_stores = (
+            sorted(set(_STORE_ALIASES.values()))
+            if sender_dept and sender_dept == root_dept and not hint_store
+            else ()
+        )
+        return IntakeOutcome(
+            "no_number",
+            build_format_hint(name, store=hint_store, stores=hint_stores),
+            region=region_cfg.region, name=name,
+        )
 
     table_name = region_cfg.aliases.get(name, name)
     old_value = _write_report(

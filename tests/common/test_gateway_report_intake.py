@@ -7,6 +7,7 @@ from decimal import Decimal
 from common.gateway.report_intake import (
     STREAM_RUN_ID,
     build_format_hint,
+    build_multi_recorded_reply,
     build_not_member_reply,
     build_not_workday_reply,
     handle_report,
@@ -137,6 +138,35 @@ class ReplyTextTests(unittest.TestCase):
             "张三 你好～报数格式：@提醒事项 数字\n"
             "例如：@提醒事项 12800（当天无销量报 0）",
         )
+
+    def test_format_hint_personalized_for_store_member(self):
+        self.assertEqual(
+            build_format_hint("王城", store="万科体验馆"),
+            "王城 你好～报数格式：@提醒事项 数字\n"
+            "例如：@提醒事项 12800（当天无销量报 0）\n"
+            "你的门店是万科体验馆，也可以这样报：万科体验馆 零售 7560，"
+            "或 万科体验馆 团购 1200",
+        )
+
+    def test_format_hint_personalized_for_root_dept(self):
+        reply = build_format_hint(
+            "王城", stores=["万科体验馆", "莲荷里体验馆"]
+        )
+        self.assertIn("多门店报数示例：万科体验馆 零售 7560；莲荷里体验馆 零售 7560", reply)
+
+    def test_multi_recorded_reply_shows_recognition_note(self):
+        reply = build_multi_recorded_reply(
+            month=9, day=23, weekday="二",
+            writes=[("莲荷里体验馆·零售", 500, None, None, "（识别：莲荷）")],
+        )
+        self.assertIn("莲荷里体验馆·零售：500（识别：莲荷）", reply)
+
+    def test_multi_recorded_reply_accepts_legacy_4_tuple(self):
+        reply = build_multi_recorded_reply(
+            month=9, day=23, weekday="二",
+            writes=[("万科体验馆·零售", 100, None, None)],
+        )
+        self.assertIn("万科体验馆·零售：100", reply)
 
 
 class RegionRoutingTests(unittest.TestCase):
@@ -360,35 +390,65 @@ class ParseMetricsTests(unittest.TestCase):
     def test_store_colon_metric_pairs(self):
         self.assertEqual(
             parse_report_metrics("万科体验馆：零售 0，团购 0"),
-            [("万科体验馆", "零售", 0), ("万科体验馆", "团购", 0)],
+            [("万科体验馆", "零售", 0, None), ("万科体验馆", "团购", 0, None)],
         )
 
     def test_store_slash_number_defaults_to_retail(self):
         self.assertEqual(
             parse_report_metrics("万科体验馆/7560 团购/0"),
-            [("万科体验馆", "零售", 7560), ("万科体验馆", "团购", 0)],
+            [("万科体验馆", "零售", 7560, None), ("万科体验馆", "团购", 0, None)],
         )
 
     def test_metric_only_has_no_store(self):
         self.assertEqual(
             parse_report_metrics("零售7560 团购0"),
-            [(None, "零售", 7560), (None, "团购", 0)],
+            [(None, "零售", 7560, None), (None, "团购", 0, None)],
         )
-        self.assertEqual(parse_report_metrics("团购/134"), [(None, "团购", 134)])
+        self.assertEqual(parse_report_metrics("团购/134"), [(None, "团购", 134, None)])
 
     def test_bare_number_before_metric_defaults_to_retail(self):
         self.assertEqual(
             parse_report_metrics("3060。团购/816"),
-            [(None, "零售", 3060), (None, "团购", 816)],
+            [(None, "零售", 3060, None), (None, "团购", 816, None)],
         )
 
     def test_store_aliases_map_to_directory_names(self):
         for spoken in ("酱酒体验馆/400", "酱香体验馆/400", "大莲花/400", "莲荷里/400"):
             self.assertEqual(
                 parse_report_metrics(spoken),
-                [("莲荷里体验馆", "零售", 400)],
+                [("莲荷里体验馆", "零售", 400, None)],
                 spoken,
             )
+
+    def test_fuzzy_store_prefix_autocompletes_with_echo(self):
+        self.assertEqual(
+            parse_report_metrics("莲荷 500"),
+            [("莲荷里体验馆", "零售", 500, "莲荷")],
+        )
+        self.assertEqual(
+            parse_report_metrics("莲荷 100 团200"),
+            [("莲荷里体验馆", "零售", 100, "莲荷"),
+             ("莲荷里体验馆", "团购", 200, "莲荷")],
+        )
+
+    def test_fuzzy_store_unmatched_word_is_noise(self):
+        # 「体验馆」不是任何候选的前缀（是后缀）→ 不补全，走单金额旧路径
+        self.assertIsNone(parse_report_metrics("体验馆 500"))
+        # 词长 <2 不补全
+        self.assertIsNone(parse_report_metrics("酱 500"))
+
+    def test_single_char_metric_tolerance_with_guard(self):
+        self.assertEqual(
+            parse_report_metrics("万科 团100"),
+            [("万科体验馆", "团购", 100, None)],
+        )
+        self.assertEqual(
+            parse_report_metrics("万科 零100"),
+            [("万科体验馆", "零售", 100, None)],
+        )
+        # 单字后非数字 → 不成指标（防「零食」「团队」误判）
+        self.assertIsNone(parse_report_metrics("零食100"))
+        self.assertIsNone(parse_report_metrics("团队100"))
 
     def test_no_label_returns_none_for_legacy_path(self):
         self.assertIsNone(parse_report_metrics("765"))
@@ -399,7 +459,7 @@ class ParseMetricsTests(unittest.TestCase):
     def test_grouped_amounts(self):
         self.assertEqual(
             parse_report_metrics("零售 12,800"),
-            [(None, "零售", 12800)],
+            [(None, "零售", 12800, None)],
         )
 
 
