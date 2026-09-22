@@ -56,7 +56,10 @@ class ShippedRegionSeedTests(unittest.TestCase):
 
     def test_shipped_seed_defines_hangzhou(self):
         configs = load_region_seed(_SEED_PATH)
-        self.assertEqual(list(configs), ["hangzhou", "vanke"])
+        self.assertEqual(
+            list(configs),
+            ["hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all"],
+        )
         cfg = configs["hangzhou"]
         self.assertEqual(cfg.display, "杭州")
         self.assertEqual((cfg.remind_hour, cfg.check_hour), (18, 20))
