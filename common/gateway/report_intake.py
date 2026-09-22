@@ -233,7 +233,14 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now):
                              region=region_cfg.region)
 
     member = fetch_member(connection, user_id=sender_uid)
-    if member is None or member["region"] != region_cfg.region:
+    via_admin = (
+        member is not None
+        and member["region"] != region_cfg.region
+        and _is_admin(connection, sender_uid)
+    )
+    # admin grant 例外（bi_authz_grant grant_type='admin'）：跨区报数
+    # 用于运维测试与代录，仍要求 dim 有档案（署名/部门归属需要）。
+    if member is None or (member["region"] != region_cfg.region and not via_admin):
         return IntakeOutcome("not_member", build_not_member_reply(),
                              region=region_cfg.region)
 
@@ -356,6 +363,17 @@ def _fetch_one(connection, sql, params):
     if row is None:
         return None
     return dict(row) if isinstance(row, dict) else row
+
+
+def _is_admin(connection, user_id):
+    """bi_authz_grant 中存在该用户的 admin grant（报数门禁的唯一例外通道）。"""
+    row = _fetch_one(
+        connection,
+        "SELECT 1 AS `x` FROM `bi_authz_grant` "
+        "WHERE `user_id` = %s AND `grant_type` = 'admin' LIMIT 1",
+        (user_id,),
+    )
+    return row is not None
 
 
 def _write_report(connection, *, region, member, table_name,

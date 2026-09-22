@@ -36,6 +36,9 @@ class _Cursor:
         elif "dim_robot_member" in sql:
             self._rows = self._conn.member_rows
             self._one = self._rows[0] if self._rows else None
+        elif "bi_authz_grant" in sql:
+            self._rows = []
+            self._one = {"x": 1} if self._conn.admin else None
         elif "ORDER BY (`monthly_target` IS NULL)" in sql:
             # 当日已有行（业务键）查询
             self._rows = []
@@ -57,13 +60,15 @@ class _Cursor:
 
 
 class _Conn:
-    def __init__(self, *, workdays=_WORKDAYS, members=(), facts=(), existing=None):
+    def __init__(self, *, workdays=_WORKDAYS, members=(), facts=(), existing=None,
+                 admin=False):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.member_rows = list(members)
         self.fact_rows = list(facts)
         self.existing_row = existing
         self.executed = []
         self.commits = 0
+        self.admin = admin
 
     def cursor(self):
         return _Cursor(self)
@@ -495,6 +500,39 @@ class MultiMetricIntakeTests(unittest.TestCase):
         inserts = self._inserts(conn)
         self.assertEqual(inserts[0][0], "stream:vanke:u1:2026-09-11")
         self.assertEqual(inserts[0][2], "张三")
+
+
+class AdminGateTests(unittest.TestCase):
+    """admin grant 例外：跨区报数放行（运维测试/代录），其余门禁不变。"""
+
+    def test_admin_may_report_across_regions(self):
+        conn = _Conn(
+            members=[_member(user_id="u-admin", name="王城", region="hq", dept="总经办")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="100", sender_uid="u-admin", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = [p for sql, p in conn.executed if sql.lstrip().startswith("INSERT")]
+        self.assertEqual(inserts[0][0], "stream:hangzhou:u-admin:2026-09-11")
+
+    def test_non_admin_region_mismatch_is_still_rejected(self):
+        conn = _Conn(
+            members=[_member(user_id="u-hq", name="路人", region="hq", dept="总经办")],
+            admin=False,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="100", sender_uid="u-hq", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "not_member")
+
+    def test_admin_without_member_record_is_rejected(self):
+        conn = _Conn(members=[], admin=True)
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="100", sender_uid="u-ghost", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "not_member")
 
 
 if __name__ == "__main__":
