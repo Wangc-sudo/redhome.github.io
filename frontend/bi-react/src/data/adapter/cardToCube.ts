@@ -24,6 +24,7 @@ import type {
 } from '../types';
 import type { CubeRow, CubeSchema, DataType, DerivedMetric, FieldDef, Severity } from '../../types/cube';
 import { alertOf } from '../severity';
+import { sanitizeTableRows, validateCardPayload } from '../validate';
 
 export interface CardToCubeOptions {
   dashboardId?: string;
@@ -191,7 +192,8 @@ function backendDerivedOf(row: CubeRow): DerivedMetric | null {
 
 function fromTable(card: CardDef, p: TablePayload, opts: CardToCubeOptions): CubeSchema {
   const columns = p.columns ?? [];
-  const rows = (p.rows ?? []).map((r) => ({ ...r }) as CubeRow);
+  // 非对象行在 validate.ts 已记 issue，这里降级丢弃（坏行不进渲染）
+  const rows = sanitizeTableRows(p.rows ?? []).map((r) => ({ ...r }) as CubeRow);
   // 行主键优先取 name 列（anomaly_top 首列是 rank，不能拿名次当主键）
   const keyCol = columns.find((c) => c.key === 'name') ?? columns[0];
 
@@ -263,6 +265,13 @@ export function cardToCube(
   opts: CardToCubeOptions = {},
 ): CubeSchema {
   if (!payload) return emptyCube(card, opts);
+
+  // 运行时校验（validate.ts：唯一校验点）：issue 只上报不打断——
+  // 单卡数据问题降级为该卡空态/坏行丢弃，不拖垮整页看板。
+  const issues = validateCardPayload(payload);
+  if (issues.length > 0) {
+    console.warn(`[cardToCube] ${card.card}: payload 校验未通过（已降级处理）`, issues);
+  }
 
   const chart = (payload.chart ?? card.chart ?? CHART_FALLBACK) as NonNullable<CubeSchema['chart']>;
 
