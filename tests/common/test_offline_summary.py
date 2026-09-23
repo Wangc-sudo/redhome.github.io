@@ -264,6 +264,12 @@ class _Cursor:
         if "dim_calendar" in sql:
             self._rows = []
             return
+        if "dim_robot_member" in sql:
+            self._rows = [
+                {"region": region, "name": name, "dept_name": dept}
+                for (region, name), dept in self._conn.members.items()
+            ]
+            return
         region = params[0]
         # 锚点由 SQL 片段形态识别（值都在 params[3]）
         if "`responsible_person` = %s" in sql:
@@ -292,8 +298,9 @@ class _Cursor:
 
 class _Conn:
     def __init__(self, facts, targets):
-        self.facts = facts        # {(region, person): {date: amount}}
-        self.targets = targets    # {(region, person): float|None}
+        self.facts = facts        # {(region, anchor): {date: amount}}
+        self.targets = targets    # {(region, anchor): float|None}
+        self.members = {}         # {(region, name): dept_name}（通讯录）
         self.agg_rows = []
         self.sql_log = []
 
@@ -477,6 +484,7 @@ class OfflineAllHtmlTest(unittest.TestCase):
             return "<html>offline_all</html>"
 
         conn = _task_conn()
+        conn.members[("hangzhou", "张三")] = "杭中（通讯录）"
         with mock.patch(
             "common.daily_robot.mart_leaderboard.mart_collect",
             side_effect=lambda connection, *, region, business_date: (
@@ -500,30 +508,39 @@ class OfflineAllHtmlTest(unittest.TestCase):
         # 人员总榜：三区合并、排序同 mart_collect 键（rate 降序、None 垫底）
         people = captured["people"]
         self.assertEqual(len(people), 3)
+        # offline_extra 行「姓名↔部门」归位：责任人余云涛为名、板块省外为部门
         self.assertEqual(
-            [p["name"] for p in people], ["省外", "张三", "李树军"]
+            [p["name"] for p in people], ["余云涛", "张三", "李树军"]
         )
+        by_name = {p["name"]: p for p in people}
+        self.assertEqual(by_name["余云涛"]["dept"], "省外")
+        # 杭/绍部门以通讯录为准：张三被 dim 覆盖，李树军无 dim 匹配保留表内值
+        self.assertEqual(by_name["张三"]["dept"], "杭中（通讯录）")
+        self.assertEqual(by_name["李树军"]["dept"], "线下运营中心")
         # 覆盖区域登记含 offline_extra（省外/总经办责任人也进榜）
         from common.daily_robot.offline_summary import OFFLINE_PEOPLE_REGIONS
         self.assertEqual(
             OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing", "offline_extra")
         )
 
-        # 三维度板块：日/周/月，顺序即页面顺序；统一 T-1（9-23 的看板看 9-22）
+        # 维度标签面板：单 panel 内 日/周/月 tab + 页内锚点
         panels = captured["extra_panels"]
-        self.assertEqual(len(panels), 3)
-        self.assertIn("📅 日维度", panels[0])
-        self.assertIn("📆 周维度", panels[1])
-        self.assertIn("🗓 月维度", panels[2])
-        # 日维度锚定 9-22（fake 里 9-23 有杭州 2.0万/绍兴 0.5万，T-1 后不可见）
-        self.assertIn("9月22日", panels[0])
-        self.assertNotIn("9月23日合计", panels[0])
+        self.assertEqual(len(panels), 1)
+        panel = panels[0]
+        self.assertIn('id="dim-tabs"', panel)
+        for key in ("daily", "weekly", "monthly"):
+            self.assertIn(f'href="#dim-{key}"', panel)
+            self.assertIn(f'id="dim-{key}"', panel)
+        self.assertIn("swDim", panel)
+        # 日维度锚定 9-22（fake 里 9-23 有数据，T-1 后不可见）
+        self.assertIn("9月22日", panel)
+        self.assertNotIn("9月23日合计", panel)
         # 月维度：杭州月累计只含 9-22 的 1.0万（9-23 的 2.0万被 T-1 排除）
-        self.assertIn("1.0万", panels[2])
-        self.assertNotIn(">2.0万<", panels[2])
+        self.assertIn("1.0万", panel)
+        self.assertNotIn(">2.0万<", panel)
         # 月维度板块含李树军拆分后的五个板块行
-        self.assertIn("李树军", panels[2])
-        self.assertIn("线下整体", panels[2])
+        self.assertIn("李树军", panel)
+        self.assertIn("线下整体", panel)
 
 
 if __name__ == "__main__":

@@ -136,6 +136,28 @@ def fetch_scope_month_target(connection, *, region, anchor, year, month):
     return sum(values) if values else None
 
 
+def fetch_member_dept_map(connection, regions):
+    """通讯录实名 → 部门名（``dim_robot_member``，人员部门归属的权威源）。
+
+    运维口径（2026-09-23）：对部门把握不准时以通讯录为准——AI 表内
+    部门列是手工维护的表内叫法，dim 才是组织真源。返回
+    ``{(region, 姓名): 部门名}``（dept_name 为空的行不收录）。
+    """
+    placeholders = ",".join(["%s"] * len(regions))
+    sql = (
+        "SELECT `region`, `name`, `dept_name` FROM `dim_robot_member` "
+        f"WHERE `region` IN ({placeholders}) AND `is_active` = 1"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, list(regions))
+        rows = cursor.fetchall()
+    return {
+        (row["region"], row["name"]): row["dept_name"]
+        for row in rows
+        if row.get("dept_name")
+    }
+
+
 def upsert_agg_daily(connection, *, stat_date, rows, synced_at):
     """写/覆盖 ``agg_offline_daily``（(stat_date, scope) 幂等）。"""
     sql = (
@@ -545,7 +567,7 @@ def _signed_pct_html(rate):
 
 
 def build_daily_panel(*, rows, total, report_day):
-    """日维度：各板块当日 + 日环比 + 周环比（报告日=最近有数据自然日）。"""
+    """日维度表体：各板块当日 + 日环比 + 周环比（报告日=最近有数据自然日）。"""
     head = (
         f'<div class="small muted" style="margin-bottom:8px">'
         f'{report_day.month}月{report_day.day}日合计 '
@@ -557,20 +579,18 @@ def build_daily_panel(*, rows, total, report_day):
         wow, wow_cls = _signed_pct_html(m.wow_rate)
         return [(_fmt_wan(m.sales), ""), (_esc(dod), dod_cls), (_esc(wow), wow_cls)]
 
-    body = (
+    return (
         head
         + '<table><thead><tr><th>板块</th><th>当日</th><th>日环比</th>'
           '<th>周环比</th></tr></thead>'
         + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
-    )
-    return _panel(
-        "📅 日维度", body,
-        note=f"数据截至 {report_day.month}月{report_day.day}日（最近有数据自然日）",
+        + f'<div class="small muted" style="margin-top:8px">'
+          f'数据截至 {report_day.month}月{report_day.day}日（最近有数据自然日）</div>'
     )
 
 
 def build_weekly_panel(*, rows, total, week_start, business_date):
-    """周维度：本周（周一至今）累计 + 对上周同期环比。"""
+    """周维度表体：本周（周一至昨日，T-1）累计 + 对上周同期环比。"""
     head = (
         f'<div class="small muted" style="margin-bottom:8px">'
         f'本周 {week_start.month}月{week_start.day}日 至 '
@@ -582,17 +602,18 @@ def build_weekly_panel(*, rows, total, week_start, business_date):
         wow, wow_cls = _signed_pct_html(m.wow_rate)
         return [(_fmt_wan(m.sales), ""), (_esc(wow), wow_cls)]
 
-    body = (
+    return (
         head
         + '<table><thead><tr><th>板块</th><th>本周累计</th>'
           '<th>环比上周同期</th></tr></thead>'
         + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+        + '<div class="small muted" style="margin-top:8px">'
+          '本周=周一至昨日（T-1，自然日口径）</div>'
     )
-    return _panel("📆 周维度", body, note="本周=周一至昨日（T-1，自然日口径）")
 
 
 def build_monthly_panel(*, rows, total, business_date):
-    """月维度：月累计 / 月目标 / 达成率 / 月环比。"""
+    """月维度表体：月累计 / 月目标 / 达成率 / 月环比。"""
     head = (
         f'<div class="small muted" style="margin-bottom:8px">'
         f'{business_date.month}月累计合计 '
@@ -614,13 +635,61 @@ def build_monthly_panel(*, rows, total, business_date):
             (_esc(mom), mom_cls),
         ]
 
-    body = (
+    return (
         head
         + '<table><thead><tr><th>板块</th><th>月累计</th><th>月目标</th>'
           '<th>达成率</th><th>月环比</th></tr></thead>'
         + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+        + '<div class="small muted" style="margin-top:8px">'
+          '月环比=本月1日至当日累计 ÷ 上月1日至同日日累计</div>'
     )
-    return _panel("🗓 月维度", body, note="月环比=本月1日至当日累计 ÷ 上月1日至同日日累计")
+
+
+#: 维度标签（键, 展示名），顺序即标签顺序。
+_DIM_TABS = (("daily", "📅 日维度"), ("weekly", "📆 周维度"), ("monthly", "🗓 月维度"))
+
+_DIM_TABS_SCRIPT = """<style>#dim-tabs .tab{text-decoration:none;color:inherit}</style>
+<script>
+function swDim(el){
+  document.querySelectorAll('#dim-tabs .tab').forEach(function(t){t.classList.remove('on')});
+  el.classList.add('on');
+  ['daily','weekly','monthly'].forEach(function(k){
+    document.getElementById('dim-'+k).style.display = el.dataset.dim===k?'':'none';
+  });
+  if(history.replaceState){history.replaceState(null,'',el.getAttribute('href'));}
+}
+(function(){
+  if(location.hash){
+    var el=document.querySelector('#dim-tabs .tab[href="'+location.hash+'"]');
+    if(el){swDim(el);}
+  }
+})();
+</script>"""
+
+
+def _dim_tabs_panel(bodies):
+    """日/月/周标签面板：tab 切换 + 页内锚点（``#dim-daily`` 等可深链接）。
+
+    锚点语义：JS 正常时点击 tab 就地切换并把 hash 写入地址栏（可收藏/
+    转发定位到指定维度）；无 JS 时 ``<a href="#dim-xxx">`` 退化为普通
+    页内锚点跳转（三段落全部纵向可见，不丢内容）。
+    """
+    tabs = []
+    sections = []
+    for i, (key, label) in enumerate(_DIM_TABS):
+        on = " on" if i == 0 else ""
+        tabs.append(
+            f'<a class="tab{on}" data-dim="{key}" href="#dim-{key}" '
+            f'onclick="swDim(this);return false;">{label}</a>'
+        )
+        display = "" if i == 0 else ' style="display:none"'
+        sections.append(f'<div id="dim-{key}"{display}>{bodies[key]}</div>')
+    return (
+        '<div class="panel">\n'
+        f'  <div class="tabs" id="dim-tabs">{"".join(tabs)}</div>\n'
+        + "\n".join(sections)
+        + f"\n{_DIM_TABS_SCRIPT}\n</div>"
+    )
 
 
 def build_offline_panels(connection, *, business_date):
@@ -660,7 +729,7 @@ def build_offline_panels(connection, *, business_date):
                     day_totals[d] = day_totals.get(d, 0.0) + amount
         filled = sorted(d for d, t in day_totals.items() if t != 0)
         if not filled:
-            return _panel("📅 日维度", '<div class="muted small">本月暂无报数数据</div>')
+            return '<div class="muted small">本月暂无报数数据</div>'
         report_day = filled[-1]
         rows = [
             compute_daily_metrics(
@@ -719,23 +788,28 @@ def build_offline_panels(connection, *, business_date):
         )
         return build_monthly_panel(rows=rows, total=total, business_date=data_date)
 
-    panels = []
-    for name, build in (("日维度", daily), ("周维度", weekly), ("月维度", monthly)):
+    bodies = {}
+    for key, build in (("daily", daily), ("weekly", weekly), ("monthly", monthly)):
         try:
-            panels.append(build())
+            bodies[key] = build()
         except Exception:
-            logger.warning("offline_all 板块 %s 生成失败，降级为占位", name, exc_info=True)
-            panels.append(_panel(name, '<div class="muted small">数据暂缺</div>'))
-    return panels
+            logger.warning("offline_all 板块 %s 生成失败，降级为占位", key, exc_info=True)
+            bodies[key] = '<div class="muted small">数据暂缺</div>'
+    return [_dim_tabs_panel(bodies)]
 
 
 def build_offline_all_html(connection, cfg, *, business_date, now):
-    """线下整体榜单页：人员总榜（杭/绍等全部线下人员，无人例外）+ 三维度板块。
+    """线下整体榜单页：人员总榜（杭/绍等全部线下人员，无人例外）+ 维度标签。
 
     人员：``OFFLINE_PEOPLE_REGIONS`` 各 region 的 ``mart_collect`` 结果合并
     （与各区域榜单页逐行同口径；「合计」行由 mart_collect 统一跳过），
     排序与 ``mart_collect`` 同键（-rate(None→-1), -completed, -target）。
-    板块：日/周/月三维度（``build_offline_panels``，extra_panels 插入）。
+    人/部门归位（运维口径 2026-09-23，人与部门不要混乱）：
+    * offline_extra 行「姓名↔部门」互换——事实行的 responsible_person 是
+      板块（省外/线下总经办）、department 才是责任人（余云涛/谢坚钰）；
+    * 杭/绍人员部门以通讯录 ``dim_robot_member`` 为准（表内部门是手工
+      叫法），无匹配保留表内值兜底。
+    板块：日/周/月标签面板（``build_offline_panels``，extra_panels 插入）。
     """
     from common.daily_robot.leaderboard import build_html
     from common.daily_robot.mart_leaderboard import (
@@ -746,11 +820,25 @@ def build_offline_all_html(connection, cfg, *, business_date, now):
 
     year, month = business_date.year, business_date.month
     people = []
+    by_region = {}
     workdays = frozenset()
     for region in OFFLINE_PEOPLE_REGIONS:
         data = mart_collect(connection, region=region, business_date=business_date)
-        people.extend(data.people)
+        rows = [dict(p) for p in data.people]
+        if region == "offline_extra":
+            for p in rows:
+                p["name"], p["dept"] = p["dept"], p["name"]
+        by_region[region] = rows
+        people.extend(rows)
         workdays = data.workdays
+
+    # 部门归属以通讯录为准（无匹配保留表内部门）
+    dim_regions = tuple(r for r in OFFLINE_PEOPLE_REGIONS if r != "offline_extra")
+    dept_map = fetch_member_dept_map(connection, dim_regions)
+    for region in dim_regions:
+        for p in by_region[region]:
+            p["dept"] = dept_map.get((region, p["name"]), p["dept"])
+
     people.sort(
         key=lambda p: (
             -(p["rate"] if p["rate"] is not None else -1),
