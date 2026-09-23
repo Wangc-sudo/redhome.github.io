@@ -154,7 +154,33 @@ class StockAlertTests(unittest.TestCase):
         data = fetch_stock_alerts(conn, today=date(2026, 9, 23))
         self.assertEqual([r["spec_no"] for r in data["urgent"]], ["习酒493"])
         self.assertEqual([r["spec_no"] for r in data["oversold"]], ["女儿红41"])
+        self.assertEqual(data["zero_stock"], [])
         self.assertEqual(data["moving_window_days"], 15)
+
+    def test_zero_stock_split_and_goods_filter(self):
+        # 零库存在售（available=0）拆出 zero_stock；赠品/服务卡被剔除，
+        # 但无酒类关键词的真酒（舍之道）必须保留（排除法，不做白名单）
+        rows = _SNAP_ROWS + [
+            {"spec_no": "习酒278", "goods_name": "1.5l习酒古韵", "available_qty": 0.0,
+             "stock_qty": 0.0, "qty_7days": None, "qty_month": None,
+             "purchase_intransit_qty": 0.0, "daily_avg": 5.0, "days_left": 0.0,
+             "moving_window_days": 15, "is_moving": 1, "stock_state": "OVERSOLD"},
+            {"spec_no": "赠品110", "goods_name": "服务升级卡", "available_qty": 0.0,
+             "stock_qty": 0.0, "qty_7days": None, "qty_month": None,
+             "purchase_intransit_qty": 0.0, "daily_avg": 1.0, "days_left": 0.0,
+             "moving_window_days": 15, "is_moving": 1, "stock_state": "OVERSOLD"},
+            {"spec_no": "舍得33", "goods_name": "舍之道（天道礼盒装）", "available_qty": 8.0,
+             "stock_qty": 8.0, "qty_7days": 10.0, "qty_month": 40.0,
+             "purchase_intransit_qty": 0.0, "daily_avg": 2.0, "days_left": 4.0,
+             "moving_window_days": 15, "is_moving": 1, "stock_state": "URGENT"},
+        ]
+        conn = _Conn(_router(snap_rows=rows))
+        data = fetch_stock_alerts(conn, today=date(2026, 9, 23))
+        self.assertEqual([r["spec_no"] for r in data["oversold"]], ["女儿红41"])
+        self.assertEqual([r["spec_no"] for r in data["zero_stock"]], ["习酒278"])
+        urgent_specs = [r["spec_no"] for r in data["urgent"]]
+        self.assertIn("舍得33", urgent_specs)  # 无关键词真酒不误伤
+        self.assertNotIn("赠品110", urgent_specs + [r["spec_no"] for r in data["zero_stock"]])
 
 
 class PurchaseInboundTests(unittest.TestCase):
@@ -220,6 +246,22 @@ class OrderRiskTests(unittest.TestCase):
 
         older = fetch_order_risk(conn, business_date=yesterday - timedelta(days=2))
         self.assertTrue(older["stale"])  # 更早的日期标记延迟
+
+    def test_incomplete_area_groups_split(self):
+        from datetime import timedelta
+
+        risk_rows = [
+            {"shop_name": "习水村-抖音习酒旗舰店", "area": "江西省吉安市新干县", "n": 5},
+            {"shop_name": "杭州习水村酒业有限公司", "area": "浙江省杭州市-", "n": 802},
+        ]
+        conn = _Conn(_router(risk_rows=risk_rows))
+        yesterday = date.today() - timedelta(days=1)
+        data = fetch_order_risk(conn, business_date=yesterday)
+        # 区级缺失（"…-"）分组不参与风险判定
+        self.assertEqual(len(data["groups"]), 1)
+        self.assertEqual(data["groups"][0]["shop_name"], "习水村-抖音习酒旗舰店")
+        self.assertEqual(len(data["incomplete_groups"]), 1)
+        self.assertEqual(data["incomplete_groups"][0]["areas"][0]["count"], 802)
 
 
 if __name__ == "__main__":

@@ -155,7 +155,13 @@ def build_hot_items_panel(connection, *, today):
         f'<th>可售</th><th>30天销</th><th>在途</th><th>状态</th></tr></thead>'
         f'<tbody>{"".join(trs)}</tbody></table>'
     )
-    return _panel("🔥 热卖品监控", body, note=_stale_note(data["as_of"], data["stale"]))
+    # 两窗口并列防误读（2026-09-23 核查：习酒761 "30天销1260 但正常/可售—"）
+    window = data.get("moving_window_days") or 15
+    note = (
+        f"{_stale_note(data['as_of'], data['stale'])}"
+        f" · 可售/状态按近{window}天动销（「—」= 近{window}天无动销），30天销为近30天窗口"
+    )
+    return _panel("🔥 热卖品监控", body, note=note)
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +204,28 @@ def build_stock_alert_panel(connection, *, today):
             f'<table><thead><tr><th>货品名称</th><th>编码</th>'
             f'<th>超卖数量</th></tr></thead><tbody>{trs}</tbody></table>'
         )
+    # 零库存在售单独成组（库存恰好为 0 但仍在卖，2026-09-23 核查拆分）
+    zero_stock = data.get("zero_stock") or []
+    if zero_stock:
+        trs = "".join(
+            f'<tr><td class="strong">{_esc(r["goods_name"])}</td>'
+            f'<td class="muted">{_esc(r["spec_no"])}</td>'
+            f'<td class="num">{float(r["daily_avg"] or 0):.1f}</td></tr>'
+            for r in zero_stock
+        )
+        sections.append(
+            f'<div class="small" style="margin:10px 0 4px">'
+            f'🚫 零库存在售（{len(zero_stock)}个，按日销降序）</div>'
+            f'<table><thead><tr><th>货品名称</th><th>编码</th>'
+            f'<th>日销</th></tr></thead><tbody>{trs}</tbody></table>'
+        )
     if not sections:
         sections.append('<div class="ok small">当前无紧急补货与超卖 SKU</div>')
     window = data["moving_window_days"] or 15
-    note = f"动销窗口 近{window}天 · {_stale_note(data['as_of'], data['stale'])}"
+    note = (
+        f"动销窗口 近{window}天 · 已剔除赠品/服务卡等非商品行 · "
+        f"{_stale_note(data['as_of'], data['stale'])}"
+    )
     return _panel("📦 库存补货提醒", "".join(sections), note=note)
 
 
@@ -260,28 +284,43 @@ def build_order_risk_panel(connection, *, business_date):
         )
         + "</div>"
     )
-    if not data["groups"]:
-        body = head + '<div class="ok small">昨日未发现同店同地区集中下单</div>'
+    def _group_html(group):
+        areas = group["areas"][:15]
+        trs = "".join(
+            f'<tr><td>{_esc(a["area"])}</td>'
+            f'<td class="num warn">{a["count"]}</td></tr>'
+            for a in areas
+        )
+        more = (
+            f'<div class="small muted">… 共{len(group["areas"])}个地区</div>'
+            if len(group["areas"]) > 15 else ""
+        )
+        # platform_of 未识别时兜底返回店名本身，避免"店名-店名"重复显示
+        title = (
+            group["shop_name"]
+            if group["platform"] == group["shop_name"]
+            else f'{group["platform"]}-{group["shop_name"]}'
+        )
+        return (
+            f'<div class="small" style="margin:6px 0 4px">'
+            f'<b>{_esc(title)}</b></div>'
+            f'<table><thead><tr><th>重点地区</th><th>异常单数</th></tr></thead>'
+            f'<tbody>{trs}</tbody></table>{more}'
+        )
+
+    incomplete = data.get("incomplete_groups") or []
+    sections = []
+    if data["groups"]:
+        sections.extend(_group_html(g) for g in data["groups"])
     else:
-        sections = []
-        for group in data["groups"]:
-            areas = group["areas"][:15]
-            trs = "".join(
-                f'<tr><td>{_esc(a["area"])}</td>'
-                f'<td class="num warn">{a["count"]}</td></tr>'
-                for a in areas
-            )
-            more = (
-                f'<div class="small muted">… 共{len(group["areas"])}个地区</div>'
-                if len(group["areas"]) > 15 else ""
-            )
-            sections.append(
-                f'<div class="small" style="margin:6px 0 4px">'
-                f'<b>{_esc(group["platform"])}-{_esc(group["shop_name"])}</b></div>'
-                f'<table><thead><tr><th>重点地区</th><th>异常单数</th></tr></thead>'
-                f'<tbody>{trs}</tbody></table>{more}'
-            )
-        body = head + "".join(sections)
+        sections.append('<div class="ok small">昨日未发现同店同地区集中下单</div>')
+    if incomplete:
+        sections.append(
+            '<div class="small muted" style="margin:10px 0 4px">'
+            '⚠️ 以下店铺地区字段不全（区级缺失），不参与风险判定，仅供参考</div>'
+        )
+        sections.extend(_group_html(g) for g in incomplete)
+    body = head + "".join(sections)
     return _panel(
         f"🚨 订单风险防控（{risk_date.month}月{risk_date.day}日）", body,
         note="口径：按付款时间，排除已取消订单；同地区定义为省市区三级归一",

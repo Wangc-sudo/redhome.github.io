@@ -119,7 +119,10 @@ def fetch_hot_items(connection, *, as_of=None, today=None,
     """
     snapshot = fetch_inventory_snapshot(connection, as_of=as_of, today=today)
     if snapshot["as_of"] is None:
-        return {**snapshot, "items": [], "watch_count": 0, "coverage_pct": None}
+        return {
+            **snapshot, "items": [], "watch_count": 0, "coverage_pct": None,
+            "moving_window_days": None,
+        }
 
     snap_date = snapshot["as_of"]
     since = snap_date - timedelta(days=HOT_SALES_DAYS)
@@ -175,29 +178,52 @@ def fetch_hot_items(connection, *, as_of=None, today=None,
         "danger_count": sum(1 for x in watch if x["stock_state"] == "URGENT"),
         "oversold_count": sum(1 for x in watch if x["stock_state"] == "OVERSOLD"),
         "coverage_pct": (watched_qty / wine_total) if wine_total else None,
+        "moving_window_days": (
+            snapshot["rows"][0]["moving_window_days"] if snapshot["rows"] else None
+        ),
     }
 
 
 def fetch_stock_alerts(connection, *, as_of=None, today=None):
-    """库存预警：紧急补货（URGENT，可售天数升序）+ 已超卖（OVERSOLD，缺口大在前）。
+    """库存预警：紧急补货（URGENT，可售天数升序）+ 超卖/零库存（OVERSOLD）。
+
+    OVERSOLD 投影口径 = 可发 ≤ 0 且 30 天内仍在卖，本层细分两档：
+    * ``oversold``：真超卖（available < 0），缺口大在前；
+    * ``zero_stock``：库存恰好为 0 但仍在卖——单独成组，避免满屏
+      "超卖 0"噪音（2026-09-23 核查：26 行里 22 行超卖数量为 0）。
+
+    剔除非商品行（赠品/服务卡/包材等，EXCLUDE_KEYWORDS 排除法）——
+    不用 :func:`is_wine` 白名单：古越金三年/舍之道/鉴湖等真酒品名不含
+    关键词，白名单会误伤（2026-09-23 实测），而噪音来源只是赠品
+    "服务升级卡"这类非商品行。
 
     去重状态机（旧 .stock_alert_state.json）不进本层——静态页按日快照
     展示全量当前状态；若未来恢复触发式播报，去重走 broadcast_dedup 表。
     """
     snapshot = fetch_inventory_snapshot(connection, as_of=as_of, today=today)
+    wine_rows = [
+        r for r in snapshot["rows"]
+        if not any(k in (r.get("goods_name") or "") for k in EXCLUDE_KEYWORDS)
+    ]
     urgent = sorted(
-        (r for r in snapshot["rows"] if r["stock_state"] == "URGENT"),
+        (r for r in wine_rows if r["stock_state"] == "URGENT"),
         key=lambda r: (float(r["days_left"] or 0), r["spec_no"]),
     )
+    oversold_all = [r for r in wine_rows if r["stock_state"] == "OVERSOLD"]
     oversold = sorted(
-        (r for r in snapshot["rows"] if r["stock_state"] == "OVERSOLD"),
+        (r for r in oversold_all if float(r["available_qty"] or 0) < 0),
         key=lambda r: (float(r["available_qty"] or 0), r["spec_no"]),
+    )
+    zero_stock = sorted(
+        (r for r in oversold_all if float(r["available_qty"] or 0) == 0),
+        key=lambda r: (-(float(r["daily_avg"] or 0)), r["spec_no"]),
     )
     return {
         "as_of": snapshot["as_of"],
         "stale": snapshot["stale"],
         "urgent": urgent,
         "oversold": oversold,
+        "zero_stock": zero_stock,
         "moving_window_days": (
             snapshot["rows"][0]["moving_window_days"] if snapshot["rows"] else None
         ),
@@ -255,12 +281,21 @@ def fetch_purchase_inbound(connection, *, now, hours=PURCHASE_LOOKBACK_HOURS):
     }
 
 
+def _area_incomplete(area):
+    """地区归一后区级缺失（"浙江省杭州市-"）：隐私/掩码导致，非真实集中。"""
+    return str(area or "").endswith("-")
+
+
 def fetch_order_risk(connection, *, business_date, threshold=RISK_THRESHOLD):
     """订单风控：昨日同店铺+同地区 ≥ threshold 单的分组（count distinct 订单）。
 
     ``receiver_area_norm`` 为 NULL 的订单不参与分组（旧口径：无地区跳过）；
     拼多多无地区单数单列返回 ``pdd_no_area_count``（设计稿 §4.3：
     源头限制必须显式计数，不得静默少单）。
+
+    地区区级缺失的分组拆到 ``incomplete_groups``（2026-09-23 核查：店铺
+    "杭州习水村酒业有限公司"全部订单归一为"浙江省杭州市-"，802 单/日恒触发
+    ≥3 规则，属于地区字段不全的系统性误报，不参与风险判定、仅供参考）。
     """
     placeholders = ", ".join(["%s"] * len(RISK_TRADE_STATUSES))
     rows = _query(
@@ -295,6 +330,15 @@ def fetch_order_risk(connection, *, business_date, threshold=RISK_THRESHOLD):
         for shop, areas in shops.items()
     ]
     groups.sort(key=lambda g: (-len(g["areas"]), -g["total"], g["shop_name"]))
+    # 地区区级缺失（"…-"）的分组拆出：不参与风险判定，仅供参考
+    complete_groups = []
+    incomplete_groups = []
+    for g in groups:
+        if g["areas"] and all(_area_incomplete(a["area"]) for a in g["areas"]):
+            incomplete_groups.append(g)
+        else:
+            complete_groups.append(g)
+    groups = complete_groups
 
     pdd = _query(
         connection,
@@ -308,6 +352,7 @@ def fetch_order_risk(connection, *, business_date, threshold=RISK_THRESHOLD):
         "as_of": business_date,
         "stale": business_date < (date.today() - timedelta(days=1)),
         "groups": groups,
+        "incomplete_groups": incomplete_groups,
         "pdd_no_area_count": int(pdd[0]["n"]) if pdd else 0,
         "threshold": threshold,
     }

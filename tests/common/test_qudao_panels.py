@@ -171,6 +171,58 @@ class ItemPanelTests(unittest.TestCase):
             )
         self.assertIn("昨日未发现同店同地区集中下单", html)
 
+    def test_stock_alert_panel_zero_stock_section(self):
+        # 零库存在售（available=0 但在卖）与真超卖（available<0）分开展示
+        data = {
+            "as_of": date(2026, 9, 23), "stale": False, "moving_window_days": 15,
+            "urgent": [],
+            "oversold": [{"spec_no": "女儿红41", "goods_name": "2.5L女儿红",
+                          "available_qty": -3.0}],
+            "zero_stock": [{"spec_no": "习酒278", "goods_name": "1.5l习酒古韵",
+                            "available_qty": 0.0, "daily_avg": 5.0}],
+        }
+        with patch("common.broadcast.queries.fetch_stock_alerts", return_value=data):
+            html = qudao_panels.build_stock_alert_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("已超卖（1个）", html)
+        self.assertIn("零库存在售（1个", html)
+        self.assertIn("已剔除赠品/服务卡等非商品行", html)
+
+    def test_order_risk_panel_incomplete_groups(self):
+        # 地区区级缺失的分组降级展示，不参与风险判定；店名/platform 相同不重复
+        data = {
+            "as_of": date(2026, 9, 22), "stale": False, "threshold": 3,
+            "groups": [],
+            "incomplete_groups": [{
+                "shop_name": "杭州习水村酒业有限公司", "platform": "杭州习水村酒业有限公司",
+                "areas": [{"area": "浙江省杭州市-", "count": 802}], "total": 802,
+            }],
+            "pdd_no_area_count": 0,
+        }
+        with patch("common.broadcast.queries.fetch_order_risk", return_value=data):
+            html = qudao_panels.build_order_risk_panel(
+                Mock(), business_date=date(2026, 9, 23)
+            )
+        self.assertIn("昨日未发现同店同地区集中下单", html)  # 正常组为空仍报平安
+        self.assertIn("不参与风险判定，仅供参考", html)
+        self.assertIn("浙江省杭州市-", html)
+        self.assertNotIn("杭州习水村酒业有限公司-杭州习水村酒业有限公司", html)
+
+    def test_hot_items_panel_window_note(self):
+        data = {
+            "as_of": date(2026, 9, 23), "stale": False, "moving_window_days": 15,
+            "items": [
+                {"spec_no": "习酒761", "goods_name": "习酒窖藏1988浙江", "available_qty": 3.0,
+                 "days_left": None, "purchase_intransit_qty": 60.0,
+                 "stock_state": "HEALTHY", "qty_30d": 1260.0},
+            ],
+            "watch_count": 1, "danger_count": 0, "oversold_count": 0,
+            "coverage_pct": 0.5,
+        }
+        with patch("common.broadcast.queries.fetch_hot_items", return_value=data):
+            html = qudao_panels.build_hot_items_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("近15天无动销", html)   # 窗口口径注释
+        self.assertIn("30天销为近30天窗口", html)
+
 
 class AssemblyTests(unittest.TestCase):
 
