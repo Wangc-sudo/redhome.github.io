@@ -624,35 +624,39 @@ def build_monthly_panel(*, rows, total, business_date):
 
 
 def build_offline_panels(connection, *, business_date):
-    """日/周/月三维度板块（顺序即页面顺序）。
+    """日/周/月三维度板块（顺序即页面顺序），**统一 T-1**。
 
-    单板块异常 → 占位降级（同 qudao_panels 纪律），绝不拖垮整页。
+    运维裁决（2026-09-23）：今天的看板看昨天的数据——三板块全部锚定
+    ``business_date - 1``（取数窗口、月目标月份、周/月区间、日维度
+    报告日上限同移），当日填报进度不进看板。单板块异常 → 占位降级
+    （同 qudao_panels 纪律），绝不拖垮整页。
     """
     import logging
 
     logger = logging.getLogger(__name__)
-    prev_first, _ = previous_month(business_date)
+    data_date = business_date - timedelta(days=1)
+    prev_first, _ = previous_month(data_date)
     facts_by_scope = {}
     targets = {}
     for scope, label, region, anchor in AGG_SCOPES:
         facts = fetch_scope_daily_facts(
             connection, region=region, anchor=anchor,
-            start=prev_first, end=business_date,
+            start=prev_first, end=data_date,
         )
         facts_by_scope[scope] = facts
         targets[scope] = fetch_scope_month_target(
             connection, region=region, anchor=anchor,
-            year=business_date.year, month=business_date.month,
+            year=data_date.year, month=data_date.month,
         )
     merged = merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES])
     total_target = merge_targets(targets.values())
 
     def daily():
-        # 报告日 = business_date 之前（含）最近一个全板块合计非零的自然日
+        # 报告日 = data_date 之前（含）最近一个全板块合计非零的自然日
         day_totals = {}
         for facts in facts_by_scope.values():
             for d, amount in facts.items():
-                if d <= business_date:
+                if d <= data_date:
                     day_totals[d] = day_totals.get(d, 0.0) + amount
         filled = sorted(d for d, t in day_totals.items() if t != 0)
         if not filled:
@@ -672,24 +676,24 @@ def build_offline_panels(connection, *, business_date):
         return build_daily_panel(rows=rows, total=total, report_day=report_day)
 
     def weekly():
-        week_start = business_date - timedelta(days=business_date.weekday())
+        week_start = data_date - timedelta(days=data_date.weekday())
         rows = []
         for scope, label, _, _ in AGG_SCOPES:
             facts = facts_by_scope[scope]
-            week_total = _sum_window(facts, week_start, business_date)
+            week_total = _sum_window(facts, week_start, data_date)
             prev_total = _sum_window(
                 facts, week_start - timedelta(days=7),
-                business_date - timedelta(days=7),
+                data_date - timedelta(days=7),
             )
             wow_amount, wow_rate = _diff_rate(week_total, prev_total)
             rows.append(ScopeMetrics(
                 scope=scope, label=label, sales=week_total,
                 wow_amount=wow_amount, wow_rate=wow_rate,
             ))
-        week_total = _sum_window(merged, week_start, business_date)
+        week_total = _sum_window(merged, week_start, data_date)
         prev_total = _sum_window(
             merged, week_start - timedelta(days=7),
-            business_date - timedelta(days=7),
+            data_date - timedelta(days=7),
         )
         wow_amount, wow_rate = _diff_rate(week_total, prev_total)
         total = ScopeMetrics(
@@ -698,22 +702,22 @@ def build_offline_panels(connection, *, business_date):
         )
         return build_weekly_panel(
             rows=rows, total=total,
-            week_start=week_start, business_date=business_date,
+            week_start=week_start, business_date=data_date,
         )
 
     def monthly():
         rows = [
             compute_daily_metrics(
                 scope, label, facts=facts_by_scope[scope],
-                business_date=business_date, month_target=targets[scope],
+                business_date=data_date, month_target=targets[scope],
             )
             for scope, label, _, _ in AGG_SCOPES
         ]
         total = compute_daily_metrics(
             TOTAL_SCOPE_KEY, TOTAL_LABEL, facts=merged,
-            business_date=business_date, month_target=total_target,
+            business_date=data_date, month_target=total_target,
         )
-        return build_monthly_panel(rows=rows, total=total, business_date=business_date)
+        return build_monthly_panel(rows=rows, total=total, business_date=data_date)
 
     panels = []
     for name, build in (("日维度", daily), ("周维度", weekly), ("月维度", monthly)):

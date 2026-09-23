@@ -509,14 +509,18 @@ class OfflineAllHtmlTest(unittest.TestCase):
             OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing", "offline_extra")
         )
 
-        # 三维度板块：日/周/月，顺序即页面顺序
+        # 三维度板块：日/周/月，顺序即页面顺序；统一 T-1（9-23 的看板看 9-22）
         panels = captured["extra_panels"]
         self.assertEqual(len(panels), 3)
         self.assertIn("📅 日维度", panels[0])
         self.assertIn("📆 周维度", panels[1])
         self.assertIn("🗓 月维度", panels[2])
-        # 日维度板块锚定最近有数据日（fake 中 9-23 有杭州/绍兴数据）
-        self.assertIn("9月23日", panels[0])
+        # 日维度锚定 9-22（fake 里 9-23 有杭州 2.0万/绍兴 0.5万，T-1 后不可见）
+        self.assertIn("9月22日", panels[0])
+        self.assertNotIn("9月23日合计", panels[0])
+        # 月维度：杭州月累计只含 9-22 的 1.0万（9-23 的 2.0万被 T-1 排除）
+        self.assertIn("1.0万", panels[2])
+        self.assertNotIn(">2.0万<", panels[2])
         # 月维度板块含李树军拆分后的五个板块行
         self.assertIn("李树军", panels[2])
         self.assertIn("线下整体", panels[2])
