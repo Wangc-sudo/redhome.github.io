@@ -498,51 +498,264 @@ def run_monthly_summary(connection, outbox, *, reference, now):
 
 
 # ---------------------------------------------------------------------------
-# 榜单页（pages-offline_all）
+# 榜单页（pages-offline_all）：人员总榜 + 日/周/月三维度板块
 # ---------------------------------------------------------------------------
 
-def build_offline_all_html(connection, cfg, *, business_date, now):
-    """线下整体榜单页：板块即「人」，复用榜单 ``build_html`` 的页面骨架。
+#: 人员总榜覆盖的 fact region（每个 region 的全部人员，无人例外；
+#: 「合计」行由 mart_collect 统一跳过；新增线下区域在此登记）。
+OFFLINE_PEOPLE_REGIONS = ("hangzhou", "shaoxing", "offline_extra")
 
-    口径：completed = 自然日累计（与 20:30 群播报一致）；时间进度条仍按
-    ``dim_calendar`` 工作日（与其他区域榜单页一致）；排序与 ``mart_collect``
-    同键（-rate(None→-1), -completed）。
+import html as _html_mod
+
+
+def _panel(title, body, note=None):
+    """与 qudao_panels 同款的 ``<div class="panel">``（页面 CSS 类约定）。"""
+    note_html = (
+        f'<div class="small muted" style="margin-top:8px">{note}</div>' if note else ""
+    )
+    return f'<div class="panel">\n  <h2>{title}</h2>\n  {body}\n{note_html}\n</div>'
+
+
+def _esc(value):
+    return _html_mod.escape(str(value if value is not None else ""))
+
+
+def _rate_cls(rate):
+    if rate is None:
+        return "muted"
+    return "g" if rate >= 0 else "r"
+
+
+def _scope_trs(rows, total, cells):
+    """板块表 <tr> 序列；*cells* 为列函数 fn(m)->[(html, cls), ...]。"""
+    trs = []
+    for m in (*rows, total):
+        label = f"<b>{_esc(m.label)}</b>" if m.scope == TOTAL_SCOPE_KEY else _esc(m.label)
+        tds = "".join(
+            f'<td class="num {cls}">{content}</td>' for content, cls in cells(m)
+        )
+        trs.append(f'<tr><td class="strong">{label}</td>{tds}</tr>')
+    return "".join(trs)
+
+
+def _signed_pct_html(rate):
+    if rate is None:
+        return "--", "muted"
+    return f"{'+' if rate >= 0 else ''}{_fmt_pct(rate)}", _rate_cls(rate)
+
+
+def build_daily_panel(*, rows, total, report_day):
+    """日维度：各板块当日 + 日环比 + 周环比（报告日=最近有数据自然日）。"""
+    head = (
+        f'<div class="small muted" style="margin-bottom:8px">'
+        f'{report_day.month}月{report_day.day}日合计 '
+        f'<b style="color:#1f2329">{_fmt_wan(total.sales)} 元</b></div>'
+    )
+
+    def cells(m):
+        dod, dod_cls = _signed_pct_html(m.dod_rate)
+        wow, wow_cls = _signed_pct_html(m.wow_rate)
+        return [(_fmt_wan(m.sales), ""), (_esc(dod), dod_cls), (_esc(wow), wow_cls)]
+
+    body = (
+        head
+        + '<table><thead><tr><th>板块</th><th>当日</th><th>日环比</th>'
+          '<th>周环比</th></tr></thead>'
+        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+    )
+    return _panel(
+        "📅 日维度", body,
+        note=f"数据截至 {report_day.month}月{report_day.day}日（最近有数据自然日）",
+    )
+
+
+def build_weekly_panel(*, rows, total, week_start, business_date):
+    """周维度：本周（周一至今）累计 + 对上周同期环比。"""
+    head = (
+        f'<div class="small muted" style="margin-bottom:8px">'
+        f'本周 {week_start.month}月{week_start.day}日 至 '
+        f'{business_date.month}月{business_date.day}日 · 合计 '
+        f'<b style="color:#1f2329">{_fmt_wan(total.sales)} 元</b></div>'
+    )
+
+    def cells(m):
+        wow, wow_cls = _signed_pct_html(m.wow_rate)
+        return [(_fmt_wan(m.sales), ""), (_esc(wow), wow_cls)]
+
+    body = (
+        head
+        + '<table><thead><tr><th>板块</th><th>本周累计</th>'
+          '<th>环比上周同期</th></tr></thead>'
+        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+    )
+    return _panel("📆 周维度", body, note="本周=周一至今（自然日口径）")
+
+
+def build_monthly_panel(*, rows, total, business_date):
+    """月维度：月累计 / 月目标 / 达成率 / 月环比。"""
+    head = (
+        f'<div class="small muted" style="margin-bottom:8px">'
+        f'{business_date.month}月累计合计 '
+        f'<b style="color:#1f2329">{_fmt_wan(total.month_completed)} 元</b>'
+        + (
+            f' · 达成率 <b style="color:#1f2329">{_fmt_pct(total.month_rate)}</b>'
+            if total.month_rate is not None else ""
+        )
+        + "</div>"
+    )
+
+    def cells(m):
+        mom, mom_cls = _signed_pct_html(m.mom_rate)
+        rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
+        return [
+            (_fmt_wan(m.month_completed), ""),
+            (_fmt_wan(m.month_target) if m.month_target else "--", "muted"),
+            (rate_txt, ""),
+            (_esc(mom), mom_cls),
+        ]
+
+    body = (
+        head
+        + '<table><thead><tr><th>板块</th><th>月累计</th><th>月目标</th>'
+          '<th>达成率</th><th>月环比</th></tr></thead>'
+        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+    )
+    return _panel("🗓 月维度", body, note="月环比=本月1日至当日累计 ÷ 上月1日至同日日累计")
+
+
+def build_offline_panels(connection, *, business_date):
+    """日/周/月三维度板块（顺序即页面顺序）。
+
+    单板块异常 → 占位降级（同 qudao_panels 纪律），绝不拖垮整页。
     """
-    from common.daily_robot.leaderboard import build_html
-    from common.daily_robot.mart_leaderboard import build_leaderboard_view
-    from common.metrics.daily_report import elapsed_workdays, fetch_workdays
+    import logging
 
-    year, month = business_date.year, business_date.month
-    workdays = fetch_workdays(connection, year=year, month=month)
-    view = build_leaderboard_view(cfg, workdays, year=year, month=month)
-
+    logger = logging.getLogger(__name__)
     prev_first, _ = previous_month(business_date)
-    people = []
+    facts_by_scope = {}
+    targets = {}
     for scope, label, region, anchor in AGG_SCOPES:
         facts = fetch_scope_daily_facts(
             connection, region=region, anchor=anchor,
             start=prev_first, end=business_date,
         )
-        target = fetch_scope_month_target(
-            connection, region=region, anchor=anchor, year=year, month=month,
+        facts_by_scope[scope] = facts
+        targets[scope] = fetch_scope_month_target(
+            connection, region=region, anchor=anchor,
+            year=business_date.year, month=business_date.month,
         )
-        m = compute_daily_metrics(
-            scope, label, facts=facts,
-            business_date=business_date, month_target=target,
+    merged = merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES])
+    total_target = merge_targets(targets.values())
+
+    def daily():
+        # 报告日 = business_date 之前（含）最近一个全板块合计非零的自然日
+        day_totals = {}
+        for facts in facts_by_scope.values():
+            for d, amount in facts.items():
+                if d <= business_date:
+                    day_totals[d] = day_totals.get(d, 0.0) + amount
+        filled = sorted(d for d, t in day_totals.items() if t != 0)
+        if not filled:
+            return _panel("📅 日维度", '<div class="muted small">本月暂无报数数据</div>')
+        report_day = filled[-1]
+        rows = [
+            compute_daily_metrics(
+                scope, label, facts=facts_by_scope[scope],
+                business_date=report_day, month_target=targets[scope],
+            )
+            for scope, label, _, _ in AGG_SCOPES
+        ]
+        total = compute_daily_metrics(
+            TOTAL_SCOPE_KEY, TOTAL_LABEL, facts=merged,
+            business_date=report_day, month_target=total_target,
         )
-        people.append({
-            "name": label,
-            "dept": label,
-            "target": m.month_target or 0,
-            "completed": m.month_completed,
-            "unfilled": 0,
-            "rate": m.month_rate,
-        })
+        return build_daily_panel(rows=rows, total=total, report_day=report_day)
+
+    def weekly():
+        week_start = business_date - timedelta(days=business_date.weekday())
+        rows = []
+        for scope, label, _, _ in AGG_SCOPES:
+            facts = facts_by_scope[scope]
+            week_total = _sum_window(facts, week_start, business_date)
+            prev_total = _sum_window(
+                facts, week_start - timedelta(days=7),
+                business_date - timedelta(days=7),
+            )
+            wow_amount, wow_rate = _diff_rate(week_total, prev_total)
+            rows.append(ScopeMetrics(
+                scope=scope, label=label, sales=week_total,
+                wow_amount=wow_amount, wow_rate=wow_rate,
+            ))
+        week_total = _sum_window(merged, week_start, business_date)
+        prev_total = _sum_window(
+            merged, week_start - timedelta(days=7),
+            business_date - timedelta(days=7),
+        )
+        wow_amount, wow_rate = _diff_rate(week_total, prev_total)
+        total = ScopeMetrics(
+            scope=TOTAL_SCOPE_KEY, label=TOTAL_LABEL, sales=week_total,
+            wow_amount=wow_amount, wow_rate=wow_rate,
+        )
+        return build_weekly_panel(
+            rows=rows, total=total,
+            week_start=week_start, business_date=business_date,
+        )
+
+    def monthly():
+        rows = [
+            compute_daily_metrics(
+                scope, label, facts=facts_by_scope[scope],
+                business_date=business_date, month_target=targets[scope],
+            )
+            for scope, label, _, _ in AGG_SCOPES
+        ]
+        total = compute_daily_metrics(
+            TOTAL_SCOPE_KEY, TOTAL_LABEL, facts=merged,
+            business_date=business_date, month_target=total_target,
+        )
+        return build_monthly_panel(rows=rows, total=total, business_date=business_date)
+
+    panels = []
+    for name, build in (("日维度", daily), ("周维度", weekly), ("月维度", monthly)):
+        try:
+            panels.append(build())
+        except Exception:
+            logger.warning("offline_all 板块 %s 生成失败，降级为占位", name, exc_info=True)
+            panels.append(_panel(name, '<div class="muted small">数据暂缺</div>'))
+    return panels
+
+
+def build_offline_all_html(connection, cfg, *, business_date, now):
+    """线下整体榜单页：人员总榜（杭/绍等全部线下人员，无人例外）+ 三维度板块。
+
+    人员：``OFFLINE_PEOPLE_REGIONS`` 各 region 的 ``mart_collect`` 结果合并
+    （与各区域榜单页逐行同口径；「合计」行由 mart_collect 统一跳过），
+    排序与 ``mart_collect`` 同键（-rate(None→-1), -completed, -target）。
+    板块：日/周/月三维度（``build_offline_panels``，extra_panels 插入）。
+    """
+    from common.daily_robot.leaderboard import build_html
+    from common.daily_robot.mart_leaderboard import (
+        build_leaderboard_view,
+        mart_collect,
+    )
+    from common.metrics.daily_report import elapsed_workdays
+
+    year, month = business_date.year, business_date.month
+    people = []
+    workdays = frozenset()
+    for region in OFFLINE_PEOPLE_REGIONS:
+        data = mart_collect(connection, region=region, business_date=business_date)
+        people.extend(data.people)
+        workdays = data.workdays
     people.sort(
         key=lambda p: (
             -(p["rate"] if p["rate"] is not None else -1),
             -p["completed"],
+            -p["target"],
         )
     )
+
+    view = build_leaderboard_view(cfg, workdays, year=year, month=month)
     elapsed = sorted({d.day for d in elapsed_workdays(workdays, today=business_date)})
-    return build_html(view, now, elapsed, people)
+    panels = build_offline_panels(connection, business_date=business_date)
+    return build_html(view, now, elapsed, people, extra_panels=panels)

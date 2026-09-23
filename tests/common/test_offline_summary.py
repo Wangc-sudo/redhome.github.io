@@ -442,18 +442,47 @@ class TaskTest(unittest.TestCase):
 
 
 class OfflineAllHtmlTest(unittest.TestCase):
-    """pages-offline_all：板块即「人」喂给榜单 build_html。"""
+    """pages-offline_all：人员总榜（三区合并，无人例外）+ 日/周/月三板块。"""
 
-    def test_scopes_become_people_rows(self):
+    def _fake_people(self, region):
+        rows = {
+            "hangzhou": [
+                {"name": "张三", "dept": "杭中", "target": 100.0,
+                 "completed": 50.0, "unfilled": 0, "rate": 0.5},
+            ],
+            "shaoxing": [
+                {"name": "李树军", "dept": "线下运营中心", "target": 0,
+                 "completed": 142910.0, "unfilled": 0, "rate": None},
+            ],
+            "offline_extra": [
+                {"name": "省外", "dept": "余云涛", "target": 1000000.0,
+                 "completed": 1519440.0, "unfilled": 0, "rate": 1.51944},
+            ],
+        }
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+        return LeaderboardData(
+            business_date=date(2026, 9, 23),
+            elapsed=(22,),
+            people=rows[region],
+            workdays=frozenset({date(2026, 9, 22)}),
+        )
+
+    def test_people_merged_no_exception_and_three_panels(self):
         captured = {}
 
-        def fake_build_html(view, now, elapsed, people, **kwargs):
+        def fake_build_html(view, now, elapsed, people, extra_panels=None, **kw):
             captured["elapsed"] = elapsed
             captured["people"] = people
+            captured["extra_panels"] = extra_panels
             return "<html>offline_all</html>"
 
         conn = _task_conn()
         with mock.patch(
+            "common.daily_robot.mart_leaderboard.mart_collect",
+            side_effect=lambda connection, *, region, business_date: (
+                self._fake_people(region)
+            ),
+        ), mock.patch(
             "common.daily_robot.mart_leaderboard.build_leaderboard_view",
             return_value={"region": {}, "calendar": {}},
         ), mock.patch(
@@ -467,23 +496,30 @@ class OfflineAllHtmlTest(unittest.TestCase):
             )
 
         self.assertEqual(page, "<html>offline_all</html>")
+
+        # 人员总榜：三区合并、排序同 mart_collect 键（rate 降序、None 垫底）
         people = captured["people"]
-        self.assertEqual(len(people), 5)
-        names = [p["name"] for p in people]
-        self.assertIn("李树军", names)
-        # 排序与 mart_collect 同键：rate 降序、None 垫底。
-        # 有目标的三个：总经办 3322147/2195000≈151% > 省外 1519440/1000000≈151.9%？
-        # 精确关系：省外 1.51944 > 总经办 1.51351 > 杭州 0.3；绍兴/李树军 None 垫底
-        self.assertEqual(names[0], "省外")
-        self.assertEqual(names[1], "线下总经办")
-        self.assertEqual(names[2], "杭州")
-        # rate None 垫底，按 completed 降序：李树军 14.3万 > 绍兴 0.5万
-        self.assertEqual(names[3:], ["李树军", "绍兴"])
-        by_name = {p["name"]: p for p in people}
-        self.assertEqual(by_name["李树军"]["completed"], 142910.0)
-        self.assertEqual(by_name["李树军"]["rate"], None)
-        self.assertEqual(by_name["杭州"]["completed"], 30000.0)
-        self.assertEqual(by_name["杭州"]["target"], 100000.0)
+        self.assertEqual(len(people), 3)
+        self.assertEqual(
+            [p["name"] for p in people], ["省外", "张三", "李树军"]
+        )
+        # 覆盖区域登记含 offline_extra（省外/总经办责任人也进榜）
+        from common.daily_robot.offline_summary import OFFLINE_PEOPLE_REGIONS
+        self.assertEqual(
+            OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing", "offline_extra")
+        )
+
+        # 三维度板块：日/周/月，顺序即页面顺序
+        panels = captured["extra_panels"]
+        self.assertEqual(len(panels), 3)
+        self.assertIn("📅 日维度", panels[0])
+        self.assertIn("📆 周维度", panels[1])
+        self.assertIn("🗓 月维度", panels[2])
+        # 日维度板块锚定最近有数据日（fake 中 9-23 有杭州/绍兴数据）
+        self.assertIn("9月23日", panels[0])
+        # 月维度板块含李树军拆分后的五个板块行
+        self.assertIn("李树军", panels[2])
+        self.assertIn("线下整体", panels[2])
 
 
 if __name__ == "__main__":
