@@ -107,7 +107,6 @@ def collect_channel_rows(*, month_facts, business_date, workdays, monthly_target
     ordered += sorted(c for c in today if c not in CHANNEL_ORDER)
 
     rows = []
-    elapsed_days = [d for d in sorted(workdays) if d <= business_date]
     for channel in ordered:
         sales = today[channel]
         prev = _prev_workday_amount(month_facts.get(channel, {}), business_date, workdays)
@@ -119,8 +118,12 @@ def collect_channel_rows(*, month_facts, business_date, workdays, monthly_target
             mom_txt = "--"
         target = (monthly_targets or {}).get(channel)
         if target:
+            # 月累计按自然日（≤ 业务日，含周末）——对齐 AI 表仪表盘口径
+            # （2026-09-23：原按已过工作日累计，比仪表盘系统性偏低）；
+            # 环比仍按上一工作日，不受此影响。
             mtd = sum(
-                month_facts.get(channel, {}).get(d, 0) for d in elapsed_days
+                v for d, v in month_facts.get(channel, {}).items()
+                if d <= business_date
             )
             target_txt = _fmt_wan(target)
             rate_txt = _fmt_pct(mtd / target)

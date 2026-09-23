@@ -303,7 +303,7 @@ class _RoutingConn:
 
 class ChannelDeptRollupTests(unittest.TestCase):
 
-    def test_completed_uses_elapsed_days_and_target_sums_stores(self):
+    def test_completed_uses_natural_days_and_target_sums_stores(self):
         conn = _RoutingConn(
             sales_rows=[
                 {"channel": "直播", "s": Decimal("11744156.00")},
@@ -315,25 +315,28 @@ class ChannelDeptRollupTests(unittest.TestCase):
             ],
         )
         rollup = fetch_channel_dept_rollup(
-            conn, year=2026, month=9,
-            elapsed_days={date(2026, 9, 21), date(2026, 9, 22)},
+            conn, year=2026, month=9, through=date(2026, 9, 23),
         )
         self.assertEqual(rollup["直播"]["completed"], 11744156.0)
         self.assertEqual(rollup["直播"]["target"], 25311000.0)
         self.assertIsNone(rollup["天猫"]["target"])     # 无目标行 → None
         self.assertEqual(rollup["猫超"]["completed"], 0.0)  # 无销售行 → 0
-        # 销售 SQL 用 IN 过滤已过工作日
+        # 销售 SQL 为月内自然日区间（含周末，对齐 AI 表仪表盘）
         sql, params = conn.cursor_instance.executed[0]
-        self.assertIn("IN (%s, %s)", sql)
-        self.assertEqual(
-            set(params), {date(2026, 9, 21), date(2026, 9, 22)}
-        )
+        self.assertIn("BETWEEN %s AND %s", sql)
+        self.assertEqual(params, (date(2026, 9, 1), date(2026, 9, 23)))
+
+    def test_through_is_capped_at_month_end(self):
+        conn = _RoutingConn(sales_rows=[])
+        fetch_channel_dept_rollup(conn, year=2026, month=9, through=date(2026, 10, 5))
+        _, params = conn.cursor_instance.executed[0]
+        self.assertEqual(params, (date(2026, 9, 1), date(2026, 9, 30)))
 
     def test_table_missing_fails_open(self):
         conn = _RoutingConn(fail=True)
         self.assertEqual(
             fetch_channel_dept_rollup(
-                conn, year=2026, month=9, elapsed_days={date(2026, 9, 22)}
+                conn, year=2026, month=9, through=date(2026, 9, 23)
             ),
             {},
         )

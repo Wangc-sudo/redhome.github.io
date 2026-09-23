@@ -251,11 +251,16 @@ def fetch_channel_monthly_targets(connection):
     }
 
 
-def fetch_channel_dept_rollup(connection, *, year, month, elapsed_days):
+def fetch_channel_dept_rollup(connection, *, year, month, through):
     """qudao 部门（=渠道）完成/目标的店铺粒度真值（``dept_overrides`` 用）。
 
-    * 完成 = Σ ``fact_channel_daily_sales``（月内、已过工作日集合内）；
+    * 完成 = Σ ``fact_channel_daily_sales``（月内**自然日**、≤ *through*）；
     * 目标 = Σ ``fact_channel_store_target``（共管店只计一次）。
+
+    口径对齐（2026-09-23 运维裁决「AI 表数据是权威的」）：AI 表仪表盘的
+    月累计按自然日（含周末），本函数同口径——此前按已过工作日累计比
+    仪表盘系统性偏低（周末销售被剔除），已对齐。当天预填的 0/NULL 行
+    不影响求和。
 
     返回 ``{channel: {"completed": float, "target": float|None}}``。
     修复背景：人员粒度事实表是「整店归集合每人」的个人考核口径，部门榜按
@@ -264,27 +269,24 @@ def fetch_channel_dept_rollup(connection, *, year, month, elapsed_days):
     （fail-open：展示层按原人员粒度口径渲染）。
     """
     first, last = _month_range(year, month)
-    elapsed = sorted(d for d in elapsed_days if first <= d <= last)
+    upper = min(through, last)
     rollup = {}
-    if elapsed:
-        placeholders = ", ".join(["%s"] * len(elapsed))
-        try:
-            rows = _fetch_all(
-                connection,
-                "SELECT `channel`, SUM(`sales_amount`) AS `s` "
-                f"FROM `{CHANNEL_SALES_TABLE}` "
-                f"WHERE `business_date` IN ({placeholders}) "
-                "GROUP BY `channel`",
-                tuple(elapsed),
-            )
-        except Exception:
-            rows = []
-        for row in rows:
-            if row.get("channel"):
-                rollup[str(row["channel"])] = {
-                    "completed": float(row["s"] or 0),
-                    "target": None,
-                }
+    try:
+        rows = _fetch_all(
+            connection,
+            "SELECT `channel`, SUM(`sales_amount`) AS `s` "
+            f"FROM `{CHANNEL_SALES_TABLE}` "
+            "WHERE `business_date` BETWEEN %s AND %s GROUP BY `channel`",
+            (first, upper),
+        )
+    except Exception:
+        rows = []
+    for row in rows:
+        if row.get("channel"):
+            rollup[str(row["channel"])] = {
+                "completed": float(row["s"] or 0),
+                "target": None,
+            }
     targets = fetch_channel_monthly_targets(connection)
     for channel, target in targets.items():
         rollup.setdefault(channel, {"completed": 0.0, "target": None})

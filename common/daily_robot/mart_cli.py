@@ -131,9 +131,9 @@ def channel_dept_overrides(conn, region, data):
         return None
     from common.metrics.daily_report import fetch_channel_dept_rollup
     bd = data.business_date
-    elapsed_dates = {date(bd.year, bd.month, d) for d in data.elapsed}
+    # 自然日累计（月内 ≤ 当天；当天预填 0 行不影响）——对齐 AI 表仪表盘口径
     return fetch_channel_dept_rollup(
-        conn, year=bd.year, month=bd.month, elapsed_days=elapsed_dates
+        conn, year=bd.year, month=bd.month, through=bd
     )
 
 
