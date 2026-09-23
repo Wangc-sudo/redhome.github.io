@@ -422,3 +422,38 @@ mart 核心表行数（验收值）：`dim_robot_member`=91、`fact_stockout_lin
 - 上机：清单 zjbsw transform 置 `cumulative`（备份 .bak-20260923c）→ sync（run 4752c984，zjbsw records_read=2 completed）→ extract（837 行重投影）→ **事实行复核：17日 省外 1,519,440 / 总经办 3,322,147 原值保留** ✅
 - 踩坑：`docker cp` 撞上只读挂载报 `read-only file system`（live 挂载后新增），改 `cat | docker exec -i sh -c 'cat > ...'` 管道注入
 - 待办（运维已提及，未开工）：李树军 = 绍兴区域内独立部门、绍兴播报独立计算 → 线下整体汇总板块拆分（shaoxing 剔除李树军 + lishujun 独立板块，AGG_SCOPES 配置行改动），等 17日事项闭环后启动
+
+### pages-offline_all 板块榜 + 李树军拆分（17:1x 北京，运维追问「offline_all 不是给你要求了吗」+ 李树军补充口径）
+- **李树军数据形态实测**：region=shaoxing、responsible_person=李树军、department=线下运营中心（19 行、月累计 14.29万、月目标 103万）——绍兴播报中他本就独立成行
+- **AGG_SCOPES 升级锚点模型**（commit `80689dc`）：("person",名)/("dept",部门)/("dept_not",部门)；绍兴板块=shaoxing 剔除线下运营中心，李树军板块=线下运营中心——日/周/月报、agg、页面同口径同步生效（agg 行 5→6）
+- **pages-offline_all**：线下整体无 region=offline_all 事实行，mart_cli leaderboard-html 特判 offline_all → `offline_summary.build_offline_all_html`（板块即行复用 build_html 骨架；completed=自然日累计与 20:30 群播报同口径；进度条按工作日与其他页一致；排序同 mart_collect 键）；scheduler+seed 注册（08:30），Nacos --if-missing published=1
+- 验证：公网 200（`<title>线下整体销售完成率榜单 · 9月</title>`），李树军行在列（14.3万/103万/13.9%）；leaderboardUrl offline_all 已回填发布（6 regions），gateway restart；**注意今晨 08:30 四区域 pages 管线已自动正常再生**（hangzhou/qudao/shaoxing/vanke 时间戳 08:30 ✅）
+- 全量 1461 例绿（+3：拆分断言/HTML 冒烟/排序）；junpin 成唯一无页面区域（无 pages 管线，同法可补）
+- 观察：服务器出现 `dops-ntp` 容器（非本链路产出，未触碰，待运维说明）
+
+### offline_all 页重构：人员总榜 + 日/周/月三维度板块（17:3x 北京，运维裁决「要全、没有人例外、日月星三板块」）
+- **人员总榜**（commit `e34fad4`）：`OFFLINE_PEOPLE_REGIONS=(hangzhou, shaoxing, offline_extra)` 三区 `mart_collect` 合并——与各区域榜单页逐行同口径（含李树军、省外/总经办责任人），「合计」行由 mart_collect 统一跳过，新增线下区域只改登记元组
+- **三维度板块**（extra_panels，qudao_panels 同款机制，单板块失败占位降级）：
+  - 日维度：锚定最近有数据自然日（08:30 再生时今日多为空，自动回退昨日），列 当日/日环比/周环比
+  - 周维度：本周=周一至今 vs 上周同期
+  - 月维度：月累计/月目标/达成率/月环比
+- 验证：公网 200（49KB），三板块标题在列，日维度锚定 9-22（杭州 23.9万 +55.8%、绍兴 4.8万、李树军 6,636、整体 29.3万）；页面随 08:30 调度每日再生
+- 全量 1461 例绿
+
+### 看板统一 T-1（17:5x 北京，运维裁决「今天的看板，昨天的数据」）
+- commit `ef0d977` + `091c071`：三维度板块取数窗口/月目标月份/周月区间/日维度报告日上限全部锚定 business_date−1；人员总榜本就 T-1（mart_collect 不含当日）→ 页面口径全统一；周维度脚注同步改「周一至昨日」
+- 验证：日维度锚定 9-22（整体 29.3万）、周维度 9-21~9-22（61.3万）、月维度累计 1403.9万/74.5%；绍兴拆分后 193.6万+李树军 14.3万=207.9万、目标 274.1+103=377.1 与拆分前交叉一致 ✅
+
+### 三维度标签化 + 人/部门归位（18:1x 北京，运维裁决「标签分日月周、内部A链接、人与部门不要混乱」）
+- commit `f2d3065`：日/周/月三板块合成**单标签面板**（复用页面 .tabs/.tab 骨架）——tab 就地切换（swDim）、`#dim-daily/#dim-weekly/#dim-monthly` 页内锚点可深链接收藏（点击写 hash、加载按 hash 激活；无 JS 时锚点退化为跳转、三段全见不丢内容）
+- **人/部门归位**（运维口径「对部门把握不准看通讯录」）：① offline_extra 行姓名↔部门互换——fact 的 responsible_person 是板块（省外/线下总经办）、department 才是责任人（余云涛/谢坚钰），此前页面人名栏显示板块名属错位；② 杭/绍人员部门以 `dim_robot_member`（通讯录快照）为权威源覆盖，`fetch_member_dept_map(region,name)→dept_name`，无匹配保留表内部门兜底（表内用名≠通讯录实名的别名场景）
+- 验证：公网标签锚点在列、`余云涛→省外`、`谢坚钰→线下总经办` 行正确；全量 1461 例绿
+
+### bi-web 上云（阶段 1 内网灰度，19:0x 北京）
+- **前置核验全绿**：云上 repo 的 `common/bi_web/{app,config}.py`、`common/public_data/settings.py` 与本地 CRLF 归一化 SHA256 逐字节一致（无需同步代码）；Nacos BI 组实测可达（NacosDashboardSource，l1-cockpit enabled、11 卡，pipeline `bi-web` enabled=true，bi.seed 15 条已在）；app.env 键齐（RDS/Nacos/Redis/三个 seed 路径全指 /opt/dops/repo，ro 挂载即覆盖）；8080/18080 宿主机空闲
+- **编排**：`docker/cloud/docker-compose.dops.yml` 加 `bi-web` 服务（repo 真源，云上副本已同步，改动前备份 `.bak-20260923-biweb`）。与 host 网络三件套不同走**桥接 + `18080:8080` 映射**——uvicorn 端口代码内固定 8080（`app.serve`），映射宿主 18080 对齐方案 §2.3（sg-dops-app 18080 已限 VPC 内网）；env 补 `PUBLIC_DATA_SERVICE_ID=bi-web` + `PUBLIC_DATA_BI_SEED`；挂载 repo:ro + live:ro（Settings 启动即读 source-manifest.json）；python urllib 健康检查
+- **阶段 1 安全裁决**：免登凭据（BI_WEB_SESSION_SECRET/BI_DINGTALK_APPKEY/APPSECRET）未注入 → 身份层为全开放（auth 设计既定行为），故**不配 nginx 公网 server 块**，访问入口仅 VPC 内网 `http://192.168.0.3:18080`；阶段 2（ICP 备案+域名+免登凭据）再反代并置 `BI_WEB_SESSION_SECURE=1`
+- **验证**：容器 healthy；`/healthz` ok+mart 通；`/diagnostics/cache` **backend=redis**（Redis 交付后首个真实消费者）；导航 API 6 看板在列；卡片 `kpi_channel_mtd` 首查 200/178ms（miss）→ 二查 200/4ms（hit），计数器 hits=1/misses=2/errors=0、后端均延 7.5ms；`kpi_annual_progress` 返回真实数（年累计 8,792.7万=线下 5,529.9万+电商 3,262.8万）；**dops-ctrl 内网访问 200 ✓**；**公网 `203.205.91.241:18080` 实测超时（000）✓**（负向验证 SG 拦截）
+- 坑登记：`docker cp` 对 scheduler 容器再报 `no such directory`，沿用 `cat | docker exec -i` 管道注入；本地 PowerShell `curl` 是 Invoke-WebRequest 别名，公网负向验证须用 `curl.exe`
+- 复用脚本：`tools/check_bi_nacos.py`（容器内 Nacos BI 组 + 门控探针）
+- 剩余（阶段 2 前置）：ECS 续费 C0（09-26 前）、regions 真值（G2）、T7 全链路冒烟、免登凭据注入 + 钉钉后台首页地址、域名+ICP 备案
