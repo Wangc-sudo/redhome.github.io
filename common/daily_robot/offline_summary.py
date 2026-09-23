@@ -588,7 +588,7 @@ def build_weekly_panel(*, rows, total, week_start, business_date):
           '<th>环比上周同期</th></tr></thead>'
         + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
     )
-    return _panel("📆 周维度", body, note="本周=周一至今（自然日口径）")
+    return _panel("📆 周维度", body, note="本周=周一至昨日（T-1，自然日口径）")
 
 
 def build_monthly_panel(*, rows, total, business_date):
