@@ -229,5 +229,60 @@ class RenderParityTests(unittest.TestCase):
         self.assertIn("9 / 24 个工作日", page)
 
 
+class DeptOverrideTests(unittest.TestCase):
+    """dept_overrides：qudao 店铺粒度真值覆盖部门完成/目标（2026-09-23）。
+
+    背景：人员粒度是「整店归集合每人」的个人考核口径，Σ(每人) 让共管店
+    重复计数；override 命中时部门完成/目标取真值，人数/未填仍按成员行。
+    """
+
+    def _data(self):
+        conn = _RouterConn(workdays=_WORKDAYS, facts=_fixture_facts())
+        return mart_collect(conn, region="hangzhou", business_date=_DAY)
+
+    _OVERRIDES = {
+        # 杭中原 Σ=300/3,000 → 真值 150/1,500（共管店去重后）
+        "杭中": {"completed": 150.0, "target": 1500.0},
+    }
+
+    def test_render_bc_markdown_uses_override_but_keeps_counts(self):
+        now = datetime(2026, 9, 11, 8, 30)
+        data = self._data()
+        view = build_leaderboard_view(_cfg(), data.workdays, year=2026, month=9)
+        md = render_bc_markdown(
+            view["region"], view["calendar"], now,
+            list(data.elapsed), list(data.people),
+            dept_overrides=self._OVERRIDES,
+        )
+        # 覆盖部门：真值 150/1,500（rate 10% 不变，金额变了）
+        self.assertIn("| 杭中 | 150 / 1,500 |", md)
+        # 未覆盖部门：仍按 Σ 成员
+        self.assertIn("| 滨萧 | 500 / 1,000 |", md)
+        # 整体口径同步用真值：150+500+0 = 650 / 1500+1000+100 = 2600 = 25.0%
+        self.assertIn("整体完成率 **25.0%**", md)
+
+    def test_build_html_dept_card_uses_override(self):
+        now = datetime(2026, 9, 11, 8, 30)
+        data = self._data()
+        view = build_leaderboard_view(_cfg(), data.workdays, year=2026, month=9)
+        page = build_html(
+            view, now, list(data.elapsed), list(data.people),
+            dept_overrides=self._OVERRIDES,
+        )
+        self.assertIn("目标 1,500", page)   # 部门卡目标被真值覆盖
+        self.assertNotIn("目标 3,000", page)
+        self.assertIn("张三", page)          # 个人行不受影响
+
+    def test_no_override_keeps_legacy_figures(self):
+        now = datetime(2026, 9, 11, 8, 30)
+        data = self._data()
+        view = build_leaderboard_view(_cfg(), data.workdays, year=2026, month=9)
+        md = render_bc_markdown(
+            view["region"], view["calendar"], now,
+            list(data.elapsed), list(data.people),
+        )
+        self.assertIn("| 杭中 | 300 / 3,000 |", md)
+
+
 if __name__ == "__main__":
     unittest.main()

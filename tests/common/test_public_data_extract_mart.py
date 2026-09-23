@@ -312,6 +312,7 @@ class MartExtractServiceTests(unittest.TestCase):
         ]
         # 默认「从未同步过通讯录」：返回空列表，跳过 dim_robot_member 步骤。
         self.repository.read_org_members.return_value = list(org_rows)
+        self.repository.read_ecom_source.return_value = ([], [])
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()
 
@@ -488,11 +489,86 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         )])
 
 
+class EcomPeopleExtractTests(unittest.TestCase):
+    """电商人员业绩 + 店铺月目标投影并入 extract-mart（2026-09-23）。"""
+
+    def _service(self, detail_rows, target_rows):
+        self.repository = Mock()
+        self.repository.read_org_members.return_value = []
+        self.repository.read_ecom_source.return_value = (
+            list(detail_rows), list(target_rows),
+        )
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(),
+            calendar_months=(),
+        )
+
+    _DETAIL = [{
+        "channel": "天猫", "store_name": "旗舰店",
+        "business_date": "2026-09-10", "sales_amount": 100.0,
+        "responsible_person": '[{"name": "张三"}]',
+    }]
+    _TARGET = [{
+        "store_name": "旗舰店", "channel": "天猫",
+        "monthly_target": 300000.0,
+        "responsible_person": '[{"name": "张三"}]',
+    }]
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_fact_rows_and_store_targets_written(self, _lock, _txn):
+        service = self._service(self._DETAIL, self._TARGET)
+        with patch(
+            "common.public_data.extract_ecom_people.upsert_rows",
+            return_value={"inserted": 1, "updated": 0},
+        ) as upsert, patch(
+            "common.public_data.extract_ecom_people.replace_store_targets",
+            return_value=1,
+        ) as replace:
+            result = service.extract()
+
+        fact_rows = upsert.call_args.args[1]
+        self.assertEqual(len(fact_rows), 1)
+        self.assertEqual(fact_rows[0]["responsible_person"], "张三")
+        self.assertEqual(fact_rows[0]["monthly_target"], 300000.0)
+        replace.assert_called_once()
+        self.assertEqual(replace.call_args.kwargs["sync_run_id"], _RUN_ID)
+
+        kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
+        self.assertEqual(kwargs["dataset_name"], "ecom_people")
+        self.assertEqual(kwargs["records_read"], 2)
+        self.assertEqual(kwargs["raw_records_written"], 2)
+        self.assertEqual(len(result.datasets), 1)
+        self.mart_repository.mark_completed.assert_called_once()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_empty_raw_skips_instead_of_wiping(self, _lock, _txn):
+        service = self._service([], [])
+        with patch(
+            "common.public_data.extract_ecom_people.upsert_rows"
+        ) as upsert, patch(
+            "common.public_data.extract_ecom_people.replace_store_targets"
+        ) as replace:
+            result = service.extract()
+        upsert.assert_not_called()
+        replace.assert_not_called()
+        self.assertEqual(result.datasets, [])
+
+
 class OrgMemberExtractTests(unittest.TestCase):
 
     def _service(self, org_rows):
         self.repository = Mock()
         self.repository.read_org_members.return_value = list(org_rows)
+        self.repository.read_ecom_source.return_value = ([], [])
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()
         return MartExtractService(
@@ -729,6 +805,7 @@ class IncrementalExtractTests(unittest.TestCase):
         self.repository = Mock()
         self.repository.read_dataset.return_value = list(rows)
         self.repository.read_org_members.return_value = []
+        self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_extract_started_at.return_value = since
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = has_skipped
@@ -873,6 +950,7 @@ class IncrementalCalendarTests(unittest.TestCase):
     def _service(self, *, previous_digest=None, full_rebuild=False):
         self.repository = Mock()
         self.repository.read_org_members.return_value = []
+        self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = True
         self.mart_repository = Mock()
@@ -944,6 +1022,7 @@ class IncrementalOrgMemberTests(unittest.TestCase):
     def _service(self, *, previous_digest=None):
         self.repository = Mock()
         self.repository.read_org_members.return_value = list(self._ROWS)
+        self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = True
         self.mart_repository = Mock()

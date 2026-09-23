@@ -101,14 +101,48 @@ def build_view(region_cfg, workdays, *, year, month):
     return build_leaderboard_view(region_cfg, workdays, year=year, month=month)
 
 
-def render_bc(region, calendar, now, elapsed, people, url=None):
+def render_bc(region, calendar, now, elapsed, people, url=None,
+              dept_overrides=None):
     from common.daily_robot.leaderboard import render_bc_markdown
-    return render_bc_markdown(region, calendar, now, elapsed, people, url=url)
+    return render_bc_markdown(
+        region, calendar, now, elapsed, people, url=url,
+        dept_overrides=dept_overrides,
+    )
 
 
-def build_html_page(view, now, elapsed, people, extra_panels=None):
+def build_html_page(view, now, elapsed, people, extra_panels=None,
+                    dept_overrides=None):
     from common.daily_robot.leaderboard import build_html
-    return build_html(view, now, elapsed, people, extra_panels=extra_panels)
+    return build_html(
+        view, now, elapsed, people, extra_panels=extra_panels,
+        dept_overrides=dept_overrides,
+    )
+
+
+def channel_dept_overrides(conn, region, data):
+    """qudao 榜单的店铺粒度部门真值覆盖（其余区域返回 ``None`` = 原口径）。
+
+    修复（2026-09-23 核查）：qudao 人员事实是「整店归集合每人」的个人
+    考核口径，部门榜按 Σ(每人) 聚合时共管店重复计数（直播 4.4x、
+    猫超 2x、私域 2x）；override 改用店铺粒度链（渠道日销 + 店铺月
+    目标，与 AI 表真值一致）。表未迁移时函数内部 fail-open 返回 {}。
+    """
+    if region != "qudao":
+        return None
+    from common.metrics.daily_report import fetch_channel_dept_rollup
+    bd = data.business_date
+    elapsed_dates = {date(bd.year, bd.month, d) for d in data.elapsed}
+    return fetch_channel_dept_rollup(
+        conn, year=bd.year, month=bd.month, elapsed_days=elapsed_dates
+    )
+
+
+def channel_monthly_targets(conn, region, cfg):
+    """渠道日销快报的月目标：店铺粒度真值优先，Nacos ``monthlyTargets`` 兜底。"""
+    if region != "qudao":
+        return cfg.monthly_targets
+    from common.metrics.daily_report import fetch_channel_monthly_targets
+    return fetch_channel_monthly_targets(conn) or cfg.monthly_targets
 
 
 def build_offline_all_page(conn, cfg, *, business_date, now):
@@ -274,6 +308,7 @@ def _handle_leaderboard(args):
             view["region"], view["calendar"], now,
             list(data.elapsed), list(data.people),
             url=cfg.leaderboard_url or None,
+            dept_overrides=channel_dept_overrides(conn, region, data),
         )
 
         outbox = build_outbox(conn)
@@ -377,6 +412,7 @@ def _handle_channel_daily(args):
             view["region"], view["calendar"], now,
             list(data.elapsed), list(data.people),
             url=cfg.leaderboard_url or None,
+            dept_overrides=channel_dept_overrides(conn, region, data),
         )
 
         # 渠道日销段：业务日 = 昨日（含）之前最近一个有渠道数据的工作日
@@ -392,7 +428,7 @@ def _handle_channel_daily(args):
                 month_facts=month_facts,
                 business_date=channel_date,
                 workdays=data.workdays,
-                monthly_targets=cfg.monthly_targets,
+                monthly_targets=channel_monthly_targets(conn, region, cfg),
             )
         body = f"{section}\n\n{people_body}" if section else people_body
 
@@ -546,11 +582,12 @@ def _handle_leaderboard_html(args):
                     business_date=business_date,
                     now=now,
                     workdays=data.workdays,
-                    monthly_targets=cfg.monthly_targets,
+                    monthly_targets=channel_monthly_targets(conn, region, cfg),
                 )
             page = build_html_page(
                 view, now, list(data.elapsed), list(data.people),
                 extra_panels=extra_panels,
+                dept_overrides=channel_dept_overrides(conn, region, data),
             )
             stats = f"people={len(data.people)}" + (
                 f" panels={len(extra_panels)}" if extra_panels is not None else ""

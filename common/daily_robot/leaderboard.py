@@ -86,12 +86,43 @@ def collect(config, include_today=False, projects=None):
     return now, elapsed, people
 
 
-def render_bc_markdown(region, calendar, now, elapsed, people, url=None):
+def _dept_figures(members, dept_overrides, dname):
+    """部门完成/目标：*dept_overrides* 命中时用店铺粒度真值，否则 Σ 成员。
+
+    qudao 背景（2026-09-23）：人员粒度是「整店归集合每人」的个人考核口径，
+    Σ 成员会让共管店重复计数；override 由调用方从店铺粒度链
+    （fact_channel_daily_sales + fact_channel_store_target）给出。
+    ``target=None`` 按 0（无目标）处理，人数/未填恒按成员行统计。
+    """
+    ov = (dept_overrides or {}).get(dname)
+    if ov is not None:
+        return float(ov.get("completed") or 0.0), float(ov.get("target") or 0.0)
+    return (
+        sum(m["completed"] for m in members),
+        sum(m["target"] for m in members),
+    )
+
+
+def _total_figures(depts, dept_overrides):
+    """整体完成/目标：按部门组分别取真值后求和（与 _dept_figures 同规则）。"""
+    total_c = total_t = 0.0
+    for dname, members in depts.items():
+        dc, dt = _dept_figures(members, dept_overrides, dname)
+        total_c += dc
+        total_t += dt
+    return total_c, total_t
+
+
+def render_bc_markdown(region, calendar, now, elapsed, people, url=None,
+                       dept_overrides=None):
     """群播报 markdown 的纯展示层。
 
     与数据源无关：region / calendar 为现行 config.json 同形字典，
     ``(now, elapsed, people)`` 由调用方采集（钉钉表 ``collect`` 或
     mart 侧 ``mart_collect``）。输出与历史版本逐字一致。
+
+    *dept_overrides*：可选 ``{部门: {"completed", "target"}`` 店铺粒度
+    真值覆盖（qudao 专用；不传即原 Σ 成员口径，输出与历史逐字一致）。
     """
     n_elapsed = len(elapsed)
     workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
@@ -107,8 +138,7 @@ def render_bc_markdown(region, calendar, now, elapsed, people, url=None):
         members = depts.get(dname)
         if not members:
             continue
-        dc = sum(m["completed"] for m in members)
-        dt = sum(m["target"] for m in members)
+        dc, dt = _dept_figures(members, dept_overrides, dname)
         stats.append({
             "name": dname, "rate": dc / dt if dt else 0,
             "completed": dc, "target": dt, "count": len(members),
@@ -116,8 +146,7 @@ def render_bc_markdown(region, calendar, now, elapsed, people, url=None):
         })
     stats.sort(key=lambda x: -x["rate"])
 
-    total_c = sum(p["completed"] for p in bc_people)
-    total_t = sum(p["target"] for p in bc_people)
+    total_c, total_t = _total_figures(depts, dept_overrides)
     overall = total_c / total_t if total_t else 0
     weekday = "一二三四五六日"[now.weekday()]
     stat_thru = f"{now.month}月{elapsed[-1]}日" if elapsed else "—"
@@ -154,12 +183,16 @@ def build_bc_markdown(config, url=None, projects=None):
     )
 
 
-def build_html(config, now, elapsed, people, projects=None, extra_panels=None):
+def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
+               dept_overrides=None):
     """榜单页 HTML。
 
     *extra_panels*：可选的预渲染 panel HTML 字符串列表（完整
     ``<div class="panel">``），插在「每日播报」之后、榜单 tabs 之前
     （2026-09-23：qudao 页并入渠道播报板块，其他区域不传即原样）。
+
+    *dept_overrides*：可选 ``{部门: {"completed", "target"}}`` 店铺粒度
+    真值覆盖（qudao 专用；不传即原 Σ 成员口径，输出与历史逐字一致）。
     """
     if projects is not None:
         people = [p for p in people if p["dept"] in projects]
@@ -175,8 +208,10 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None):
     n_elapsed = len(elapsed)
     n_total = len(workdays)
     progress = n_elapsed / n_total if n_total else 0
-    total_completed = sum(p["completed"] for p in people)
-    total_target = sum(p["target"] for p in people)
+    _all_depts = {}
+    for p in people:
+        _all_depts.setdefault(p["dept"], []).append(p)
+    total_completed, total_target = _total_figures(_all_depts, dept_overrides)
     overall_rate = total_completed / total_target if total_target else 0
 
     def diff_badge(rate):
@@ -231,8 +266,7 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None):
         members = depts.get(dname)
         if not members:
             continue
-        dc = sum(m["completed"] for m in members)
-        dt = sum(m["target"] for m in members)
+        dc, dt = _dept_figures(members, dept_overrides, dname)
         dr = dc / dt if dt else 0
         dept_stats.append({"name": dname, "rate": dr, "completed": dc, "target": dt,
                            "count": len(members)})
@@ -275,8 +309,7 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None):
         members = bc_depts.get(dname)
         if not members:
             continue
-        dc = sum(m["completed"] for m in members)
-        dt = sum(m["target"] for m in members)
+        dc, dt = _dept_figures(members, dept_overrides, dname)
         bc_dept_stats.append({"name": dname, "rate": dc / dt if dt else 0,
                               "completed": dc, "target": dt, "count": len(members),
                               "members": members})

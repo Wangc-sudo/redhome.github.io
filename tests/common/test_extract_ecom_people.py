@@ -15,8 +15,10 @@ from common.public_data.extract_ecom_people import (
     ECOM_RUN_ID,
     REGION,
     build_fact_rows,
+    channel_fallback_owners,
     fetch_source_rows,
     parse_owners,
+    replace_store_targets,
     store_meta_by_store,
     upsert_rows,
 )
@@ -494,6 +496,122 @@ class UpsertRowsTests(unittest.TestCase):
         row = conn.table["stream:qudao:u-zhangsan:2026-09-10"]
         self.assertEqual(row["sales_amount"], 12800.0)
         self.assertEqual(row["monthly_target"], 300000.0)
+
+
+# ---------------------------------------------------------------------------
+# 渠道级兜底归属（猫超式整渠道留空，2026-09-23 核查）
+# ---------------------------------------------------------------------------
+
+class ChannelFallbackOwnersTests(unittest.TestCase):
+
+    def test_single_owner_set_channel_included(self):
+        fallback = channel_fallback_owners([
+            _target_row("MC猫超", 15000000, channel="猫超", owners=["恬恬", "懒羊羊"]),
+        ])
+        self.assertEqual(fallback, {"猫超": ["恬恬", "懒羊羊"]})
+
+    def test_same_owner_set_across_stores_is_unambiguous(self):
+        # 即时零售三店同一负责人集合 → 可兜底
+        fallback = channel_fallback_owners([
+            _target_row("多多买菜", 180000, channel="即时零售", owners=["黄贤宋", "zzz"]),
+            _target_row("朴朴", 960000, channel="即时零售", owners=["黄贤宋", "zzz"]),
+        ])
+        self.assertEqual(fallback, {"即时零售": ["黄贤宋", "zzz"]})
+
+    def test_differing_owner_sets_are_ambiguous_and_excluded(self):
+        # 直播各店负责人集合不同 → 歧义，不兜底
+        fallback = channel_fallback_owners([
+            _target_row("DY1988旗舰店（店播）", 10670000, channel="直播",
+                        owners=["李勇钢", "卢雅玲", "刘萍", "Jevon"]),
+            _target_row("DY习酒酒类旗舰店", 2080000, channel="直播",
+                        owners=["李勇钢", "刘萍", "卢雅玲"]),
+        ])
+        self.assertNotIn("直播", fallback)
+
+    def test_store_empty_row_attributed_via_channel_fallback(self):
+        # 猫超日报行店铺/负责人留空 → 渠道兜底归到恬恬/懒羊羊
+        rows = build_fact_rows(
+            [{"channel": "猫超", "store_name": None,
+              "business_date": "2026-09-10", "sales_amount": 500.0,
+              "responsible_person": "null"}],
+            _store_meta({"MC猫超": (15000000.0, ["恬恬", "懒羊羊"])}),
+            {"猫超": ["恬恬", "懒羊羊"]},
+        )
+        owners = {r["responsible_person"] for r in rows}
+        self.assertEqual(owners, {"恬恬", "懒羊羊"})
+        self.assertEqual(rows[0]["department"], "猫超")
+        self.assertEqual(rows[0]["sales_amount"], 500.0)
+
+    def test_store_empty_row_without_fallback_still_skipped(self):
+        with self.assertLogs("common.public_data.extract_ecom_people",
+                             level="WARNING"):
+            rows = build_fact_rows(
+                [{"channel": "猫超", "store_name": None,
+                  "business_date": "2026-09-10", "sales_amount": 500.0,
+                  "responsible_person": "null"}],
+                _store_meta({}),
+            )
+        self.assertEqual(rows, [])
+
+
+# ---------------------------------------------------------------------------
+# 店铺粒度月目标投影（fact_channel_store_target 全量替换）
+# ---------------------------------------------------------------------------
+
+class _StoreCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        head = sql.lstrip().upper()
+        if head.startswith("DELETE"):
+            self._conn.deleted = True
+            self._conn.rows.clear()
+        elif head.startswith("INSERT"):
+            (store, channel, target, owners_json, synced, run_id) = params
+            self._conn.rows[store] = {
+                "store_name": store, "channel": channel,
+                "monthly_target": target, "owners_json": owners_json,
+                "synced_at": synced, "sync_run_id": run_id,
+            }
+
+    def close(self):
+        pass
+
+
+class _StoreConnection:
+    def __init__(self, initial=None):
+        self.rows = dict(initial or {})
+        self.executed = []
+        self.deleted = False
+
+    def cursor(self):
+        return _StoreCursor(self)
+
+
+class ReplaceStoreTargetsTests(unittest.TestCase):
+
+    def test_full_replace_writes_each_store_once(self):
+        conn = _StoreConnection(initial={"已下线店": {"store_name": "已下线店"}})
+        written = replace_store_targets(
+            conn,
+            [
+                _target_row("旗舰店", 300000, owners=["张三", "李四"]),
+                _target_row("专营店", None, owners=[]),
+                {"store_name": "  ", "channel": "天猫",
+                 "monthly_target": 100, "responsible_person": None},  # 空店名跳过
+            ],
+            sync_run_id=ECOM_RUN_ID, synced_at=_NOW,
+        )
+        self.assertEqual(written, 2)
+        self.assertTrue(conn.deleted)
+        self.assertNotIn("已下线店", conn.rows)  # 全量替换，下线店消失
+        row = conn.rows["旗舰店"]
+        self.assertEqual(row["monthly_target"], 300000.0)
+        self.assertEqual(row["sync_run_id"], ECOM_RUN_ID)
+        self.assertIsNone(conn.rows["专营店"]["monthly_target"])  # 归属与目标解耦
+        self.assertEqual(json.loads(conn.rows["旗舰店"]["owners_json"])[0]["name"], "张三")
 
 
 if __name__ == "__main__":

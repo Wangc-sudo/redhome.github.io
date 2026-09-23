@@ -119,6 +119,20 @@ class MartExtractRepository:
             raise MartExtractError("wdt source connection is not configured")
         return self._wdt
 
+    @property
+    def raw_connection(self):
+        """raw_dingtalk 连接（电商人员业绩/店铺目标投影直接复用）。"""
+        return self._raw
+
+    def read_ecom_source(self):
+        """电商人员业绩投影的 raw 源行 ``(detail_rows, target_rows)``。
+
+        全量重放（写入侧按业务键幂等 upsert），月度过滤由独立 CLI 的
+        ``--month``/``--day`` 承担，管线内不做窗口。
+        """
+        from common.public_data.extract_ecom_people import fetch_source_rows
+        return fetch_source_rows(self._raw, month=None, day=None)
+
     def read_table(self, table):
         if table not in {d.source_table for d in EXTRACT_DATASETS if d.source == "dingtalk"}:
             raise MartExtractError("unregistered source table")
@@ -756,6 +770,10 @@ class MartExtractService:
             if org_summary is not None:
                 datasets_summary.append(org_summary)
 
+            ecom_summary = self._extract_ecom_people(run_id, synced_at)
+            if ecom_summary is not None:
+                datasets_summary.append(ecom_summary)
+
             self._mart_repository.mark_completed(
                 sync_run_id=run_id,
                 finished_at=self._now(),
@@ -977,6 +995,47 @@ class MartExtractService:
                 run_id=run_id,
                 skipped=skipped,
                 digest=digest,
+            )
+        except Exception as exc:
+            raise _ProjectionFailure() from exc
+
+    def _extract_ecom_people(self, run_id, synced_at):
+        """电商人员业绩 + 店铺月目标投影（region=qudao）。
+
+        此前 ``extract_ecom_people`` 只有独立 CLI、未挂任何调度（2026-09-23
+        核查发现），qudao 事实行靠手动跑；并入 extract-mart 后随每日
+        04/08/15/17 自动重放。raw 为空（渠道日报表从未同步）时跳过返回
+        ``None``——同 org_members 的「未配置即跳过」语义，不清空既有数据。
+        """
+        from common.public_data import extract_ecom_people as ecom
+
+        detail_rows, target_rows = self._repository.read_ecom_source()
+        if not detail_rows and not target_rows:
+            return None
+
+        store_meta = ecom.store_meta_by_store(target_rows)
+        fact_rows = ecom.build_fact_rows(
+            detail_rows, store_meta, ecom.channel_fallback_owners(target_rows)
+        )
+        with transaction(self._mart_connection):
+            stats = ecom.upsert_rows(self._mart_connection, fact_rows, synced_at)
+            stores_written = ecom.replace_store_targets(
+                self._mart_connection, target_rows,
+                sync_run_id=run_id, synced_at=synced_at,
+            )
+        self._mart_repository.mark_raw_committed(run_id)
+
+        record_ids = [row["source_record_id"] for row in fact_rows]
+        record_ids += [f"store:{r.get('store_name')}" for r in target_rows]
+        try:
+            return self._save_summary(
+                dataset="ecom_people",
+                record_ids=record_ids,
+                records_read=len(detail_rows) + len(target_rows),
+                records_written=(
+                    stats["inserted"] + stats["updated"] + stores_written
+                ),
+                run_id=run_id,
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc

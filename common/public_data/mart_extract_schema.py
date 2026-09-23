@@ -299,6 +299,23 @@ _FACT_CHANNEL_DAILY_SALES_DDL = (
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 )
 
+# 店铺粒度月目标（2026-09-23 核查发现部门榜按 Σ(每人目标) 聚合时共管店
+# 被重复计数）：从 raw_dingtalk.channel_monthly_target 全量投影，一行一店。
+# 部门（=渠道）月目标 = Σ 店铺目标（共管店只计一次，与 AI 表真值一致）；
+# 部门完成 = Σ fact_channel_daily_sales（同店铺粒度链）。
+_FACT_CHANNEL_STORE_TARGET_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_channel_store_target` (\n"
+    "  `store_name` VARCHAR(255) NOT NULL,\n"
+    "  `channel` VARCHAR(50) DEFAULT NULL,\n"
+    "  `monthly_target` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `owners_json` JSON DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`store_name`),\n"
+    "  KEY `idx_channel` (`channel`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
 _FACT_FIN_RECEIVABLES_AGING_DDL = (
     "CREATE TABLE IF NOT EXISTS `fact_fin_receivables_aging` (\n"
     "  `record_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
