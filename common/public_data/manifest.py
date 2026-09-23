@@ -184,6 +184,14 @@ def _parse_transform(raw, prefix: str) -> dict | None:
             "value_column": value_column,
         }
 
+        semantics = raw.get("value_semantics", "daily")
+        if semantics not in ("daily", "cumulative"):
+            raise ManifestError(
+                f"{prefix}.transform.value_semantics must be 'daily' or "
+                f"'cumulative' (got {semantics!r})"
+            )
+        result["value_semantics"] = semantics
+
         inject = raw.get("inject")
         if inject is not None:
             if not isinstance(inject, dict) or not inject:
