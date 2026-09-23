@@ -51,28 +51,48 @@ logger = logging.getLogger(__name__)
 #: reproduces their compose one-shot command (``sys.executable -m`` prefix is
 #: added by the runner).  ``extra_env`` is merged into the child environment.
 #: ``{credentials}`` / ``{output_dir}`` are filled from scheduler settings.
+def _sync_entry(*extra):
+    """apps 线同步命令：live-sync 公共骨架 + 源差异参数。"""
+    return {
+        "argv": [
+            "common.public_data.cli", "live-sync", "--live-read",
+            "--confirm-local-test-write", *extra,
+            "--source-credentials", "{credentials}",
+        ],
+    }
+
+
+def _mart_cli_entry(subcommand, *extra, region=None):
+    """业务线命令：mart_cli 子命令 + 可选 ROBOT_REGION 注入。"""
+    entry = {
+        "argv": [
+            "common.daily_robot.mart_cli", subcommand,
+            "--confirm-local-test-write", *extra,
+        ],
+    }
+    if region is not None:
+        entry["extra_env"] = {"ROBOT_REGION": region}
+    return entry
+
+
+def _pages_entry(region):
+    return _mart_cli_entry(
+        "leaderboard-html",
+        "--output", f"{{output_dir}}/{region}.html",
+        region=region,
+    )
+
+
+#: 日报机器人区域（robot-<region> → mart_cli once）
+_ROBOT_REGIONS = ("hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all")
+
+#: 榜单页区域（pages-<region> → mart_cli leaderboard-html）
+_PAGES_REGIONS = ("hangzhou", "vanke", "shaoxing", "qudao", "offline_all")
+
 _COMMAND_TABLE = {
-    "sync-runner": {
-        "argv": [
-            "common.public_data.cli", "live-sync", "--live-read",
-            "--confirm-local-test-write",
-            "--source-credentials", "{credentials}",
-        ],
-    },
-    "sync-dingtalk": {
-        "argv": [
-            "common.public_data.cli", "live-sync", "--live-read",
-            "--confirm-local-test-write", "--source", "dingtalk",
-            "--source-credentials", "{credentials}",
-        ],
-    },
-    "sync-wdt": {
-        "argv": [
-            "common.public_data.cli", "live-sync", "--live-read",
-            "--confirm-local-test-write", "--source", "wdt",
-            "--source-credentials", "{credentials}",
-        ],
-    },
+    "sync-runner": _sync_entry(),
+    "sync-dingtalk": _sync_entry("--source", "dingtalk"),
+    "sync-wdt": _sync_entry("--source", "wdt"),
     "roll-manifest": {
         "argv": [
             "common.public_data.cli", "roll-manifest",
@@ -85,116 +105,12 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
-    "robot-hangzhou": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "hangzhou"},
-    },
-    "robot-vanke": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "vanke"},
-    },
-    "robot-shaoxing": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "shaoxing"},
-    },
-    "robot-junpin": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "junpin"},
-    },
-    "robot-qudao": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "qudao"},
-    },
-    "robot-offline_all": {
-        "argv": [
-            "common.daily_robot.mart_cli", "once",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "offline_all"},
-    },
-    "channel-daily-qudao": {
-        "argv": [
-            "common.daily_robot.mart_cli", "channel-daily",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "qudao"},
-    },
-    "pages-hangzhou": {
-        "argv": [
-            "common.daily_robot.mart_cli", "leaderboard-html",
-            "--confirm-local-test-write",
-            "--output", "{output_dir}/hangzhou.html",
-        ],
-        "extra_env": {"ROBOT_REGION": "hangzhou"},
-    },
-    "pages-vanke": {
-        "argv": [
-            "common.daily_robot.mart_cli", "leaderboard-html",
-            "--confirm-local-test-write",
-            "--output", "{output_dir}/vanke.html",
-        ],
-        "extra_env": {"ROBOT_REGION": "vanke"},
-    },
-    "pages-shaoxing": {
-        "argv": [
-            "common.daily_robot.mart_cli", "leaderboard-html",
-            "--confirm-local-test-write",
-            "--output", "{output_dir}/shaoxing.html",
-        ],
-        "extra_env": {"ROBOT_REGION": "shaoxing"},
-    },
-    "pages-qudao": {
-        "argv": [
-            "common.daily_robot.mart_cli", "leaderboard-html",
-            "--confirm-local-test-write",
-            "--output", "{output_dir}/qudao.html",
-        ],
-        "extra_env": {"ROBOT_REGION": "qudao"},
-    },
-    "pages-offline_all": {
-        "argv": [
-            "common.daily_robot.mart_cli", "leaderboard-html",
-            "--confirm-local-test-write",
-            "--output", "{output_dir}/offline_all.html",
-        ],
-        "extra_env": {"ROBOT_REGION": "offline_all"},
-    },
-    "offline-daily-summary": {
-        "argv": [
-            "common.daily_robot.mart_cli", "offline-daily",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "offline_all"},
-    },
-    "offline-weekly-summary": {
-        "argv": [
-            "common.daily_robot.mart_cli", "offline-weekly",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "offline_all"},
-    },
-    "offline-monthly-summary": {
-        "argv": [
-            "common.daily_robot.mart_cli", "offline-monthly",
-            "--confirm-local-test-write",
-        ],
-        "extra_env": {"ROBOT_REGION": "offline_all"},
-    },
+    **{f"robot-{r}": _mart_cli_entry("once", region=r) for r in _ROBOT_REGIONS},
+    "channel-daily-qudao": _mart_cli_entry("channel-daily", region="qudao"),
+    **{f"pages-{r}": _pages_entry(r) for r in _PAGES_REGIONS},
+    "offline-daily-summary": _mart_cli_entry("offline-daily", region="offline_all"),
+    "offline-weekly-summary": _mart_cli_entry("offline-weekly", region="offline_all"),
+    "offline-monthly-summary": _mart_cli_entry("offline-monthly", region="offline_all"),
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable
