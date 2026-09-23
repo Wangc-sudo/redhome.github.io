@@ -535,6 +535,42 @@ def _handle_publish_pipelines(args):
         sys.exit(1)
 
 
+def roll_manifest_windows(manifest_path, *, lookback_days=None):
+    """Roll the WDT window block of *manifest_path* forward to now."""
+    from common.public_data.manifest_roll import roll_manifest
+    return roll_manifest(manifest_path, lookback_days=lookback_days)
+
+
+def _handle_roll_manifest(args):
+    """每日滚动 manifest 的 WDT 窗口块（sync-wdt 的前置管线）。
+
+    只重写配置文件的 ``wdt.datasets``（原子写），不碰 DB、不调源 API；
+    窗口不滚动时 sync-wdt 会幂等重拉同一天（2026-09-23 生产实锤窗口
+    停在 09-21→09-22），所以本管线必须排在每日 sync 之前。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+        written = roll_manifest_windows(
+            settings.source_config_path, lookback_days=args.lookback_days
+        )
+        print(
+            f"service={service_id} kind=roll-manifest "
+            f"datasets={written} status=completed"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="config_error")
+        sys.exit(1)
+
+
 def _handle_publish_bi(args):
     try:
         count = publish_bi_seed(args.seed, if_missing=args.if_missing)
@@ -729,6 +765,24 @@ def main(argv=None):
     publish.add_argument("--seed", required=True)
     publish.add_argument("--if-missing", action="store_true", default=False)
 
+    # -- roll-manifest --------------------------------------------------------
+    roll = subparsers.add_parser(
+        "roll-manifest",
+        help="Roll the manifest's WDT sync windows forward to now",
+    )
+    roll.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    roll.add_argument(
+        "--lookback-days", type=int, default=None,
+        help="override the WDT lookback window in days (default: config value)",
+    )
+    roll.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
     # -- publish-bi -----------------------------------------------------------
     publish_bi = subparsers.add_parser(
         "publish-bi", help="Publish the dashboard seed to Nacos"
@@ -802,6 +856,7 @@ def main(argv=None):
         "rebuild-projection": _handle_rebuild_projection,
         "extract-mart": _handle_extract_mart,
         "publish-pipelines": _handle_publish_pipelines,
+        "roll-manifest": _handle_roll_manifest,
         "publish-bi": _handle_publish_bi,
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,

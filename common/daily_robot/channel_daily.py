@@ -78,11 +78,27 @@ def _prev_workday_amount(day_facts, business_date, workdays):
     return day_facts.get(prev[-1])
 
 
-def build_channel_section(*, month_facts, business_date, workdays, monthly_targets):
-    """渠道日销快报 markdown（旧播报表格复刻）。
+def resolve_channel_business_date(month_facts, business_date):
+    """渠道业务日回退：*business_date*（不含）之前最近一个有效数据日。
 
-    *month_facts* 见 :func:`fetch_channel_month_facts`；*monthly_targets*
-    为渠道键月目标（可空 → 目标/达成率列 ``--``）。
+    按日合计非零才算有效（店铺后台导出存在时滞，预填 0 值行不算，
+    防止"0 元假日报"）；无有效日返回 ``None``。
+    """
+    day_totals = {}
+    for facts in month_facts.values():
+        for day, amount in facts.items():
+            if day < business_date:
+                day_totals[day] = day_totals.get(day, 0) + amount
+    filled_days = sorted(d for d, total in day_totals.items() if total != 0)
+    return filled_days[-1] if filled_days else None
+
+
+def collect_channel_rows(*, month_facts, business_date, workdays, monthly_targets):
+    """渠道日销快报的结构化行（markdown / HTML 两渲染器共用，同口径）。
+
+    返回 ``(total, rows)``：*total* 为全渠道当日销售额；*rows* 每行
+    ``{channel, sales, mom, mom_txt, target_txt, rate_txt}``，mom 为
+    数值（无环比基数时 None），文本列已按旧播报格式渲染。
     """
     today = {c: facts.get(business_date) for c, facts in month_facts.items()}
     today = {c: v for c, v in today.items() if v is not None}
@@ -90,12 +106,7 @@ def build_channel_section(*, month_facts, business_date, workdays, monthly_targe
     ordered = [c for c in CHANNEL_ORDER if c in today]
     ordered += sorted(c for c in today if c not in CHANNEL_ORDER)
 
-    lines = [
-        f"【渠道日销】全渠道{business_date.month}月{business_date.day}日销售额：**{_fmt_wan(total)} 元**",
-        "",
-        "| 渠道 | 销售额 | 环比 | 目标 | 达成率 |",
-        "|---|---|---|---|---|",
-    ]
+    rows = []
     elapsed_days = [d for d in sorted(workdays) if d <= business_date]
     for channel in ordered:
         sales = today[channel]
@@ -104,6 +115,7 @@ def build_channel_section(*, month_facts, business_date, workdays, monthly_targe
             mom = (sales - prev) / abs(prev)
             mom_txt = f"{'+' if mom >= 0 else ''}{_fmt_pct(mom)}"
         else:
+            mom = None
             mom_txt = "--"
         target = (monthly_targets or {}).get(channel)
         if target:
@@ -114,7 +126,38 @@ def build_channel_section(*, month_facts, business_date, workdays, monthly_targe
             rate_txt = _fmt_pct(mtd / target)
         else:
             target_txt = rate_txt = "--"
+        rows.append({
+            "channel": channel,
+            "sales": sales,
+            "mom": mom,
+            "mom_txt": mom_txt,
+            "target_txt": target_txt,
+            "rate_txt": rate_txt,
+        })
+    return total, rows
+
+
+def build_channel_section(*, month_facts, business_date, workdays, monthly_targets):
+    """渠道日销快报 markdown（旧播报表格复刻）。
+
+    *month_facts* 见 :func:`fetch_channel_month_facts`；*monthly_targets*
+    为渠道键月目标（可空 → 目标/达成率列 ``--``）。
+    """
+    total, rows = collect_channel_rows(
+        month_facts=month_facts,
+        business_date=business_date,
+        workdays=workdays,
+        monthly_targets=monthly_targets,
+    )
+    lines = [
+        f"【渠道日销】全渠道{business_date.month}月{business_date.day}日销售额：**{_fmt_wan(total)} 元**",
+        "",
+        "| 渠道 | 销售额 | 环比 | 目标 | 达成率 |",
+        "|---|---|---|---|---|",
+    ]
+    for row in rows:
         lines.append(
-            f"| {channel} | {_fmt_wan(sales)} | {mom_txt} | {target_txt} | {rate_txt} |"
+            f"| {row['channel']} | {_fmt_wan(row['sales'])} | {row['mom_txt']}"
+            f" | {row['target_txt']} | {row['rate_txt']} |"
         )
     return "\n".join(lines)

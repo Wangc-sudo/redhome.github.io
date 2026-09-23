@@ -154,7 +154,13 @@ def build_bc_markdown(config, url=None, projects=None):
     )
 
 
-def build_html(config, now, elapsed, people, projects=None):
+def build_html(config, now, elapsed, people, projects=None, extra_panels=None):
+    """榜单页 HTML。
+
+    *extra_panels*：可选的预渲染 panel HTML 字符串列表（完整
+    ``<div class="panel">``），插在「每日播报」之后、榜单 tabs 之前
+    （2026-09-23：qudao 页并入渠道播报板块，其他区域不传即原样）。
+    """
     if projects is not None:
         people = [p for p in people if p["dept"] in projects]
     calendar = config["calendar"]
@@ -309,6 +315,7 @@ def build_html(config, now, elapsed, people, projects=None):
     stat_thru = f"{month}月{elapsed[-1]}日" if elapsed else "—"
 
     exclude_note = "、".join(bc_exclude)
+    extra_panels_html = "\n".join(extra_panels or [])
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -379,6 +386,8 @@ table.mini td,table.mini th{{padding:4px 6px}}
   <tbody>{dept_bc_html}</tbody></table>
   <div class="small muted" style="margin-top:8px">个人明细不进群播报，请点击查看完整榜单（个人总榜 / 部门内排行）</div>
 </div>
+
+{extra_panels_html}
 
 <div class="panel">
   <div class="tabs">

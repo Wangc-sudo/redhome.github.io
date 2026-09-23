@@ -18,10 +18,13 @@ from common.public_data.mart_extract_schema import (
     _DIM_ROBOT_MEMBER_DDL,
     _FACT_CHANNEL_DAILY_SALES_DDL,
     _FACT_DAILY_REPORT_OFFLINE_DDL,
+    _FACT_ORDER_LINE_AREA_DDL,
     _FACT_ORDER_LINE_CHANNEL_DDL,
     _FACT_ORDER_LINE_DDL,
+    channel_ops_ddl_statements,
     legacy_ddl_statements as extract_ddl,
     finance_ddl_statements,
+    order_line_area_ddl_statements,
     order_line_ddl_statements,
     order_line_channel_ddl_statements,
     stock_flow_ddl_statements,
@@ -325,7 +328,11 @@ def _build_mart_facts_ddl() -> tuple[str, ...]:
         _FACT_ORDER_LINE_CHANNEL_DDL,
     ) + mart_manual_ddl_statements() + (
         _DAILY_REPORT_DATE_INDEX_DDL,
-    ) + stock_flow_ddl_statements()
+    ) + stock_flow_ddl_statements() + (
+        # mart-facts-v1 尚未在任何库应用过：v3 地区补列与渠道三表随首建
+        # 一并落（注释见上——版本未应用前追加语句不构成校验和漂移）。
+        _FACT_ORDER_LINE_AREA_DDL,
+    ) + channel_ops_ddl_statements()
 
 
 def _build_mart_dims_ddl() -> tuple[str, ...]:
@@ -358,6 +365,8 @@ _MIGRATIONS = (
     ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),
     ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
     ("mart-extract-stock-flow-v1", "mart", stock_flow_ddl_statements()),
+    ("mart-extract-order-line-v3", "mart", order_line_area_ddl_statements()),
+    ("mart-extract-channel-ops-v1", "mart", channel_ops_ddl_statements()),
     (
         "mart-extract-daily-report-date-index-v1",
         "mart",

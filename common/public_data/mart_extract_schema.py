@@ -189,6 +189,38 @@ EXTRACT_DATASETS = (
         kind="refund_line_expand",
         source="wdt",
     ),
+    # 渠道播报 DB 化（2026-09-23，设计稿
+    # docs/superpowers/specs/2026-09-17-broadcast-alerts-db-sourcing-design.md）：
+    # ① fact_stockout_line 聚合成 SKU×仓×日 日销（任意窗口动销的数据基础，
+    # 注册顺序必须在库存快照之前——daily_avg 依赖本表）；
+    ExtractDataset(
+        dataset="wdt_sales_daily",
+        source_table="fact_stockout_line",
+        target_table="fact_sales_daily",
+        columns=(),
+        kind="sales_daily_aggregate",
+        source="wdt",
+    ),
+    # ② wdt_records 库存快照（wms.StockSpec.search2）→ 日粒度库存快照，
+    # daily_avg / days_left / stock_state 在投影期一次算死（播报与看板同口径）；
+    ExtractDataset(
+        dataset="wdt_inventory_sku_daily",
+        source_table="wdt_records",
+        target_table="fact_inventory_sku_daily",
+        columns=(),
+        kind="inventory_snapshot",
+        source="wdt",
+    ),
+    # ③ wdt_records 采购入库单（wms.stockin.Purchase.queryWithDetail）→
+    # 行级入库事实，append 语义（事件不可变，PK 天然幂等）。
+    ExtractDataset(
+        dataset="wdt_purchase_inbound",
+        source_table="wdt_records",
+        target_table="fact_purchase_inbound",
+        columns=(),
+        kind="purchase_inbound_expand",
+        source="wdt",
+    ),
 )
 
 
@@ -560,10 +592,107 @@ def stock_flow_ddl_statements() -> tuple:
     )
 
 
+# 订单风控（设计稿 2026-09-17 §4.3）：风控判定依赖 receiver_area，v1/v2
+# 已冻结，另起 v3 增量。``receiver_area_norm`` 在投影期归一化落库
+# （省市区三级拼接、去连续重复，口径同 order_risk_alert.normalize_area）；
+# 拼多多按隐私协议不返回地区 → NULL（查询层须显式计数，不得静默少单）。
+_FACT_ORDER_LINE_AREA_DDL = (
+    "ALTER TABLE `fact_order_line`\n"
+    "  ADD COLUMN `receiver_area_raw` VARCHAR(255) DEFAULT NULL,\n"
+    "  ADD COLUMN `receiver_area_norm` VARCHAR(64) DEFAULT NULL,\n"
+    "  ADD KEY `idx_order_line_area` (`receiver_area_norm`)"
+)
+
+
+def order_line_area_ddl_statements() -> tuple:
+    """fact_order_line 收货地区补列（独立迁移版本 mart-extract-order-line-v3）。"""
+    return (_FACT_ORDER_LINE_AREA_DDL,)
+
+
+# SKU×仓×日 日销明细（设计稿 §3.1.1）：由 fact_stockout_line（发货时间口径）
+# 聚合派生，零新增 WDT 调用；15 天（可调）动销窗口的真实数据基础。
+_FACT_SALES_DAILY_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_sales_daily` (\n"
+    "  `business_date` DATE NOT NULL,\n"
+    "  `spec_no` VARCHAR(100) NOT NULL,\n"
+    "  `warehouse_no` VARCHAR(10) NOT NULL,\n"
+    "  `qty_sold` DECIMAL(20,4) NOT NULL DEFAULT 0,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`business_date`, `spec_no`, `warehouse_no`),\n"
+    "  KEY `idx_spec_date` (`spec_no`, `business_date`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+# 库存日快照（设计稿 §3.1 全量版）：wms.StockSpec.search2 跨仓（01 习水村
+# + 12 杭易）合并为 warehouse_scope='ALL'；``daily_avg``/``days_left`` 由
+# fact_sales_daily 按 moving_window_days（默认 15，用户裁定 2026-09-17 §9）
+# 在投影期算死；``stock_state`` 同样投影期判定，播报与看板共用唯一口径。
+# qty_7days/qty_month 为 WDT 原生桶值（mask=1），仅作对照冗余。
+_FACT_INVENTORY_SKU_DAILY_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_inventory_sku_daily` (\n"
+    "  `business_date` DATE NOT NULL,\n"
+    "  `spec_no` VARCHAR(100) NOT NULL,\n"
+    "  `warehouse_scope` VARCHAR(20) NOT NULL,\n"
+    "  `goods_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `available_qty` DECIMAL(20,4) NOT NULL,\n"
+    "  `stock_qty` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `qty_7days` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `qty_month` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `purchase_intransit_qty` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `daily_avg` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `days_left` DECIMAL(10,2) DEFAULT NULL,\n"
+    "  `moving_window_days` TINYINT NOT NULL DEFAULT 15,\n"
+    "  `is_moving` TINYINT(1) NOT NULL DEFAULT 0,\n"
+    "  `stock_state` ENUM('HEALTHY','URGENT','OVERSOLD','DEAD') NOT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`business_date`, `spec_no`, `warehouse_scope`),\n"
+    "  KEY `idx_state_days` (`stock_state`, `days_left`),\n"
+    "  KEY `idx_moving` (`is_moving`, `stock_state`),\n"
+    "  KEY `idx_spec` (`spec_no`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+# 采购入库行事实（设计稿 §4.2，按 2026-09-21 实锤修正粒度）：raw 侧记录
+# 粒度是入库单（order_no=RK…，一张 purchase_no 可多次入库），故主键用
+# (order_no, spec_no)；append 语义——事件不可变，PK 天然幂等。
+# warehouse_name 由 WAREHOUSE_MAP 01/12 翻译落库；stockin_time 取审核
+# （入库）时间 check_time。
+_FACT_PURCHASE_INBOUND_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_purchase_inbound` (\n"
+    "  `order_no` VARCHAR(64) NOT NULL,\n"
+    "  `spec_no` VARCHAR(100) NOT NULL,\n"
+    "  `purchase_no` VARCHAR(64) DEFAULT NULL,\n"
+    "  `warehouse_no` VARCHAR(10) DEFAULT NULL,\n"
+    "  `warehouse_name` VARCHAR(50) DEFAULT NULL,\n"
+    "  `goods_name` VARCHAR(500) DEFAULT NULL,\n"
+    "  `qty` DECIMAL(20,4) NOT NULL,\n"
+    "  `stockin_time` DATETIME(6) DEFAULT NULL,\n"
+    "  `status` VARCHAR(20) DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`order_no`, `spec_no`),\n"
+    "  KEY `idx_stockin_time` (`stockin_time`),\n"
+    "  KEY `idx_spec_time` (`spec_no`, `stockin_time`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def channel_ops_ddl_statements() -> tuple:
+    """渠道播报 DB 化三表（独立迁移版本 mart-extract-channel-ops-v1）。"""
+    return (
+        _FACT_SALES_DAILY_DDL,
+        _FACT_INVENTORY_SKU_DAILY_DDL,
+        _FACT_PURCHASE_INBOUND_DDL,
+    )
+
+
 def ddl_statements() -> tuple:
     return (
         legacy_ddl_statements()
         + finance_ddl_statements()
         + order_line_ddl_statements()
         + stock_flow_ddl_statements()
+        + channel_ops_ddl_statements()
     )

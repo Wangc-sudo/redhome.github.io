@@ -1,8 +1,14 @@
 """Generate manifest.json for the 10-table trial sync."""
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from common.public_data.manifest_roll import build_wdt_datasets  # noqa: E402
 
 # Sheet name lookup from API discovery
 SHEET_NAMES = {
@@ -310,90 +316,6 @@ def build_offline_deposit_other_receivables():
     }
 
 
-_WDT_CONFIG_PATH = Path(__file__).resolve().parent / "wdt_datasets.json"
-
-#: Default number of past days each WDT window sweep covers.
-_DEFAULT_LOOKBACK_DAYS = 1
-#: Default slice length (minutes) for time-split WDT datasets.
-_DEFAULT_WINDOW_MINUTES = 50
-
-
-def load_wdt_config(config_path=None):
-    """Read the externalized WDT dataset definitions.
-
-    The configuration lives in ``scripts/wdt_datasets.json`` so the four
-    allowlisted WDT methods (and their pagination / id-path / params) can be
-    tuned without editing Python.  Each entry is one logical dataset;
-    ``build_wdt_datasets`` expands time-split entries into concrete windows.
-    """
-    path = Path(config_path) if config_path else _WDT_CONFIG_PATH
-    with open(path, encoding="utf-8") as fh:
-        config = json.load(fh)
-    if not isinstance(config, dict) or not isinstance(config.get("datasets"), list):
-        raise ValueError(f"WDT config must be an object with a 'datasets' list: {path}")
-    return config
-
-
-def build_wdt_datasets(lookback_days=None, config_path=None):
-    """Expand the externalized WDT definitions into concrete windowed datasets.
-
-    Time-split entries are divided into ``window_minutes`` slices covering the
-    most recent *lookback_days*; ``single`` entries (e.g. ``goods.Goods.queryWithSpec``, a
-    full catalog pull) get one minimal window.  Re-run ``build_manifest.py``
-    to shift the windows forward.
-    """
-    config = load_wdt_config(config_path)
-    if lookback_days is None:
-        lookback = int(config.get("lookback_days", _DEFAULT_LOOKBACK_DAYS))
-    else:
-        lookback = lookback_days
-    window_minutes = int(config.get("window_minutes", _DEFAULT_WINDOW_MINUTES))
-
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=lookback)
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    step = timedelta(minutes=window_minutes)
-
-    datasets = []
-    for entry in config["datasets"]:
-        base = {
-            "method": entry["method"],
-            "target_table": "wdt_records",
-            "record_id_path": entry["record_id_path"],
-            "page_size": entry["page_size"],
-            "max_pages": entry["max_pages"],
-            "max_window_minutes": window_minutes,
-            "params": entry.get("params", {}),
-        }
-        # Only emitted when False; the manifest reader defaults it to True.
-        if not entry.get("time_boxed", True):
-            base["time_boxed"] = False
-
-        if entry.get("window", "split") == "single":
-            datasets.append({
-                **base,
-                "dataset": entry["dataset"],
-                "window_start": start.strftime(fmt),
-                "window_end": (start + timedelta(minutes=1)).strftime(fmt),
-            })
-            continue
-
-        idx = 0
-        w_start = start
-        while w_start < now:
-            w_end = min(w_start + step, now)
-            datasets.append({
-                **base,
-                "dataset": f"{entry['dataset']}_{idx:04d}",
-                "window_start": w_start.strftime(fmt),
-                "window_end": w_end.strftime(fmt),
-            })
-            w_start = w_end
-            idx += 1
-
-    return datasets
-
-
 def _bootstrap_dingtalk_bases():
     """The 10-table trial DingTalk bases (used only for a fresh manifest)."""
     return [
@@ -469,8 +391,6 @@ def main(argv=None):
     print(f"Manifest written to {output_path}")
 
     # Validate
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from common.public_data.manifest import load_manifest
     loaded = load_manifest(output_path)
     print(f"Validation passed: {len(loaded.dingtalk_sheets)} sheets, {len(loaded.wdt_datasets)} wdt datasets")

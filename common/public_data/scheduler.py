@@ -73,6 +73,12 @@ _COMMAND_TABLE = {
             "--source-credentials", "{credentials}",
         ],
     },
+    "roll-manifest": {
+        "argv": [
+            "common.public_data.cli", "roll-manifest",
+            "--confirm-local-test-write",
+        ],
+    },
     "extract-mart": {
         "argv": [
             "common.public_data.cli", "extract-mart",

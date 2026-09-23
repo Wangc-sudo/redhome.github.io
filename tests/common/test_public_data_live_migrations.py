@@ -272,11 +272,16 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
 
     def test_table_columns_match_the_projection_whitelist(self):
         from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
-        from common.public_data.mart_extract_schema import order_line_ddl_statements
+        from common.public_data.mart_extract_schema import (
+            order_line_area_ddl_statements,
+            order_line_ddl_statements,
+        )
 
         _, fact_order_line = order_line_ddl_statements()
         columns = set(self._COLUMN_RE.findall(fact_order_line))
         for statement in order_line_channel_ddl_statements():
+            columns |= set(self._ADD_COLUMN_RE.findall(statement))
+        for statement in order_line_area_ddl_statements():
             columns |= set(self._ADD_COLUMN_RE.findall(statement))
 
         self.assertEqual(

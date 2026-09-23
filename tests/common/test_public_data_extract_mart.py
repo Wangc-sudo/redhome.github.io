@@ -98,6 +98,9 @@ class ExtractSchemaTests(unittest.TestCase):
             "wdt_order_line_fact": "fact_order_line",
             "wdt_stockout_line_fact": "fact_stockout_line",
             "wdt_refund_line_fact": "fact_refund_line",
+            "wdt_sales_daily": "fact_sales_daily",
+            "wdt_inventory_sku_daily": "fact_inventory_sku_daily",
+            "wdt_purchase_inbound": "fact_purchase_inbound",
         })
 
         self.assertEqual(dataset_by_name("daily_report_offline").kind, "fact")

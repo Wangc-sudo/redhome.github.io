@@ -106,9 +106,9 @@ def render_bc(region, calendar, now, elapsed, people, url=None):
     return render_bc_markdown(region, calendar, now, elapsed, people, url=url)
 
 
-def build_html_page(view, now, elapsed, people):
+def build_html_page(view, now, elapsed, people, extra_panels=None):
     from common.daily_robot.leaderboard import build_html
-    return build_html(view, now, elapsed, people)
+    return build_html(view, now, elapsed, people, extra_panels=extra_panels)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +306,22 @@ def build_channel_section(**kwargs):
     return _build(**kwargs)
 
 
+def resolve_channel_date(month_facts, business_date):
+    from common.daily_robot.channel_daily import (
+        resolve_channel_business_date as _resolve,
+    )
+    return _resolve(month_facts, business_date)
+
+
+def build_qudao_panels_html(conn, **kwargs):
+    from common.broadcast.qudao_panels import build_qudao_panels
+    return build_qudao_panels(conn, **kwargs)
+
+
+#: 并入渠道播报板块的区域（榜单页 extra_panels 门）。
+_PANEL_REGIONS = frozenset({"qudao"})
+
+
 def _handle_channel_daily(args):
     """电商渠道日报（qudao 三段式）：渠道日销快报 + 人员完成率榜 → outbox。
 
@@ -365,14 +381,8 @@ def _handle_channel_daily(args):
             conn, year=business_date.year, month=business_date.month
         )
         # 按日合计非零判定有效数据日（预填 0 值行不算，防止"0 元假日报"）
-        day_totals = {}
-        for facts in month_facts.values():
-            for d, amount in facts.items():
-                if d < business_date:
-                    day_totals[d] = day_totals.get(d, 0) + amount
-        filled_days = sorted(d for d, total in day_totals.items() if total != 0)
-        if filled_days:
-            channel_date = filled_days[-1]
+        channel_date = resolve_channel_date(month_facts, business_date)
+        if channel_date is not None:
             section = build_channel_section(
                 month_facts=month_facts,
                 business_date=channel_date,
@@ -512,7 +522,23 @@ def _handle_leaderboard_html(args):
             cfg, data.workdays,
             year=business_date.year, month=business_date.month,
         )
-        page = build_html_page(view, now, list(data.elapsed), list(data.people))
+
+        # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
+        # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
+        # 照常产出（详见 common.broadcast.qudao_panels）。
+        extra_panels = None
+        if region in _PANEL_REGIONS:
+            extra_panels = build_qudao_panels_html(
+                conn,
+                business_date=business_date,
+                now=now,
+                workdays=data.workdays,
+                monthly_targets=cfg.monthly_targets,
+            )
+        page = build_html_page(
+            view, now, list(data.elapsed), list(data.people),
+            extra_panels=extra_panels,
+        )
 
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -520,6 +546,7 @@ def _handle_leaderboard_html(args):
         print(
             f"service={service_id} region={region} kind=leaderboard-html "
             f"status=written people={len(data.people)}"
+            + (f" panels={len(extra_panels)}" if extra_panels is not None else "")
         )
     except SystemExit:
         raise

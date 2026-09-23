@@ -209,6 +209,129 @@ class MartExtractRepository:
                     )
         return len(rows)
 
+    # ------------------------------------------------------------------
+    # Channel-ops projections（2026-09-23 渠道播报 DB 化）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_channel_ops_columns(dataset, columns):
+        """渠道投影的列白名单校验（与 replace_table 同一套纪律）。"""
+        from common.public_data.extract_channel_ops import dataset_columns
+
+        allowed = set(dataset_columns(dataset)) | {"synced_at", "sync_run_id"}
+        if not columns or len(set(columns)) != len(columns) or set(columns) != allowed:
+            raise MartExtractError("invalid channel-ops columns")
+
+    def read_stockout_daily_sales(self):
+        """fact_stockout_line → SKU×仓×日 销量聚合（sales_daily 数据源）。"""
+        sql = textwrap.dedent(
+            """\
+            SELECT DATE(`consign_time`) AS `business_date`,
+                   `spec_no` AS `spec_no`,
+                   IFNULL(`warehouse_no`, '') AS `warehouse_no`,
+                   SUM(`quantity`) AS `qty_sold`
+            FROM `fact_stockout_line`
+            WHERE `consign_time` IS NOT NULL AND `spec_no` IS NOT NULL
+            GROUP BY DATE(`consign_time`), `spec_no`, IFNULL(`warehouse_no`, '')"""
+        )
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(sql)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def read_sales_window_sums(self, business_date, *, window_days, active_days):
+        """fact_sales_daily 按 SKU 求窗口/兜底销量。
+
+        返回 ``{spec_no: (window_qty, active_qty)}``：window_qty = 近
+        *window_days* 天（不含当天）销量合计，active_qty = 近 *active_days*
+        天合计（「仍在卖」兜底判定，设计稿 §9.4）。
+        """
+        sql = textwrap.dedent(
+            """\
+            SELECT `spec_no` AS `spec_no`,
+                   SUM(CASE WHEN `business_date` > %s THEN `qty_sold` ELSE 0 END) AS `window_qty`,
+                   SUM(CASE WHEN `business_date` > %s THEN `qty_sold` ELSE 0 END) AS `active_qty`
+            FROM `fact_sales_daily`
+            WHERE `business_date` < %s
+            GROUP BY `spec_no`"""
+        )
+        from datetime import timedelta as _td
+
+        window_start = business_date - _td(days=window_days)
+        active_start = business_date - _td(days=active_days)
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(sql, (window_start, active_start, business_date))
+            return {
+                row["spec_no"]: (float(row["window_qty"] or 0), float(row["active_qty"] or 0))
+                for row in cursor.fetchall()
+            }
+
+    def replace_sales_daily(self, dataset, columns, rows):
+        """全量替换 ``fact_sales_daily``（派生表，确定性重建）。"""
+        if dataset.kind != "sales_daily_aggregate":
+            raise MartExtractError("unregistered sales-daily table")
+        self._validate_channel_ops_columns(dataset, columns)
+        params = [tuple(row.get(name) for name in columns) for row in rows]
+        with transaction(self._mart):
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"DELETE FROM `{dataset.target_table}`")
+                if params:
+                    col_sql = ", ".join(f"`{name}`" for name in columns)
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    cursor.executemany(
+                        f"INSERT INTO `{dataset.target_table}` ({col_sql}) VALUES ({placeholders})",
+                        params,
+                    )
+        return len(rows)
+
+    def replace_inventory_day(self, dataset, columns, rows, business_date):
+        """按日替换 ``fact_inventory_sku_daily``：历史日保留，当日重写。
+
+        raw 侧是最新快照语义（wdt_records PK 无日期），历史快照只能
+        逐日积累——每日 DELETE 当日 + INSERT，回放安全（设计稿 §5.4）。
+        """
+        if dataset.kind != "inventory_snapshot":
+            raise MartExtractError("unregistered inventory table")
+        self._validate_channel_ops_columns(dataset, columns)
+        params = [tuple(row.get(name) for name in columns) for row in rows]
+        with transaction(self._mart):
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(
+                    f"DELETE FROM `{dataset.target_table}` WHERE `business_date` = %s",
+                    (business_date,),
+                )
+                if params:
+                    col_sql = ", ".join(f"`{name}`" for name in columns)
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    cursor.executemany(
+                        f"INSERT INTO `{dataset.target_table}` ({col_sql}) VALUES ({placeholders})",
+                        params,
+                    )
+        return len(rows)
+
+    def upsert_purchase_inbound(self, dataset, columns, rows):
+        """append 语义写入 ``fact_purchase_inbound``（PK 幂等 upsert）。"""
+        if dataset.kind != "purchase_inbound_expand":
+            raise MartExtractError("unregistered purchase-inbound table")
+        self._validate_channel_ops_columns(dataset, columns)
+        if not rows:
+            return 0
+        col_sql = ", ".join(f"`{name}`" for name in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        update_clause = ", ".join(
+            f"`{name}` = VALUES(`{name}`)"
+            for name in columns
+            if name not in ("order_no", "spec_no")
+        )
+        sql = (
+            f"INSERT INTO `{dataset.target_table}` ({col_sql}) VALUES ({placeholders}) "
+            f"ON DUPLICATE KEY UPDATE {update_clause}"
+        )
+        params = [tuple(row.get(name) for name in columns) for row in rows]
+        with transaction(self._mart):
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.executemany(sql, params)
+        return len(rows)
+
     def read_dataset(self, dataset, since=None):
         """按列白名单读取 ``dataset.source_table`` 的行。
 
@@ -543,6 +666,17 @@ def _projector_for_kind(kind):
         return {
             "stockout_line_expand": project_stockout_lines,
             "refund_line_expand": project_refund_lines,
+        }[kind]
+    if kind in ("sales_daily_aggregate", "inventory_snapshot", "purchase_inbound_expand"):
+        from common.public_data.extract_channel_ops import (
+            project_inventory_snapshot,
+            project_purchase_inbound,
+            project_sales_daily,
+        )
+        return {
+            "sales_daily_aggregate": project_sales_daily,
+            "inventory_snapshot": project_inventory_snapshot,
+            "purchase_inbound_expand": project_purchase_inbound,
         }[kind]
     return None
 
