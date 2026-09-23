@@ -23,13 +23,17 @@ from common.calendar_utils import month_days
 from common.daily_robot.channel_daily import _fmt_pct, _fmt_wan
 from common.metrics.daily_report import achievement_rate
 
-#: 汇总板块：(scope 键, 展示名, fact region 键, 板块键=responsible_person)。
-#: person=None 表示整区域合计；新增板块（如省外建群、李树军单列）只改这里。
+#: 汇总板块：(scope 键, 展示名, fact region 键, 锚点)。
+#: 锚点：None=整区域；("person", 名)=按 responsible_person 过滤；
+#: ("dept", 部门)=按 department 过滤；("dept_not", 部门)=排除该部门。
+#: 新增/拆分板块只改这里（2026-09-23 李树军拆分：绍兴剔除线下运营中心，
+#: 李树军板块=线下运营中心——绍兴播报中他本就独立计算）。
 AGG_SCOPES = (
     ("hangzhou", "杭州", "hangzhou", None),
-    ("shaoxing", "绍兴", "shaoxing", None),
-    ("shengwai", "省外", "offline_extra", "省外"),
-    ("zongjingban", "线下总经办", "offline_extra", "线下总经办"),
+    ("shaoxing", "绍兴", "shaoxing", ("dept_not", "线下运营中心")),
+    ("shengwai", "省外", "offline_extra", ("person", "省外")),
+    ("zongjingban", "线下总经办", "offline_extra", ("person", "线下总经办")),
+    ("lishujun", "李树军", "shaoxing", ("dept", "线下运营中心")),
 )
 
 TOTAL_SCOPE_KEY = "offline_total"
@@ -68,12 +72,27 @@ class ScopeMetrics:
 # DB 取数（只读 mart_ops；口径判断全在纯函数里）
 # ---------------------------------------------------------------------------
 
-def fetch_scope_daily_facts(connection, *, region, person, start, end):
-    """``{date: 销售额}``；person=None 整区域，否则按 responsible_person 过滤。
+def _anchor_clause(anchor):
+    """锚点 → (SQL 片段, 参数)。None 整区域；person/dept/dept_not 见 AGG_SCOPES。"""
+    if anchor is None:
+        return "", []
+    kind, value = anchor
+    if kind == "person":
+        return " AND `responsible_person` = %s", [value]
+    if kind == "dept":
+        return " AND `department` = %s", [value]
+    if kind == "dept_not":
+        return " AND (`department` IS NULL OR `department` <> %s)", [value]
+    raise ValueError(f"unknown scope anchor: {anchor!r}")
+
+
+def fetch_scope_daily_facts(connection, *, region, anchor, start, end):
+    """``{date: 销售额}``；anchor=None 整区域，否则按锚点过滤。
 
     名称含「合计」的行一律排除（与 ``mart_leaderboard`` 同口径）——AI 表
     自带 杭州合计/余杭合计 等合计行，不排则区域汇总双倍计数。
     """
+    clause, clause_params = _anchor_clause(anchor)
     sql = (
         "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
         "FROM `fact_daily_report_offline` "
@@ -81,19 +100,17 @@ def fetch_scope_daily_facts(connection, *, region, person, start, end):
         # %% 转义：pymysql 按 % 格式化 SQL，字面量 %合计% 须双写
         "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
+        f"{clause}"
+        " GROUP BY `business_date`"
     )
-    params = [region, start, end]
-    if person:
-        sql += " AND `responsible_person` = %s"
-        params.append(person)
-    sql += " GROUP BY `business_date`"
+    params = [region, start, end, *clause_params]
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
     return {row["d"]: float(row["s"] or 0) for row in rows}
 
 
-def fetch_scope_month_target(connection, *, region, person, year, month):
+def fetch_scope_month_target(connection, *, region, anchor, year, month):
     """该板块当月目标；无 → None。
 
     口径：先按人取 MAX（melt 行重复携带，绝不可 SUM），再跨人求和
@@ -101,18 +118,17 @@ def fetch_scope_month_target(connection, *, region, person, year, month):
     汇总，混入即虚增）。
     """
     first, last = month_days(year, month)[0], month_days(year, month)[-1]
+    clause, clause_params = _anchor_clause(anchor)
     sql = (
         "SELECT `responsible_person` AS `p`, MAX(`monthly_target`) AS `t` "
         "FROM `fact_daily_report_offline` "
         "WHERE `region` = %s AND `monthly_target` IS NOT NULL "
         "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
+        f"{clause}"
+        " GROUP BY `responsible_person`"
     )
-    params = [region, first, last]
-    if person:
-        sql += " AND `responsible_person` = %s"
-        params.append(person)
-    sql += " GROUP BY `responsible_person`"
+    params = [region, first, last, *clause_params]
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -345,9 +361,9 @@ def build_monthly_markdown(*, month_first, rows, total):
 # 任务（connection + outbox 注入，幂等）
 # ---------------------------------------------------------------------------
 
-def _fetch_window(connection, *, region, person, start, end):
+def _fetch_window(connection, *, region, anchor, start, end):
     return fetch_scope_daily_facts(
-        connection, region=region, person=person, start=start, end=end
+        connection, region=region, anchor=anchor, start=start, end=end
     )
 
 
@@ -359,14 +375,14 @@ def run_daily_summary(connection, outbox, *, business_date, now):
     prev_first, _ = previous_month(business_date)
     facts_by_scope = {}
     targets = {}
-    for scope, label, region, person in AGG_SCOPES:
+    for scope, label, region, anchor in AGG_SCOPES:
         facts = _fetch_window(
-            connection, region=region, person=person,
+            connection, region=region, anchor=anchor,
             start=prev_first, end=business_date,
         )
         facts_by_scope[scope] = facts
         targets[scope] = fetch_scope_month_target(
-            connection, region=region, person=person,
+            connection, region=region, anchor=anchor,
             year=business_date.year, month=business_date.month,
         )
 
@@ -406,9 +422,9 @@ def run_weekly_summary(connection, outbox, *, reference, now):
     week_start, week_end = previous_week(reference)
     fetch_start = week_start - timedelta(days=7)
     facts_by_scope = {}
-    for scope, label, region, person in AGG_SCOPES:
+    for scope, label, region, anchor in AGG_SCOPES:
         facts_by_scope[scope] = _fetch_window(
-            connection, region=region, person=person,
+            connection, region=region, anchor=anchor,
             start=fetch_start, end=week_end,
         )
 
@@ -444,13 +460,13 @@ def run_monthly_summary(connection, outbox, *, reference, now):
     prev_first, _ = previous_month(month_first)
     facts_by_scope = {}
     targets = {}
-    for scope, label, region, person in AGG_SCOPES:
+    for scope, label, region, anchor in AGG_SCOPES:
         facts_by_scope[scope] = _fetch_window(
-            connection, region=region, person=person,
+            connection, region=region, anchor=anchor,
             start=prev_first, end=month_last,
         )
         targets[scope] = fetch_scope_month_target(
-            connection, region=region, person=person,
+            connection, region=region, anchor=anchor,
             year=month_first.year, month=month_first.month,
         )
 
@@ -479,3 +495,54 @@ def run_monthly_summary(connection, outbox, *, reference, now):
         created_at=now,
     )
     return "enqueued" if enqueued else "already_sent"
+
+
+# ---------------------------------------------------------------------------
+# 榜单页（pages-offline_all）
+# ---------------------------------------------------------------------------
+
+def build_offline_all_html(connection, cfg, *, business_date, now):
+    """线下整体榜单页：板块即「人」，复用榜单 ``build_html`` 的页面骨架。
+
+    口径：completed = 自然日累计（与 20:30 群播报一致）；时间进度条仍按
+    ``dim_calendar`` 工作日（与其他区域榜单页一致）；排序与 ``mart_collect``
+    同键（-rate(None→-1), -completed）。
+    """
+    from common.daily_robot.leaderboard import build_html
+    from common.daily_robot.mart_leaderboard import build_leaderboard_view
+    from common.metrics.daily_report import elapsed_workdays, fetch_workdays
+
+    year, month = business_date.year, business_date.month
+    workdays = fetch_workdays(connection, year=year, month=month)
+    view = build_leaderboard_view(cfg, workdays, year=year, month=month)
+
+    prev_first, _ = previous_month(business_date)
+    people = []
+    for scope, label, region, anchor in AGG_SCOPES:
+        facts = fetch_scope_daily_facts(
+            connection, region=region, anchor=anchor,
+            start=prev_first, end=business_date,
+        )
+        target = fetch_scope_month_target(
+            connection, region=region, anchor=anchor, year=year, month=month,
+        )
+        m = compute_daily_metrics(
+            scope, label, facts=facts,
+            business_date=business_date, month_target=target,
+        )
+        people.append({
+            "name": label,
+            "dept": label,
+            "target": m.month_target or 0,
+            "completed": m.month_completed,
+            "unfilled": 0,
+            "rate": m.month_rate,
+        })
+    people.sort(
+        key=lambda p: (
+            -(p["rate"] if p["rate"] is not None else -1),
+            -p["completed"],
+        )
+    )
+    elapsed = sorted({d.day for d in elapsed_workdays(workdays, today=business_date)})
+    return build_html(view, now, elapsed, people)

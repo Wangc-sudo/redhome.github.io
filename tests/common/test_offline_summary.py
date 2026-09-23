@@ -3,6 +3,7 @@
 
 import unittest
 from datetime import date, datetime
+from unittest import mock
 
 from common.daily_robot.offline_summary import (
     AGG_SCOPES,
@@ -12,6 +13,7 @@ from common.daily_robot.offline_summary import (
     WEEKLY_KIND,
     build_daily_markdown,
     build_monthly_markdown,
+    build_offline_all_html,
     build_weekly_markdown,
     compute_daily_metrics,
     compute_monthly_metrics,
@@ -259,14 +261,24 @@ class _Cursor:
             self._conn.agg_rows.append(params)
             self._rows = []
             return
+        if "dim_calendar" in sql:
+            self._rows = []
+            return
         region = params[0]
-        person = params[3] if len(params) > 3 else None
-        if "MAX(`monthly_target`)" in sql:
-            self._rows = [
-                {"t": self._conn.targets.get((region, person))}
-            ]
+        # 锚点由 SQL 片段形态识别（值都在 params[3]）
+        if "`responsible_person` = %s" in sql:
+            anchor = ("person", params[3])
+        elif "`department` = %s" in sql:
+            anchor = ("dept", params[3])
+        elif "`department` <> %s" in sql:
+            anchor = ("dept_not", params[3])
         else:
-            facts = self._conn.facts.get((region, person), {})
+            anchor = None
+        if "MAX(`monthly_target`)" in sql:
+            value = self._conn.targets.get((region, anchor))
+            self._rows = [{"t": value}] if value is not None else []
+        else:
+            facts = self._conn.facts.get((region, anchor), {})
             self._rows = [
                 {"d": d, "s": amount} for d, amount in facts.items()
             ]
@@ -302,15 +314,17 @@ class _Outbox:
 def _task_conn():
     facts = {
         ("hangzhou", None): {date(2026, 9, 23): 20000.0, date(2026, 9, 22): 10000.0},
-        ("shaoxing", None): {date(2026, 9, 23): 5000.0},
-        ("offline_extra", "省外"): {date(2026, 9, 17): 1519440.0},
-        ("offline_extra", "线下总经办"): {date(2026, 9, 17): 3322147.0},
+        ("shaoxing", ("dept_not", "线下运营中心")): {date(2026, 9, 23): 5000.0},
+        ("offline_extra", ("person", "省外")): {date(2026, 9, 17): 1519440.0},
+        ("offline_extra", ("person", "线下总经办")): {date(2026, 9, 17): 3322147.0},
+        ("shaoxing", ("dept", "线下运营中心")): {date(2026, 9, 17): 142910.0},
     }
     targets = {
         ("hangzhou", None): 100000.0,
-        ("shaoxing", None): None,
-        ("offline_extra", "省外"): 1000000.0,
-        ("offline_extra", "线下总经办"): 2195000.0,
+        ("shaoxing", ("dept_not", "线下运营中心")): None,
+        ("offline_extra", ("person", "省外")): 1000000.0,
+        ("offline_extra", ("person", "线下总经办")): 2195000.0,
+        ("shaoxing", ("dept", "线下运营中心")): None,
     }
     return _Conn(facts, targets)
 
@@ -324,19 +338,23 @@ class TaskTest(unittest.TestCase):
             business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 20, 30),
         )
         self.assertEqual(status, "enqueued")
-        # agg 落表：4 板块 + 整体 = 5 行
-        self.assertEqual(len(conn.agg_rows), 5)
+        # agg 落表：5 板块（含李树军拆分）+ 整体 = 6 行
+        self.assertEqual(len(conn.agg_rows), 6)
         scopes = {row[1] for row in conn.agg_rows}
         self.assertEqual(
             scopes,
-            {"hangzhou", "shaoxing", "shengwai", "zongjingban", TOTAL_SCOPE_KEY},
+            {"hangzhou", "shaoxing", "shengwai", "zongjingban",
+             "lishujun", TOTAL_SCOPE_KEY},
         )
         # 省外 9-23 无报数 → 0；线下总经办月目标 2195000
         by_scope = {row[1]: row for row in conn.agg_rows}
         self.assertEqual(by_scope["shengwai"][2], 0.0)
         # 元组索引 10 = month_target（11 为 month_rate）
         self.assertEqual(by_scope["zongjingban"][10], 2195000.0)
-        # 整体月目标 = 100000 + 1000000 + 2195000（绍兴 None 跳过）
+        # 李树军板块：9-23 无报数 → 当日 0，月累计含 9-17 的 142910
+        self.assertEqual(by_scope["lishujun"][2], 0.0)
+        self.assertEqual(by_scope["lishujun"][9], 142910.0)
+        # 整体月目标 = 100000 + 1000000 + 2195000（绍兴/李树军 None 跳过）
         self.assertEqual(by_scope[TOTAL_SCOPE_KEY][10], 3295000.0)
 
         self.assertEqual(len(outbox.calls), 1)
@@ -355,7 +373,7 @@ class TaskTest(unittest.TestCase):
             business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 21, 0),
         )
         self.assertEqual(status, "already_sent")
-        self.assertEqual(len(conn.agg_rows), 5)
+        self.assertEqual(len(conn.agg_rows), 6)
 
     def test_weekly_uses_previous_full_week(self):
         conn = _task_conn()
@@ -404,6 +422,68 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn("shengwai", keys)
         self.assertIn("zongjingban", keys)
+        self.assertIn("lishujun", keys)
+        # 李树军拆分：绍兴剔除线下运营中心，李树军板块=该部门
+        anchors = {scope: anchor for scope, _, _, anchor in AGG_SCOPES}
+        self.assertEqual(anchors["shaoxing"], ("dept_not", "线下运营中心"))
+        self.assertEqual(anchors["lishujun"], ("dept", "线下运营中心"))
+
+    def test_daily_markdown_contains_lishujun_row(self):
+        conn = _task_conn()
+        outbox = _Outbox()
+        run_daily_summary(
+            conn, outbox,
+            business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 20, 30),
+        )
+        body = outbox.calls[0]["body_md"]
+        self.assertIn("| 李树军 |", body)
+        # 李树军月累计 14.3万（142910）
+        self.assertIn("14.3万", body)
+
+
+class OfflineAllHtmlTest(unittest.TestCase):
+    """pages-offline_all：板块即「人」喂给榜单 build_html。"""
+
+    def test_scopes_become_people_rows(self):
+        captured = {}
+
+        def fake_build_html(view, now, elapsed, people, **kwargs):
+            captured["elapsed"] = elapsed
+            captured["people"] = people
+            return "<html>offline_all</html>"
+
+        conn = _task_conn()
+        with mock.patch(
+            "common.daily_robot.mart_leaderboard.build_leaderboard_view",
+            return_value={"region": {}, "calendar": {}},
+        ), mock.patch(
+            "common.daily_robot.leaderboard.build_html",
+            side_effect=fake_build_html,
+        ):
+            page = build_offline_all_html(
+                conn, None,
+                business_date=date(2026, 9, 23),
+                now=datetime(2026, 9, 23, 8, 30),
+            )
+
+        self.assertEqual(page, "<html>offline_all</html>")
+        people = captured["people"]
+        self.assertEqual(len(people), 5)
+        names = [p["name"] for p in people]
+        self.assertIn("李树军", names)
+        # 排序与 mart_collect 同键：rate 降序、None 垫底。
+        # 有目标的三个：总经办 3322147/2195000≈151% > 省外 1519440/1000000≈151.9%？
+        # 精确关系：省外 1.51944 > 总经办 1.51351 > 杭州 0.3；绍兴/李树军 None 垫底
+        self.assertEqual(names[0], "省外")
+        self.assertEqual(names[1], "线下总经办")
+        self.assertEqual(names[2], "杭州")
+        # rate None 垫底，按 completed 降序：李树军 14.3万 > 绍兴 0.5万
+        self.assertEqual(names[3:], ["李树军", "绍兴"])
+        by_name = {p["name"]: p for p in people}
+        self.assertEqual(by_name["李树军"]["completed"], 142910.0)
+        self.assertEqual(by_name["李树军"]["rate"], None)
+        self.assertEqual(by_name["杭州"]["completed"], 30000.0)
+        self.assertEqual(by_name["杭州"]["target"], 100000.0)
 
 
 if __name__ == "__main__":

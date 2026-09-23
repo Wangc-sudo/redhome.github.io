@@ -166,6 +166,14 @@ _COMMAND_TABLE = {
         ],
         "extra_env": {"ROBOT_REGION": "qudao"},
     },
+    "pages-offline_all": {
+        "argv": [
+            "common.daily_robot.mart_cli", "leaderboard-html",
+            "--confirm-local-test-write",
+            "--output", "{output_dir}/offline_all.html",
+        ],
+        "extra_env": {"ROBOT_REGION": "offline_all"},
+    },
     "offline-daily-summary": {
         "argv": [
             "common.daily_robot.mart_cli", "offline-daily",

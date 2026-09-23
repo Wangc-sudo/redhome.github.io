@@ -81,6 +81,12 @@ pages-qudao:
   schedule: "30 8,15,17 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
+pages-offline_all:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "offline_all scope leaderboard HTML page generation"
 offline-daily-summary:
   kind: business
   enabled: true

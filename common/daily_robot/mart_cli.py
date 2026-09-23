@@ -111,6 +111,11 @@ def build_html_page(view, now, elapsed, people, extra_panels=None):
     return build_html(view, now, elapsed, people, extra_panels=extra_panels)
 
 
+def build_offline_all_page(conn, cfg, *, business_date, now):
+    from common.daily_robot.offline_summary import build_offline_all_html
+    return build_offline_all_html(conn, cfg, business_date=business_date, now=now)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -517,36 +522,46 @@ def _handle_leaderboard_html(args):
         )
 
         conn = connect_mart(settings)
-        data = mart_collect_data(conn, region=region, business_date=business_date)
-        view = build_view(
-            cfg, data.workdays,
-            year=business_date.year, month=business_date.month,
-        )
-
-        # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
-        # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
-        # 照常产出（详见 common.broadcast.qudao_panels）。
-        extra_panels = None
-        if region in _PANEL_REGIONS:
-            extra_panels = build_qudao_panels_html(
-                conn,
-                business_date=business_date,
-                now=now,
-                workdays=data.workdays,
-                monthly_targets=cfg.monthly_targets,
+        if region == "offline_all":
+            # 线下整体无 region=offline_all 的事实行：板块榜由
+            # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
+            page = build_offline_all_page(
+                conn, cfg, business_date=business_date, now=now
             )
-        page = build_html_page(
-            view, now, list(data.elapsed), list(data.people),
-            extra_panels=extra_panels,
-        )
+            stats = "scopes=5"
+        else:
+            data = mart_collect_data(conn, region=region, business_date=business_date)
+            view = build_view(
+                cfg, data.workdays,
+                year=business_date.year, month=business_date.month,
+            )
+
+            # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
+            # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
+            # 照常产出（详见 common.broadcast.qudao_panels）。
+            extra_panels = None
+            if region in _PANEL_REGIONS:
+                extra_panels = build_qudao_panels_html(
+                    conn,
+                    business_date=business_date,
+                    now=now,
+                    workdays=data.workdays,
+                    monthly_targets=cfg.monthly_targets,
+                )
+            page = build_html_page(
+                view, now, list(data.elapsed), list(data.people),
+                extra_panels=extra_panels,
+            )
+            stats = f"people={len(data.people)}" + (
+                f" panels={len(extra_panels)}" if extra_panels is not None else ""
+            )
 
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(page, encoding="utf-8")
         print(
             f"service={service_id} region={region} kind=leaderboard-html "
-            f"status=written people={len(data.people)}"
-            + (f" panels={len(extra_panels)}" if extra_panels is not None else "")
+            f"status=written {stats}"
         )
     except SystemExit:
         raise
