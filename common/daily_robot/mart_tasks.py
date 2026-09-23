@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """日报机器人的 mart 侧任务：remind / check（阶段 4）。
 
-与 :mod:`common.daily_robot.core` 的 ``do_remind`` / ``do_check`` 的区别只在
-**数据来源与投递方式**，文案逐字一致：
+与旧 ``daily_robot.core``（已随双轨收口删除）的 ``do_remind`` /
+``do_check`` 的区别只在**数据来源与投递方式**，文案逐字一致：
 
 * 名单来自 ``mart_ops``（``dim_robot_member`` + 事实表反连接，经
   :mod:`common.metrics.daily_report`），不再直连钉钉 AI 表；
