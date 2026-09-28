@@ -27,6 +27,9 @@ HEALTH_TIMEOUT="${DOPS_HEALTH_TIMEOUT:-90}"
 PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）
 CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web}"
+# 灾备/CI 模式（DOPS_SYNC_ONLY=1，如 dops-ci）：只 git 同步代码到部署分支，
+# 不重建镜像、不重启服务——避免灾备机与生产机重复跑 cron / 抢占 DingTalk stream。
+SYNC_ONLY="${DOPS_SYNC_ONLY:-0}"
 
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/deploy.log"
@@ -56,6 +59,17 @@ if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
 fi
 
 log "DEPLOY START: ${LOCAL_SHA:0:8} -> ${REMOTE_SHA:0:8} (branch=$BRANCH host=$(hostname))"
+
+# 灾备/CI 同步模式：只把代码 reset 到部署分支（顺带同步 compose 真源），不动服务。
+if [ "$SYNC_ONLY" = "1" ]; then
+  git reset --hard "$REMOTE_SHA"
+  if [ -f docker/cloud/docker-compose.dops.yml ]; then
+    cp docker/cloud/docker-compose.dops.yml "$COMPOSE_FILE"
+  fi
+  log "SYNC-ONLY OK: ${REMOTE_SHA:0:8}（不重启服务）"
+  write_status ok "$LOCAL_SHA" "$REMOTE_SHA" "sync-only, no service restart"
+  exit 0
+fi
 
 DEPS_CHANGED=0
 git diff --quiet "$LOCAL_SHA" "$REMOTE_SHA" -- requirements.txt || DEPS_CHANGED=1
