@@ -31,6 +31,7 @@ Two projectors, both WDT-backed and full-replay:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -62,7 +63,8 @@ _DIM_PRODUCT_MIRROR_COLUMNS = (
 )
 
 # 与 mart fact_order_line DDL 一一对应（渠道两列由迁移
-# mart-extract-order-line-v2 补建，见 mart_extract_schema）。
+# mart-extract-order-line-v2 补建、收货地区两列由 v3 补建，
+# 见 mart_extract_schema）。
 _ORDER_LINE_COLUMNS = (
     "trade_no",
     "line_no",
@@ -73,6 +75,8 @@ _ORDER_LINE_COLUMNS = (
     "brand_name",
     "shop_name",
     "channel_name",
+    "receiver_area_raw",
+    "receiver_area_norm",
     "quantity",
     "paid_amount",
     "platform_subsidy",
@@ -105,6 +109,26 @@ def _normalize_channel(shop_name: str) -> str:
         if keyword in shop_name:
             return channel
     return _UNMATCHED_CHANNEL
+
+
+def normalize_area(raw):
+    """``'广东省 深圳市 龙华区 民治街道'`` → ``'广东省深圳市龙华区'``。
+
+    省市区三级拼接；去街道与连续重复（东莞市东莞市 / 北京北京市）；
+    不足两级视为无效地区返回 ``None``（拼多多按隐私协议不返回地区，
+    投影后 ``receiver_area_norm`` 为 NULL，由查询层显式计数）。
+    与旧 ``order_risk_alert.normalize_area`` 逐字同口径。
+    """
+    if not raw:
+        return None
+    parts = [p for p in re.split(r"\s+", str(raw).strip()) if p]
+    dedup = [parts[0]] if parts else []
+    for part in parts[1:]:
+        if part != dedup[-1]:
+            dedup.append(part)
+    if len(dedup) < 2:
+        return None
+    return "".join(dedup[:3])
 
 
 def _clean(value: object) -> str:
@@ -256,6 +280,7 @@ def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
         trade_time = _parse_datetime(payload.get("trade_time"))
         shop_name = _clean(payload.get("shop_name"))
         channel_name = _normalize_channel(shop_name)
+        receiver_area_raw = _clean(payload.get("receiver_area")) or None
         details = payload.get("detail_list") or []
         line_no = 0
         for detail in details:
@@ -275,6 +300,8 @@ def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
                 "brand_name": brand_index.get(spec_no, _UNMATCHED_BRAND),
                 "shop_name": shop_name or None,
                 "channel_name": channel_name,
+                "receiver_area_raw": receiver_area_raw,
+                "receiver_area_norm": normalize_area(receiver_area_raw),
                 "quantity": _to_decimal(detail.get("num")),
                 "paid_amount": _to_decimal(detail.get("paid")),
                 "platform_subsidy": Decimal("0"),
@@ -308,6 +335,7 @@ __all__ = [
     "_UNMATCHED_BRAND",
     "_UNMATCHED_CHANNEL",
     "_normalize_channel",
+    "normalize_area",
     "project_dim_product_mirror",
     "project_order_lines",
 ]

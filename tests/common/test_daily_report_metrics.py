@@ -7,6 +7,8 @@ from decimal import Decimal
 from common.metrics.daily_report import (
     achievement_rate,
     elapsed_workdays,
+    fetch_channel_dept_rollup,
+    fetch_channel_monthly_targets,
     fetch_filled_names,
     fetch_month_facts,
     fetch_region_members,
@@ -261,6 +263,92 @@ class FetchTests(unittest.TestCase):
         self.assertIn("f.`source_record_id` IS NULL", sql)
         self.assertEqual(params, ("hangzhou", date(2026, 9, 10), "hangzhou"))
         self.assertEqual(rows, [{"user_id": "u2", "name": "李四"}])
+
+
+# ---------------------------------------------------------------------------
+# qudao 店铺粒度部门真值（2026-09-23 共管店重复计数修复）
+# ---------------------------------------------------------------------------
+
+class _RoutingCursor:
+    """按 SQL 里的表名路由到不同行集。"""
+
+    def __init__(self, sales_rows=(), target_rows=(), fail=False):
+        self._sales = list(sales_rows)
+        self._targets = list(target_rows)
+        self._fail = fail
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        if self._fail:
+            raise RuntimeError("table does not exist")
+        self._rows = (
+            self._sales if "fact_channel_daily_sales" in sql else self._targets
+        )
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def close(self):
+        pass
+
+
+class _RoutingConn:
+    def __init__(self, sales_rows=(), target_rows=(), fail=False):
+        self.cursor_instance = _RoutingCursor(sales_rows, target_rows, fail)
+
+    def cursor(self):
+        return self.cursor_instance
+
+
+class ChannelDeptRollupTests(unittest.TestCase):
+
+    def test_completed_uses_natural_days_and_target_sums_stores(self):
+        conn = _RoutingConn(
+            sales_rows=[
+                {"channel": "直播", "s": Decimal("11744156.00")},
+                {"channel": "天猫", "s": Decimal("2696396.00")},
+            ],
+            target_rows=[
+                {"channel": "直播", "t": Decimal("25311000.00")},
+                {"channel": "猫超", "t": Decimal("15000000.00")},
+            ],
+        )
+        rollup = fetch_channel_dept_rollup(
+            conn, year=2026, month=9, through=date(2026, 9, 23),
+        )
+        self.assertEqual(rollup["直播"]["completed"], 11744156.0)
+        self.assertEqual(rollup["直播"]["target"], 25311000.0)
+        self.assertIsNone(rollup["天猫"]["target"])     # 无目标行 → None
+        self.assertEqual(rollup["猫超"]["completed"], 0.0)  # 无销售行 → 0
+        # 销售 SQL 为月内自然日区间（含周末，对齐 AI 表仪表盘）
+        sql, params = conn.cursor_instance.executed[0]
+        self.assertIn("BETWEEN %s AND %s", sql)
+        self.assertEqual(params, (date(2026, 9, 1), date(2026, 9, 23)))
+
+    def test_through_is_capped_at_month_end(self):
+        conn = _RoutingConn(sales_rows=[])
+        fetch_channel_dept_rollup(conn, year=2026, month=9, through=date(2026, 10, 5))
+        _, params = conn.cursor_instance.executed[0]
+        self.assertEqual(params, (date(2026, 9, 1), date(2026, 9, 30)))
+
+    def test_table_missing_fails_open(self):
+        conn = _RoutingConn(fail=True)
+        self.assertEqual(
+            fetch_channel_dept_rollup(
+                conn, year=2026, month=9, through=date(2026, 9, 23)
+            ),
+            {},
+        )
+        self.assertEqual(fetch_channel_monthly_targets(conn), {})
+
+    def test_monthly_targets_keyed_by_channel(self):
+        conn = _RoutingConn(target_rows=[
+            {"channel": "拼多多", "t": Decimal("3620000.00")},
+        ])
+        self.assertEqual(
+            fetch_channel_monthly_targets(conn), {"拼多多": 3620000.0}
+        )
 
 
 if __name__ == "__main__":

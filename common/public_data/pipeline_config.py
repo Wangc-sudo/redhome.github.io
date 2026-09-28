@@ -15,12 +15,15 @@ Consumers depend only on the :class:`ConfigSource` contract -- never on Nacos
 directly -- so the backend stays swappable without touching consumers.
 """
 
+import logging
 import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_GROUP = "PIPELINES"
 SUPPORTED_KINDS = ("apps", "business")
@@ -193,7 +196,13 @@ class NacosConfigSource(ConfigSource):
         data_id = f"{service_id}.yaml"
         try:
             content = self._nacos().get_config(data_id, self._group)
-        except Exception:
+        except Exception as exc:
+            # fail-open 是有意设计（注册表抖动不停摆），但必须可观测：
+            # 静默期间「关停某条线」的指令不生效，运维需要看得到。
+            logger.warning(
+                "nacos get_config failed for %s (group=%s): %s -- falling back",
+                data_id, self._group, type(exc).__name__,
+            )
             content = None
         if not content:
             if self._fallback is not None:
@@ -258,8 +267,12 @@ def ensure_namespace(server, namespace, username=None, password=None, timeout=5)
     )
     try:
         urllib.request.urlopen(request, timeout=timeout)
-    except Exception:
+    except Exception as exc:
         # Already exists (or the server refuses duplicates) -- not fatal.
+        logger.warning(
+            "nacos namespace ensure failed for %s: %s -- assumed existing",
+            namespace, type(exc).__name__,
+        )
         return
 
 

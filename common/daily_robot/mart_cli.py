@@ -76,6 +76,21 @@ def build_outbox(conn):
     return OutboxRepository(conn)
 
 
+def run_offline_daily_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_daily_summary
+    return run_daily_summary(conn, outbox, **kwargs)
+
+
+def run_offline_weekly_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_weekly_summary
+    return run_weekly_summary(conn, outbox, **kwargs)
+
+
+def run_offline_monthly_task(conn, outbox, **kwargs):
+    from common.daily_robot.offline_summary import run_monthly_summary
+    return run_monthly_summary(conn, outbox, **kwargs)
+
+
 def mart_collect_data(conn, *, region, business_date):
     from common.daily_robot.mart_leaderboard import mart_collect
     return mart_collect(conn, region=region, business_date=business_date)
@@ -86,14 +101,53 @@ def build_view(region_cfg, workdays, *, year, month):
     return build_leaderboard_view(region_cfg, workdays, year=year, month=month)
 
 
-def render_bc(region, calendar, now, elapsed, people, url=None):
+def render_bc(region, calendar, now, elapsed, people, url=None,
+              dept_overrides=None):
     from common.daily_robot.leaderboard import render_bc_markdown
-    return render_bc_markdown(region, calendar, now, elapsed, people, url=url)
+    return render_bc_markdown(
+        region, calendar, now, elapsed, people, url=url,
+        dept_overrides=dept_overrides,
+    )
 
 
-def build_html_page(view, now, elapsed, people):
+def build_html_page(view, now, elapsed, people, extra_panels=None,
+                    dept_overrides=None):
     from common.daily_robot.leaderboard import build_html
-    return build_html(view, now, elapsed, people)
+    return build_html(
+        view, now, elapsed, people, extra_panels=extra_panels,
+        dept_overrides=dept_overrides,
+    )
+
+
+def channel_dept_overrides(conn, region, data):
+    """qudao 榜单的店铺粒度部门真值覆盖（其余区域返回 ``None`` = 原口径）。
+
+    修复（2026-09-23 核查）：qudao 人员事实是「整店归集合每人」的个人
+    考核口径，部门榜按 Σ(每人) 聚合时共管店重复计数（直播 4.4x、
+    猫超 2x、私域 2x）；override 改用店铺粒度链（渠道日销 + 店铺月
+    目标，与 AI 表真值一致）。表未迁移时函数内部 fail-open 返回 {}。
+    """
+    if region != "qudao":
+        return None
+    from common.metrics.daily_report import fetch_channel_dept_rollup
+    bd = data.business_date
+    # 自然日累计（月内 ≤ 当天；当天预填 0 行不影响）——对齐 AI 表仪表盘口径
+    return fetch_channel_dept_rollup(
+        conn, year=bd.year, month=bd.month, through=bd
+    )
+
+
+def channel_monthly_targets(conn, region, cfg):
+    """渠道日销快报的月目标：店铺粒度真值优先，Nacos ``monthlyTargets`` 兜底。"""
+    if region != "qudao":
+        return cfg.monthly_targets
+    from common.metrics.daily_report import fetch_channel_monthly_targets
+    return fetch_channel_monthly_targets(conn) or cfg.monthly_targets
+
+
+def build_offline_all_page(conn, cfg, *, business_date, now):
+    from common.daily_robot.offline_summary import build_offline_all_html
+    return build_offline_all_html(conn, cfg, business_date=business_date, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +308,7 @@ def _handle_leaderboard(args):
             view["region"], view["calendar"], now,
             list(data.elapsed), list(data.people),
             url=cfg.leaderboard_url or None,
+            dept_overrides=channel_dept_overrides(conn, region, data),
         )
 
         outbox = build_outbox(conn)
@@ -289,6 +344,22 @@ def fetch_channel_month_facts(connection, *, year, month):
 def build_channel_section(**kwargs):
     from common.daily_robot.channel_daily import build_channel_section as _build
     return _build(**kwargs)
+
+
+def resolve_channel_date(month_facts, business_date):
+    from common.daily_robot.channel_daily import (
+        resolve_channel_business_date as _resolve,
+    )
+    return _resolve(month_facts, business_date)
+
+
+def build_qudao_panels_html(conn, **kwargs):
+    from common.broadcast.qudao_panels import build_qudao_panels
+    return build_qudao_panels(conn, **kwargs)
+
+
+#: 并入渠道播报板块的区域（榜单页 extra_panels 门）。
+_PANEL_REGIONS = frozenset({"qudao"})
 
 
 def _handle_channel_daily(args):
@@ -341,6 +412,7 @@ def _handle_channel_daily(args):
             view["region"], view["calendar"], now,
             list(data.elapsed), list(data.people),
             url=cfg.leaderboard_url or None,
+            dept_overrides=channel_dept_overrides(conn, region, data),
         )
 
         # 渠道日销段：业务日 = 昨日（含）之前最近一个有渠道数据的工作日
@@ -350,19 +422,13 @@ def _handle_channel_daily(args):
             conn, year=business_date.year, month=business_date.month
         )
         # 按日合计非零判定有效数据日（预填 0 值行不算，防止"0 元假日报"）
-        day_totals = {}
-        for facts in month_facts.values():
-            for d, amount in facts.items():
-                if d < business_date:
-                    day_totals[d] = day_totals.get(d, 0) + amount
-        filled_days = sorted(d for d, total in day_totals.items() if total != 0)
-        if filled_days:
-            channel_date = filled_days[-1]
+        channel_date = resolve_channel_date(month_facts, business_date)
+        if channel_date is not None:
             section = build_channel_section(
                 month_facts=month_facts,
                 business_date=channel_date,
                 workdays=data.workdays,
-                monthly_targets=cfg.monthly_targets,
+                monthly_targets=channel_monthly_targets(conn, region, cfg),
             )
         body = f"{section}\n\n{people_body}" if section else people_body
 
@@ -382,6 +448,71 @@ def _handle_channel_daily(args):
             f"status={'enqueued' if enqueued else 'already_sent'} "
             f"section={'channel' if section else 'people_only'} "
             f"people={len(data.people)}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
+def _handle_offline_summary(args, *, period):
+    """线下整体汇总（offline_all 群）：daily/weekly/monthly 三周期 → outbox。
+
+    kind 与业务日：daily=当日；weekly=上周周一；monthly=上月 1 日——
+    幂等键自带周期唯一性，重跑不重复发。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        region = _resolve_region(args)
+        if not region:
+            _print_failure("region_required")
+            sys.exit(1)
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+        if configs.get(region) is None:
+            _print_failure("unknown_region")
+            sys.exit(1)
+
+        now = datetime.now()
+        reference = (
+            date.fromisoformat(args.date) if getattr(args, "date", None)
+            else now.date()
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        if period == "daily":
+            status = run_offline_daily_task(
+                conn, outbox, business_date=reference, now=now
+            )
+        elif period == "weekly":
+            status = run_offline_weekly_task(
+                conn, outbox, reference=reference, now=now
+            )
+        else:
+            status = run_offline_monthly_task(
+                conn, outbox, reference=reference, now=now
+            )
+        conn.commit()
+        print(
+            f"service={service_id} region={region} kind=offline_{period} "
+            f"status={status}"
         )
     except SystemExit:
         raise
@@ -427,19 +558,47 @@ def _handle_leaderboard_html(args):
         )
 
         conn = connect_mart(settings)
-        data = mart_collect_data(conn, region=region, business_date=business_date)
-        view = build_view(
-            cfg, data.workdays,
-            year=business_date.year, month=business_date.month,
-        )
-        page = build_html_page(view, now, list(data.elapsed), list(data.people))
+        if region == "offline_all":
+            # 线下整体无 region=offline_all 的事实行：板块榜由
+            # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
+            page = build_offline_all_page(
+                conn, cfg, business_date=business_date, now=now
+            )
+            stats = "scopes=5"
+        else:
+            data = mart_collect_data(conn, region=region, business_date=business_date)
+            view = build_view(
+                cfg, data.workdays,
+                year=business_date.year, month=business_date.month,
+            )
+
+            # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
+            # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
+            # 照常产出（详见 common.broadcast.qudao_panels）。
+            extra_panels = None
+            if region in _PANEL_REGIONS:
+                extra_panels = build_qudao_panels_html(
+                    conn,
+                    business_date=business_date,
+                    now=now,
+                    workdays=data.workdays,
+                    monthly_targets=channel_monthly_targets(conn, region, cfg),
+                )
+            page = build_html_page(
+                view, now, list(data.elapsed), list(data.people),
+                extra_panels=extra_panels,
+                dept_overrides=channel_dept_overrides(conn, region, data),
+            )
+            stats = f"people={len(data.people)}" + (
+                f" panels={len(extra_panels)}" if extra_panels is not None else ""
+            )
 
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(page, encoding="utf-8")
         print(
             f"service={service_id} region={region} kind=leaderboard-html "
-            f"status=written people={len(data.people)}"
+            f"status=written {stats}"
         )
     except SystemExit:
         raise
@@ -465,6 +624,9 @@ def main(argv=None):
         ("once", "Route to remind/check by the current hour"),
         ("leaderboard", "Enqueue the daily leaderboard broadcast"),
         ("channel-daily", "Enqueue the ecom channel daily report (qudao composite)"),
+        ("offline-daily", "Enqueue the offline-all daily summary (20:30)"),
+        ("offline-weekly", "Enqueue the offline-all weekly summary (Mon 09:30)"),
+        ("offline-monthly", "Enqueue the offline-all monthly summary (1st 10:00)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument(
@@ -516,6 +678,9 @@ def main(argv=None):
         return
     if args.command == "channel-daily":
         _handle_channel_daily(args)
+        return
+    if args.command in ("offline-daily", "offline-weekly", "offline-monthly"):
+        _handle_offline_summary(args, period=args.command.split("-", 1)[1])
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

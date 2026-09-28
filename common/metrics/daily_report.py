@@ -219,6 +219,81 @@ def fetch_filled_names(connection, *, region, business_date):
     return {row["responsible_person"] for row in rows}
 
 
+# ---------------------------------------------------------------------------
+# qudao 部门（=渠道）店铺粒度真值（2026-09-23 核查修复）
+# ---------------------------------------------------------------------------
+
+CHANNEL_SALES_TABLE = "fact_channel_daily_sales"
+STORE_TARGET_TABLE = "fact_channel_store_target"
+
+
+def fetch_channel_monthly_targets(connection):
+    """渠道月目标（店铺粒度 Σ）：``{channel: float}``。
+
+    与钉钉 AI 表 ``channel_monthly_target`` 真值一致——共管店只计一次。
+    表不存在（未迁移环境）返回 ``{}``（fail-open，调用方回退 Nacos
+    ``monthlyTargets`` 或显示 ``--``）。
+    """
+    try:
+        rows = _fetch_all(
+            connection,
+            "SELECT `channel`, SUM(`monthly_target`) AS `t` "
+            f"FROM `{STORE_TARGET_TABLE}` "
+            "WHERE `monthly_target` IS NOT NULL GROUP BY `channel`",
+            (),
+        )
+    except Exception:
+        return {}
+    return {
+        str(row["channel"]): float(row["t"])
+        for row in rows
+        if row.get("channel") and row.get("t") is not None
+    }
+
+
+def fetch_channel_dept_rollup(connection, *, year, month, through):
+    """qudao 部门（=渠道）完成/目标的店铺粒度真值（``dept_overrides`` 用）。
+
+    * 完成 = Σ ``fact_channel_daily_sales``（月内**自然日**、≤ *through*）；
+    * 目标 = Σ ``fact_channel_store_target``（共管店只计一次）。
+
+    口径对齐（2026-09-23 运维裁决「AI 表数据是权威的」）：AI 表仪表盘的
+    月累计按自然日（含周末），本函数同口径——此前按已过工作日累计比
+    仪表盘系统性偏低（周末销售被剔除），已对齐。当天预填的 0/NULL 行
+    不影响求和。
+
+    返回 ``{channel: {"completed": float, "target": float|None}}``。
+    修复背景：人员粒度事实表是「整店归集合每人」的个人考核口径，部门榜按
+    Σ(每人) 聚合时共管店被重复计数（直播 4.4x、猫超 2x、私域 2x 等）；
+    店铺粒度链与渠道日销快报（已验证正确）同源。表不存在时返回 ``{}``
+    （fail-open：展示层按原人员粒度口径渲染）。
+    """
+    first, last = _month_range(year, month)
+    upper = min(through, last)
+    rollup = {}
+    try:
+        rows = _fetch_all(
+            connection,
+            "SELECT `channel`, SUM(`sales_amount`) AS `s` "
+            f"FROM `{CHANNEL_SALES_TABLE}` "
+            "WHERE `business_date` BETWEEN %s AND %s GROUP BY `channel`",
+            (first, upper),
+        )
+    except Exception:
+        rows = []
+    for row in rows:
+        if row.get("channel"):
+            rollup[str(row["channel"])] = {
+                "completed": float(row["s"] or 0),
+                "target": None,
+            }
+    targets = fetch_channel_monthly_targets(connection)
+    for channel, target in targets.items():
+        rollup.setdefault(channel, {"completed": 0.0, "target": None})
+        rollup[channel]["target"] = target
+    return rollup
+
+
 def fetch_unfilled_members(connection, *, region, business_date):
     """成员 × 日期 LEFT JOIN 事实表：当天无事实行的在册成员。
 

@@ -18,6 +18,8 @@ _DINGTALK_SOURCE_TYPES = {
     "user": "user",
     "multipleSelect": "multipleSelect",
     "unidirectionalLink": "unidirectionalLink",
+    # AI 表格主列（标题列）：records API 返回标题字符串（2026-09-23 实测）。
+    "primaryDoc": "primaryDoc",
 }
 
 

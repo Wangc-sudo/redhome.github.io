@@ -13,6 +13,8 @@ class ManifestError(ValueError):
 
 _ALLOWED_SOURCE_TYPES = frozenset({
     "text", "singleSelect", "number", "currency", "date", "user", "multipleSelect", "unidirectionalLink",
+    # AI 表格主列（标题列）：notable records API 按字符串返回标题，按 text 语义消费。
+    "primaryDoc",
 })
 
 _ALLOWED_WDT_METHODS = frozenset({
@@ -181,6 +183,14 @@ def _parse_transform(raw, prefix: str) -> dict | None:
             "date_columns": dict(date_columns),
             "value_column": value_column,
         }
+
+        semantics = raw.get("value_semantics", "daily")
+        if semantics not in ("daily", "cumulative"):
+            raise ManifestError(
+                f"{prefix}.transform.value_semantics must be 'daily' or "
+                f"'cumulative' (got {semantics!r})"
+            )
+        result["value_semantics"] = semantics
 
         inject = raw.get("inject")
         if inject is not None:

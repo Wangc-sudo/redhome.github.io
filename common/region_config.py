@@ -17,10 +17,14 @@
 """
 
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 #: 区域覆盖所在的 Nacos group（与管道注册表的 PIPELINES 分离）。
@@ -193,7 +197,12 @@ def apply_region_overlay(configs, overlay):
     for region, cfg in configs.items():
         try:
             remote = overlay(f"region-{region}.yaml")
-        except Exception:
+        except Exception as exc:
+            # fail-open 保留种子值是有意设计，但注册表故障必须可观测。
+            logger.warning(
+                "region overlay fetch failed for region-%s.yaml: %s -- using seed",
+                region, type(exc).__name__,
+            )
             remote = None
         if not remote:
             merged[region] = cfg

@@ -1,0 +1,130 @@
+# dops 容器组（dops-app 宿主机，/opt/dops/docker-compose.dops.yml）
+# 版本受控：本文件（repo docker/cloud/）为唯一真源，服务器 /opt/dops/ 下为
+# 部署副本——改动走 git，发布 = 同步本文件 + compose up -d（注意：restart
+# 不应用 env_file 变更，改 app.env 必须 up -d 重建容器）。
+# 设计：镜像只做运行时（python3 + requirements 依赖），代码经 /opt/dops/repo
+# 挂卷进容器（working_dir 即仓库根）。日常迭代 = scp 代码 + compose restart，
+# 不重构镜像；仅 requirements.txt 变更才重建（--build-arg PIP_INDEX_URL）。
+name: dops
+
+services:
+  gateway:
+    image: dops-app:latest
+    container_name: dingtalk-gateway
+    network_mode: host
+    restart: unless-stopped
+    env_file: /opt/dops/app.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.gateway.cli
+      - run
+      - --live-send
+      - --confirm-local-test-write
+      - --with-stream
+      - --live-read
+      - --source-credentials
+      - /run/live-input/source-credentials.json
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      - /opt/dops/config-local:/opt/dops/config-local:ro
+      - /opt/dops/live/gateway-credentials.json:/run/live-input/source-credentials.json:ro
+      - /opt/dops/live:/opt/dops/live:ro
+
+  scheduler:
+    image: dops-app:latest
+    container_name: dops-scheduler
+    network_mode: host
+    restart: unless-stopped
+    env_file: /opt/dops/app.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.public_data.scheduler
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      - /opt/dops/config-local:/opt/dops/config-local:ro
+      - /opt/dops/live/source-credentials.json:/run/live-input/source-credentials.json:ro
+      - /opt/dops/live:/opt/dops/live:ro
+      # roll-manifest 管线每日重写 WDT 窗口块（sync-wdt 前置），需写权限
+      - /opt/dops/live/source-manifest.json:/opt/dops/live/source-manifest.json:rw
+      - /opt/dops/pages-output:/output
+
+  # 业务线 bi-web（2026-09-23 上云，阶段 1 = 内网灰度）：只读 mart_ops 的
+  # L1 驾驶舱。与 host 网络三件套不同，本服务走桥接 + 端口映射——uvicorn
+  # 端口代码内固定 8080（app.serve），映射宿主机 18080（对齐上云方案
+  # §2.3：sg-dops-app 的 18080 已限 VPC 内网，公网 SG 不放行 = 天然
+  # 仅内网）。免登凭据（BI_WEB_SESSION_SECRET/BI_DINGTALK_APPKEY/
+  # APPSECRET）未注入前身份层为全开放（auth 设计既定行为），故阶段 1
+  # 不配 nginx 公网 server 块、不暴露公网；访问入口 http://192.168.0.3:18080。
+  # 阶段 2（ICP 备案 + 域名 + 免登凭据到位）再加 nginx 反代并把
+  # BI_WEB_SESSION_SECURE 置 1。Redis 缓存由 app.env 的
+  # PUBLIC_DATA_REDIS_URL 注入，fail-open（缓存挂 ≠ 看板挂）。
+  bi-web:
+    image: dops-app:latest
+    container_name: dops-bi-web
+    restart: unless-stopped
+    env_file: /opt/dops/app.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      # 注册表门控服务 id（pipelines.seed 的 bi-web 条目，Nacos 可整站 503）
+      PUBLIC_DATA_SERVICE_ID: bi-web
+      # seed 启动校验 + Nacos 不可达时的 fallback（bi.seed 已发布 BI 组）
+      PUBLIC_DATA_BI_SEED: /opt/dops/repo/docker/integration/bi.seed.yaml
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.bi_web.app
+    ports:
+      - "18080:8080"
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      # Settings 启动即读 PUBLIC_DATA_CONFIG（source-manifest.json）
+      - /opt/dops/live:/opt/dops/live:ro
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # 榜单静态页发布（2026-09-23 提前拉起）：serve pages-output，host 网络占 80。
+  # 仅静态文件，无 upstream；bi-web 公网反代待阶段 2（备案+域名+免登）再加。
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: dops-nginx
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /opt/dops/nginx/pages.conf:/etc/nginx/conf.d/default.conf:ro
+      - /opt/dops/pages-output:/usr/share/nginx/html:ro
+
+  # NTP 授时（2026-09-23）：chronyd 校准宿主机内核时钟（容器共享宿主时钟，
+  # gateway/scheduler/nginx 自动受益），host 网络下 123/udp 对私网授时。
+  # 上游实测可用：阿里 ntp.aliyun.com/ntp1 + 腾讯 time1（百度/清华源出向
+  # UDP/123 全丢包，2026-09-23 实测）。chrony.conf 在 repo docker/integration/ntp/。
+  ntp:
+    build:
+      context: /opt/dops/repo/docker/integration/ntp
+    image: dops-ntp:local
+    container_name: dops-ntp
+    network_mode: host
+    cap_add:
+      - SYS_TIME
+    volumes:
+      - /opt/dops/ntp-data:/var/lib/chrony
+    restart: unless-stopped

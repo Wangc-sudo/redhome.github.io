@@ -7,18 +7,24 @@
 # (a) the fallback used when Nacos is unreachable and (b) the default for a
 # fresh environment.  Keys are service ids; the data-id is "<key>.yaml" in
 # the "PIPELINES" group under the environment's namespace.
+roll-manifest:
+  kind: apps
+  enabled: true
+  schedule: "55 1,6,13,15 * * *"
+  reads: []
+  description: "rolls the source manifest's WDT windows forward (runs before each sync round)"
 sync-dingtalk:
   kind: apps
   enabled: true
   sources: [dingtalk]
-  schedule: "0 2 * * *"
+  schedule: "0 2,7,14,16 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "DingTalk AI sheets -> raw_dingtalk"
 sync-wdt:
   kind: apps
   enabled: true
   sources: [wdt]
-  schedule: "0 2 * * *"
+  schedule: "0 2,7,14,16 * * *"
   reads: [raw_wdt, mart_ops]
   description: "WDT read APIs -> raw_wdt"
 project-mart:
@@ -30,7 +36,7 @@ project-mart:
 extract-mart:
   kind: apps
   enabled: true
-  schedule: "0 4 * * *"
+  schedule: "0 4,8,15,17 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
 robot-hangzhou:
@@ -47,10 +53,10 @@ pages-hangzhou:
   description: "hangzhou leaderboard HTML page generation"
 channel-daily-qudao:
   kind: business
-  enabled: true
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
-  description: "qudao channel daily report broadcast (channel section + people leaderboard)"
+  description: "qudao channel daily report broadcast - 已并入 qudao 榜单页（渠道日销快报板块），2026-09-23 停单独播报"
 robot-vanke:
   kind: business
   enabled: true
@@ -63,6 +69,42 @@ pages-vanke:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "vanke leaderboard HTML page generation"
+pages-shaoxing:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "shaoxing leaderboard HTML page generation"
+pages-qudao:
+  kind: business
+  enabled: true
+  schedule: "30 8,15,17 * * *"
+  reads: [mart_ops]
+  description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
+pages-offline_all:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "offline_all scope leaderboard HTML page generation"
+offline-daily-summary:
+  kind: business
+  enabled: true
+  schedule: "30 20 * * *"
+  reads: [mart_ops]
+  description: "offline_all daily aggregation summary (scopes + dod/wow + mtd)"
+offline-weekly-summary:
+  kind: business
+  enabled: true
+  schedule: "30 9 * * 1"
+  reads: [mart_ops]
+  description: "offline_all weekly summary (last week totals + wow + ranking)"
+offline-monthly-summary:
+  kind: business
+  enabled: true
+  schedule: "0 10 1 * *"
+  reads: [mart_ops]
+  description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
 robot-shaoxing:
   kind: business
   enabled: true

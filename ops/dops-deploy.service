@@ -1,0 +1,14 @@
+[Unit]
+Description=dops pull-based CD (git pull -> compose up -d -> health gate -> rollback)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 可选环境覆盖（DOPS_DEPLOY_BRANCH / DOPS_PIP_INDEX_URL / ...），不存在则忽略
+EnvironmentFile=-/opt/dops/deploy.env
+# 跑快照副本：deploy.sh 会 git reset --hard，若直接执行 repo 内脚本，
+# bash 边读边执行会在文件被改写后错乱——先复制到 /run 再执行以免疫。
+ExecStart=/bin/bash -c 'tmp=$(mktemp /run/dops-deploy.XXXXXX.sh); cp /opt/dops/repo/ops/deploy.sh "$tmp"; bash "$tmp"; rc=$?; rm -f "$tmp"; exit $rc'
+# oneshot 不自动重启；下一个 timer 周期再试

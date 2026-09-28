@@ -76,6 +76,11 @@ REGION = "qudao"
 #: 不走 sync_runs 状态机，故用常量而非每次新 UUID。
 ECOM_RUN_ID = "3f6b2c10-7c2a-4f1e-9a5b-2e6d8c4a1b77"
 
+#: 店铺粒度月目标投影表（2026-09-23 新增）：部门（=渠道）目标/完成的
+#: 真值链——部门目标 = Σ 店铺目标（共管店只计一次），修复人员粒度
+#: Σ 聚合对共管店的重复计数。
+STORE_TARGET_TABLE = "fact_channel_store_target"
+
 
 # ---------------------------------------------------------------------------
 # 纯逻辑：负责人集合解析与行展开（不触网、不触库）
@@ -172,7 +177,30 @@ def _day_str(value):
     return None
 
 
-def build_fact_rows(detail_rows, store_meta):
+def channel_fallback_owners(target_rows):
+    """渠道级兜底归属：该渠道所有带负责人集合的店铺**集合相同**时才可用。
+
+    猫超场景（2026-09-23 核查）：日报明细 29/30 行店铺名与负责人都留空，
+    店铺级回退（按 store 匹配）因此失败、个人归属几乎全丢；而猫超渠道
+    只有 "MC猫超" 一个店有负责人，归属无歧义，可按渠道兜底。即时零售
+    三店同为 [黄贤宋, zzz] 也适用；直播/京东/拼多多/天猫各店集合不同
+    （歧义）→ 不兜底，保持跳过。返回 ``{channel: [姓名]}``。
+    """
+    by_channel = {}
+    ambiguous = set()
+    for row in target_rows:
+        channel = str(row.get("channel") or "").strip()
+        owners = parse_owners(row.get("responsible_person"))
+        if not channel or not owners:
+            continue
+        if channel in by_channel and by_channel[channel] != owners:
+            ambiguous.add(channel)
+        else:
+            by_channel[channel] = owners
+    return {c: o for c, o in by_channel.items() if c not in ambiguous}
+
+
+def build_fact_rows(detail_rows, store_meta, channel_owners=None):
     """把渠道日销明细展开并聚合为事实行（每 ``(owner, 日期)`` 一行）。
 
     *detail_rows* 是 ``channel_daily_sales`` 的行 dict（``channel`` /
@@ -184,7 +212,10 @@ def build_fact_rows(detail_rows, store_meta):
 
     1. 明细行自带 ``responsible_person`` 非空 → 用它；
     2. 明细行为空 → 回退用该店铺在月目标表的负责人集合；
-    3. 两者都空 → 跳过并记日志。
+    3. 店铺名为空（猫超式整渠道留空）→ 回退 *channel_owners* 渠道级
+       兜底（仅渠道内负责人集合无歧义时，见
+       :func:`channel_fallback_owners`）；
+    4. 三者都空 → 跳过并记日志。
 
     整店日销售额归到集合里每一位 owner 名下——多人共一店各计整店，
     绝不均摊；同一 owner 名下多店时：
@@ -199,7 +230,8 @@ def build_fact_rows(detail_rows, store_meta):
     聚合到 ``(owner, day)`` 的原因：事实表业务键为
     ``(region, responsible_person, business_date)``，一人多店若不聚合，
     多店行共享同一业务键会在 upsert 时互相覆盖。负责人集合（含回退）
-    为空、缺店铺/日期/销售额的行跳过并记日志。
+    为空、缺日期/销售额的行跳过并记日志；店铺名为空的行放行到归属
+    解析（渠道级兜底，见上文第 3 条），兜底不成才按无归属跳过。
     """
     # (owner, day) -> {"sales": float, "channels": [str]}，插入序即输出行序
     aggregated = {}
@@ -209,7 +241,7 @@ def build_fact_rows(detail_rows, store_meta):
         store = str(row.get("store_name") or "").strip()
         day = _day_str(row.get("business_date"))
         sales = _to_float(row.get("sales_amount"))
-        if not store or day is None or sales is None:
+        if day is None or sales is None:
             logger.warning(
                 "跳过不完整明细行: channel=%s store=%r day=%r sales=%r",
                 channel, store, day, sales,
@@ -218,6 +250,8 @@ def build_fact_rows(detail_rows, store_meta):
         owners = parse_owners(row.get("responsible_person"))
         if not owners:
             owners = list(store_meta.get(store, {}).get("owners") or [])
+        if not owners and not store:
+            owners = list((channel_owners or {}).get(channel) or [])
         if not owners:
             logger.warning(
                 "跳过负责人集合为空的明细行: channel=%s store=%s day=%s",
@@ -361,6 +395,48 @@ def upsert_rows(connection, rows, now):
 
 
 # ---------------------------------------------------------------------------
+# IO：店铺粒度月目标投影（全量替换，与 raw 月维度全量表同语义）
+# ---------------------------------------------------------------------------
+
+def replace_store_targets(connection, target_rows, *, sync_run_id, synced_at):
+    """把 ``channel_monthly_target`` 全量投影进 ``fact_channel_store_target``。
+
+    DELETE + INSERT（源表是月维度全量表，店铺下线随之消失）；不写 commit
+    （调用方在 ``transaction()`` 里统一提交）。``owners_json`` 保留 raw 的
+    responsible_person JSON 原文（供读侧审计归属集合），返回写入行数。
+    """
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(f"DELETE FROM `{STORE_TARGET_TABLE}`")
+        written = 0
+        for row in target_rows:
+            store = str(row.get("store_name") or "").strip()
+            if not store:
+                continue
+            owners = row.get("responsible_person")
+            owners_json = (
+                owners if isinstance(owners, str) else json.dumps(
+                    owners, ensure_ascii=False, default=str
+                )
+            ) if owners is not None else None
+            cursor.execute(
+                f"INSERT INTO `{STORE_TARGET_TABLE}` "
+                "(`store_name`, `channel`, `monthly_target`, `owners_json`, "
+                "`synced_at`, `sync_run_id`) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    store,
+                    str(row.get("channel") or "").strip() or None,
+                    _to_float(row.get("monthly_target")),
+                    owners_json,
+                    synced_at,
+                    sync_run_id,
+                ),
+            )
+            written += 1
+    return written
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -400,7 +476,9 @@ def main(argv=None):
             raw_connection.close()
 
         store_meta = store_meta_by_store(target_rows)
-        rows = build_fact_rows(detail_rows, store_meta)
+        rows = build_fact_rows(
+            detail_rows, store_meta, channel_fallback_owners(target_rows)
+        )
         stores_with_target = sum(
             1 for meta in store_meta.values() if meta["target"] is not None
         )
@@ -428,11 +506,15 @@ def main(argv=None):
             try:
                 with transaction(connection):
                     stats = upsert_rows(connection, rows, now)
+                    stores_written = replace_store_targets(
+                        connection, target_rows,
+                        sync_run_id=ECOM_RUN_ID, synced_at=now,
+                    )
             finally:
                 connection.close()
             print(f"dataset=ecom_people database={db_settings.name} "
                   f"inserted={stats['inserted']} updated={stats['updated']} "
-                  f"status=completed")
+                  f"store_targets={stores_written} status=completed")
         return 0
     except Exception:
         logger.error("extract_ecom_people 运行失败", exc_info=True)

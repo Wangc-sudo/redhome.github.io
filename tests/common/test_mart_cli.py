@@ -336,6 +336,91 @@ class LeaderboardHtmlCliTests(unittest.TestCase):
         self.assertNotEqual(0, raised.exception.code)
         load_settings.assert_not_called()
 
+    def test_qudao_page_includes_channel_panels(self):
+        """qudao 榜单页并入渠道播报板块（hangzhou 不并）。"""
+        import dataclasses
+        import tempfile
+
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        qudao_cfg = dataclasses.replace(_CFG, region="qudao")
+        data = LeaderboardData(
+            business_date=date(2026, 9, 23),
+            elapsed=(1, 2),
+            people=(),
+            workdays=frozenset({date(2026, 9, 22)}),
+        )
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"qudao": qudao_cfg}), \
+             patch("common.daily_robot.mart_cli.connect_mart"), \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.build_qudao_panels_html",
+                   return_value=["<div class=\"panel\">渠道板块</div>"]) as panels, \
+             patch("common.daily_robot.mart_cli.build_html_page",
+                   return_value="<html>qudao</html>") as build_page, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 23, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            target = Path(tmp) / "qudao.html"
+            with redirect_stdout(output):
+                main([
+                    "leaderboard-html", "--confirm-local-test-write",
+                    "--region", "qudao", "--output", str(target),
+                ])
+
+        panels.assert_called_once()
+        kwargs = build_page.call_args.kwargs
+        self.assertEqual(kwargs["extra_panels"], ["<div class=\"panel\">渠道板块</div>"])
+        self.assertIn("panels=1", output.getvalue())
+
+    def test_hangzhou_page_skips_channel_panels(self):
+        import tempfile
+
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        data = LeaderboardData(
+            business_date=date(2026, 9, 11),
+            elapsed=(1, 2, 3),
+            people=(),
+            workdays=frozenset({date(2026, 9, 10)}),
+        )
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"hangzhou": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart"), \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.build_qudao_panels_html") as panels, \
+             patch("common.daily_robot.mart_cli.build_html_page",
+                   return_value="<html>hz</html>") as build_page, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 11, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            target = Path(tmp) / "hangzhou.html"
+            with redirect_stdout(output):
+                main([
+                    "leaderboard-html", "--confirm-local-test-write",
+                    "--region", "hangzhou", "--output", str(target),
+                ])
+
+        panels.assert_not_called()
+        self.assertIsNone(build_page.call_args.kwargs["extra_panels"])
+        self.assertNotIn("panels=", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,10 @@ import json
 from datetime import date
 
 
-_KINDS = frozenset({"remind", "check", "ding", "leaderboard", "channel_daily"})
+_KINDS = frozenset({
+    "remind", "check", "ding", "leaderboard", "channel_daily",
+    "offline_daily", "offline_weekly", "offline_monthly",
+})
 
 #: 投递重试上限：达到后行转 ``failed``，留给控制面告警，不再自动重试。
 DEFAULT_MAX_ATTEMPTS = 5

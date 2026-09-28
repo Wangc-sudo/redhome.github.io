@@ -109,6 +109,26 @@ class BuildSectionTests(unittest.TestCase):
         # 未配目标的渠道仍为 --
         self.assertIn("| 京东 | 1.2万 | +20.0% | -- | -- |", body)
 
+    def test_mtd_includes_weekend_days(self):
+        # 月累计按自然日（对齐 AI 表仪表盘）：周末销售额计入 MTD
+        facts = {
+            "天猫": {
+                date(2026, 9, 19): 5000.0,   # 周六（_REST 内）
+                date(2026, 9, 21): 20000.0,
+                date(2026, 9, 22): 10000.0,
+                date(2026, 9, 29): 99999.0,  # 业务日之后不计入
+            },
+        }
+        body = build_channel_section(
+            month_facts=facts,
+            business_date=date(2026, 9, 22),
+            workdays=_WORKDAYS,
+            monthly_targets={"天猫": 70000},
+        )
+        # MTD = 5000+20000+10000 = 3.5万 → 50.0%（周末 5,000 计入）；
+        # 环比仍按上一工作日（21 日），不受自然日口径影响
+        self.assertIn("| 天猫 | 1.0万 | -50.0% | 7.0万 | 50.0% |", body)
+
     def test_empty_day_still_has_header(self):
         body = build_channel_section(
             month_facts={},

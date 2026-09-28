@@ -1,0 +1,27 @@
+# dops-ntp 云上编排片段（2026-09-23）
+# 云上实际编排在服务器本地 /opt/dops/docker-compose.dops.yml，本文件是仓库副本，
+# 变更时两边同步（同 pages-cloud.conf 惯例，随 PR 收口）。
+#
+# 原理：容器共享宿主机内核时钟，chronyd 加 SYS_TIME 直接校准宿主机时钟，
+# 宿主机上全部容器（dops-scheduler / dingtalk-gateway / dops-nginx ...）自动
+# 获得正确时间，无需逐容器配置；同时 host 网络下 chronyd 在 123/udp 对私网
+# 提供授时，其他主机把 NTP 客户端指向本机即可。
+
+name: dops
+
+services:
+  dops-ntp:
+    build:
+      # 服务器上 repo 以 bind 挂载在 /opt/dops/repo
+      context: /opt/dops/repo/docker/integration/ntp
+    image: dops-ntp:local
+    container_name: dops-ntp
+    # host 网络：123/udp 直接落在宿主机协议栈，私网客户端直连宿主机 IP
+    network_mode: host
+    cap_add:
+      # 允许 chronyd 调 adjtimex 校准内核时钟（只授时钟，不给 SYS_ADMIN）
+      - SYS_TIME
+    volumes:
+      # drift 文件持久化：容器重建后延续频率补偿，不用重新驯化
+      - /opt/dops/ntp-data:/var/lib/chrony
+    restart: unless-stopped
