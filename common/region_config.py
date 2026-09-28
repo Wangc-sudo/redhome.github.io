@@ -55,6 +55,8 @@ class RegionConfig:
     dept_label: dict = field(default_factory=dict)
     broadcast_exclude: tuple = ()
     leaderboard_url: str = ""
+    #: 渠道到齐校验的门店排除清单（storeExclude，如已撤店/测试店）。
+    store_exclude: tuple = ()
     #: 无 AI 表区域的当月月目标（表内用名 → 金额），报数落库时快照。
     monthly_targets: dict = field(default_factory=dict)
 
@@ -99,6 +101,7 @@ def _parse_region(region, raw, label):
 
     dept_order = _str_list("deptOrder")
     broadcast_exclude = _str_list("broadcastExclude")
+    store_exclude = _str_list("storeExclude")
 
     dept_label = raw.get("deptLabel", {})
     if not isinstance(dept_label, dict) or any(
@@ -140,6 +143,7 @@ def _parse_region(region, raw, label):
         dept_label=dict(dept_label),
         broadcast_exclude=broadcast_exclude,
         leaderboard_url=leaderboard_url,
+        store_exclude=store_exclude,
         monthly_targets=dict(monthly_targets),
     )
 
@@ -181,6 +185,7 @@ def _to_mapping(cfg):
         "deptLabel": dict(cfg.dept_label),
         "broadcastExclude": list(cfg.broadcast_exclude),
         "leaderboardUrl": cfg.leaderboard_url,
+        "storeExclude": list(cfg.store_exclude),
         "monthlyTargets": dict(cfg.monthly_targets),
     }
 

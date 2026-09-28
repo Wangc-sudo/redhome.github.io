@@ -485,7 +485,8 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
         self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", "hangzhou", "1049728636", "杭中", 1, _NOW, _RUN_ID,
+            "u1", "张三", None, "hangzhou", "1049728636", "杭中",
+            1, _NOW, _RUN_ID,
         )])
 
 
@@ -770,7 +771,8 @@ class IncrementalRepositoryTests(unittest.TestCase):
         self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
         self.assertIn("ON DUPLICATE KEY UPDATE", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", "hangzhou", "1049728636", "杭中", 1, _NOW, _RUN_ID,
+            "u1", "张三", None, "hangzhou", "1049728636", "杭中",
+            1, _NOW, _RUN_ID,
         )])
         delete_sql, delete_params = self.mart.cursor_instance.executed[0]
         self.assertIn(f"DELETE FROM `{DIM_ROBOT_MEMBER}`", delete_sql)
@@ -1041,7 +1043,7 @@ class IncrementalOrgMemberTests(unittest.TestCase):
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_unchanged_org_snapshot_skips_the_write(self, _lock, _txn):
         digest = MartExtractService._content_digest(
-            ["u1|张三|hangzhou|1049728636|杭中"]
+            ["u1|张三|hangzhou|1049728636|杭中|"]
         )
         service = self._service(previous_digest=digest)
 

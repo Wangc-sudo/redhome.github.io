@@ -1,7 +1,7 @@
 """Scheduler unit tests: no Nacos, MySQL or subprocesses -- all fakes."""
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from common.public_data.pipeline_config import StaticConfigSource
 from common.public_data.scheduler import (
@@ -72,6 +72,24 @@ def due_scheduler(configs, clock=None, **kwargs):
     return scheduler, clock
 
 
+def make_dag_scheduler(dep_cfg, *, probe, clock=None):
+    """带依赖探针的 scheduler：roll-manifest + sync-wdt 两线。"""
+    configs = {
+        "roll-manifest": {"schedule": "55 1 * * *"},
+        "sync-wdt": dep_cfg,
+    }
+    return Scheduler(
+        config_source=StaticConfigSource(configs),
+        service_ids=tuple(configs.keys()),
+        runner=RecordingRunner(),
+        lock_factory=lambda service_id: NullLock(),
+        settings=SETTINGS,
+        executor=SyncExecutor(),
+        clock=clock or FakeClock(datetime(2026, 9, 21, 2, 0, 5)),
+        dep_probe=probe,
+    )
+
+
 # -- command table ------------------------------------------------------------
 
 def test_build_argv_mirrors_compose_sync_wdt():
@@ -99,6 +117,72 @@ def test_child_env_carries_line_identity_and_region():
     assert env["FOO"] == "1"
     assert env["PUBLIC_DATA_SERVICE_ID"] == "robot-hangzhou"
     assert env["ROBOT_REGION"] == "hangzhou"
+
+
+# -- dependencies (DAG) --------------------------------------------------------
+
+_DEP_CFG = {"schedule": "0 2 * * *", "depends_on": ["roll-manifest"]}
+
+
+def test_dependency_unsatisfied_defers_fire_and_retries_next_tick():
+    probes = iter([False, True])  # 第一 tick 未满足，第二 tick 满足
+    scheduler = make_dag_scheduler(_DEP_CFG, probe=lambda service_id: next(probes))
+    scheduler.tick()
+    assert scheduler._runner.calls == []        # 未满足：暂缓
+    assert "sync-wdt" in scheduler._next_fire   # 点火时间保留（不推进）
+    scheduler.tick()                            # 下一 tick 重查，满足即补发
+    assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
+
+
+def test_dependency_fire_at_not_advanced_while_waiting():
+    clock = FakeClock(datetime(2026, 9, 21, 2, 0, 5))
+    scheduler = make_dag_scheduler(
+        _DEP_CFG, probe=lambda service_id: False, clock=clock
+    )
+    scheduler.tick()
+    first = scheduler._next_fire["sync-wdt"]
+    clock.advance(minutes=5)
+    scheduler.tick()
+    assert scheduler._next_fire["sync-wdt"] == first  # 等待期间不推进
+    assert scheduler._runner.calls == []
+
+
+def test_unknown_dependency_warns_once_and_fires(caplog):
+    # probe=None → 走 Scheduler 默认探针（未知依赖告警一次后按满足处理）
+    clock = FakeClock(datetime(2026, 9, 21, 2, 0, 5))
+    scheduler = make_dag_scheduler(
+        {"schedule": "0 2 * * *", "depends_on": ["typo-service"]},
+        probe=None, clock=clock,
+    )
+    with caplog.at_level(logging.WARNING):
+        scheduler.tick()
+        clock.advance(days=1)  # 次日同一窗口（no-catch-up：同分钟不重燃）
+        scheduler.tick()  # 第二次：告警去重
+    fired = [sid for sid, _ in scheduler._runner.calls if sid == "sync-wdt"]
+    assert fired == ["sync-wdt", "sync-wdt"]
+    assert caplog.text.count("无探针实现") == 1
+
+
+def test_roll_manifest_probe_reads_manifest_mtime(tmp_path):
+    from common.public_data.scheduler import _roll_manifest_probe
+
+    manifest = tmp_path / "source-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    settings = SchedulerSettings(manifest_path=str(manifest))
+    assert _roll_manifest_probe(settings, now=datetime.now()) is True
+
+    # 昨天的时间戳 → 未滚动（fail-closed）
+    old = datetime.now().timestamp() - 86400 * 2
+    import os as _os
+    _os.utime(manifest, (old, old))
+    assert _roll_manifest_probe(settings, now=datetime.now()) is False
+
+    # 未配置路径 / 文件不存在 → 未满足
+    assert _roll_manifest_probe(SchedulerSettings(), now=datetime.now()) is False
+    assert _roll_manifest_probe(
+        SchedulerSettings(manifest_path=str(tmp_path / "nope.json")),
+        now=datetime.now(),
+    ) is False
 
 
 # -- firing --------------------------------------------------------------------
@@ -270,3 +354,136 @@ def test_config_error_keeps_last_known_good(caplog):
         scheduler.tick()
     assert "沿用上次配置" in caplog.text
     assert len(scheduler._runner.calls) == 1  # 仍按缓存配置触发
+
+# -- 渠道日销 T+1 窗口命令表（2026-09-28） -------------------------------------
+
+def test_build_argv_sync_channel_sales():
+    argv = build_argv("sync-channel-sales", SETTINGS)
+    assert argv[1:3] == ["-m", "common.public_data.cli"]
+    assert argv[3:] == [
+        "live-sync", "--live-read", "--confirm-local-test-write",
+        "--source", "dingtalk",
+        "--dataset", "channel_daily_sales*",
+        "--dataset", "channel_monthly_target",
+        "--source-credentials", "/creds/source-credentials.json",
+    ]
+
+
+def test_build_argv_extract_channel():
+    argv = build_argv("extract-channel", SETTINGS)
+    assert argv[1:3] == ["-m", "common.public_data.cli"]
+    assert argv[3:] == [
+        "extract-mart", "--confirm-local-test-write",
+        "--dataset", "channel_daily_sales",
+        "--dataset", "channel_monthly_target",
+    ]
+
+
+def test_build_argv_channel_missing_check():
+    argv = build_argv("channel-missing-check", SETTINGS)
+    assert argv[1:4] == ["-m", "common.daily_robot.mart_cli", "channel-missing"]
+    env = build_child_env("channel-missing-check", {})
+    assert env["ROBOT_REGION"] == "qudao"
+    assert env["PUBLIC_DATA_SERVICE_ID"] == "channel-missing-check"
+
+
+def test_build_argv_pages_qudao_t1_uses_default_date():
+    # 默认日期（今天）即锚定 T-1；--date yesterday 会退到 T-2（见 scheduler 注释）
+    argv = build_argv("pages-qudao-t1", SETTINGS)
+    assert argv[1:4] == ["-m", "common.daily_robot.mart_cli", "leaderboard-html"]
+    assert "/out/qudao.html" in argv
+    assert "--date" not in argv
+
+
+# -- 摘要型依赖探针 ------------------------------------------------------------
+
+class _ProbeCursor:
+    def __init__(self, hit):
+        self._hit = hit
+        self.queries = []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params))
+
+    def fetchone(self):
+        return {"hit": 1} if self._hit else None
+
+    def close(self):
+        pass
+
+
+class _ProbeConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.closed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def close(self):
+        self.closed = True
+
+
+def _probe_connect(cursor):
+    return lambda _settings: _ProbeConnection(cursor)
+
+
+def test_summary_dep_probe_true_when_completed_summary_in_window():
+    from common.public_data.scheduler import build_summary_dep_probe
+
+    cursor = _ProbeCursor(hit=True)
+    probe = build_summary_dep_probe(
+        _probe_connect(cursor), object(),
+        source_name="dingtalk", dataset_like="channel_daily_sales%",
+        beijing_hm=(10, 30),
+        now=lambda: datetime(2026, 9, 28, 2, 40, tzinfo=timezone.utc),
+    )
+    assert probe() is True
+    _, params = cursor.queries[0]
+    # 北京 10:30 阈值 = UTC 02:30；时间列存 UTC
+    assert params == (
+        "dingtalk", "channel_daily_sales%",
+        datetime(2026, 9, 28, 2, 30, tzinfo=timezone.utc),
+    )
+
+
+def test_summary_dep_probe_false_without_matching_summary():
+    from common.public_data.scheduler import build_summary_dep_probe
+
+    probe = build_summary_dep_probe(
+        _probe_connect(_ProbeCursor(hit=False)), object(),
+        source_name="extract", dataset_like="ecom_people",
+        beijing_hm=(10, 34),
+        now=lambda: datetime(2026, 9, 28, 2, 40, tzinfo=timezone.utc),
+    )
+    assert probe() is False
+
+
+def test_summary_dep_probe_fail_closed_on_db_error():
+    from common.public_data.scheduler import build_summary_dep_probe
+
+    def broken_connect(_settings):
+        raise RuntimeError("db down")
+
+    probe = build_summary_dep_probe(
+        broken_connect, object(),
+        source_name="dingtalk", dataset_like="channel_daily_sales%",
+        beijing_hm=(10, 30),
+        now=lambda: datetime(2026, 9, 28, 2, 40, tzinfo=timezone.utc),
+    )
+    assert probe() is False
+
+
+def test_scheduler_consults_registered_dep_probes_first():
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return False
+
+    scheduler = make_scheduler({})
+    scheduler._dep_probes = {"sync-channel-sales": probe}
+    assert scheduler._default_dep_probe("sync-channel-sales") is False
+    assert calls == [1]
+    # 未登记的依赖维持原有语义（roll-manifest 之外告警后按满足处理）
+    assert scheduler._default_dep_probe("some-unknown-line") is True

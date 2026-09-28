@@ -58,6 +58,10 @@ class PipelineConfig:
     schedule: str | None = None
     reads: tuple = ()
     description: str = ""
+    #: 上游依赖（service_id 列表）：依赖未满足时本线暂缓触发、下一 tick
+    #: 重查（2026-09-23：sync-wdt 必须先等 roll-manifest 滚动 WDT 窗口，
+    #: 否则幂等重拉同一天——此前靠 cron 时刻表错位维系的隐式依赖）。
+    depends_on: tuple = ()
 
     def to_mapping(self):
         mapping = {"enabled": self.enabled, "kind": self.kind}
@@ -69,6 +73,8 @@ class PipelineConfig:
             mapping["reads"] = list(self.reads)
         if self.description:
             mapping["description"] = self.description
+        if self.depends_on:
+            mapping["depends_on"] = list(self.depends_on)
         return mapping
 
 
@@ -111,6 +117,14 @@ def parse_pipeline_config(service_id, data):
             f"pipeline '{service_id}' has an invalid 'description'"
         )
 
+    depends_on = data.get("depends_on", [])
+    if not isinstance(depends_on, list) or any(
+        not isinstance(d, str) or not d for d in depends_on
+    ):
+        raise PipelineConfigError(
+            f"pipeline '{service_id}' has an invalid 'depends_on'"
+        )
+
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -119,6 +133,7 @@ def parse_pipeline_config(service_id, data):
         schedule=schedule,
         reads=tuple(reads),
         description=description,
+        depends_on=tuple(depends_on),
     )
 
 

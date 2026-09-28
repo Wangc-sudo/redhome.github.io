@@ -74,6 +74,10 @@ def build_channel_daily_panel(connection, *, business_date, workdays, monthly_ta
     channel_date = resolve_channel_business_date(month_facts, business_date)
     if channel_date is None:
         return _placeholder_panel("🛒 渠道日销快报", "本月暂无非零渠道日销数据")
+    # T-1 水位（2026-09-28）：锚点 = business_date-1（10:31 采集窗口的
+    # 目标日）；回退到更早说明昨日全渠道无有效数据，页面显著标注。
+    expected = business_date - timedelta(days=1)
+    stale = channel_date < expected
     total, rows = collect_channel_rows(
         month_facts=month_facts,
         business_date=channel_date,
@@ -91,7 +95,14 @@ def build_channel_daily_panel(connection, *, business_date, workdays, monthly_ta
             f'<td class="num muted">{_esc(row["target_txt"])}</td>'
             f'<td class="num">{_esc(row["rate_txt"])}</td></tr>'
         )
+    stale_banner = (
+        f'<div class="small" style="margin-bottom:8px;color:#b26a00">'
+        f'⚠️ 昨日数据未到齐，当前显示 '
+        f'{channel_date.month} 月 {channel_date.day} 日</div>'
+        if stale else ""
+    )
     body = (
+        f'{stale_banner}'
         f'<div class="small muted" style="margin-bottom:8px">'
         f'全渠道{channel_date.month}月{channel_date.day}日销售额 '
         f'<b style="color:#1f2329">{_fmt_wan(total)} 元</b></div>'
@@ -101,7 +112,10 @@ def build_channel_daily_panel(connection, *, business_date, workdays, monthly_ta
     )
     return _panel(
         "🛒 渠道日销快报", body,
-        note=f"数据截至 {channel_date.month}月{channel_date.day}日（店铺后台导出 · DB）",
+        note=(
+            f"数据截至 {channel_date.month}月{channel_date.day}日"
+            f"（T+1 10:31 采集 · 店铺后台导出 · DB）"
+        ),
     )
 
 

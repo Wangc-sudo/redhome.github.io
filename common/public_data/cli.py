@@ -456,7 +456,9 @@ def _handle_live_sync(args):
         if manifest.dingtalk_org is not None and isinstance(org_seed_path, Path):
             org_regions = load_org_seed(org_seed_path)
         service = build_service(settings, credentials, manifest, org_regions)
-        result = service.sync(manifest, source=args.source)
+        result = service.sync(
+            manifest, source=args.source, datasets=args.dataset
+        )
         _print_success(result)
     except SystemExit:
         raise
@@ -515,7 +517,7 @@ def _handle_extract_mart(args):
             calendar_months = tuple(load_calendar_seed(seed_path))
 
         service = build_extract_service(settings, calendar_months)
-        result = service.extract()
+        result = service.extract(datasets=args.dataset)
         _print_success(result)
     except SystemExit:
         raise
@@ -722,6 +724,11 @@ def main(argv=None):
         help="restrict the run to a single source line (default: both)",
     )
     live_sync.add_argument(
+        "--dataset", action="append", default=None, metavar="PATTERN",
+        help="restrict the run to matching manifest datasets "
+             "(exact or 'prefix*' wildcard; repeatable; default: all)",
+    )
+    live_sync.add_argument(
         "--service", default=None,
         help="pipeline service id for the registry enable gate "
              "(default: $PUBLIC_DATA_SERVICE_ID)",
@@ -751,6 +758,12 @@ def main(argv=None):
     )
     extract.add_argument(
         "--confirm-local-test-write", action="store_true", default=False
+    )
+    extract.add_argument(
+        "--dataset", action="append", default=None, metavar="PATTERN",
+        help="restrict the run to matching extract datasets "
+             "(exact or 'prefix*' wildcard; repeatable; default: all; "
+             "'channel_monthly_target' selects the ecom_people step)",
     )
     extract.add_argument(
         "--service", default=None,

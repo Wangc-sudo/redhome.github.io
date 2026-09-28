@@ -31,13 +31,15 @@ All collaborators (config source, runner, lock factory, executor, clock,
 sleeper) are injected, so unit tests need no Nacos, MySQL or subprocess.
 """
 
+import contextlib
 import logging
 import os
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from common.public_data.pipeline_config import (
     PipelineConfig,
@@ -75,10 +77,21 @@ def _mart_cli_entry(subcommand, *extra, region=None):
     return entry
 
 
-def _pages_entry(region):
+def _extract_entry(*extra):
+    """apps 线提取命令：extract-mart 公共骨架 + 数据集过滤参数。"""
+    return {
+        "argv": [
+            "common.public_data.cli", "extract-mart",
+            "--confirm-local-test-write", *extra,
+        ],
+    }
+
+
+def _pages_entry(region, *extra):
     return _mart_cli_entry(
         "leaderboard-html",
         "--output", f"{{output_dir}}/{region}.html",
+        *extra,
         region=region,
     )
 
@@ -87,7 +100,9 @@ def _pages_entry(region):
 _ROBOT_REGIONS = ("hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all")
 
 #: 榜单页区域（pages-<region> → mart_cli leaderboard-html）
-_PAGES_REGIONS = ("hangzhou", "vanke", "shaoxing", "qudao", "offline_all")
+_PAGES_REGIONS = (
+    "hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all",
+)
 
 _COMMAND_TABLE = {
     "sync-runner": _sync_entry(),
@@ -99,12 +114,24 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
-    "extract-mart": {
-        "argv": [
-            "common.public_data.cli", "extract-mart",
-            "--confirm-local-test-write",
-        ],
-    },
+    "extract-mart": _extract_entry(),
+    # 渠道日销 T+1 采集窗口（10:31 补采 → 10:35 提取 → 10:40 到齐校验 →
+    # 10:45 页面重算；方案 docs/渠道日销T+1采集与门店到齐催办方案-2026-09-28.md）。
+    "sync-channel-sales": _sync_entry(
+        "--source", "dingtalk",
+        "--dataset", "channel_daily_sales*",
+        "--dataset", "channel_monthly_target",
+    ),
+    "extract-channel": _extract_entry(
+        "--dataset", "channel_daily_sales",
+        "--dataset", "channel_monthly_target",
+    ),
+    "channel-missing-check": _mart_cli_entry("channel-missing", region="qudao"),
+    # 10:45 T+1 重算用默认日期（今天）：渠道板块锚定「business_date 之前
+    # 最近有效日」= T-1，带 --date yesterday 反而退到 T-2（2026-09-28 裁决，
+    # 偏离执行提示词 §2.4——其 yesterday 前提与 resolve_channel_business_date
+    # 的既有锚定语义冲突）。
+    "pages-qudao-t1": _pages_entry("qudao"),
     **{f"robot-{r}": _mart_cli_entry("once", region=r) for r in _ROBOT_REGIONS},
     "channel-daily-qudao": _mart_cli_entry("channel-daily", region="qudao"),
     **{f"pages-{r}": _pages_entry(r) for r in _PAGES_REGIONS},
@@ -131,6 +158,8 @@ class SchedulerSettings:
     credentials_path: str = "/run/live-input/source-credentials.json"
     output_dir: str = "/output"
     poll_seconds: float = DEFAULT_POLL_SECONDS
+    #: roll-manifest 依赖探针盯的 live manifest 路径（见 _roll_manifest_probe）。
+    manifest_path: str = ""
 
     @staticmethod
     def from_env(environ=None):
@@ -146,6 +175,10 @@ class SchedulerSettings:
                 or SchedulerSettings.output_dir
             ),
             poll_seconds=float(poll) if poll else DEFAULT_POLL_SECONDS,
+            manifest_path=(
+                (env.get("PUBLIC_DATA_LIVE_MANIFEST_PATH") or "").strip()
+                or (env.get("PUBLIC_DATA_CONFIG") or "").strip()
+            ),
         )
 
 
@@ -260,6 +293,74 @@ def _next_fire(schedule, now):
         return None
 
 
+#: 摘要型依赖探针登记：service_id -> (source_name, dataset_name LIKE 模式,
+#: 北京窗口时刻)。今日（北京）窗口时刻之后存在 completed run 的匹配摘要
+#: 即视为上游已就绪；时间列存 UTC，阈值按 UTC+8 折算。
+_DEP_SUMMARY_PROBES = {
+    "sync-channel-sales": ("dingtalk", "channel_daily_sales%", (10, 30)),
+    "extract-channel": ("extract", "ecom_people", (10, 34)),
+}
+
+
+def build_summary_dep_probe(
+    connect, database_settings, *, source_name, dataset_like, beijing_hm,
+    now=None,
+):
+    """依赖探针工厂：上游线今日（北京）窗口时刻后已有 completed 摘要。
+
+    任何 DB 异常一律 fail-closed 返回 False（宁可暂缓触发，不错过序——
+    下一 tick 会重查）。*now* 可注入便于测试（默认 UTC 实时钟）。
+    """
+    clock = now or (lambda: datetime.now(timezone.utc))
+
+    def probe():
+        try:
+            beijing_now = clock() + timedelta(hours=8)
+            hour, minute = beijing_hm
+            threshold_utc = beijing_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            ) - timedelta(hours=8)
+            connection = connect(database_settings)
+            try:
+                with contextlib.closing(connection.cursor()) as cursor:
+                    cursor.execute(
+                        "SELECT 1 AS hit FROM `sync_dataset_summary` s "
+                        "JOIN `sync_runs` r "
+                        "ON r.`sync_run_id` = s.`sync_run_id` "
+                        "WHERE r.`status` = 'completed' "
+                        "AND s.`source_name` = %s "
+                        "AND s.`dataset_name` LIKE %s "
+                        "AND s.`completed_at` >= %s LIMIT 1",
+                        (source_name, dataset_like, threshold_utc),
+                    )
+                    return cursor.fetchone() is not None
+            finally:
+                connection.close()
+        except Exception:
+            logger.warning("依赖探针查询异常，按未满足处理", exc_info=True)
+            return False
+
+    return probe
+
+
+def _roll_manifest_probe(settings, *, now):
+    """roll-manifest 今日已成功：live manifest 今日被原子重写。
+
+    roll-manifest 不碰 DB，其唯一可信成功信号是 manifest 文件本身——
+    原子写（临时文件 + os.replace）只在成功时落盘，失败不会改 mtime。
+    读不到文件/未配置路径一律按未满足（fail-closed：窗口不滚动时
+    sync-wdt 会幂等重拉同一天，2026-09-23 生产实锤，宁可等不可错拉）。
+    """
+    path = (settings.manifest_path or "").strip()
+    if not path:
+        return False
+    try:
+        mtime = datetime.fromtimestamp(Path(path).stat().st_mtime)
+    except OSError:
+        return False
+    return mtime.date() == now.date()
+
+
 class Scheduler:
     """Polls the registry and fires pipelines whose cron is due.
 
@@ -271,7 +372,8 @@ class Scheduler:
 
     def __init__(self, *, config_source, service_ids, runner, lock_factory,
                  settings=None, executor=None, clock=None, sleeper=None,
-                 poll_seconds=DEFAULT_POLL_SECONDS):
+                 poll_seconds=DEFAULT_POLL_SECONDS, dep_probe=None,
+                 dep_probes=None):
         self._config_source = config_source
         self._service_ids = tuple(service_ids)
         self._runner = runner
@@ -281,10 +383,43 @@ class Scheduler:
         self._clock = clock or datetime.now
         self._sleeper = sleeper
         self._poll_seconds = poll_seconds
+        self._dep_probe = dep_probe or self._default_dep_probe
+        #: 按 service_id 的专用依赖探针（摘要型，main() 按
+        #: _DEP_SUMMARY_PROBES 接线）；未登记的依赖走 _default_dep_probe。
+        self._dep_probes = dict(dep_probes or {})
         self._configs = {}     # service_id -> PipelineConfig (last known good)
         self._next_fire = {}   # service_id -> datetime
         self._running = set()  # service_ids with a run in flight
         self._warned = set()   # one-shot WARNING dedup
+
+    def _default_dep_probe(self, service_id):
+        """默认依赖探针：已知依赖逐项判定；未知依赖告警后按满足处理。"""
+        probe = self._dep_probes.get(service_id)
+        if probe is not None:
+            return probe()
+        if service_id == "roll-manifest":
+            try:
+                return _roll_manifest_probe(self._settings, now=self._clock())
+            except Exception:
+                logger.warning("roll-manifest 依赖探针异常，按未满足处理", exc_info=True)
+                return False
+        self._warn_once(
+            service_id, "dep-unknown",
+            "service=%s 作为依赖被引用但无探针实现，按已满足处理（请检查 depends_on 拼写）",
+            service_id,
+        )
+        return True
+
+    def _unsatisfied_deps(self, service_id, config):
+        """返回未满足的依赖列表（空 = 可触发）。"""
+        pending = [d for d in config.depends_on if not self._dep_probe(d)]
+        if pending:
+            self._warn_once(
+                service_id, "dep-wait",
+                "service=%s 依赖 %s 未满足，暂缓触发（每 tick 重查，满足即补发）",
+                service_id, pending,
+            )
+        return pending
 
     # -- configuration (re-resolved every tick: Nacos hot reload) -----------
 
@@ -337,6 +472,11 @@ class Scheduler:
             if now < fire_at:
                 continue
             config = self._configs.get(service_id) or PipelineConfig(service_id)
+            # 依赖门禁（DAG）：depends_on 未满足时暂缓——**不推进**点火时间，
+            # 下一 tick 重查，满足即补发（与其他跳过语义的「等下一 cron 槽」
+            # 不同：依赖是分钟级等待，不该错过整个周期）。
+            if self._unsatisfied_deps(service_id, config):
+                continue
             self._next_fire[service_id] = _next_fire(config.schedule, now)
             if service_id in _UNSCHEDULABLE:
                 continue
@@ -421,16 +561,25 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
     from common.public_data.settings import Settings
 
     settings = SchedulerSettings.from_env()
+    mart_database = Settings.from_environment().mart_database
+    dep_probes = {
+        service_id: build_summary_dep_probe(
+            connect, mart_database,
+            source_name=source_name, dataset_like=dataset_like,
+            beijing_hm=beijing_hm,
+        )
+        for service_id, (source_name, dataset_like, beijing_hm)
+        in _DEP_SUMMARY_PROBES.items()
+    }
     scheduler = Scheduler(
         config_source=build_config_source(),
         service_ids=load_service_ids(),
         runner=SubprocessRunner(),
-        lock_factory=build_mysql_lock_factory(
-            connect, Settings.from_environment().mart_database
-        ),
+        lock_factory=build_mysql_lock_factory(connect, mart_database),
         settings=settings,
         poll_seconds=settings.poll_seconds,
         sleeper=time.sleep,
+        dep_probes=dep_probes,
     )
     scheduler.run_forever()
 

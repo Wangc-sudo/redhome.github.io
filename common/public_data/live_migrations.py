@@ -260,6 +260,21 @@ def _build_mart_outbox_ddl() -> tuple[str, ...]:
     return (_ROBOT_OUTBOX_DDL,)
 
 
+# 渠道到齐催办（2026-09-28）的 @ 精准映射：unionId → userId 不跨库读
+# raw_dingtalk.dingtalk_org_member（业务线只读 mart_ops），映射随组织投影
+# 物化进 dim_robot_member.union_id（源为 payload_json.unionid；raw 无该
+# 字段时落 NULL，读侧整级跳过走姓名匹配）。独立版本而非改写
+# mart-extract-v1，避免已应用库的校验和漂移。
+_DIM_ROBOT_MEMBER_UNION_ID_DDL = (
+    "ALTER TABLE `dim_robot_member`\n"
+    "  ADD COLUMN `union_id` VARCHAR(64) DEFAULT NULL AFTER `name`"
+)
+
+
+def _build_mart_robot_member_union_id_ddl() -> tuple[str, ...]:
+    return (_DIM_ROBOT_MEMBER_UNION_ID_DDL,)
+
+
 # 年度目标维度（版本受控种子 docker/integration/target.seed.json 整体重放：
 # load-target 先 DELETE 全表再 INSERT，表内容永远与种子一致）。
 _DIM_TARGET_DDL = (
@@ -387,6 +402,11 @@ _MIGRATIONS = (
         "mart-ops-channel-store-target-v1",
         "mart",
         (_FACT_CHANNEL_STORE_TARGET_DDL,),
+    ),
+    (
+        "mart-ops-robot-member-union-id-v1",
+        "mart",
+        _build_mart_robot_member_union_id_ddl(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),
