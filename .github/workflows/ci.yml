@@ -1,12 +1,20 @@
 name: CI
 
-# push / PR 到 main 时做只读质量检查（不触碰钉钉凭据与真实数据）。
-# 定时执行 / 发消息 / 页面发布仍在本机，见 docs 云迁移指南 §3。
+# 全量迁云后的质量门（2026-09-28 起本地环境废弃，源码唯一事实源 = 本 GitHub 仓库）。
+# 三个检查全绿是合并 main 的唯一门槛；main 合并即部署意图，
+# 由各 dops 主机的拉模式 CD（ops/deploy.sh + systemd timer）自拉上线，见
+# docs/CICD-全量迁云方案-2026-09-28.md。CI 只读，不碰钉钉凭据与真实数据。
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
+
+# 同一分支新 push 取消在跑的旧 run，省 runner、避免旧结果覆盖新结论
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   python-lint:
@@ -40,7 +48,6 @@ jobs:
       - uses: actions/checkout@v4
       # --build 显式重建再测：代码烤在镜像里，复用旧镜像 = 跑旧代码假绿
       # （2026-09-17 本地实测踩过：276 OK 全是旧基线，重建后才是真结果）。
-      # runner 虽每次全新，但显式 --build 防未来加镜像缓存后回归此坑。
       - name: 集成测试（test-runner，全量）
         run: docker compose -f docker-compose.integration.yml run --rm --build test-runner
       - name: 清理 compose 资源
@@ -67,3 +74,12 @@ jobs:
         run: npm run test
       - name: 构建
         run: npm run build
+
+  # 单一质量门：branch protection 只需要求这一个 check。
+  # 后续若加 push 式 CD / 部署回执，从这里挂。
+  gate:
+    runs-on: ubuntu-latest
+    needs: [python-lint, python-tests, frontend]
+    steps:
+      - name: 质量门汇总
+        run: echo "CI green on ${GITHUB_REF} (${GITHUB_SHA}) — 合并 main 即部署意图"
