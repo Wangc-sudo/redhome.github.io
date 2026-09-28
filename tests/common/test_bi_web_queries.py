@@ -148,7 +148,7 @@ _PARAM_SUMMARY_EXCLUSION = "responsible_person NOT LIKE '%%合计%%'"
 
 #: 线下线归属排除（B3，2026-09-20 业务裁定）：region=电商 归电商线，
 #: 线下口径一律排除。串内无字面 %，静态/参数化语句同形。
-_LINE_EXCLUSION = "region <> '电商'"
+_LINE_EXCLUSION = "region NOT IN ('电商', 'qudao', 'vanke')"
 
 
 class FakeCursor:

@@ -1720,7 +1720,7 @@ _RECON_OFFLINE_LATEST_SQL = (
     "FROM fact_daily_report_offline "
     "WHERE business_date <= CURDATE() "
     "AND responsible_person NOT LIKE '%合计%' "
-    "AND region <> '电商'"
+    "AND region NOT IN ('电商', 'qudao', 'vanke')"
 )
 _RECON_OFFLINE_MTD_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "
@@ -1728,7 +1728,7 @@ _RECON_OFFLINE_MTD_SQL = (
     "WHERE business_date >= DATE_FORMAT(CURDATE(), '%%Y-%%m-01') "
     "AND business_date <= %s "
     "AND responsible_person NOT LIKE '%%合计%%' "
-    "AND region <> '电商'"
+    "AND region NOT IN ('电商', 'qudao', 'vanke')"
 )
 _RECON_OFFLINE_ANNUAL_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "
@@ -1736,7 +1736,7 @@ _RECON_OFFLINE_ANNUAL_SQL = (
     "WHERE business_date >= MAKEDATE(YEAR(CURDATE()), 1) "
     "AND business_date <= CURDATE() "
     "AND responsible_person NOT LIKE '%合计%' "
-    "AND region <> '电商'"
+    "AND region NOT IN ('电商', 'qudao', 'vanke')"
 )
 _RECON_CHANNEL_ANNUAL_SQL = (
     "SELECT COALESCE(SUM(sales_amount), 0) "

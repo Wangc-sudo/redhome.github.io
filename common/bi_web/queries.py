@@ -40,13 +40,20 @@ from common.metrics.daily_report import fetch_workdays
 #: Money unit for every chart payload (元; the front end formats 万).
 _UNIT = "元"
 
-#: 线下线归属（B3，2026-09-20 业务裁定）：fact_daily_report_offline 是
-#: 全公司日报，region=电商（直播/天猫/京东/拼多多等部门）归电商线——
-#: 线下口径一律排除该区域，年度达成不再双线各计一次。用单值排除而非
-#: 区域白名单：新区域上线默认计入线下，不会静默丢数。该串无字面 %，
-#: 静态/参数化 SQL 可直接拼接；电商线页面（l2-ecom-people）经 region
-#: 参数显式选择该区域、走人员/缺口查询族，不经过这些线下取数。
-_OFFLINE_LINE_SQL = "AND region <> '电商'"
+#: 线下线归属（B3，2026-09-20 业务裁定；2026-09-28 P0-1 修正排除名单）：
+#: fact_daily_report_offline 是全公司日报，非线下区域一律排除——
+#: * ``电商``：B3 原裁定值（显式选它得空集，该线走 l2-ecom-people）；
+#: * ``qudao``：电商七部门的集合口径聚合区（整店业绩/月目标按人重复
+#:   携带，归电商线。原黑名单只有「电商」而入库值是 qudao，过滤线上
+#:   完全失效，线下 MTD 虚增 462.6%——2026-09-28 线上校验 P0-1）；
+#: * ``vanke``：体验馆+总经办（暂按 offline_all 页「线下整体」口径排除，
+#:   是否计入待业务裁决，见 docs/BI驾驶舱-数据校验与计算口径-2026-09-28.md
+#:   §7.1）。
+#: 仍是排除名单而非白名单：新线下区域上线默认计入，不会静默丢数
+#: （B3 原设计意图）。该串无字面 %，静态/参数化 SQL 可直接拼接；
+#: 电商线页面（l2-ecom-people）经 region 参数显式选择该区域、走
+#: 人员/缺口查询族（显式 region 不注入本过滤），不经过这些线下取数。
+_OFFLINE_LINE_SQL = "AND region NOT IN ('电商', 'qudao', 'vanke')"
 
 # B2（水位批次）：窗口上界由 CURDATE() 改为绑定的真实水位——日报 T+1
 # 未入仓时「本月累计」不再把缺的天假装已入仓。月首锚点仍用 MySQL 时钟
@@ -414,8 +421,8 @@ def offline_mtd_total(connection) -> Decimal:
     """线下本月累计销售 (①)：窗口上界 = 真实数据水位（非 CURDATE()）。
 
     日报 T+1 未入仓时「本月累计」截至最新入仓日；合计行排除不变；
-    水位滞后整月时区间为空、和为 0。B3 起排除 region=电商（归电商线，
-    见 ``_OFFLINE_LINE_SQL``），水位同源（同为线下口径）。
+    水位滞后整月时区间为空、和为 0。B3 起排除 qudao/vanke/电商（归
+    电商/体验馆线，名单见 ``_OFFLINE_LINE_SQL``），水位同源（同为线下口径）。
     """
     return _offline_mtd_sum(connection, offline_latest_date(connection))
 
@@ -795,9 +802,9 @@ def _optional_region_filter(region):
 def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal:
     """选中区域（缺省全区域）某自然月 Σsales（截断未来 + 排除合计行）。
 
-    B3 起「全区域」= 线下线全域（排除 region=电商，见
-    ``_OFFLINE_LINE_SQL``）；显式选 region=电商 得空集——该区域归
-    电商线，本查询族不服务。带参 SQL 的字面 ``%`` 双写（pymysql
+    B3 起「全区域」= 线下线全域（排除 qudao/vanke/电商，见
+    ``_OFFLINE_LINE_SQL``）；显式选名单内区域（如 qudao）得空集——
+    归电商/体验馆线，本查询族不服务。带参 SQL 的字面 ``%`` 双写（pymysql
     ``sql % params`` 约定）：``'%%合计%%'`` 格式化后 MySQL 收到
     ``'%合计%'``。
     """
@@ -977,11 +984,18 @@ _OFFLINE_DOD_LATEST_SQL = textwrap.dedent(
     """
 ).strip()
 
+#: 渠道 DoD 水位（P0-3，2026-09-28 修正）：必须与 ``_CHANNEL_LATEST_SQL``
+#: 同口径过滤预填 NULL 行——渠道 extract 会预填整周 sales_amount=NULL
+#: 空行，不过滤时水位虚报到预填末日，环比窗口内全是缺数日 → 整卡
+#: value/prev/delta_pct 全 null（线上 09-24~09-28 预填即触发）。
+#: 线下侧 ``_OFFLINE_DOD_LATEST_SQL`` 当前无预填故不过滤；若线下未来
+#: 也预填，应对齐本口径（``offline_latest_date`` 的既有预警）。
 _CHANNEL_DOD_LATEST_SQL = textwrap.dedent(
     """
     SELECT MAX(business_date) AS d
     FROM fact_channel_daily_sales
     WHERE business_date <= CURDATE()
+    AND sales_amount IS NOT NULL
     """
 ).strip()
 
@@ -1812,6 +1826,10 @@ def run_kpi_people_rate(connection, params) -> dict:
 # 取 MAX 的子查询刻意**不做** CURDATE 截断（月目标是月级常量，预填未来行
 # 不影响 MAX）；取 done 的子查询按惯例 ``business_date <= CURDATE()``
 # 截断未来预填行。
+#
+# 缺省区域口径（P0-1，2026-09-28）：无 region 参数 = 线下线全域
+# （排除 qudao/vanke/电商，见 ``_OFFLINE_LINE_SQL``）；显式 region 透传
+# ——l2-ecom-people 选 qudao 走的就是这条显式通道。
 # ---------------------------------------------------------------------------
 
 #: 事实表 grain → 卡面/下钻粒度标识（people 的前端 grain 是 person）。
@@ -1853,8 +1871,10 @@ _SHORTFALL_PEOPLE_SQL = textwrap.dedent(
 
 #: 区域粒度：区域目标是该区域内各人员 MAX(monthly_target) 之和，而不是
 #: 区域内所有行的 SUM（同一人的月目标在 melt 后每行重复携带，只计一次）。
+#: 缺省口径（P0-1，2026-09-28）与人员粒度同步：排除电商集合口径
+#: ``qudao`` 与体验馆 ``vanke``（见 ``_OFFLINE_LINE_SQL``）。
 _SHORTFALL_REGION_SQL = textwrap.dedent(
-    """
+    f"""
     SELECT t.region AS name, SUM(t.mx) AS target,
     COALESCE(SUM(d.done), 0) AS done,
     (MAX(d.responsible_person) IS NOT NULL) AS has_fact
@@ -1863,6 +1883,7 @@ _SHORTFALL_REGION_SQL = textwrap.dedent(
     FROM fact_daily_report_offline
     WHERE business_date BETWEEN %s AND %s
     AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
     GROUP BY region, responsible_person
     ) t
     LEFT JOIN (
@@ -1871,6 +1892,7 @@ _SHORTFALL_REGION_SQL = textwrap.dedent(
     WHERE business_date BETWEEN %s AND %s
     AND business_date <= CURDATE()
     AND responsible_person NOT LIKE '%%合计%%'
+    {_OFFLINE_LINE_SQL}
     GROUP BY region, responsible_person
     ) d ON d.region <=> t.region
     AND d.responsible_person <=> t.responsible_person
@@ -1889,7 +1911,9 @@ def shortfall_facts(connection, *, grain="people", region=None,
 
     **不含任何派生列** —— 派生一律走 :mod:`common.bi_web.derived`，这是
     「口径后端化」的可测边界。``grain`` 为 ``people``（人员，含部门）或
-    ``region``（区域汇总）；``region`` 参数只对人员粒度生效。
+    ``region``（区域汇总）；``region`` 参数只对人员粒度生效：**缺省
+    （None）= 线下线全域**（排除 qudao/vanke/电商，P0-1），显式给值则
+    逐字透传该区域（l2-ecom-people 的集合口径入口）。
     """
     if grain not in _SHORTFALL_GRAINS:
         grain = _DEFAULT_SHORTFALL_GRAIN
@@ -1898,7 +1922,14 @@ def shortfall_facts(connection, *, grain="people", region=None,
             connection, _SHORTFALL_REGION_SQL,
             (first_day, last_day, first_day, last_day),
         )
-    region_sql, region_params = _optional_region_filter(region)
+    if region:
+        region_sql, region_params = _optional_region_filter(region)
+    else:
+        # P0-1（2026-09-28）：缺省 = 线下线全域。L1 的缺口/告警卡不带
+        # region 参数，原「空片段=全区域」把 qudao 电商集合口径人员
+        # （23 人、月目标合计 1.62 亿）整个混进缺口榜；显式选 region
+        # （如 l2-ecom-people 选 qudao）仍逐字透传，不受本过滤影响。
+        region_sql, region_params = _OFFLINE_LINE_SQL, ()
     sql = _SHORTFALL_PEOPLE_SQL.replace("{region_sql}", region_sql)
     return _fetch_rows(
         connection, sql,
