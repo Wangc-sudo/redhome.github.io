@@ -63,6 +63,15 @@ class _RawCursor:
 
     def fetchall(self):
         last = self.executed[-1][0]
+        # 电商人员业绩源表（2026-09-28 修复 adc6d44 引入的 CI 失败）：本测试族
+        # 只建模 daily_report 管线、不覆盖 ecom 阶段。read_ecom_source 对
+        # channel_* 两表返回空 → extract 的 _extract_ecom_people 在「detail/target
+        # 皆空」时整段跳过（return None），避免：(a) wrong-shape 的 daily_report
+        # 行被当 channel_daily_sales 读入后 upsert 触发 _MartCursor.fetchone
+        # 罐头应答无 source_record_id 的 KeyError；(b) replace_store_targets
+        # 写未注册进 mart 白名单的 fact_channel_store_target。
+        if "channel_daily_sales" in last or "channel_monthly_target" in last:
+            return []
         if "dingtalk_org_member" in last:
             return list(self._org_rows)
         return list(self._dataset_rows)
