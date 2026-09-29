@@ -26,6 +26,7 @@ sync-wdt:
   sources: [wdt]
   schedule: "0 2,7,14,16 * * *"
   reads: [raw_wdt, mart_ops]
+  depends_on: [roll-manifest]
   description: "WDT read APIs -> raw_wdt"
 project-mart:
   kind: apps
@@ -75,12 +76,47 @@ pages-shaoxing:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "shaoxing leaderboard HTML page generation"
+pages-junpin:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "junpin leaderboard HTML page generation"
 pages-qudao:
   kind: business
   enabled: true
   schedule: "30 8,15,17 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
+# --- 渠道日销 T+1 采集与门店到齐催办（2026-09-28 方案） ---
+# 灰度发布：四条线先 enabled:false 手工 dry-run，确认后放行（P4）。
+sync-channel-sales:
+  kind: apps
+  enabled: false
+  schedule: "31 10 * * *"
+  reads: [raw_dingtalk, mart_ops]
+  description: "渠道日销 T+1 补采（dingtalk channel_daily_sales* + channel_monthly_target）"
+extract-channel:
+  kind: apps
+  enabled: false
+  schedule: "35 10 * * *"
+  reads: [raw_dingtalk, mart_ops]
+  depends_on: [sync-channel-sales]
+  description: "渠道日销 T+1 提取（fact_channel_daily_sales + fact_channel_store_target，点名册依赖）"
+channel-missing-check:
+  kind: business
+  enabled: false
+  schedule: "40 10 * * *"
+  reads: [mart_ops]
+  depends_on: [extract-channel]
+  description: "渠道门店到齐校验与催办（region=qudao，同步失败 fail-closed 跳过）"
+pages-qudao-t1:
+  kind: business
+  enabled: false
+  schedule: "45 10 * * *"
+  reads: [mart_ops]
+  depends_on: [extract-channel]
+  description: "qudao 榜单页 T+1 重算（leaderboard-html --date yesterday）"
 pages-offline_all:
   kind: business
   enabled: true

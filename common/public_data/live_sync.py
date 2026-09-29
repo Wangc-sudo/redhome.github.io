@@ -3,6 +3,7 @@
 import hashlib
 from dataclasses import dataclass, field
 
+from common.public_data.dataset_filter import matches_any
 from common.public_data.db import named_lock, transaction
 from common.public_data.dingtalk_read import DingTalkReadError
 from common.public_data.org_read import OrgReadError, collect_members
@@ -89,7 +90,7 @@ class LiveSyncService:
     # Public API
     # ------------------------------------------------------------------
 
-    def sync(self, manifest, source=None) -> SyncResult:
+    def sync(self, manifest, source=None, datasets=None) -> SyncResult:
         """Execute a full sync run described by *manifest*.
 
         *source* may be ``"dingtalk"`` or ``"wdt"`` to restrict the run to a
@@ -97,6 +98,13 @@ class LiveSyncService:
         ``sync-wdt`` runners); ``None`` syncs every dataset in the manifest.
         Each invocation is its own run with its own ``sync_run_id``, so the
         two lines fail independently.
+
+        *datasets* optionally restricts the run to manifest datasets whose
+        name matches any pattern (exact, or ``*``-suffixed prefix wildcard);
+        empty/``None`` keeps the historical "everything selected by *source*"
+        behaviour.  When the filter selects nothing a ``LiveSyncError`` is
+        raised **before** any run row is created — a filtered run must never
+        silently "succeed" with zero datasets.
 
         Steps for every selected dataset:
 
@@ -113,10 +121,42 @@ class LiveSyncService:
         """
         if source not in (None, "dingtalk", "wdt"):
             raise LiveSyncError(f"unknown source: {source!r}")
-        if source in (None, "dingtalk") and self._dingtalk_gateway is None:
-            raise LiveSyncError("dingtalk gateway is not configured")
-        if source in (None, "wdt") and self._wdt_gateway is None:
-            raise LiveSyncError("wdt gateway is not configured")
+
+        patterns = tuple(datasets or ())
+        dingtalk_sheets = (
+            list(manifest.dingtalk_sheets) if source in (None, "dingtalk") else []
+        )
+        org_dataset = manifest.dingtalk_org if source in (None, "dingtalk") else None
+        wdt_datasets = (
+            list(manifest.wdt_datasets) if source in (None, "wdt") else []
+        )
+
+        if patterns:
+            dingtalk_sheets = [
+                s for s in dingtalk_sheets if matches_any(s.dataset, patterns)
+            ]
+            if org_dataset is not None and not matches_any(
+                org_dataset.dataset, patterns
+            ):
+                org_dataset = None
+            wdt_datasets = [
+                d for d in wdt_datasets if matches_any(d.dataset, patterns)
+            ]
+            if not dingtalk_sheets and org_dataset is None and not wdt_datasets:
+                raise LiveSyncError(
+                    f"no datasets matched --dataset filter: {sorted(patterns)}"
+                )
+            if (dingtalk_sheets or org_dataset is not None) and (
+                self._dingtalk_gateway is None
+            ):
+                raise LiveSyncError("dingtalk gateway is not configured")
+            if wdt_datasets and self._wdt_gateway is None:
+                raise LiveSyncError("wdt gateway is not configured")
+        else:
+            if source in (None, "dingtalk") and self._dingtalk_gateway is None:
+                raise LiveSyncError("dingtalk gateway is not configured")
+            if source in (None, "wdt") and self._wdt_gateway is None:
+                raise LiveSyncError("wdt gateway is not configured")
 
         run_id = self._new_run_id()
         started_at = self._now()
@@ -132,18 +172,16 @@ class LiveSyncService:
         datasets_summary = []
 
         try:
-            if source in (None, "dingtalk"):
-                for sheet in manifest.dingtalk_sheets:
-                    summary = self._sync_dingtalk_sheet(sheet, run_id)
-                    datasets_summary.append(summary)
-                if manifest.dingtalk_org is not None:
-                    summary = self._sync_org_dataset(manifest.dingtalk_org, run_id)
-                    datasets_summary.append(summary)
+            for sheet in dingtalk_sheets:
+                summary = self._sync_dingtalk_sheet(sheet, run_id)
+                datasets_summary.append(summary)
+            if org_dataset is not None:
+                summary = self._sync_org_dataset(org_dataset, run_id)
+                datasets_summary.append(summary)
 
-            if source in (None, "wdt"):
-                for dataset in manifest.wdt_datasets:
-                    summary = self._sync_wdt_dataset(dataset, run_id)
-                    datasets_summary.append(summary)
+            for dataset in wdt_datasets:
+                summary = self._sync_wdt_dataset(dataset, run_id)
+                datasets_summary.append(summary)
 
             self._mart_repo.mark_completed(
                 sync_run_id=run_id,

@@ -65,6 +65,31 @@ class ChannelDailyPanelTests(unittest.TestCase):
         )
         self.assertIn("暂无", html)
 
+    def test_t1_watermark_note_and_fresh_anchor_has_no_banner(self):
+        html = qudao_panels.build_channel_daily_panel(
+            self._conn(),
+            business_date=date(2026, 9, 23),
+            workdays=_WORKDAYS,
+            monthly_targets={},
+        )
+        # 锚点 = T-1（9/22）数据到齐：无 ⚠️ 横幅，水位标注 10:31 采集
+        self.assertIn("数据截至 9月22日（T+1 10:31 采集", html)
+        self.assertNotIn("昨日数据未到齐", html)
+
+    def test_stale_anchor_shows_warning_banner(self):
+        # 9/23 跑页但最新有效数据停在 9/21 → 昨日未到齐，显著标注
+        conn = _Conn([
+            {"channel": "天猫", "business_date": date(2026, 9, 21), "s": 20000.0},
+        ])
+        html = qudao_panels.build_channel_daily_panel(
+            conn,
+            business_date=date(2026, 9, 23),
+            workdays=_WORKDAYS,
+            monthly_targets={},
+        )
+        self.assertIn("⚠️ 昨日数据未到齐，当前显示 9 月 21 日", html)
+        self.assertIn("数据截至 9月21日（T+1 10:31 采集", html)
+
 
 class ItemPanelTests(unittest.TestCase):
 

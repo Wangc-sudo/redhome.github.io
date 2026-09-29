@@ -40,6 +40,7 @@ class DeliveryErrorCode(str, enum.Enum):
 _GROUP_KINDS = frozenset({
     "remind", "check", "leaderboard", "channel_daily",
     "offline_daily", "offline_weekly", "offline_monthly",
+    "channel_missing",
 })
 
 #: 每种 kind 的非泄露错误码（写 outbox.last_error）。
@@ -51,6 +52,7 @@ _ERROR_CODES = {
     "offline_daily": DeliveryErrorCode.GROUP_SEND_FAILED,
     "offline_weekly": DeliveryErrorCode.GROUP_SEND_FAILED,
     "offline_monthly": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "channel_missing": DeliveryErrorCode.GROUP_SEND_FAILED,
     "ding": DeliveryErrorCode.DING_SEND_FAILED,
 }
 

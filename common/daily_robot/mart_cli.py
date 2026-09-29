@@ -17,7 +17,7 @@
 import argparse
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -150,6 +150,11 @@ def build_offline_all_page(conn, cfg, *, business_date, now):
     return build_offline_all_html(conn, cfg, business_date=business_date, now=now)
 
 
+def run_channel_missing_task(conn, outbox, **kwargs):
+    from common.daily_robot.channel_missing import run_channel_missing
+    return run_channel_missing(conn, outbox, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -182,6 +187,20 @@ def _resolve_region(args):
 
 def _print_failure(code):
     print(f"status=failed code={code}")
+
+
+def _resolve_business_date(args, now):
+    """``--date`` 解析：YYYY-MM-DD，或特殊值 ``yesterday``（= 今天 -1 天）。
+
+    cron 无法表达「昨天」，T+1 窗口（10:31 采集 / 10:45 页面重算）
+    依赖该字面值锚定前一业务日；缺省仍为今天。
+    """
+    raw = (getattr(args, "date", None) or "").strip()
+    if not raw:
+        return now.date()
+    if raw.lower() == "yesterday":
+        return now.date() - timedelta(days=1)
+    return date.fromisoformat(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +237,7 @@ def _handle(args, kind=None):
             sys.exit(1)
 
         now = datetime.now()
-        business_date = (
-            date.fromisoformat(args.date) if getattr(args, "date", None)
-            else now.date()
-        )
+        business_date = _resolve_business_date(args, now)
 
         kinds = (kind,) if kind else route_by_hour(now.hour, cfg)
         if not kinds:
@@ -293,10 +309,7 @@ def _handle_leaderboard(args):
             sys.exit(1)
 
         now = datetime.now()
-        business_date = (
-            date.fromisoformat(args.date) if getattr(args, "date", None)
-            else now.date()
-        )
+        business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
         data = mart_collect_data(conn, region=region, business_date=business_date)
@@ -397,10 +410,7 @@ def _handle_channel_daily(args):
             sys.exit(1)
 
         now = datetime.now()
-        business_date = (
-            date.fromisoformat(args.date) if getattr(args, "date", None)
-            else now.date()
-        )
+        business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
         data = mart_collect_data(conn, region=region, business_date=business_date)
@@ -521,6 +531,87 @@ def _handle_offline_summary(args, *, period):
         sys.exit(1)
 
 
+def _handle_channel_missing(args):
+    """渠道门店到齐校验（10:40，region=qudao）：缺口 @ + 零销售播报 → outbox。
+
+    业务日默认 **昨天**（T+1 窗口）；``--dry`` 只打印名册/缺口/零销售/
+    @ 名单，不入库不发消息（灰度核对用）。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        region = _resolve_region(args)
+        if not region:
+            _print_failure("region_required")
+            sys.exit(1)
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+        cfg = configs.get(region)
+        if cfg is None:
+            _print_failure("unknown_region")
+            sys.exit(1)
+
+        now = datetime.now()
+        raw_date = (getattr(args, "date", None) or "").strip()
+        business_date = (
+            _resolve_business_date(args, now)
+            if raw_date
+            else now.date() - timedelta(days=1)
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        report = {}
+        outcome = run_channel_missing_task(
+            conn, outbox,
+            region=region, display=cfg.display,
+            business_date=business_date, now=now,
+            table_url=cfg.table_url,
+            cc_user_ids=cfg.cc_user_ids,
+            store_exclude=cfg.store_exclude,
+            dry=args.dry,
+            report=report,
+        )
+        if args.dry:
+            print(f"roster={len(report.get('roster', []))} "
+                  f"missing={len(report.get('missing', []))} "
+                  f"zero={len(report.get('zero', []))}")
+            for row in report.get("missing", []):
+                print(f"  missing {row['channel'] or '-'} | {row['store']} "
+                      f"| {'、'.join(row['owner_names']) or '-'}")
+            for row in report.get("zero", []):
+                print(f"  zero    {row['channel'] or '-'} | {row['store']} "
+                      f"| {'、'.join(row['owner_names']) or '-'}")
+            print(f"at={report.get('at_user_ids', [])} "
+                  f"cc={report.get('cc_user_ids', [])} "
+                  f"unmatched={report.get('unmatched', [])}")
+        else:
+            conn.commit()
+        print(
+            f"service={service_id} region={region} kind=channel_missing "
+            f"status={outcome.status} missing={len(outcome.unfilled)}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 def _handle_leaderboard_html(args):
     """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
     if not args.confirm_local_test_write:
@@ -552,10 +643,7 @@ def _handle_leaderboard_html(args):
             sys.exit(1)
 
         now = datetime.now()
-        business_date = (
-            date.fromisoformat(args.date) if getattr(args, "date", None)
-            else now.date()
-        )
+        business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
         if region == "offline_all":
@@ -643,8 +731,36 @@ def main(argv=None):
         )
         sub.add_argument(
             "--date", default=None,
-            help="business date override (YYYY-MM-DD, default: today)",
+            help="business date override (YYYY-MM-DD or 'yesterday', "
+                 "default: today)",
         )
+
+    # -- channel-missing --------------------------------------------------------
+    missing_sub = subparsers.add_parser(
+        "channel-missing",
+        help="Channel store fill-rate check + broadcast (10:40, qudao)",
+    )
+    missing_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    missing_sub.add_argument(
+        "--region", default=None,
+        help="business region (default: $ROBOT_REGION)",
+    )
+    missing_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    missing_sub.add_argument(
+        "--date", default=None,
+        help="business date override (YYYY-MM-DD or 'yesterday', "
+             "default: yesterday)",
+    )
+    missing_sub.add_argument(
+        "--dry", action="store_true", default=False,
+        help="print roster/missing/zero/@ lists only; nothing enqueued",
+    )
 
     # -- leaderboard-html ------------------------------------------------------
     html_sub = subparsers.add_parser(
@@ -681,6 +797,9 @@ def main(argv=None):
         return
     if args.command in ("offline-daily", "offline-weekly", "offline-monthly"):
         _handle_offline_summary(args, period=args.command.split("-", 1)[1])
+        return
+    if args.command == "channel-missing":
+        _handle_channel_missing(args)
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

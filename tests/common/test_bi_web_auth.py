@@ -461,7 +461,11 @@ class IdentityGateTests(unittest.TestCase):
         response = client.get("/d/l1-cockpit", follow_redirects=False)
 
         self.assertEqual(302, response.status_code)
-        self.assertEqual("/auth/entry?reason=login", response.headers["location"])
+        # M4 免登：401 跳转携带回跳地址（提示页 JS 校验单斜杠后 location.href）
+        self.assertEqual(
+            "/auth/entry?reason=login&next=%2Fd%2Fl1-cockpit",
+            response.headers["location"],
+        )
 
     def test_no_credentials_api_answers_401_json(self):
         client = TestClient(_session_app())

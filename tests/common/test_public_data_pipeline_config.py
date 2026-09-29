@@ -72,6 +72,23 @@ class ParsePipelineConfigTests(unittest.TestCase):
         config = parse_pipeline_config("x", {"enabled": False, "sources": ["wdt"]})
         self.assertEqual(parse_pipeline_config("x", config.to_mapping()), config)
 
+    def test_depends_on_parsed_and_round_trips(self):
+        config = parse_pipeline_config(
+            "sync-wdt", {"depends_on": ["roll-manifest"]}
+        )
+        self.assertEqual(config.depends_on, ("roll-manifest",))
+        self.assertEqual(
+            parse_pipeline_config("sync-wdt", config.to_mapping()), config
+        )
+
+    def test_rejects_invalid_depends_on(self):
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"depends_on": "roll-manifest"})
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"depends_on": [""]})
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"depends_on": [42]})
+
 
 class ConfigSourceTests(unittest.TestCase):
     def test_static_source_default_is_enabled(self):

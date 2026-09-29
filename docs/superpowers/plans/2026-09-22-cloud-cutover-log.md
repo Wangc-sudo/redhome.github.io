@@ -457,3 +457,45 @@ mart 核心表行数（验收值）：`dim_robot_member`=91、`fact_stockout_lin
 - 坑登记：`docker cp` 对 scheduler 容器再报 `no such directory`，沿用 `cat | docker exec -i` 管道注入；本地 PowerShell `curl` 是 Invoke-WebRequest 别名，公网负向验证须用 `curl.exe`
 - 复用脚本：`tools/check_bi_nacos.py`（容器内 Nacos BI 组 + 门控探针）
 - 剩余（阶段 2 前置）：ECS 续费 C0（09-26 前）、regions 真值（G2）、T7 全链路冒烟、免登凭据注入 + 钉钉后台首页地址、域名+ICP 备案
+
+### 云上健康巡检首跑 + ECS 到期实测（20:1x 北京）
+- **巡检脚本** `tools/cloud_health_check.py`（方案 §2.4 告警源 1 的手动版，只读聚合）：sync_runs 48h 状态分布 + robot_outbox 72h + 超龄 failed + **stale 'started'（>2h）检测**（本次新增）。跑法：`cat | docker exec -i dops-scheduler` 注入后容器内执行。坑：`db.connect` 是 DictCursor，`dict(fetchall())` 会把单行两列捏成 `{'status':'COUNT(*)'}` 假行，须显式按键取值
+- **首跑结果**：robot_outbox 72h 全 delivered（6 行）✓；sync_runs 48h = completed 31 / failed 13 / started 1——**13 个 failed 全部落在今晨 07:15~07:31（D15 空壳事故修复窗口）**，failure_code=source_read_failed×3/schema_drift×2（及更早 8 个昨日调试残留），零摘要行、零污染；08:00 起全部 completed，当前链路健康
+- **残留登记（待运维裁决）**：run `9a04049d` 卡 `started`（08:17 今晨，D15 窗口手动中断的 extract，无摘要行、无写入）。按纪律未自行修数；处置建议：UPDATE 置 `failed`/`aborted` 或留档——它会让 stale-started 告警恒亮
+- **ECS 到期实测**（ctyun-cli ListEcsInstances，只读）：三台统一 **2026-10-06 11:22:19 北京**到期（expiredTime=2026-10-06T03:22:19Z），全 running。C0 拍板期限 09-26 不变
+- 容器面：bi-web Up 50min healthy（日志仅 healthz 200）、scheduler 刚完成 14:02 sync-dingtalk、gateway/nginx/ntp 正常
+- 复用脚本：`tools/cloud_health_check.py`（巡检）、`tools/cloud_run_inspect.py`（run 溯源，传 run_id 查 source/dataset/manifest）
+
+### G2 regions 真值核对（20:4x 北京，闸口=运维目视确认，本次只出证据）
+- **记载位置**：schema=`docker/integration/regions.seed.json`（占位符，版本受控）；真值文件=`e:/repos/credentials/regions.values.json`（仓库外）；发布工具=`common/gateway/cli.py publish-regions`；验收点=Nacos `REGIONS` 组 `region-<id>.yaml`（checklist 第 1 步）
+- **比对证据**（`tools/cloud_regions_check.py`，Nacos 现值 vs 文件逐字段，robotCode/conversationId 脱敏只报 MATCH/MISMATCH）：**6 区域 × 机器人凭据全部 MATCH**（robotCode 同一只 ding***fbjl、openConversationId 各区各自 MATCH）；tableUrl 五区 MATCH
+- **Nacos 领先文件的项**（9-23 页面通道工作的线上回填，凭据零偏差）：leaderboardUrl×5 已回填 `http://203.205.91.241:8300/<region>.html`（junpin 仍占位=唯一无页面区域，一致）；vanke tableUrl 线上为真实 alidocs 链接；各区新增 `monthlyTargets`（vanke 4 项 0 值、余空对象）
+- **处置**：已将 Nacos 现值**回写** `regions.values.json`（leaderboardUrl×5、vanke tableUrl、monthlyTargets×6，JSON 校验通过）——文件与线上恢复一致，作为 G2 目视确认载体；比对用真值副本在云上与容器内已即删
+- **结论**：G2 实质（真值发布）已成立且凭据零偏差；剩余闸口动作 = 运维目视确认 `regions.values.json`（重点：6 群 conversationId 归属、vanke monthlyTargets 四项 0 值是否为本月口径、junpin leaderboardUrl 占位）
+- **✅ G2 闸口通过（2026-09-23 21:0x 北京，运维目视确认「目测是对的」）**：确认载体=回写后的 `regions.values.json`（与 Nacos 线上逐字段一致）
+
+### C0 续费闭环（21:2x 北京，运维口径「ECS 续费 1 年 + 到期自动续费」）
+- **C0 按运维口径关闭**：ECS 三台已续 1 年并开自动续费
+- 复核记录：ctyun-cli ListEcsInstances 的 `expiredTime` 仍显示 2026-10-06T03:22:19Z（自动续费在到期日扣款延长后该值才会变，返回体无 autoRenew 字段可直查）——**留 09-29 复核点**：再查 expiredTime 是否已变 2027-10-06，未变则控制台核实自动续费开关
+
+### G4 预查：旧链路定时任务清单（21:4x 北京，来源=git 历史 533bc63^ 已删脚本 README + 主 README）
+- **形态澄清**：旧 cron **不是** Windows 计划任务/WSL（本机 schtasks、WSL crontab 已实测为空），而是**千问办公桌面端 cron**（主 README:16「千问办公桌面端 cron 定时任务（5 个），路径指向本仓库」）+ 启动文件夹常驻 vbs + 渠道机器人独立任务——全部在**现网机器**（非本机）上，需运维在该机操作
+- **A. 千问办公 cron（5 个，出处：杭州 README「定时任务（千问办公 cron）」节 + 绍兴 README 机制节）**：
+  1. `5 0 * * *`「组织同步-线下运营中心」→ `org_sync.py --sync`（3 区域快照，新链路=sync-dingtalk org_directory）
+  2. `30 18 * * *`「杭州日报-1830未填提醒」→ `hangzhou_reminder.py --remind`
+  3. `0 20 * * *`「杭州日报-2000催办」→ `hangzhou_reminder.py --check`（输出 DING_CMD 由 cron agent 执行 DING）
+  4. 绍兴日报 `shaoxing_reminder.py --once`（18:30/20:00 按小时分流，速查表注明「供 cron 用」；任务名未见明确记载，1~2 个任务待面板核对）
+  5. 8:30 榜单 `leaderboard_report.py --send`（手册第 5 步载明「两个 leaderboard_report.py」=杭州+绍兴）
+- **B. 开机自启常驻（最优先停）**：`register_autostart.bat` 注册到当前用户启动文件夹的 vbs——`hangzhou_listener_start.vbs`（杭州）与绍兴同款。**风险：旧 listener 与云上 gateway 抢同应用 Stream 连接（spec §9 同应用不可多连接，多连接会负载分流消息），观察期内报数消息可能落到旧进程**
+- **C. 渠道日报机器人**：Windows 计划任务 每日 09:00（README_ECS部署指南；本机 schtasks 实测无 → 在现网机器），`hot_items_monitor`/`daily_scheduler` 系列；新链路=pages-qudao 三班 08:30/15:30/17:30
+- **D. QW Pages 发布通道**（主 README:17：每日 8:30 生成 HTML → 复制到 榜单页面/ → 发布）：已被 dops-nginx:8300 替代，QW Pages 侧停止更新
+- **E. 数字化/钉钉/榜单服务**（旧 docker-compose 服务 server.py）：若在现网机器仍在跑，一并停
+- **执行纪律不变**：G4 注释动作由运维亲手做（checklist 闸口），以上为对照清单；观察期 9-23 已计第 1 个工作日（robot_outbox 全 delivered），9-24 无恙即满足 2 个工作日
+
+### bi-web 公网开放（限公司 IP，阶段 1.5，22:0x 北京，运维裁决「公网地址开放，但是需要公司的公网地址」）
+- **公司公网地址认定**：sg-dops-app 既有规则 `ops-office-ip-20260923` = **36.20.86.193/32**（今日创建、命名即办公网），直接复用；本机当前出口 125.121.109.7（动态电信）≠ 办公网 IP
+- **变更**：`CreateVpcSecurityGroupIngress` 加 `TCP 18080 ← 36.20.86.193/32`（rule id `sgrule-hzfonalec3`，priority 5，description `bi-web office-ip only`），原 `bi-web intranet only`（192.168.0.0/24）保留——VPC 内网访问不受影响
+- **BI 公网入口**：`http://203.205.91.241:18080`（→ /d/l1-cockpit 首页驾驶舱），**仅公司办公网可达**
+- **验证**：规则落库回读 ✓；负向实测本机（非公司 IP）`203.205.91.241:18080` 超时 000 ✓（白名单生效）；正向（办公网 → 200）待运维在办公网实测
+- **风险登记**：身份层仍全开放，暴露控制=SG 源地址单点——①公司出口 IP 若变（动态/多出口）会瞬间断连或需补规则；②办公网内任何人可未登录访问。阶段 2（免登+域名+备案）落地前属接受态
+- 坑：ctyun-cli 的 `--securityGroupRules` JSON 在 PowerShell 包装层被吞引号（`\"` 报 invalid character、单引号被剥）——解法：写成 .bat 走 cmd（C 运行时 argv 把 `\"` 归一为 `"`）；`range` 端口格式是单值 `"18080"` 不是 `"18080/18080"`

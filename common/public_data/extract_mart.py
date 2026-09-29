@@ -23,6 +23,7 @@ import textwrap
 from dataclasses import dataclass, field
 
 from common.calendar_utils import month_days
+from common.public_data.dataset_filter import matches_any
 from common.public_data.db import named_lock, transaction
 from common.public_data.mart_extract_schema import (
     DIM_CALENDAR,
@@ -392,7 +393,9 @@ class MartExtractRepository:
             tuple(
                 [row.get("source_record_id")]
                 + [row.get(name) for name in dataset.target_columns]
-                + [synced_at, sync_run_id]
+                # 行级 ``_sync_run_id``（robot 填报归并行的全零标记）优先于
+                # 本批 run id——审计可辨，非归并行不受影响。
+                + [synced_at, row.get("_sync_run_id") or sync_run_id]
             )
             for row in rows
         ]
@@ -430,7 +433,9 @@ class MartExtractRepository:
         """
         sql = textwrap.dedent(
             """\
-            SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name`
+            SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name`,
+                   JSON_UNQUOTE(JSON_EXTRACT(`payload_json`, '$.unionid'))
+                       AS `union_id`
             FROM `dingtalk_org_member`
             WHERE `sync_run_id` = (
               SELECT `sync_run_id` FROM `dingtalk_org_member`
@@ -453,13 +458,14 @@ class MartExtractRepository:
             if rows:
                 cursor.executemany(
                     "INSERT INTO `dim_robot_member` "
-                    "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, "
-                    "`is_active`, `synced_at`, `sync_run_id`) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    "(`user_id`, `name`, `union_id`, `region`, `dept_id`, "
+                    "`dept_name`, `is_active`, `synced_at`, `sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     [
                         (
                             row["user_id"],
                             row["name"],
+                            row.get("union_id"),
                             row["region"],
                             row.get("dept_id"),
                             row.get("dept_name"),
@@ -528,11 +534,12 @@ class MartExtractRepository:
                 textwrap.dedent(
                     """\
                     INSERT INTO `dim_robot_member`
-                    (`user_id`, `name`, `region`, `dept_id`, `dept_name`,
-                     `is_active`, `synced_at`, `sync_run_id`)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (`user_id`, `name`, `union_id`, `region`, `dept_id`,
+                     `dept_name`, `is_active`, `synced_at`, `sync_run_id`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                       `name` = VALUES(`name`),
+                      `union_id` = VALUES(`union_id`),
                       `region` = VALUES(`region`),
                       `dept_id` = VALUES(`dept_id`),
                       `dept_name` = VALUES(`dept_name`),
@@ -544,6 +551,7 @@ class MartExtractRepository:
                     (
                         row["user_id"],
                         row["name"],
+                        row.get("union_id"),
                         row["region"],
                         row.get("dept_id"),
                         row.get("dept_name"),
@@ -730,8 +738,15 @@ class MartExtractService:
     # Public API
     # ------------------------------------------------------------------
 
-    def extract(self) -> ExtractResult:
+    def extract(self, datasets=None) -> ExtractResult:
         """执行一次提取运行。
+
+        *datasets* 可选：把本次运行限制在名称命中模式（精确或 ``*`` 前缀
+        通配）的投影步骤内；为空时行为与历史完全一致（全量计划）。
+        ``channel_monthly_target`` 是 ``ecom_people`` 步骤的别名——店铺
+        月目标表（``fact_channel_store_target``）由该步骤物化。过滤后
+        没有任何步骤命中时在起 run 前抛 ``MartExtractError``，绝不静默
+        「成功」。
 
         步骤：
 
@@ -744,6 +759,29 @@ class MartExtractService:
         任何异常都会把 run 标记为 ``failed``；只有「mart 已写、摘要失败」
         才标记 ``projection_pending``。
         """
+        patterns = tuple(datasets or ())
+        if patterns:
+            selected = tuple(
+                d for d in self._datasets if matches_any(d.dataset, patterns)
+            )
+            run_calendar = bool(self._calendar_months) and matches_any(
+                DIM_CALENDAR, patterns
+            )
+            run_org = matches_any(DIM_ROBOT_MEMBER, patterns)
+            run_ecom = matches_any("ecom_people", patterns) or matches_any(
+                "channel_monthly_target", patterns
+            )
+            if not selected and not run_calendar and not run_org and not run_ecom:
+                raise MartExtractError(
+                    f"no extract datasets matched --dataset filter: "
+                    f"{sorted(patterns)}"
+                )
+        else:
+            selected = self._datasets
+            run_calendar = bool(self._calendar_months)
+            run_org = True
+            run_ecom = True
+
         run_id = self._new_run_id()
         synced_at = self._now()
 
@@ -756,23 +794,25 @@ class MartExtractService:
 
         datasets_summary = []
         try:
-            for dataset in self._datasets:
+            for dataset in selected:
                 datasets_summary.append(
                     self._extract_dataset(dataset, run_id, synced_at)
                 )
 
-            if self._calendar_months:
+            if run_calendar:
                 datasets_summary.append(
                     self._extract_calendar(run_id, synced_at)
                 )
 
-            org_summary = self._extract_org_members(run_id, synced_at)
-            if org_summary is not None:
-                datasets_summary.append(org_summary)
+            if run_org:
+                org_summary = self._extract_org_members(run_id, synced_at)
+                if org_summary is not None:
+                    datasets_summary.append(org_summary)
 
-            ecom_summary = self._extract_ecom_people(run_id, synced_at)
-            if ecom_summary is not None:
-                datasets_summary.append(ecom_summary)
+            if run_ecom:
+                ecom_summary = self._extract_ecom_people(run_id, synced_at)
+                if ecom_summary is not None:
+                    datasets_summary.append(ecom_summary)
 
             self._mart_repository.mark_completed(
                 sync_run_id=run_id,
@@ -818,6 +858,26 @@ class MartExtractService:
                 logger.warning("dataset=%s %s", dataset.dataset, degrade_reason)
             rows = self._repository.read_dataset(dataset, since=since)
             rows = _normalize_region_keys(dataset, rows)
+            if dataset.dataset == "channel_daily_sales":
+                # 机器人填报归并（2026-09-29 方案）：inbox 最新行优先、
+                # 复用 AI recordId 覆盖，fact 每业务键恒一行；inbox id 进
+                # record_ids → digest 感知 robot 填报，触发写入。
+                # inbox 为空（无填报/迁移未应用 fail-open）时短路——不为
+                # 空归并白付一次 raw 全量业务键查询。
+                from common.public_data.channel_robot_inbox import (
+                    fetch_latest_inbox,
+                    fetch_raw_business_keys,
+                    merge_channel_rows,
+                )
+                inbox_latest = fetch_latest_inbox(self._mart_connection)
+                if inbox_latest:
+                    rows = merge_channel_rows(
+                        rows,
+                        inbox_latest,
+                        fetch_raw_business_keys(
+                            self._repository.raw_connection
+                        ),
+                    )
             record_ids = [row.get("source_record_id") for row in rows]
             digest = self._compute_digest(record_ids)
             skipped = self._should_skip_dataset(
@@ -960,9 +1020,10 @@ class MartExtractService:
             return None
 
         digest = self._content_digest(
-            "{}|{}|{}|{}|{}".format(
+            "{}|{}|{}|{}|{}|{}".format(
                 row["user_id"], row["name"], row["region"],
                 row.get("dept_id") or "", row.get("dept_name") or "",
+                row.get("union_id") or "",
             )
             for row in rows
         )

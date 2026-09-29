@@ -316,6 +316,30 @@ _FACT_CHANNEL_STORE_TARGET_DDL = (
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 )
 
+# 渠道日销机器人填报收件箱（2026-09-29 方案：手工台账改群内填报）。
+# append-only：每次填报/解析失败各一行，同业务键取 created_at 最新；
+# extract 的 channel_daily_sales 分支把它与 raw AI 表行归并（robot 优先、
+# 复用 AI recordId 覆盖，fact 每业务键恒一行）。status=rejected 的行也落
+# （channel/store/日期/金额可空），支撑解析失败率运营观察。
+_CHANNEL_SALES_ROBOT_INBOX_DDL = (
+    "CREATE TABLE IF NOT EXISTS `channel_sales_robot_inbox` (\n"
+    "  `id` BIGINT NOT NULL AUTO_INCREMENT,\n"
+    "  `conversation_id` VARCHAR(64) NOT NULL,\n"
+    "  `sender_userid` VARCHAR(64) DEFAULT NULL,\n"
+    "  `sender_name` VARCHAR(128) DEFAULT NULL,\n"
+    "  `raw_text` TEXT NOT NULL,\n"
+    "  `channel` VARCHAR(50) DEFAULT NULL,\n"
+    "  `store_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `business_date` DATE DEFAULT NULL,\n"
+    "  `sales_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `status` VARCHAR(16) NOT NULL DEFAULT 'parsed',\n"
+    "  `reject_reason` VARCHAR(255) DEFAULT NULL,\n"
+    "  `created_at` DATETIME(6) NOT NULL,\n"
+    "  PRIMARY KEY (`id`),\n"
+    "  KEY `idx_biz` (`business_date`, `channel`, `store_name`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
 _FACT_FIN_RECEIVABLES_AGING_DDL = (
     "CREATE TABLE IF NOT EXISTS `fact_fin_receivables_aging` (\n"
     "  `record_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"

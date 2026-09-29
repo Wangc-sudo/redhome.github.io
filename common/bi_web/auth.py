@@ -44,6 +44,10 @@ _MAX_ATTEMPTS = 2
 _API_TOKEN_URL = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
 _OAPI_BASE = "https://oapi.dingtalk.com"
 _GETUSERINFO_PATH = "/topapi/v2/user/getuserinfo"
+_GETJSAPITICKET_PATH = "/get_jsapi_ticket"
+
+#: jsapi_ticket 缓存窗口（有效期 7200s，缓存与 access_token 同纪律）。
+_TICKET_CACHE_SECONDS = 100 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +177,8 @@ class DingTalkAuthClient:
         )
         self._token = None
         self._token_timestamp = 0.0
+        self._ticket = None
+        self._ticket_timestamp = 0.0
 
     def exchange_auth_code(self, auth_code):
         """用钉钉容器内的 authCode 换 ``userid``（字符串）。"""
@@ -250,6 +256,70 @@ class DingTalkAuthClient:
     @staticmethod
     def _test_access_token():
         return "test-access-token"
+
+    # ------------------------------------------------------------------
+    # jsapi_ticket（设计稿 §5.3：dd.config 签名原料，TTL 缓存）
+    # ------------------------------------------------------------------
+
+    def jsapi_ticket(self):
+        """取 ``jsapi_ticket``（TTL 缓存）；失败抛泛化 :class:`AuthError`。"""
+        if (
+            self._ticket is not None
+            and time.time() - self._ticket_timestamp < _TICKET_CACHE_SECONDS
+        ):
+            return self._ticket
+        ticket = self._request_jsapi_ticket()
+        if not isinstance(ticket, str) or not ticket:
+            raise AuthError("dingtalk jsapi ticket failed")
+        self._ticket = ticket
+        self._ticket_timestamp = time.time()
+        return ticket
+
+    def _request_jsapi_ticket(self):
+        url = (
+            f"{_OAPI_BASE}{_GETJSAPITICKET_PATH}?access_token="
+            + urllib.parse.quote(self._get_access_token(), safe="")
+        )
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                response = self._request_json(
+                    url, method="GET", timeout=_REQUEST_TIMEOUT_SECONDS
+                )
+            except Exception:
+                if attempt + 1 >= _MAX_ATTEMPTS:
+                    raise AuthError("dingtalk jsapi ticket failed") from None
+                continue
+            if not isinstance(response, Mapping):
+                raise AuthError("dingtalk jsapi ticket failed")
+            if response.get("errcode") != 0:
+                raise AuthError("dingtalk jsapi ticket failed")
+            return response.get("ticket")
+        raise AuthError("dingtalk jsapi ticket failed")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# JSAPI 签名（设计稿 §5.3，纯函数无 IO，全部可离线单测）
+# ---------------------------------------------------------------------------
+
+def make_nonce():
+    """dd.config 的 nonceStr 原料（随机 16 位 hex）。"""
+    return secrets.token_hex(8)
+
+
+def build_jsapi_signature(jsapi_ticket, noncestr, timestamp, url):
+    """按钉钉官方算法签名：固定字典序拼接后 SHA1（hex 小写）。
+
+    参数串为 ``jsapi_ticket=..&noncestr=..&timestamp=..&url=..``（钉钉文档
+    规定的字典序，恰好即此顺序）；``url`` 必须是调用 jsapi 的当前页地址
+    （不含 ``#`` 及之后部分），与前端 ``dd.config`` 所在页逐字节一致。
+    """
+    if not jsapi_ticket or not url:
+        raise SessionFormatError("jsapi signature material missing")
+    plain = (
+        f"jsapi_ticket={jsapi_ticket}&noncestr={noncestr}"
+        f"&timestamp={timestamp}&url={url}"
+    )
+    return hashlib.sha1(plain.encode("utf-8")).hexdigest()
 
 
 def mask_userid(userid):
