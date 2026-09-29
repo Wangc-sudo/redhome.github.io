@@ -108,6 +108,7 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
                     sender_name=getattr(incoming, "sender_nick", None),
                     conversation_id=conversation_id,
                     now=self._now(),
+                    is_admin=bool(getattr(incoming, "is_admin", False)),
                 )
             else:
                 outcome = self._report_handler(
