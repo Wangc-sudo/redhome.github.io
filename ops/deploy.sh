@@ -66,7 +66,13 @@ if [ "$SYNC_ONLY" = "1" ]; then
   if [ -f docker/cloud/docker-compose.dops.yml ]; then
     cp docker/cloud/docker-compose.dops.yml "$COMPOSE_FILE"
   fi
-  log "SYNC-ONLY OK: ${REMOTE_SHA:0:8}（不重启服务）"
+  # 灾备机不得跑长驻调度/stream：2026-09-29 发现 dops-ci 的 scheduler 容器
+  # （09-27 首部署遗留）与生产同 cron 并发触发 sync-dingtalk——每批成对
+  # run、输家误报 schema_drift；gateway 双开还会抢占 DingTalk stream。
+  # SYNC_ONLY 只阻止 deploy 重建，停不掉已运行容器，故在此幂等 stop
+  # （已停则无影响；每次部署都重申一次，防手工误启）。
+  docker compose -f "$COMPOSE_FILE" stop gateway scheduler 2>/dev/null || true
+  log "SYNC-ONLY OK: ${REMOTE_SHA:0:8}（不重启服务；已确保 gateway/scheduler 停止）"
   write_status ok "$LOCAL_SHA" "$REMOTE_SHA" "sync-only, no service restart"
   exit 0
 fi
