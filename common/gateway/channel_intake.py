@@ -1,27 +1,31 @@
 # -*- coding: utf-8 -*-
-"""渠道日销机器人填报（2026-09-29 方案，region=qudao）。
+"""渠道日销机器人填报（2026-09-29 方案 P1.1，region=qudao）。
 
-群内一句话填报替代手工 AI 表台账：``京东 习水村 15867`` → 解析 →
+群内一句话填报替代手工 AI 表台账：``京东 1 15867`` → 解析 →
 写 ``channel_sales_robot_inbox``（append-only）→ 即时回执。extract
 归并进 fact 由 :mod:`common.public_data.channel_robot_inbox` 承担。
 
-与线下报数 :mod:`common.gateway.report_intake` 的核心差异：
+P1.1 三键定位（2026-09-29 运维定稿，实测 19 负责人 12 人管多店）：
 
-* 门禁 = **群成员即可填**，不查 ``dim_robot_member``（P0 探针证实 19
-  位渠道负责人不在本企业钉钉组织）；sender 仅作审计记录；
-* 店名在文本里（名册 = ``fact_channel_store_target`` 全店），填报人与
-  门店无归属绑定——渠道对接人代填与门店自填同一通道；
-* 默认业务日 = **昨天**（T+1 采集口径），日期前缀补填最长 30 天；
-* 同业务键重发即覆盖（inbox 追加，extract 取最新），无编辑概念。
+1. **渠道+编号**（主键，``京东 1 15867``）：编号 = 渠道内按月目标降序
+   （无目标新店排尾），从月目标表自动派生，零维护；
+2. **负责人**（``饶佳君`` 或 ``饶佳君 京东``）：归属来自月目标表
+   ``owners_json``；单店直达，多店回执给个性化编号引导（歧义→教学）；
+3. **店名模糊**（``京东 购喝 15867``）：包含互查，代填/管理精确通道。
 
-已定格式裁决（2026-09-29 运维）：一条（行）一店一金额；多店分行发。
+``/店铺映射表`` 指令回复「渠道｜编号｜店名｜负责人」全表（可贴群公告）。
+门禁 = 群成员即可填（19 位负责人不在本企业组织，P0 探针证实）；店名/
+编号在文本里，渠道对接人代填与门店自填同一通道。默认业务日 = 昨天，
+日期前缀补填最长 30 天；同业务键重发即覆盖。
 """
 
 import contextlib
 import re
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from common.daily_robot.channel_missing import parse_owner_entries
 from common.gateway.report_intake import IntakeOutcome, _fmt_amount
 from common.metrics.daily_report import fetch_channel_dept_rollup
 from common.public_data import channel_robot_inbox as inbox_mod
@@ -49,6 +53,9 @@ _AMOUNT_TAIL_RE = re.compile(r"(?:^|[\s,，:：])(?P<amt>-?\d[\d,]*(?:\.\d+)?)\s
 _ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
 _LEADING_MENTION_RE = re.compile(r"^@[^\s/]+\s*")
 
+#: 渠道词位置：开头或结尾（「京东 3」「饶佳君 京东」都认）。
+_NUMBER_RE = re.compile(r"^\d{1,3}$")
+
 
 @dataclass(frozen=True)
 class FillEntry:
@@ -70,13 +77,66 @@ class FillReject:
     reason: str
 
 
+@dataclass(frozen=True)
+class Roster:
+    """填报名册三视图（编号 / 负责人 / 店名）。"""
+
+    stores: dict  # store -> channel
+    numbers: dict  # (channel, number) -> store
+    store_numbers: dict  # store -> (channel, number)
+    owners: dict  # name -> [(channel, number, store)]
+    owners_casefold: dict = field(default_factory=dict)
+
+
+def build_roster(rows):
+    """月目标表行 → :class:`Roster`（纯逻辑）。
+
+    编号：渠道内按月目标降序（填报人记大店；无目标新店排尾、店名排序
+    保证确定性）。负责人索引同名取 ``owners_json`` 原样，另建
+    casefold 索引容错英文花名大小写。
+    """
+    stores = {}
+    by_channel = defaultdict(list)
+    for row in rows:
+        store = str(row.get("store_name") or "").strip()
+        if not store:
+            continue
+        channel = str(row.get("channel") or "").strip()
+        stores[store] = channel
+        by_channel[channel].append((store, row.get("monthly_target")))
+    numbers = {}
+    store_numbers = {}
+    for channel, items in by_channel.items():
+        def sort_key(item):
+            store, target = item
+            if target is None:
+                return (1, 0.0, store)
+            return (0, -float(target), store)
+
+        for idx, (store, _target) in enumerate(sorted(items, key=sort_key), 1):
+            numbers[(channel, idx)] = store
+            store_numbers[store] = (channel, idx)
+    owners = defaultdict(list)
+    for row in rows:
+        store = str(row.get("store_name") or "").strip()
+        if not store or store not in store_numbers:
+            continue
+        channel, number = store_numbers[store]
+        for entry in parse_owner_entries(row.get("owners_json")):
+            owners[entry["name"]].append((channel, number, store))
+    owners_casefold = {name.casefold(): name for name in owners}
+    return Roster(
+        stores=stores, numbers=numbers, store_numbers=store_numbers,
+        owners=dict(owners), owners_casefold=owners_casefold,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 解析（纯逻辑）
 # ---------------------------------------------------------------------------
 
 def _clean_text(text):
-    text = _ZERO_WIDTH_RE.sub("", text or "")
-    return text
+    return _ZERO_WIDTH_RE.sub("", text or "")
 
 
 def _resolve_date(month, day, *, today):
@@ -96,14 +156,10 @@ def _resolve_date(month, day, *, today):
 
 
 def _match_store(token, *, roster, channel_hint=None):
-    """店名包含互查 → ``(store, channel)`` / ``("AMBIGUOUS", candidates)`` / ``None``。
-
-    *channel_hint* 非空时先按渠道过滤名册（``京东 习水村`` 只在京东店内
-    选，降歧义）；候选唯一才认。
-    """
-    scope = roster
+    """店名包含互查 → ``(store, channel)`` / ``("AMBIGUOUS", candidates)`` / ``None``。"""
+    scope = roster.stores
     if channel_hint:
-        scoped = {s: c for s, c in roster.items() if c == channel_hint}
+        scoped = {s: c for s, c in roster.stores.items() if c == channel_hint}
         if scoped:
             scope = scoped
     candidates = [
@@ -114,6 +170,38 @@ def _match_store(token, *, roster, channel_hint=None):
     if candidates:
         return "AMBIGUOUS", sorted(candidates)
     return None
+
+
+def _owner_stores(name, roster, *, channel_hint=None):
+    """负责人 → 名下店铺 ``[(channel, number, store)]``（精确名 + 大小写容错）。"""
+    canonical = roster.owners_casefold.get(name.casefold())
+    if canonical is None:
+        return None
+    entries = roster.owners[canonical]
+    if channel_hint:
+        entries = [e for e in entries if e[0] == channel_hint]
+    return entries, canonical
+
+
+def _owner_guide(name, entries, roster):
+    """多店负责人的个性化编号引导文案。"""
+    parts = [f"{channel} {number}={store}" for channel, number, store in entries]
+    example_channel, example_number, _ = entries[0]
+    return (
+        f"「{name}」负责 {len(entries)} 家店：{'；'.join(parts)}\n"
+        f"请发：{example_channel} {example_number} 金额"
+        f"（渠道 编号 金额；全部编号见 /店铺映射表）"
+    )
+
+
+def _strip_channel_word(token_text):
+    """剥开头/结尾渠道词 → ``(channel_hint, rest)``；无渠道词 → ``(None, 原文)``。"""
+    for word in CHANNEL_WORDS:
+        if token_text.startswith(word):
+            return word, token_text[len(word):].strip(" ,，:：")
+        if token_text.endswith(word):
+            return word, token_text[: -len(word)].strip(" ,，:：")
+    return None, token_text
 
 
 def _parse_line(line, *, today, roster):
@@ -149,52 +237,65 @@ def _parse_line(line, *, today, roster):
     token_text = line[: amount_match.start()].strip(" ,，:：")
 
     if not token_text:
-        return FillReject(raw_line, "缺少店名/渠道词")
+        return FillReject(raw_line, "缺少店名/渠道词/负责人")
 
-    # 整段先按店名匹配（覆盖「私域 0」这类店名=渠道词的写法）。
+    # 整段店名匹配优先（「私域 0」店名=渠道词、「朴朴 100」直达）。
     whole = token_text.replace(" ", "")
-    hit = _match_store(whole, roster=roster)
-    if hit is not None and hit[0] != "AMBIGUOUS":
-        store, channel = hit
+    matched = _match_store(whole, roster=roster)
+    if matched is not None and matched[0] != "AMBIGUOUS":
+        store, channel = matched
         return FillEntry(
             business_date, channel, store, amount,
             None if whole == store else whole, raw_line,
         )
 
-    # 剥渠道词前缀，渠道内匹配剩余店名。
-    channel_hint = next(
-        (w for w in CHANNEL_WORDS if token_text.startswith(w)), None
-    )
-    if channel_hint:
-        token = token_text[len(channel_hint):].strip(" ,，:：")
-        if not token:
-            if channel_hint in CHANNEL_LEVEL_OK:
-                return FillEntry(
-                    business_date, channel_hint, None, amount, None, raw_line
-                )
-            return FillReject(
-                raw_line, f"「{channel_hint}」需带店名（仅猫超支持渠道级填报）"
-            )
-        hit = _match_store(token, roster=roster, channel_hint=channel_hint)
-    else:
-        if hit is not None:  # 整段歧义（无渠道词可剥）
+    channel_hint, token = _strip_channel_word(whole)
+
+    # 渠道词 + 纯编号（主键）：京东 1 15867
+    if channel_hint and _NUMBER_RE.match(token):
+        store = roster.numbers.get((channel_hint, int(token)))
+        if store is None:
             return FillReject(
                 raw_line,
-                "「{}」匹配多家店：{}，请加渠道词或写全店名".format(
-                    whole, "、".join(hit[1])
-                ),
+                f"「{channel_hint} {token}」编号不存在（发 /店铺映射表 查看）",
             )
-        hit = _match_store(token_text, roster=roster)
+        return FillEntry(business_date, channel_hint, store, amount,
+                         None, raw_line)
 
-    if hit is None:
-        return FillReject(raw_line, f"未找到门店「{token_text}」")
-    if hit[0] == "AMBIGUOUS":
+    # 渠道级填报：仅渠道词（猫超式）
+    if channel_hint and not token:
+        if channel_hint in CHANNEL_LEVEL_OK:
+            return FillEntry(business_date, channel_hint, None, amount,
+                             None, raw_line)
+        return FillReject(
+            raw_line, f"「{channel_hint}」需带店名或编号（仅猫超支持渠道级填报）"
+        )
+
+    # 负责人（可带渠道词）：饶佳君 [京东] 15867
+    hit = _owner_stores(token, roster, channel_hint=channel_hint)
+    if hit is not None:
+        entries, canonical = hit
+        if len(entries) == 1:
+            channel, _number, store = entries[0]
+            return FillEntry(business_date, channel, store, amount,
+                             canonical, raw_line)
+        if entries:
+            return FillReject(
+                raw_line, _owner_guide(canonical, entries, roster)
+            )
+
+    # 店名匹配（渠道内优先）
+    matched = _match_store(token, roster=roster, channel_hint=channel_hint)
+    if matched is None:
+        return FillReject(raw_line, f"未找到门店「{token}」（发 /店铺映射表 查看编号）")
+    if matched[0] == "AMBIGUOUS":
+        hint = "请加渠道词，或" if not channel_hint else "请"
         return FillReject(
             raw_line,
-            "匹配多家店：{}，请写全店名".format("、".join(hit[1])),
+            f"匹配多家店：{'、'.join(matched[1])}，{hint}用「渠道 编号」"
+            f"（见 /店铺映射表）",
         )
-    store, channel = hit
-    token = token_text[len(channel_hint):].strip(" ,，:：") if channel_hint else token_text
+    store, channel = matched
     return FillEntry(
         business_date, channel, store, amount,
         None if token == store else token, raw_line,
@@ -204,8 +305,9 @@ def _parse_line(line, *, today, roster):
 def parse_fill_text(text, *, today, roster):
     """填报文本 → ``(entries, rejects)``；不含任何金额数字 → ``([], [])``。
 
-    按行解析（一条一行一店一金额，2026-09-29 运维裁决）；剥 @提及 与
-    零宽字符；``/`` 开头由调用方拦截（辅助指令），这里按普通行处理。
+    *roster*：:class:`Roster`（:func:`build_roster` 构建）。按行解析
+    （一条一行一店一金额）；剥 @提及 与零宽字符；``/`` 开头由调用方
+    拦截（辅助指令），这里按普通行处理。
     """
     entries, rejects = [], []
     for raw in _clean_text(text).splitlines():
@@ -221,25 +323,49 @@ def parse_fill_text(text, *, today, roster):
 
 
 # ---------------------------------------------------------------------------
-# 回执文案（纯逻辑）
+# 回执与指令文案（纯逻辑）
 # ---------------------------------------------------------------------------
 
 def build_channel_help():
     return (
-        "🤖 渠道日销填报：\n"
-        "直接发：店名 金额（默认报昨天）\n"
-        "  京东 习水村 15867\n"
+        "🤖 渠道日销填报（默认报昨天）：\n"
+        "  京东 1 15867（渠道+编号，推荐）\n"
+        "  饶佳君 15867（负责人，单店直达）\n"
+        "  京东 购喝 15867（店名也行）\n"
         "  猫超 731033（猫超可只报渠道）\n"
-        "补填带日期：9.27 天猫 酒旗 82059\n"
-        "当天无销售报 0；填错了重发一条同店同日即可覆盖～"
+        "补填带日期：9.27 京东 1 82059\n"
+        "当天无销售报 0；填错了重发一条同店同日即可覆盖～\n"
+        "/店铺映射表 — 查看全部编号与负责人"
     )
 
 
 def build_format_hint():
     return (
-        "⚠️ 没看懂～格式：[日期] 渠道 店名 金额\n"
-        "例如：京东 习水村 15867（报昨天）；9.27 天猫 酒旗 82059（补填）"
+        "⚠️ 没看懂～格式：[日期] 渠道 编号/店名/负责人 金额\n"
+        "例如：京东 1 15867（报昨天）；9.27 天猫 3 82059（补填）\n"
+        "查编号：/店铺映射表"
     )
+
+
+def build_mapping_table(roster):
+    """``/店铺映射表`` 全表：渠道｜编号｜店名｜负责人（目标降序，新店标尾注）。"""
+    by_channel = defaultdict(list)
+    for store, (channel, number) in roster.store_numbers.items():
+        by_channel[channel].append((number, store))
+    owner_names = {}
+    for name, entries in roster.owners.items():
+        for _channel, _number, store in entries:
+            owner_names.setdefault(store, []).append(name)
+    lines = ["📋 店铺映射表（填报：渠道 编号 金额）"]
+    for channel in CHANNEL_WORDS:
+        items = by_channel.get(channel)
+        if not items:
+            continue
+        lines.append(f"【{channel}】")
+        for number, store in sorted(items):
+            names = "、".join(owner_names.get(store) or []) or "—"
+            lines.append(f"{number}={store}（{names}）")
+    return "\n".join(lines)
 
 
 def _fmt_wan(value):
@@ -249,11 +375,19 @@ def _fmt_wan(value):
     return _fmt_amount(number)
 
 
-def build_fill_reply(*, entries, overwritten, rejects, progress_lines):
-    """回执。entries = ``[(entry, prev_amount|None)]``。"""
+def build_fill_reply(*, entries, rejects, progress_lines, roster):
+    """回执。entries = ``[(entry, prev_amount|None)]``；店名前回显编号。"""
     lines = [f"✅ 已记录 {len(entries)} 条渠道日销："]
     for entry, prev in entries:
-        store_disp = entry.store_name or f"{entry.channel}（渠道级）"
+        if entry.store_name is None:
+            store_disp = f"{entry.channel}（渠道级）"
+        else:
+            _channel, number = roster.store_numbers.get(
+                entry.store_name, (entry.channel, None)
+            )
+            store_disp = (
+                f"{number}={entry.store_name}" if number else entry.store_name
+            )
         line = (
             f"{entry.business_date.month}/{entry.business_date.day} "
             f"{entry.channel}·{store_disp}：{_fmt_amount(entry.amount)}"
@@ -268,7 +402,7 @@ def build_fill_reply(*, entries, overwritten, rejects, progress_lines):
         lines.append(f"⚠️ {len(rejects)} 条未识别：")
         for reject in rejects:
             lines.append(f"「{reject.raw_line}」{reject.reason}")
-        lines.append("格式：[日期] 渠道 店名 金额，如：京东 习水村 15867")
+        lines.append("格式：[日期] 渠道 编号/店名/负责人 金额（查 /店铺映射表）")
     else:
         lines.append("填错了重发一条即可覆盖～")
     return "\n".join(lines)
@@ -288,17 +422,13 @@ def _fetch_all(conn, sql, params=()):
         return [dict(row) for row in cursor.fetchall()]
 
 
-def fetch_roster(conn):
-    """填报名册：``{store_name: channel}``（fact_channel_store_target 全店）。"""
-    rows = _fetch_all(
+def fetch_roster_rows(conn):
+    """填报名册源行（fact_channel_store_target 全店，含目标与负责人）。"""
+    return _fetch_all(
         conn,
-        "SELECT `store_name`, `channel` FROM `fact_channel_store_target`",
+        "SELECT `store_name`, `channel`, `monthly_target`, `owners_json` "
+        "FROM `fact_channel_store_target`",
     )
-    return {
-        str(row["store_name"]).strip(): str(row.get("channel") or "").strip()
-        for row in rows
-        if str(row.get("store_name") or "").strip()
-    }
 
 
 def _fetch_prev_inbox(conn, entry):
@@ -365,33 +495,20 @@ def handle_channel_fill(conn, *, region_cfg, text, sender_uid, sender_name,
     """
     today = now.date() if isinstance(now, datetime) else now
     cleaned = _clean_text(text).strip()
+    roster = build_roster(fetch_roster_rows(conn))
     if cleaned.startswith("/"):
+        command = cleaned.lstrip("/").strip()
+        if command in ("店铺映射表", "映射表", "店铺"):
+            return IntakeOutcome(
+                "aux", build_mapping_table(roster), region=region_cfg.region,
+            )
         return IntakeOutcome(
             "aux", build_channel_help(), region=region_cfg.region,
         )
 
-    roster = fetch_roster(conn)
     entries, rejects = parse_fill_text(text, today=today, roster=roster)
     if not entries and not rejects:
         return IntakeOutcome("ignored", None, region=region_cfg.region)
-    if not entries:
-        for reject in rejects:
-            inbox_mod.insert_inbox(
-                conn, conversation_id=conversation_id,
-                sender_userid=sender_uid, sender_name=sender_name,
-                raw_text=reject.raw_line, channel=None, store_name=None,
-                business_date=None, sales_amount=None, status="rejected",
-                reject_reason=reject.reason, now=now,
-            )
-        return IntakeOutcome(
-            "no_number",
-            "\n".join(
-                [f"⚠️ {len(rejects)} 条未识别："]
-                + [f"「{r.raw_line}」{r.reason}" for r in rejects]
-                + [build_format_hint()]
-            ),
-            region=region_cfg.region,
-        )
 
     recorded = []
     diffs = {}
@@ -423,9 +540,19 @@ def handle_channel_fill(conn, *, region_cfg, text, sender_uid, sender_name,
             business_date=None, sales_amount=None, status="rejected",
             reject_reason=reject.reason, now=now,
         )
+    if not entries:
+        return IntakeOutcome(
+            "no_number",
+            "\n".join(
+                [f"⚠️ {len(rejects)} 条未识别："]
+                + [f"「{r.raw_line}」{r.reason}" for r in rejects]
+                + [build_format_hint()]
+            ),
+            region=region_cfg.region,
+        )
 
     reply = build_fill_reply(
-        entries=recorded, overwritten=overwritten, rejects=rejects,
+        entries=recorded, rejects=rejects, roster=roster,
         progress_lines=_progress_lines(conn, entries, diffs),
     )
     return IntakeOutcome(
