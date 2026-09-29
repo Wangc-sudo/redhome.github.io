@@ -135,7 +135,7 @@ bi-web（FastAPI 后端） + bi-react（React 前端）← 展示层：SQL 在�
 
 | 指标 | 口径 | 位置 |
 |---|---|---|
-| 日销售额 | Σsales_amount，`business_date ≤ CURDATE()` 截断未来，排除合计行 | `queries.py` |
+| 日销售额 | Σsales_amount，`business_date ≤ CURDATE()` 截断未来，排除合计行；线下侧另排除非线下区域（`region NOT IN ('电商','qudao','vanke')`，2026-09-28 P0-1 修正） | `queries.py` |
 | 日环比 | 基期=前一**自然日**（非前一数据日）；prev 缺失/为 0 → 「—」 | 阶段 B §7 |
 | 月目标 | Σ各人员 MAX(monthly_target)，**绝不跨行 SUM 目标**（melt 陷阱） | 阶段 B §3.2 |
 | 达成率 | Σcompleted ÷ Σtarget（非个人率平均） | `common.metrics` |
@@ -219,6 +219,8 @@ seed 增加 dashboard 条目（`title/enabled/nav_order/filters/cards`）→ 发
 4. 餐厅板块数据来源（系统 or 填报）——①⑤⑥⑭
 5. 合同/核销业务归口与填报字段——⑨
 6. 线下渠道字典（流通/宴席/商超/团购/体验馆映射）——E 类
+7. **vanke（体验馆）是否计入 L1「线下」**——2026-09-28 校验发现 P0-1（`region<>'电商'` 过滤与入库值 qudao 脱节，电商集合口径混入线下虚增 462.6%），当日已修复为 `region NOT IN ('电商','qudao','vanke')` 并把 vanke 暂按 offline_all 页口径排除；若裁决纳入 vanke，移出名单即可。见 `docs/BI驾驶舱-数据校验与计算口径-2026-09-28.md` §7.1
+8. **2026 年度目标值（dim_target scope='line' 三行）灌库**——P0-2 年度达成卡分母为 0，同文 §7.2
 
 ---
 
@@ -326,6 +328,7 @@ ON DUPLICATE KEY UPDATE ...;
 - **前端架构**：`frontend/bi-react/ARCHITECTURE.md`（React + Vite + TypeScript）
 - **前端进度**：`frontend/bi-react/PROGRESS.md`
 - **派生指标**：`docs/derived-metrics.md`
+- **首页驾驶舱（l1-cockpit）逐卡计算逻辑与 2026-09-28 线上校验**：`docs/BI驾驶舱-数据校验与计算口径-2026-09-28.md`（11 张卡 SQL/派生公式/锚点规则真相源 + P0×3 缺陷清单与修复建议）
 - 阶段 B 设计：`docs/superpowers/specs/2026-09-12-bi-web-stage-b-design.md`
 - 阶段 B1 设计：`docs/superpowers/specs/2026-09-14-bi-web-stage-b1-design.md`
 - 缓存分离设计：`docs/superpowers/specs/2026-09-14-bi-web-cache-separation-design.md`

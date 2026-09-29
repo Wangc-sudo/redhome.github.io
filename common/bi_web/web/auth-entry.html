@@ -25,6 +25,7 @@
   <h1 id="title">需要登录</h1>
   <p id="message">请从钉钉工作台打开本看板。</p>
 </div>
+<script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.7.13/dingtalk.open.js"></script>
 <script>
   // reason 只切换固定文案，绝不回填到 DOM——提示页无反射面。
   var messages = {
@@ -34,9 +35,71 @@
     loggedout: ["已退出", "您已安全退出。重新访问请从钉钉工作台打开。"]
   };
   var params = new URLSearchParams(location.search);
-  var entry = messages[params.get("reason")] || messages.login;
+  var reason = params.get("reason") || "login";
+  var entry = messages[reason] || messages.login;
   document.getElementById("title").textContent = entry[0];
   document.getElementById("message").textContent = entry[1];
+
+  // M4 钉钉容器内自动免登（设计稿 §5.1）：仅未登录（reason=login）且
+  // 运行在钉钉 UA 内时触发；unauthorized/forbidden/loggedout 不再自动
+  // 尝试（已有身份被准入门拦、或刚登出——再登一次只会兜圈）。
+  (function () {
+    if (reason !== "login") return;
+    if (!/DingTalk/i.test(navigator.userAgent) || typeof dd === "undefined") return;
+
+    // next 仅接受「单斜杠开头的站内路径」，其余一律回根页——不进 DOM、
+    // 不参与拼接，只作 location.href 的目的地。
+    var next = params.get("next") || "/";
+    if (next.charAt(0) !== "/" || next.charAt(1) === "/") next = "/";
+
+    function fail() {
+      document.getElementById("title").textContent = "免登失败";
+      document.getElementById("message").textContent =
+        "钉钉免登未成功，请稍后重试或联系管理员。";
+    }
+
+    fetch("/auth/jsapi-config?url=" + encodeURIComponent(location.href.split("#")[0]),
+          { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("jsapi-config " + r.status);
+        return r.json();
+      })
+      .then(function (cfg) {
+        dd.config({
+          agentId: cfg.agentId,
+          corpId: cfg.corpId,
+          timeStamp: cfg.timeStamp,
+          nonceStr: cfg.nonceStr,
+          signature: cfg.signature,
+          jsApiList: ["runtime.permission.requestAuthCode"]
+        });
+        dd.ready(function () {
+          dd.runtime.permission.requestAuthCode({
+            corpId: cfg.corpId,
+            onSuccess: function (result) {
+              fetch("/auth/dingtalk", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ authCode: result.code }),
+                cache: "no-store"
+              }).then(function (r) {
+                if (r.ok) { location.href = next; return; }
+                // 已登录但被准入门拦：换提示文案为「暂未授权」。
+                if (r.status === 403) {
+                  document.getElementById("title").textContent = messages.unauthorized[0];
+                  document.getElementById("message").textContent = messages.unauthorized[1];
+                  return;
+                }
+                fail();
+              }).catch(fail);
+            },
+            onFail: fail
+          });
+        });
+        dd.error(fail);
+      })
+      .catch(fail);
+  })();
 </script>
 </body>
 </html>

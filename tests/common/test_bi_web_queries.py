@@ -146,8 +146,11 @@ _SUMMARY_EXCLUSION = "responsible_person NOT LIKE '%合计%'"
 #: parameters are passed, so every literal ``%`` must be doubled there.
 _PARAM_SUMMARY_EXCLUSION = "responsible_person NOT LIKE '%%合计%%'"
 
-#: 线下线归属排除（B3，2026-09-20 业务裁定）：region=电商 归电商线，
-#: 线下口径一律排除。串内无字面 %，静态/参数化语句同形。
+#: 线下线归属排除（B3，2026-09-20 业务裁定；2026-09-28 P0-1 修正名单）：
+#: region=电商 归电商线；qudao=电商七部门集合口径聚合区（原黑名单只有
+#: 「电商」而入库值是 qudao，过滤线上失效、线下 MTD 虚增 462.6%）；
+#: vanke=体验馆+总经办（暂按 offline_all 页口径排除，待业务裁决）。
+#: 串内无字面 %，静态/参数化语句同形。
 _LINE_EXCLUSION = "region NOT IN ('电商', 'qudao', 'vanke')"
 
 
@@ -1809,7 +1812,59 @@ class ShortfallRegionGrainTests(ParameterizedSqlShapeTests):
         self.assertIn(
             "(MAX(d.responsible_person) IS NOT NULL) AS has_fact", sql
         )
+        # P0-1（2026-09-28）：region 粒度缺省同排 qudao/vanke/电商。
+        self.assertIn(_LINE_EXCLUSION, sql)
         self.assertNotIn("d.person", sql)
+
+
+class ShortfallDefaultLineTests(ParameterizedSqlShapeTests):
+    """P0-1（2026-09-28）缺口族缺省区域口径回归守门。
+
+    L1 缺口/告警卡不带 region 参数：缺省必须落**线下线全域**（排除
+    qudao 电商集合口径与 vanke 体验馆——修复前「空片段=全区域」把
+    23 名电商人员、1.62 亿月目标整个混进缺口榜）；显式选 region
+    （l2-ecom-people 选 qudao）则逐字透传、不注入排除名单。两条
+    通道分别钉死，缺一不可。
+    """
+
+    def test_default_excludes_off_line_regions(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": []}
+        )
+
+        shortfall_facts(
+            connection,
+            first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+        )
+
+        sql = self.sole_parameterized_sql(
+            connection,
+            (date(2026, 9, 1), date(2026, 9, 30),
+             date(2026, 9, 1), date(2026, 9, 30)),
+        )
+        self.assertIn("FROM fact_daily_report_offline", sql)
+        self.assertIn(_LINE_EXCLUSION, sql)
+        self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
+        self.assertNotIn("region = %s", sql)
+
+    def test_explicit_region_passes_through_without_line_exclusion(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": []}
+        )
+
+        shortfall_facts(
+            connection, region="qudao",
+            first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+        )
+
+        sql = self.sole_parameterized_sql(
+            connection,
+            (date(2026, 9, 1), date(2026, 9, 30), "qudao",
+             date(2026, 9, 1), date(2026, 9, 30), "qudao"),
+        )
+        self.assertIn("region = %s", sql)
+        self.assertNotIn(_LINE_EXCLUSION, sql)
+        self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
 
 
 class MonthBoundsTests(unittest.TestCase):
@@ -2022,6 +2077,9 @@ class DodShapeTests(unittest.TestCase):
         self.assertIn("MAX(business_date)", latest_sql)
         self.assertIn("FROM fact_channel_daily_sales", latest_sql)
         self.assertIn(_TRUNCATION, latest_sql)
+        # P0-3（2026-09-28）：DoD 水位必须过滤预填 NULL 行，与
+        # _CHANNEL_LATEST_SQL 同口径——否则水位虚报到预填末日、整卡全空。
+        self.assertIn("sales_amount IS NOT NULL", latest_sql)
         self.assertNotIn("合计", latest_sql)
         self.assertIn("FROM fact_channel_daily_sales", window_sql)
         self.assertIn("BETWEEN %s AND %s", window_sql)

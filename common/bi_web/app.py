@@ -77,6 +77,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
@@ -454,10 +455,15 @@ def _build_identity_dependencies(authenticate, *, redirect_pages):
                 raise HTTPException(
                     status_code=status, detail=ErrorDetail.UNAUTHORIZED
                 )
-            raise HTTPException(
-                status_code=302,
-                headers={"Location": f"/auth/entry?reason={reason}"},
-            )
+            location = f"/auth/entry?reason={reason}"
+            if status == 401:
+                # 未登录跳转携带回跳地址（M4 免登成功后由提示页 JS 校验
+                # 「单斜杠开头」再 location.href，静态提示页无反射面）。
+                target = request.url.path
+                if request.url.query:
+                    target += f"?{request.url.query}"
+                location += f"&next={urllib.parse.quote(target, safe='')}"
+            raise HTTPException(status_code=302, headers={"Location": location})
 
     def require_identity_api(request: Request, response: Response) -> None:
         denial = authenticate(request, response)
@@ -601,7 +607,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
                seed_path=None, card_cache=None, session_secret=None,
                auth_client=None, viewer_resolver=None,
-               session_secure=False) -> FastAPI:
+               session_secure=False, corp_id=None, agent_id=None) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
@@ -679,6 +685,36 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
             secure=session_secure,
         )
         return response
+
+    @app.get("/auth/jsapi-config")
+    def auth_jsapi_config(url: str = ""):
+        # dd.config 签名原料（设计稿 §5.3）：agentId/corpId + 随机
+        # nonceStr/timeStamp + 对当前页 URL 的 SHA1 签名。与 /auth/dingtalk
+        # 同属认证路由（无 bearer、无 gate）；url 仅参与签名、不回显，
+        # scheme 非 http/https 直接 400（不给任意字符串签名的面）。
+        if auth_client is None or not corp_id or not agent_id:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        nonce = auth.make_nonce()
+        timestamp = int(time.time() * 1000)
+        try:
+            ticket = auth_client.jsapi_ticket()
+        except auth.AuthError as exc:
+            _LOGGER.warning("jsapi ticket fetch failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse(
+            {
+                "agentId": agent_id,
+                "corpId": corp_id,
+                "timeStamp": timestamp,
+                "nonceStr": nonce,
+                "signature": auth.build_jsapi_signature(
+                    ticket, nonce, timestamp, url
+                ),
+            }
+        )
 
     @app.get("/auth/entry")
     def auth_entry():
@@ -864,6 +900,8 @@ def main():
             if session_secret and app_key and app_secret
             else None
         )
+        corp_id = (os.environ.get("BI_DINGTALK_CORPID") or "").strip() or None
+        agent_id = (os.environ.get("BI_DINGTALK_AGENTID") or "").strip() or None
         session_secure = os.environ.get(
             "BI_WEB_SESSION_SECURE", ""
         ).strip().lower() in ("1", "true", "yes")
@@ -877,6 +915,8 @@ def main():
             session_secret=session_secret,
             auth_client=auth_client,
             session_secure=session_secure,
+            corp_id=corp_id,
+            agent_id=agent_id,
         )
     except Exception as exc:
         print(f"bi-web startup failed: invalid configuration ({type(exc).__name__})")
