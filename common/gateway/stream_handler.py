@@ -18,6 +18,7 @@ import dingtalk_stream
 from dingtalk_stream import AckMessage
 
 from common.gateway.card_menu import is_menu_request, send_menu_card
+from common.gateway.channel_intake import handle_channel_fill
 from common.gateway.report_intake import (
     build_error_reply,
     handle_report,
@@ -96,14 +97,27 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
 
         conn = self._connection_factory()
         try:
-            outcome = self._report_handler(
-                conn,
-                region_cfg=region_cfg,
-                text=text,
-                sender_uid=sender_uid,
-                now=self._now(),
-                all_region_cfgs=tuple(self._region_configs.values()),
-            )
+            if region_cfg.region == "qudao":
+                # 渠道日销机器人填报（2026-09-29 方案）：群成员即可填、
+                # 落 inbox，不走线下报数的实名门禁。
+                outcome = handle_channel_fill(
+                    conn,
+                    region_cfg=region_cfg,
+                    text=text,
+                    sender_uid=sender_uid,
+                    sender_name=getattr(incoming, "sender_nick", None),
+                    conversation_id=conversation_id,
+                    now=self._now(),
+                )
+            else:
+                outcome = self._report_handler(
+                    conn,
+                    region_cfg=region_cfg,
+                    text=text,
+                    sender_uid=sender_uid,
+                    now=self._now(),
+                    all_region_cfgs=tuple(self._region_configs.values()),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -111,7 +125,8 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
             self._safe_reply(incoming, build_error_reply())
             return AckMessage.STATUS_OK, "OK"
 
-        self._safe_reply(incoming, outcome.reply)
+        if outcome.reply:  # None = 非填报消息（闲聊），静默不回
+            self._safe_reply(incoming, outcome.reply)
         return AckMessage.STATUS_OK, "OK"
 
     def _safe_reply(self, incoming, text):

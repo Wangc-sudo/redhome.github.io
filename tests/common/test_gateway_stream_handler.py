@@ -132,6 +132,71 @@ class StreamHandlerTests(unittest.TestCase):
         self.assertIn("report reply failed", logs)
 
 
+_QUDAO_CFG = RegionConfig(
+    region="qudao", display="渠道日报",
+    table_url="https://example.com/table",
+    robot_code="rc", open_conversation_id="conv-qudao",
+    aliases={}, cc_user_ids=(),
+)
+
+
+class QudaoRoutingTests(unittest.TestCase):
+    """qudao 群消息分叉到 channel_intake，不走线下报数实名门禁。"""
+
+    def _handler(self, *, conn=None, replies=None):
+        logs = []
+        conn = conn or Mock()
+        handler = StreamReportHandler(
+            region_configs={"qudao": _QUDAO_CFG},
+            connection_factory=lambda: conn,
+            report_handler=Mock(),  # 线下报数 handler，qudao 绝不应触达
+            now=lambda: datetime(2026, 9, 29, 9, 40),
+            log=logs.append,
+        )
+        replies = replies if replies is not None else []
+        handler.reply_text = lambda text, incoming: replies.append(text)
+        return handler, conn, replies, logs
+
+    def test_qudao_goes_to_channel_fill_not_report(self):
+        handler, conn, replies, _ = self._handler()
+        incoming = _incoming(text="大家早上好", conversation_id="conv-qudao",
+                             sender_uid="u-ext")
+        incoming.sender_nick = "外部人员"
+        with patch(
+            "common.gateway.stream_handler.handle_channel_fill"
+        ) as fill, patch(
+            "dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming
+        ):
+            fill.return_value = IntakeOutcome("ignored", None, region="qudao")
+            status, _ = asyncio.run(handler.process(_callback()))
+
+        self.assertEqual(status, _STATUS_OK)
+        handler._report_handler.assert_not_called()
+        kwargs = fill.call_args.kwargs
+        self.assertEqual(kwargs["conversation_id"], "conv-qudao")
+        self.assertEqual(kwargs["sender_uid"], "u-ext")
+        self.assertEqual(kwargs["sender_name"], "外部人员")
+        conn.commit.assert_called_once()
+        self.assertEqual(replies, [])  # reply=None → 静默
+
+    def test_qudao_recorded_replies(self):
+        handler, conn, replies, _ = self._handler()
+        incoming = _incoming(text="京东 购喝 15867",
+                             conversation_id="conv-qudao", sender_uid="u-ext")
+        incoming.sender_nick = None
+        with patch(
+            "common.gateway.stream_handler.handle_channel_fill"
+        ) as fill, patch(
+            "dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming
+        ):
+            fill.return_value = IntakeOutcome("recorded", "✅ 已记录 1 条",
+                                              region="qudao")
+            status, _ = asyncio.run(handler.process(_callback()))
+
+        self.assertEqual(status, _STATUS_OK)
+        self.assertEqual(replies, ["✅ 已记录 1 条"])
+
+
 class BuildStreamClientTests(unittest.TestCase):
 
     def test_registers_the_handler_on_the_chatbot_topic(self):

@@ -13,6 +13,7 @@ from common.public_data.manual_import.schema import (
 )
 from common.public_data.mart_extract_schema import (
     _AGG_OFFLINE_DAILY_DDL,
+    _CHANNEL_SALES_ROBOT_INBOX_DDL,
     _DIM_CALENDAR_DDL,
     _DIM_PRODUCT_DDL as _MART_DIM_PRODUCT_DDL,
     _DIM_ROBOT_MEMBER_DDL,
@@ -407,6 +408,11 @@ _MIGRATIONS = (
         "mart-ops-robot-member-union-id-v1",
         "mart",
         _build_mart_robot_member_union_id_ddl(),
+    ),
+    (
+        "mart-ops-channel-robot-inbox-v1",
+        "mart",
+        (_CHANNEL_SALES_ROBOT_INBOX_DDL,),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

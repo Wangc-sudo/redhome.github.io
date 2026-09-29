@@ -393,7 +393,9 @@ class MartExtractRepository:
             tuple(
                 [row.get("source_record_id")]
                 + [row.get(name) for name in dataset.target_columns]
-                + [synced_at, sync_run_id]
+                # 行级 ``_sync_run_id``（robot 填报归并行的全零标记）优先于
+                # 本批 run id——审计可辨，非归并行不受影响。
+                + [synced_at, row.get("_sync_run_id") or sync_run_id]
             )
             for row in rows
         ]
@@ -856,6 +858,20 @@ class MartExtractService:
                 logger.warning("dataset=%s %s", dataset.dataset, degrade_reason)
             rows = self._repository.read_dataset(dataset, since=since)
             rows = _normalize_region_keys(dataset, rows)
+            if dataset.dataset == "channel_daily_sales":
+                # 机器人填报归并（2026-09-29 方案）：inbox 最新行优先、
+                # 复用 AI recordId 覆盖，fact 每业务键恒一行；inbox id 进
+                # record_ids → digest 感知 robot 填报，触发写入。
+                from common.public_data.channel_robot_inbox import (
+                    fetch_latest_inbox,
+                    fetch_raw_business_keys,
+                    merge_channel_rows,
+                )
+                rows = merge_channel_rows(
+                    rows,
+                    fetch_latest_inbox(self._mart_connection),
+                    fetch_raw_business_keys(self._repository.raw_connection),
+                )
             record_ids = [row.get("source_record_id") for row in rows]
             digest = self._compute_digest(record_ids)
             skipped = self._should_skip_dataset(
