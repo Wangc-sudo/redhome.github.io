@@ -14,9 +14,16 @@ P1.1 三键定位（2026-09-29 运维定稿，实测 19 负责人 12 人管多�
 3. **店名模糊**（``京东 购喝 15867``）：包含互查，代填/管理精确通道。
 
 ``/店铺映射表`` 指令回复「渠道｜编号｜店名｜负责人」全表（可贴群公告）。
-门禁 = 群成员即可填（19 位负责人不在本企业组织，P0 探针证实）；店名/
-编号在文本里，渠道对接人代填与门店自填同一通道。默认业务日 = 昨天，
-日期前缀补填最长 30 天；同业务键重发即覆盖。
+
+权限（2026-09-29 收口裁决）：**只能报自己负责的店，群管理员可代填**。
+身份 = 群昵称 ↔ ``owners_json`` 负责人名匹配（精确 → casefold → 包含
+互查唯一；回调无 unionId 字段，昵称是跨组织场景唯一可用键，群规要求
+昵称=本人姓名）。无法识别 → 拒收并引导改昵称；报他人店 → 拒收并列出
+本人店铺；``is_admin``（群管理员）不受限。拒收一律落 rejected 审计。
+
+门禁场景依据：19 位负责人不在本企业组织（P0 探针证实），不查
+``dim_robot_member``。默认业务日 = 昨天，日期前缀补填最长 30 天；
+同业务键重发即覆盖。
 """
 
 import contextlib
@@ -183,6 +190,68 @@ def _owner_stores(name, roster, *, channel_hint=None):
     return entries, canonical
 
 
+def resolve_sender_name(nick, roster):
+    """群昵称 → 负责人名（精确 → casefold → 包含互查唯一）；失败 ``None``。
+
+    回调没有 unionId 字段，昵称是跨组织场景唯一可用的身份键——依赖
+    群规「昵称 = 本人姓名」。包含互查防「饶佳君-习酒」式后缀昵称，
+    多候选（如单姓）不信任。
+    """
+    name = (nick or "").strip()
+    if not name:
+        return None
+    if name in roster.owners:
+        return name
+    canonical = roster.owners_casefold.get(name.casefold())
+    if canonical:
+        return canonical
+    hits = [n for n in roster.owners if name in n or n in name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def store_owner_names(roster):
+    """``{store: {负责人名}}``（权限校验反查）。"""
+    index = defaultdict(set)
+    for name, entries in roster.owners.items():
+        for _channel, _number, store in entries:
+            index[store].add(name)
+    return dict(index)
+
+
+def check_entry_permission(entry, *, sender_name, is_admin, roster,
+                           store_owners):
+    """单条填报权限 → ``None``（放行）或拒因文案。
+
+    群管理员全放；负责人只能报名下店（含共管）；渠道级行按该渠道全部
+    负责人集合判定；未识别身份一律拒。
+    """
+    if is_admin:
+        return None
+    if sender_name is None:
+        return (
+            "无法识别你的身份（群昵称不在负责人名单）。"
+            "请将群昵称改为本人姓名后重试，或联系群管理员代报。"
+        )
+    if entry.store_name is None:
+        allowed = {
+            name
+            for store, names in store_owners.items()
+            if roster.stores.get(store) == entry.channel
+            for name in names
+        }
+    else:
+        allowed = store_owners.get(entry.store_name) or set()
+    if sender_name in allowed:
+        return None
+    mine = "、".join(
+        store for _c, _n, store in roster.owners.get(sender_name, [])
+    )
+    return (
+        f"「{entry.store_name or entry.channel}」不是你负责的店铺"
+        f"（你负责：{mine or '无'}）。如需代报请联系群管理员。"
+    )
+
+
 def _owner_guide(name, entries, roster):
     """多店负责人的个性化编号引导文案。"""
     parts = [f"{channel} {number}={store}" for channel, number, store in entries]
@@ -335,7 +404,8 @@ def build_channel_help():
         "  猫超 731033（猫超可只报渠道）\n"
         "补填带日期：9.27 京东 1 82059\n"
         "当天无销售报 0；填错了重发一条同店同日即可覆盖～\n"
-        "/店铺映射表 — 查看全部编号与负责人"
+        "/店铺映射表 — 查看全部编号与负责人\n"
+        "权限：只能报自己负责的店（群昵称须为本人姓名）；代报请联系群管理员"
     )
 
 
@@ -487,8 +557,11 @@ def _progress_lines(conn, entries, diffs):
 
 
 def handle_channel_fill(conn, *, region_cfg, text, sender_uid, sender_name,
-                        conversation_id, now):
+                        conversation_id, now, is_admin=False):
     """处理一条渠道群填报消息。不写连接 commit（由调用方提交）。
+
+    权限（2026-09-29 收口）：*is_admin*（群管理员）可代填任何店；其余
+    按群昵称 ↔ 负责人匹配结果只能报名下店，拒收落 rejected 审计。
 
     返回 :class:`IntakeOutcome`；``reply=None`` 表示非填报消息（无金额
     数字的闲聊），调用方静默不回执。
@@ -509,6 +582,21 @@ def handle_channel_fill(conn, *, region_cfg, text, sender_uid, sender_name,
     entries, rejects = parse_fill_text(text, today=today, roster=roster)
     if not entries and not rejects:
         return IntakeOutcome("ignored", None, region=region_cfg.region)
+
+    # 权限分流：本人名下店放行，其余改判拒收（落 rejected 审计）。
+    sender_owner = resolve_sender_name(sender_name, roster)
+    owners_by_store = store_owner_names(roster)
+    permitted = []
+    for entry in entries:
+        deny = check_entry_permission(
+            entry, sender_name=sender_owner, is_admin=is_admin,
+            roster=roster, store_owners=owners_by_store,
+        )
+        if deny is None:
+            permitted.append(entry)
+        else:
+            rejects.append(FillReject(entry.raw_line, deny))
+    entries = permitted
 
     recorded = []
     diffs = {}

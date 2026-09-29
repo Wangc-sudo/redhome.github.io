@@ -331,7 +331,7 @@ class HandleChannelFillTest(unittest.TestCase):
         })
         outcome = handle_channel_fill(
             conn, region_cfg=_cfg(), text="京东 1 15867",
-            sender_uid="u9", sender_name=None,
+            sender_uid="u9", sender_name="娄灿斌",
             conversation_id="conv-qudao", now=_NOW,
         )
         self.assertTrue(outcome.overwritten)
@@ -379,6 +379,69 @@ class HandleChannelFillTest(unittest.TestCase):
         self.assertEqual(len(conn.inbox_rows), 1)
         self.assertEqual(conn.inbox_rows[0][8], "rejected")
 
+    def test_owner_fills_own_store(self):
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="京东 2 100",
+            sender_uid="u-rjj", sender_name="饶佳君",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertIn("JD习水村酒类专营店", outcome.reply)
+
+    def test_owner_filling_others_store_denied(self):
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="京东 1 100",
+            sender_uid="u-rjj", sender_name="饶佳君",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "no_number")
+        self.assertIn("不是你负责的店铺", outcome.reply)
+        self.assertIn("JD习水村酒类专营店", outcome.reply)  # 列出本人店
+        self.assertEqual(conn.inbox_rows[0][8], "rejected")
+
+    def test_co_owner_allowed(self):
+        # 共管店：任一共管人可报（朴朴=黄贤宋、杨情情）
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="朴朴 100",
+            sender_uid="u-yqq", sender_name="杨情情",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+
+    def test_admin_can_fill_for_others(self):
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="京东 2 100",
+            sender_uid="u-admin", sender_name="王城",
+            conversation_id="conv-qudao", now=_NOW, is_admin=True,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertIn("JD习水村酒类专营店", outcome.reply)
+
+    def test_unidentified_sender_denied(self):
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="朴朴 100",
+            sender_uid="u-x", sender_name="路人甲",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "no_number")
+        self.assertIn("无法识别你的身份", outcome.reply)
+        self.assertEqual(conn.inbox_rows[0][8], "rejected")
+
+    def test_nick_with_suffix_resolves(self):
+        # 带后缀的群昵称（饶佳君-习酒）包含互查唯一命中
+        conn = _Conn()
+        outcome = handle_channel_fill(
+            conn, region_cfg=_cfg(), text="京东 2 100",
+            sender_uid="u-rjj", sender_name="饶佳君-习酒",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+
     def test_progress_line_present(self):
         conn = _Conn(fact_rows=[
             {"channel": "京东", "sales_amount": 1000,
@@ -386,7 +449,7 @@ class HandleChannelFillTest(unittest.TestCase):
         ])
         outcome = handle_channel_fill(
             conn, region_cfg=_cfg(), text="京东 1 15867",
-            sender_uid="u9", sender_name=None,
+            sender_uid="u9", sender_name="娄灿斌",
             conversation_id="conv-qudao", now=_NOW,
         )
         self.assertIn("📊 京东 本月累计", outcome.reply)
