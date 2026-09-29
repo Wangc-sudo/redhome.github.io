@@ -862,16 +862,22 @@ class MartExtractService:
                 # 机器人填报归并（2026-09-29 方案）：inbox 最新行优先、
                 # 复用 AI recordId 覆盖，fact 每业务键恒一行；inbox id 进
                 # record_ids → digest 感知 robot 填报，触发写入。
+                # inbox 为空（无填报/迁移未应用 fail-open）时短路——不为
+                # 空归并白付一次 raw 全量业务键查询。
                 from common.public_data.channel_robot_inbox import (
                     fetch_latest_inbox,
                     fetch_raw_business_keys,
                     merge_channel_rows,
                 )
-                rows = merge_channel_rows(
-                    rows,
-                    fetch_latest_inbox(self._mart_connection),
-                    fetch_raw_business_keys(self._repository.raw_connection),
-                )
+                inbox_latest = fetch_latest_inbox(self._mart_connection)
+                if inbox_latest:
+                    rows = merge_channel_rows(
+                        rows,
+                        inbox_latest,
+                        fetch_raw_business_keys(
+                            self._repository.raw_connection
+                        ),
+                    )
             record_ids = [row.get("source_record_id") for row in rows]
             digest = self._compute_digest(record_ids)
             skipped = self._should_skip_dataset(
