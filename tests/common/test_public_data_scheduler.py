@@ -3,6 +3,8 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
+from dataclasses import dataclass
+
 from common.public_data.pipeline_config import StaticConfigSource
 from common.public_data.scheduler import (
     NullLock,
@@ -11,6 +13,8 @@ from common.public_data.scheduler import (
     SyncExecutor,
     build_argv,
     build_child_env,
+    command_spec,
+    has_command,
 )
 
 T0 = datetime(2026, 9, 21, 1, 59, 30)  # 周一 01:59:30，离 02:00 窗口 30 秒
@@ -487,3 +491,156 @@ def test_scheduler_consults_registered_dep_probes_first():
     assert calls == [1]
     # 未登记的依赖维持原有语义（roll-manifest 之外告警后按满足处理）
     assert scheduler._default_dep_probe("some-unknown-line") is True
+
+
+# -- 命令模板泛化（ops-web「可添加」A 方案，2026-09-30） --------------------
+
+def test_command_spec_robot_family_generalizes_region():
+    spec = command_spec("robot-hangzhou")
+    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "once"]
+    assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
+
+
+def test_command_spec_pages_family_generalizes_region():
+    spec = command_spec("pages-qudao")
+    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "leaderboard-html"]
+    assert spec["extra_env"] == {"ROBOT_REGION": "qudao"}
+
+
+def test_command_spec_explicit_wins_over_family():
+    # pages-qudao-t1 在显式表，不应被 pages- 家族吞掉
+    spec = command_spec("pages-qudao-t1")
+    assert "--output" in spec["argv"]
+    assert spec["extra_env"] == {"ROBOT_REGION": "qudao"}
+
+
+def test_command_spec_rejects_dash_in_family_region():
+    # 家族 region 不允许中划线（显式表已优先）
+    assert command_spec("robot-qudao-t1") is None
+    assert command_spec("pages-foo-bar") is None
+
+
+def test_command_spec_empty_region_is_none():
+    assert command_spec("robot-") is None
+    assert command_spec("pages-") is None
+
+
+def test_command_spec_unknown_is_none():
+    assert command_spec("bi-web") is None
+    assert command_spec("mystery") is None
+
+
+def test_has_command_mirrors_command_spec():
+    assert has_command("robot-hangzhou") is True
+    assert has_command("pages-qudao") is True
+    assert has_command("sync-wdt") is True
+    assert has_command("bi-web") is False
+    assert has_command("mystery") is False
+
+
+def test_nacos_service_ids_without_server_returns_empty():
+    # 未配 Nacos：列举降级为空元组（scheduler 仅按 seed keys）。
+    from common.public_data.scheduler import _nacos_service_ids
+
+    assert _nacos_service_ids({"PUBLIC_DATA_NACOS_SERVER": ""}) == ()
+
+
+# -- 「立即运行一次」通道（pd_ops_run_request，ops-web 写入） ------------------
+
+@dataclass
+class _RunReq:
+    request_id: int
+    service_id: str
+    requested_by: str
+
+
+class FakeRunRequestStore:
+    """scheduler._drain_run_requests 依赖的最小 store 接口（离线替身）。"""
+
+    def __init__(self):
+        self.pending = []
+        self.claims = []
+        self.finished = []
+        self.rejected = []
+
+    def fetch_pending(self):
+        return list(self.pending)
+
+    def claim(self, request_id):
+        self.claims.append(request_id)
+        return True
+
+    def mark_finished(self, request_id, returncode):
+        self.finished.append((request_id, returncode))
+
+    def mark_rejected(self, request_id, note):
+        self.rejected.append((request_id, note))
+
+
+def _run_once_scheduler(configs, store, clock=None):
+    return Scheduler(
+        config_source=StaticConfigSource(configs),
+        service_ids=tuple(configs.keys()),
+        runner=RecordingRunner(),
+        lock_factory=lambda service_id: NullLock(),
+        settings=SETTINGS,
+        executor=SyncExecutor(),
+        clock=clock or FakeClock(datetime(2026, 9, 21, 9, 0, 0)),
+        run_requests=store,
+    )
+
+
+def test_run_once_drains_pending_and_fires():
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(1, "sync-wdt", "alice")]
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+    )
+    scheduler.tick()
+    # 仅 run-once 触发（时钟不在 cron 窗口，无补跑）
+    assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
+    assert store.claims == [1]
+    assert store.finished == [(1, 0)]
+
+
+def test_run_once_rejects_service_without_command():
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(2, "bi-web", "bob")]
+    scheduler = _run_once_scheduler({}, store)
+    scheduler.tick()
+    assert scheduler._runner.calls == []
+    assert store.rejected == [(2, "无调度命令映射")]
+
+
+def test_run_once_skips_when_already_running():
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(3, "sync-wdt", "carol")]
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+    )
+    scheduler._running.add("sync-wdt")
+    scheduler.tick()
+    assert scheduler._runner.calls == []
+    assert store.claims == []  # 在途：下 tick 再认领
+
+
+def test_run_once_leaves_pending_on_unsatisfied_deps():
+    # 依赖探针不满足 → 留 pending（不认领、不拒绝），下 tick 重查。
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return False
+
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(4, "sync-wdt", "dave")]
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *", "depends_on": ["roll-manifest"]}},
+        store,
+        clock=FakeClock(datetime(2026, 9, 21, 9, 0, 0)),
+    )
+    scheduler._dep_probes = {"sync-wdt": probe}
+    scheduler.tick()
+    assert scheduler._runner.calls == []
+    assert store.claims == []
+    assert store.rejected == []

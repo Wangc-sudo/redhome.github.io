@@ -129,6 +129,48 @@ class RestNacosClient:
             )
         return True
 
+    def list_data_ids(self, group, *, page_size=200, timeout=None):
+        """List every data-id in *group* (v1 open API, paginated).
+
+        Used by the scheduler's fleet enumeration and ops-web's pipeline
+        listing so Nacos-only registrations (ops-web additions) are
+        visible without touching the seed file.  The legacy SDK client has
+        no equivalent -- callers must ``getattr(client, "list_data_ids",
+        None)`` and degrade when it is missing.
+        """
+        data_ids = []
+        page_no = 1
+        while True:
+            params = self._query(
+                {
+                    "search": "accurate",
+                    "dataId": "",
+                    "group": group,
+                    "pageNo": str(page_no),
+                    "pageSize": str(page_size),
+                }
+            )
+            url = f"{self._base}/nacos/v1/cs/configs?{urllib.parse.urlencode(params)}"
+            status, body = self._http_get(url, timeout or self._timeout)
+            if status != 200:
+                raise NacosAuthError(f"nacos list configs failed: HTTP {status}")
+            try:
+                payload = json.loads(body)
+            except ValueError as error:
+                raise NacosAuthError(
+                    "nacos list configs returned non-JSON"
+                ) from error
+            items = payload.get("pageItems") or []
+            for item in items:
+                data_id = item.get("dataId")
+                if data_id:
+                    data_ids.append(data_id)
+            total = payload.get("totalCount", 0)
+            if not items or page_no * page_size >= total:
+                break
+            page_no += 1
+        return data_ids
+
 
 def build_nacos_client(server, *, namespace="", username=None, password=None,
                        timeout=5, **rest_kwargs):

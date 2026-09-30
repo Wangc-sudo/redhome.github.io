@@ -31,6 +31,10 @@ _DDL_WHITELIST = frozenset(
         # BI 授权 schema 定义模块（mart-ops-bi-authz-v1 的 DDL 源，
         # 同 live_migrations 引用关系；授权数据读写 SQL 也在此集中）
         "common/public_data/bi_authz.py",
+        # ops-web 定时任务管理 schema 定义模块（mart-ops-run-requests-v1 的
+        # DDL 源：pd_ops_run_request / pd_ops_pipeline_audit；与 bi_authz
+        # 同属「被 live_migrations 引用的 DDL 定义模块」）
+        "common/public_data/ops_control.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关

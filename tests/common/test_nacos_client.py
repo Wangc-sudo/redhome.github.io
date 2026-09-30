@@ -125,6 +125,80 @@ class RestNacosClientTests(unittest.TestCase):
         self.assertNotIn("tenant", query)
 
 
+def _login_only_post(url, form, timeout):
+    """username 场景首次调用先走登录；其余 POST 不应发生。"""
+    if url.endswith("/nacos/v1/auth/login"):
+        return 200, json.dumps({"accessToken": "tok", "tokenTtl": 18000})
+    raise AssertionError(f"unexpected POST {url}")
+
+
+class ListDataIdsTests(unittest.TestCase):
+    """list_data_ids：v1 open API 分页列举（舰队枚举与 ops-web 列表依赖）。"""
+
+    def _paged_client(self, pages):
+        calls = []
+
+        def http_get(url, timeout):
+            calls.append(url)
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            page_no = int(query["pageNo"][0])
+            return 200, json.dumps(pages[page_no - 1])
+
+        client = RestNacosClient(
+            "nacos:8848", namespace="production", username="u", password="p",
+            http_get=http_get, http_post=_login_only_post,
+        )
+        return client, calls
+
+    def test_single_page_listing(self):
+        client, calls = self._paged_client([
+            {"totalCount": 2,
+             "pageItems": [{"dataId": "a.yaml"}, {"dataId": "b.yaml"}]},
+        ])
+
+        self.assertEqual(["a.yaml", "b.yaml"], client.list_data_ids("PIPELINES"))
+        self.assertEqual(1, len(calls))
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]).query)
+        self.assertEqual(["accurate"], query["search"])
+        self.assertEqual(["PIPELINES"], query["group"])
+        self.assertEqual(["production"], query["tenant"])
+
+    def test_multi_page_listing_walks_until_total(self):
+        client, calls = self._paged_client([
+            {"totalCount": 3,
+             "pageItems": [{"dataId": "a.yaml"}, {"dataId": "b.yaml"}]},
+            {"totalCount": 3, "pageItems": [{"dataId": "c.yaml"}]},
+        ])
+
+        self.assertEqual(
+            ["a.yaml", "b.yaml", "c.yaml"],
+            client.list_data_ids("PIPELINES", page_size=2),
+        )
+        self.assertEqual(2, len(calls))
+
+    def test_http_error_raises(self):
+        def http_get(url, timeout):
+            return 500, "boom"
+
+        client = RestNacosClient(
+            "nacos:8848", username="u", password="p",
+            http_get=http_get, http_post=_login_only_post,
+        )
+        with self.assertRaises(NacosAuthError):
+            client.list_data_ids("PIPELINES")
+
+    def test_non_json_raises(self):
+        def http_get(url, timeout):
+            return 200, "<html>not json</html>"
+
+        client = RestNacosClient(
+            "nacos:8848", username="u", password="p",
+            http_get=http_get, http_post=_login_only_post,
+        )
+        with self.assertRaises(NacosAuthError):
+            client.list_data_ids("PIPELINES")
+
+
 class BuildNacosClientTests(unittest.TestCase):
     def test_authenticated_build_returns_rest_client(self):
         client = build_nacos_client("nacos:8848", namespace="ns", username="u", password="p")

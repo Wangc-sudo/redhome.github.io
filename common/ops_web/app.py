@@ -1,4 +1,5 @@
-"""ops-web 应用装配：权限管理（grant 增删 + 审计流水 + 批量区域开通）。
+"""ops-web 应用装配：权限管理（grant 增删 + 审计流水 + 批量区域开通）
+与定时任务管理（管道列表 / 开关 / 新增 / 立即运行一次）。
 
 访问控制双闸（铁律 8）：
 
@@ -10,8 +11,9 @@
 unavailable / bad_request），异常只记一条带类名的 WARNING；页面 HTML 的
 每一处插值都过 ``html.escape``（管理页同样无反射面）。
 
-写路径（铁律 3 的另一半）：``bi_authz_grant`` 的 INSERT/DELETE 只存在于
-本模块，且每次变更与同事务的一行 audit 同生共死。
+写路径（铁律 3 的另一半）：``bi_authz_grant`` 的 INSERT/DELETE 与定时
+任务管理的 Nacos 发布 / run-request 写入只存在于本模块，且每次变更与
+同事务的一行 audit 同生共死（run_request 行的 requested_by 即触发审计）。
 """
 
 import html
@@ -19,12 +21,15 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common.public_data import bi_authz
+from common.public_data import bi_authz, ops_control
+from common.public_data.pipeline_config import PipelineConfig
+from common.public_data.scheduler import has_command
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,6 +118,27 @@ function grantRegion(ev) {
   if (!confirm('确认为 ' + region + ' 区域全部在职成员开通该区域授权？')) return;
   postJSON('/api/grants/region', {region: region});
 }
+function togglePipeline(serviceId, enabled) {
+  const action = enabled ? '启用' : '停用';
+  if (!confirm('确认' + action + ' ' + serviceId + '？（下一个调度 tick 生效，≤30s）')) return;
+  postJSON('/api/pipelines/toggle', {service_id: serviceId, enabled: enabled});
+}
+function runPipelineOnce(serviceId) {
+  if (!confirm('确认立即运行一次 ' + serviceId + '？（调度器下个 tick 认领触发）')) return;
+  postJSON('/api/pipelines/run-once', {service_id: serviceId});
+}
+function addPipeline(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  postJSON('/api/pipelines/add', {
+    service_id: f.service_id.value.trim(),
+    kind: f.kind.value,
+    schedule: f.schedule.value.trim(),
+    enabled: f.enabled.checked,
+    depends_on: f.depends_on.value.split(/[\\s,]+/).filter(Boolean),
+    description: f.description.value.trim(),
+  });
+}
 """
 
 
@@ -125,7 +151,10 @@ def _page(title, *sections, viewer_name=""):
         f"<style>{_PAGE_STYLE}</style></head><body>"
         "<header><strong>ops-web</strong>"
         "<a href=\"/\">成员与授权</a><a href=\"/grants\">授权现状</a>"
-        "<a href=\"/audit\">审计流水</a><a href=\"/auth/logout\">退出</a>"
+        "<a href=\"/audit\">审计流水</a>"
+        "<a href=\"/pipelines\">定时任务</a>"
+        "<a href=\"/pipelines/audit\">任务审计</a>"
+        "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
         + "".join(sections)
         + f"</main><script>{_PAGE_JS}</script></body></html>"
@@ -141,12 +170,16 @@ def _esc(value):
 # ---------------------------------------------------------------------------
 
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
-               viewer_resolver=None, session_secure=False) -> FastAPI:
+               viewer_resolver=None, session_secure=False,
+               fleet_source=None, config_source=None,
+               config_publisher=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
     FakeConnection，``viewer_resolver`` 喂静态 Viewer，``auth_client``
-    喂 fake 交换客户端。
+    喂 fake 交换客户端。定时任务管理面另有三注入：``fleet_source``
+    （零参 callable → service_id 元组）、``config_source``（注册表读）、
+    ``config_publisher``（注册表写，None = 写 API 降级 503）。
     """
     if not session_secret:
         raise ValueError("ops-web requires a session secret")
@@ -224,6 +257,24 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         response = RedirectResponse("/auth/entry?reason=loggedout")
         response.delete_cookie(auth.SESSION_COOKIE)
         return response
+
+    @app.get("/healthz")
+    def healthz():
+        # 顶层运维端点（与 bi-web 同款）：活性与 mart 连通性（SELECT 1）。
+        try:
+            with db_connector() as connection:
+                cursor = connection.cursor()
+                try:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web healthz mart probe failed: %s", type(exc).__name__
+            )
+            return JSONResponse({"status": "unhealthy"}, status_code=503)
+        return JSONResponse({"status": "ok", "database": "ok"})
 
     # -- 页面 ----------------------------------------------------------------
     @app.get("/")
@@ -412,6 +463,256 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "written": written})
 
+    # -- 定时任务管理（管道注册表 + 立即运行一次）----------------------------
+
+    def _fleet():
+        """舰队清单；未接线或读取失败 -> 503（页面与写 API 共用）。"""
+        if fleet_source is None or config_source is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            return tuple(fleet_source())
+        except Exception as exc:
+            _LOGGER.warning("ops-web fleet load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+
+    @app.get("/pipelines")
+    def pipelines_page(request: Request):
+        viewer = require_admin(request)
+        service_ids = _fleet()
+        configs = []
+        for service_id in service_ids:
+            try:
+                configs.append(config_source.get_pipeline(service_id))
+            except Exception as exc:
+                # 单条注册表项畸形不拖垮整页：按默认配置展示。
+                _LOGGER.warning(
+                    "ops-web pipeline config parse failed: %s", type(exc).__name__
+                )
+                configs.append(PipelineConfig(service_id))
+        try:
+            with db_connector() as connection:
+                recent = ops_control.fetch_recent_requests(connection, limit=100)
+        except Exception as exc:
+            _LOGGER.warning("ops-web run requests load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        latest = {}
+        for row in recent:  # fetch 按 id DESC，首见即最新
+            service_id = row.get("service_id") if isinstance(row, dict) else row[1]
+            if service_id not in latest:
+                latest[service_id] = row
+        rows = []
+        for config in configs:
+            request_row = latest.get(config.service_id)
+            if request_row is None:
+                request_cell = "—"
+            else:
+                get = (
+                    (lambda key: request_row.get(key))
+                    if isinstance(request_row, dict)
+                    else (lambda key: request_row[
+                        ("id", "service_id", "requested_by", "status", "note",
+                         "exit_code", "created_at", "finished_at").index(key)])
+                )
+                request_cell = (
+                    f"{_esc(get('status'))}"
+                    f"<span class=\"hint\">（{_esc(get('requested_by'))} "
+                    f"{_esc(get('created_at'))}）</span>"
+                )
+            template = (
+                "✓" if has_command(config.service_id)
+                else "<span class=\"hint\">无模板</span>"
+            )
+            toggle_label = "停用" if config.enabled else "启用"
+            run_button = (
+                f"<button onclick=\"runPipelineOnce('{_esc(config.service_id)}')\">"
+                "运行一次</button>"
+                if has_command(config.service_id) else ""
+            )
+            rows.append(
+                f"<tr><td>{_esc(config.service_id)}</td>"
+                f"<td>{_esc(config.kind)}</td>"
+                f"<td>{'✓' if config.enabled else '—'}</td>"
+                f"<td>{_esc(config.schedule)}</td>"
+                f"<td>{_esc(', '.join(config.depends_on))}</td>"
+                f"<td>{_esc(config.description)}</td>"
+                f"<td>{template}</td>"
+                f"<td>{request_cell}</td>"
+                f"<td><button onclick=\"togglePipeline("
+                f"'{_esc(config.service_id)}', {str(not config.enabled).lower()})\">"
+                f"{toggle_label}</button> {run_button}</td></tr>"
+            )
+        table = (
+            "<h1>定时任务（管道注册表）</h1>"
+            "<table><tr><th>service_id</th><th>kind</th><th>启用</th>"
+            "<th>cron</th><th>依赖</th><th>描述</th><th>模板</th>"
+            "<th>最近运行请求</th><th>操作</th></tr>"
+            + "".join(rows) + "</table>"
+            "<p class=\"hint\">配置存 Nacos（PIPELINES 组），开关与新增在"
+            "下一个调度 tick（≤30s）生效；「模板」= 调度器是否能把该 "
+            "service_id 翻译成可执行命令。</p>"
+        )
+        add_form = (
+            "<h2>新增管道</h2>"
+            "<form class=\"inline\" onsubmit=\"addPipeline(event)\">"
+            "<input name=\"service_id\" placeholder=\"service_id\" required>"
+            "<select name=\"kind\">"
+            "<option value=\"business\">business</option>"
+            "<option value=\"apps\">apps</option>"
+            "</select>"
+            "<input name=\"schedule\" placeholder=\"cron，如 0 18 * * *\" required>"
+            "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
+            "<input name=\"depends_on\" placeholder=\"依赖 id，逗号分隔（可空）\">"
+            "<input name=\"description\" placeholder=\"描述\">"
+            "<button type=\"submit\">新增</button></form>"
+            "<p class=\"hint\">robot-&lt;region&gt; / pages-&lt;region&gt; "
+            "家族自动按后缀解析区域，注册即可调度；其他任意 id 也可注册，"
+            "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
+            "自查）。已存在的 id 请用「操作」列开关，不可重复新增。</p>"
+        )
+        return HTMLResponse(_page("定时任务", table, add_form,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.get("/pipelines/audit")
+    def pipeline_audit_page(request: Request):
+        viewer = require_admin(request)
+        try:
+            with db_connector() as connection:
+                entries = ops_control.fetch_pipeline_audit(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline audit load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        rows = []
+        for row in entries:
+            if isinstance(row, dict):
+                values = (row.get("actor"), row.get("action"),
+                          row.get("service_id"), row.get("detail"),
+                          row.get("created_at"))
+            else:
+                values = row
+            actor, action, service_id, detail, created_at = values
+            rows.append(
+                f"<tr><td>{_esc(created_at)}</td><td>{_esc(actor)}</td>"
+                f"<td>{_esc(action)}</td><td>{_esc(service_id)}</td>"
+                f"<td>{_esc(detail)}</td></tr>"
+            )
+        table = (
+            "<h1>定时任务审计流水</h1>"
+            "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
+            "<th>service_id</th><th>详情</th></tr>"
+            + "".join(rows) + "</table>"
+            "<p class=\"hint\">「立即运行一次」不经本表——其 "
+            "requested_by 直接落在运行请求行上（定时任务页「最近运行请求」列）。</p>"
+        )
+        return HTMLResponse(_page("任务审计", table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.post("/api/pipelines/toggle")
+    async def pipeline_toggle(request: Request):
+        viewer = require_admin(request)
+        if config_publisher is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        enabled = payload.get("enabled")
+        if (not ops_control.SERVICE_ID_RE.match(service_id or "")
+                or not isinstance(enabled, bool)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if service_id not in _fleet():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config = config_source.get_pipeline(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            config_publisher(replace(config, enabled=enabled))
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid,
+                    "enable" if enabled else "disable", service_id,
+                    detail=config.schedule or "",
+                )
+        except Exception as exc:
+            # 发布已生效而审计没落库：变更存在但流水缺失，必须显眼。
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER publish: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/pipelines/add")
+    async def pipeline_add(request: Request):
+        viewer = require_admin(request)
+        if config_publisher is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        depends_on = payload.get("depends_on") or []
+        if not isinstance(depends_on, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config = ops_control.validate_pipeline_fields(
+                payload.get("service_id"),
+                payload.get("kind"),
+                payload.get("schedule"),
+                enabled=payload.get("enabled", True),
+                description=payload.get("description", ""),
+                depends_on=depends_on,
+            )
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if config.service_id in _fleet():
+            # 已存在的线走「操作」列开关；重复新增会静默覆盖 Nacos 条目。
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config_publisher(config)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid, "add", config.service_id,
+                    detail=config.schedule or "",
+                )
+        except Exception as exc:
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER publish: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/pipelines/run-once")
+    async def pipeline_run_once(request: Request):
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        if not ops_control.SERVICE_ID_RE.match(service_id or ""):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not has_command(service_id):
+            # 无命令模板的 id 触发不了（C 方案：允许注册但不允许空跑）。
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                if ops_control.has_pending_request(connection, service_id):
+                    raise HTTPException(
+                        status_code=400, detail=ErrorDetail.BAD_REQUEST
+                    )
+                request_id = ops_control.insert_run_request(
+                    connection, service_id, viewer.userid,
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning("ops-web run-once write failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "request_id": request_id})
+
     return app
 
 
@@ -433,6 +734,12 @@ def serve(application):
 def main():
     """从环境装配并启动；启动失败只打印一行安全消息（同 bi-web 纪律）。"""
     try:
+        from common.public_data.pipeline_config import (
+            build_config_publisher,
+            build_config_source,
+        )
+        from common.public_data.scheduler import build_fleet_source
+
         settings = load_settings()
         session_secret = os.environ.get("BI_WEB_SESSION_SECRET") or None
         app_key = (os.environ.get("BI_DINGTALK_APPKEY") or "").strip()
@@ -445,11 +752,21 @@ def main():
         session_secure = os.environ.get(
             "BI_WEB_SESSION_SECURE", ""
         ).strip().lower() in ("1", "true", "yes")
+        config_source = build_config_source()
+        try:
+            fleet_source = build_fleet_source()
+        except Exception:
+            # 舰队清单地基（seed）缺失不拖垮权限管理面：定时任务页 503。
+            _LOGGER.warning("ops-web fleet source unavailable at startup")
+            fleet_source = None
         application = create_app(
             settings=settings,
             session_secret=session_secret,
             auth_client=auth_client,
             session_secure=session_secure,
+            fleet_source=fleet_source,
+            config_source=config_source,
+            config_publisher=build_config_publisher(),
         )
     except Exception as exc:
         print(f"ops-web startup failed: invalid configuration ({type(exc).__name__})")

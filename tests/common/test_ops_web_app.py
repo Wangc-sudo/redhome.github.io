@@ -13,6 +13,7 @@
 import unittest
 import warnings
 from contextlib import contextmanager
+from unittest import mock
 
 warnings.filterwarnings(
     "ignore", message="Using `httpx` with `starlette.testclient` is deprecated"
@@ -22,6 +23,8 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
+from common.public_data import ops_control
+from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
 
@@ -227,6 +230,268 @@ class AuthExchangeTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         cookie = response.cookies.get(auth.SESSION_COOKIE)
         self.assertEqual(ADMIN_USERID, auth.resolve_session_userid(cookie, SECRET))
+
+
+class HealthzTests(unittest.TestCase):
+    def test_healthz_reports_ok_with_db(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+
+        response = client.get("/healthz")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok", "database": "ok"}, response.json())
+
+    def test_healthz_reports_unhealthy_without_db(self):
+        client = TestClient(
+            _app(viewer=_admin_viewer(), connector_error=RuntimeError("mart down"))
+        )
+
+        response = client.get("/healthz")
+
+        self.assertEqual(503, response.status_code)
+        self.assertEqual({"status": "unhealthy"}, response.json())
+
+
+class _RecordingPublisher:
+    """config_publisher 替身：记录每条发布；可注入异常模拟 Nacos 故障。"""
+
+    def __init__(self, error=None):
+        self.published = []
+        self._error = error
+
+    def __call__(self, config):
+        if self._error is not None:
+            raise self._error
+        self.published.append(config)
+
+
+class _PipelineStore:
+    """ops_control 读写函数的插桩替身集合（记录调用、回灌既定值）。"""
+
+    def __init__(self):
+        self.audit = []          # (actor, action, service_id, detail)
+        self.inserted = []       # (service_id, requested_by)
+        self.pending = False     # has_pending_request 的应答
+        self.recent = []         # fetch_recent_requests 的应答
+        self.audit_rows = []     # fetch_pipeline_audit 的应答
+
+    def patch_audit(self):
+        return mock.patch.object(
+            ops_control, "insert_pipeline_audit",
+            lambda conn, actor, action, sid, detail="":
+            self.audit.append((actor, action, sid, detail)))
+
+    def patch_pending(self):
+        return mock.patch.object(
+            ops_control, "has_pending_request", lambda conn, sid: self.pending)
+
+    def patch_insert(self):
+        return mock.patch.object(
+            ops_control, "insert_run_request",
+            lambda conn, sid, by, note="":
+            self.inserted.append((sid, by)) or 42)
+
+    def patch_recent(self):
+        return mock.patch.object(
+            ops_control, "fetch_recent_requests",
+            lambda conn, limit=100: tuple(self.recent))
+
+    def patch_audit_rows(self):
+        return mock.patch.object(
+            ops_control, "fetch_pipeline_audit",
+            lambda conn, limit=200: tuple(self.audit_rows))
+
+
+def _pipeline_app(*, viewer=None, fleet=("robot-hangzhou",), publisher=None,
+                  connection=None, connector_error=None):
+    configs = {"robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True}}
+    return create_app(
+        settings=_fake_settings(),
+        session_secret=SECRET,
+        db_connector=_connector(connection, connector_error),
+        viewer_resolver=_StaticViewerResolver(viewer),
+        fleet_source=lambda: fleet,
+        config_source=StaticConfigSource(configs),
+        config_publisher=publisher,
+    )
+
+
+class PipelinePageTests(unittest.TestCase):
+    def test_pipelines_page_lists_fleet_with_template_and_run_button(self):
+        store = _PipelineStore()
+        store.recent = [{
+            "service_id": "robot-hangzhou", "requested_by": "王城",
+            "status": "finished", "note": None, "exit_code": 0,
+            "created_at": "2026-09-30 10:00:00", "finished_at": "2026-09-30 10:01:00",
+        }]
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_recent():
+            body = client.get("/pipelines").text
+
+        self.assertIn("robot-hangzhou", body)
+        self.assertIn("0 2 * * *", body)
+        self.assertIn("运行一次", body)          # 有命令模板 → 可运行
+        self.assertIn("finished", body)          # 最近运行请求
+        self.assertIn("新增管道", body)
+
+    def test_pipeline_audit_page_renders_entries(self):
+        store = _PipelineStore()
+        store.audit_rows = [("admin", "add", "robot-x", "0 2 * * *", "2026-09-30 10:00:00")]
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_audit_rows():
+            body = client.get("/pipelines/audit").text
+
+        self.assertIn("robot-x", body)
+        self.assertIn("add", body)
+
+
+class PipelineToggleTests(unittest.TestCase):
+    def test_toggle_publishes_flipped_enabled_and_audits(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=publisher))
+        _login(client)
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/toggle",
+                json={"service_id": "robot-hangzhou", "enabled": False},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, len(publisher.published))
+        self.assertEqual("robot-hangzhou", publisher.published[0].service_id)
+        self.assertEqual(False, publisher.published[0].enabled)
+        self.assertEqual(
+            [(ADMIN_USERID, "disable", "robot-hangzhou", "0 2 * * *")],
+            store.audit,
+        )
+
+    def test_toggle_requires_admin(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        self.assertEqual(
+            401, client.post("/api/pipelines/toggle",
+                             json={"service_id": "robot-hangzhou",
+                                   "enabled": True}).status_code
+        )
+
+    def test_toggle_503_when_no_publisher(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=None))
+        _login(client)
+        self.assertEqual(
+            503, client.post("/api/pipelines/toggle",
+                             json={"service_id": "robot-hangzhou",
+                                   "enabled": True}).status_code
+        )
+
+    def test_toggle_rejects_bad_payload_and_unknown_service(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        _login(client)
+        for payload in (
+            {"service_id": "BAD ID", "enabled": True},   # 非法 id
+            {"service_id": "robot-hangzhou", "enabled": "yes"},  # enabled 非 bool
+            {"service_id": "nope", "enabled": True},      # 不在舰队
+        ):
+            self.assertEqual(
+                400,
+                client.post("/api/pipelines/toggle", json=payload).status_code,
+                payload,
+            )
+
+
+class PipelineAddTests(unittest.TestCase):
+    def test_add_validates_publishes_and_audits(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=publisher))
+        _login(client)
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/add",
+                json={"service_id": "robot-x", "kind": "apps",
+                      "schedule": "0 2 * * *", "enabled": True,
+                      "depends_on": [], "description": "demo"},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("robot-x", publisher.published[0].service_id)
+        self.assertEqual(
+            [(ADMIN_USERID, "add", "robot-x", "0 2 * * *")], store.audit
+        )
+
+    def test_add_rejects_invalid_fields(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        _login(client)
+        for payload in (
+            {"service_id": "BAD ID", "kind": "apps", "schedule": "0 2 * * *"},
+            {"service_id": "robot-x", "kind": "nope", "schedule": "0 2 * * *"},
+            {"service_id": "robot-x", "kind": "apps", "schedule": "not a cron"},
+            {"service_id": "robot-x", "kind": "apps",
+             "schedule": "0 2 * * *", "depends_on": ["robot-x"]},
+        ):
+            self.assertEqual(
+                400, client.post("/api/pipelines/add", json=payload).status_code,
+                payload,
+            )
+
+    def test_add_rejects_duplicate_service(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        _login(client)
+        self.assertEqual(
+            400, client.post("/api/pipelines/add",
+                             json={"service_id": "robot-hangzhou", "kind": "apps",
+                                   "schedule": "0 2 * * *"}).status_code
+        )
+
+
+class PipelineRunOnceTests(unittest.TestCase):
+    def test_run_once_inserts_request_with_actor(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_pending(), store.patch_insert():
+            response = client.post(
+                "/api/pipelines/run-once", json={"service_id": "robot-hangzhou"}
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(42, response.json()["request_id"])
+        self.assertEqual([("robot-hangzhou", ADMIN_USERID)], store.inserted)
+
+    def test_run_once_rejects_without_command_template(self):
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        # bi-web 无调度命令模板（C 方案：允许注册但不允许空跑）
+        self.assertEqual(
+            400, client.post("/api/pipelines/run-once",
+                             json={"service_id": "bi-web"}).status_code
+        )
+
+    def test_run_once_rejects_bad_id_and_duplicate_pending(self):
+        store = _PipelineStore()
+        store.pending = True
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        self.assertEqual(
+            400, client.post("/api/pipelines/run-once",
+                             json={"service_id": "BAD ID"}).status_code
+        )
+        with store.patch_pending():  # has_pending_request -> True
+            self.assertEqual(
+                400, client.post("/api/pipelines/run-once",
+                                 json={"service_id": "robot-hangzhou"}).status_code
+            )
 
 
 class MembersPageTests(unittest.TestCase):
