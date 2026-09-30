@@ -120,7 +120,12 @@ services:
     image: dops-app:latest
     container_name: dops-ops-web
     restart: unless-stopped
-    env_file: /opt/dops/app.env
+    # BI_* 凭据走独立的 /opt/dops/ops-web.env（服务器本地、不入库）：app.env
+    # 与 bi-web 共享，直接注入 BI_WEB_SESSION_SECRET 会让 bi-web 下次重建时
+    # 从「阶段 1.5 公网全开放」意外切到登录态，必须隔离。
+    env_file:
+      - /opt/dops/app.env
+      - /opt/dops/ops-web.env
     working_dir: /opt/dops/repo
     environment:
       TZ: Asia/Shanghai
