@@ -226,11 +226,11 @@
               },
               "计税金额": {
                 "column": "taxable_amount",
-                "source_type": "currency"
+                "source_type": "number"
               },
               "适用税率": {
                 "column": "applicable_tax_rate",
-                "source_type": "singleSelect"
+                "source_type": "number"
               },
               "经办人": {
                 "column": "handler",
