@@ -60,7 +60,10 @@ channel-daily-qudao:
   description: "qudao channel daily report broadcast - 已并入 qudao 榜单页（渠道日销快报板块），2026-09-23 停单独播报"
 robot-vanke:
   kind: business
-  enabled: true
+  # 2026-09-30 关停：催办口径错配（fact 按单元名、名单按人名 → 恒判 6 人全未填，
+  # 每天 18:00 @6 + 20:00 check + DING 全员；吴金澎 7 天被 @ 12 次）。Nacos 同步置 false。
+  # 数据通道不受影响（sync-dingtalk / 报数流 / pages-vanke 榜单照常）。
+  enabled: false
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "vanke daily-report robot (mart_ops -> robot_outbox)"
