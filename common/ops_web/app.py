@@ -20,6 +20,8 @@ import html
 import logging
 import os
 import sys
+import time
+import urllib.parse
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -172,7 +174,7 @@ def _esc(value):
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
                fleet_source=None, config_source=None,
-               config_publisher=None) -> FastAPI:
+               config_publisher=None, corp_id=None, agent_id=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -257,6 +259,37 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         response = RedirectResponse("/auth/entry?reason=loggedout")
         response.delete_cookie(auth.SESSION_COOKIE)
         return response
+
+    @app.get("/auth/jsapi-config")
+    def auth_jsapi_config(url: str = ""):
+        # dd.config 签名原料（与 bi-web 同款，设计稿 §5.3）：agentId/corpId +
+        # 随机 nonceStr/timeStamp + 对当前页 URL 的 SHA1 签名。与 /auth/dingtalk
+        # 同属认证路由；url 仅参与签名、不回显，scheme 非 http/https 直接 400。
+        if auth_client is None or not corp_id or not agent_id:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        nonce = auth.make_nonce()
+        timestamp = int(time.time() * 1000)
+        try:
+            ticket = auth_client.jsapi_ticket()
+        except auth.AuthError as exc:
+            _LOGGER.warning(
+                "ops-web jsapi ticket fetch failed: %s", type(exc).__name__
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse(
+            {
+                "agentId": agent_id,
+                "corpId": corp_id,
+                "timeStamp": timestamp,
+                "nonceStr": nonce,
+                "signature": auth.build_jsapi_signature(
+                    ticket, nonce, timestamp, url
+                ),
+            }
+        )
 
     @app.get("/healthz")
     def healthz():
@@ -752,6 +785,8 @@ def main():
         session_secure = os.environ.get(
             "BI_WEB_SESSION_SECURE", ""
         ).strip().lower() in ("1", "true", "yes")
+        corp_id = (os.environ.get("BI_DINGTALK_CORPID") or "").strip() or None
+        agent_id = (os.environ.get("BI_DINGTALK_AGENTID") or "").strip() or None
         config_source = build_config_source()
         try:
             fleet_source = build_fleet_source()
@@ -767,6 +802,8 @@ def main():
             fleet_source=fleet_source,
             config_source=config_source,
             config_publisher=build_config_publisher(),
+            corp_id=corp_id,
+            agent_id=agent_id,
         )
     except Exception as exc:
         print(f"ops-web startup failed: invalid configuration ({type(exc).__name__})")

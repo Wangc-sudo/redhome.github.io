@@ -252,6 +252,71 @@ class HealthzTests(unittest.TestCase):
         self.assertEqual({"status": "unhealthy"}, response.json())
 
 
+class JsapiConfigTests(unittest.TestCase):
+    """ops-web 的 /auth/jsapi-config（免登 dd.config 签名原料，与 bi-web 同款）。"""
+
+    class _JsapiClient:
+        def exchange_auth_code(self, code):
+            return ADMIN_USERID
+
+        def jsapi_ticket(self):
+            return "ticket-1"
+
+    def _jsapi_app(self, *, client=None, corp_id="corp-1", agent_id="agent-1"):
+        return create_app(
+            settings=_fake_settings(), session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            auth_client=client if client is not None else self._JsapiClient(),
+            corp_id=corp_id, agent_id=agent_id,
+        )
+
+    def test_jsapi_config_returns_signature_material(self):
+        client = TestClient(self._jsapi_app())
+        url = "http://127.0.0.1:18100/pipelines"
+
+        response = client.get("/auth/jsapi-config", params={"url": url})
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual("agent-1", body["agentId"])
+        self.assertEqual("corp-1", body["corpId"])
+        self.assertEqual(
+            auth.build_jsapi_signature(
+                "ticket-1", body["nonceStr"], body["timeStamp"], url
+            ),
+            body["signature"],
+        )
+
+    def test_jsapi_config_503_without_corp_or_agent(self):
+        client = TestClient(self._jsapi_app(corp_id=None))
+        response = client.get("/auth/jsapi-config", params={"url": "http://x/"})
+        self.assertEqual(503, response.status_code)
+
+    def test_jsapi_config_503_without_client(self):
+        client = TestClient(self._jsapi_app(client=None))
+        # client=None 显式构造无 auth_client 的应用
+        app = create_app(
+            settings=_fake_settings(), session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            auth_client=None, corp_id="corp-1", agent_id="agent-1",
+        )
+        response = TestClient(app).get(
+            "/auth/jsapi-config", params={"url": "http://x/"}
+        )
+        self.assertEqual(503, response.status_code)
+
+    def test_jsapi_config_400_on_bad_url(self):
+        client = TestClient(self._jsapi_app())
+        for bad in ("notaurl", "javascript:alert(1)", "ftp://x/"):
+            self.assertEqual(
+                400,
+                client.get("/auth/jsapi-config", params={"url": bad}).status_code,
+                bad,
+            )
+
+
 class _RecordingPublisher:
     """config_publisher 替身：记录每条发布；可注入异常模拟 Nacos 故障。"""
 
