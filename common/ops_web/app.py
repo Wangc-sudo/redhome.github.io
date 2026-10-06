@@ -214,6 +214,61 @@ _CRON_DOW = {
     "4": "四", "5": "五", "6": "六", "7": "日",
 }
 
+#: 区域 → 中文名（服务名/描述展示用；与 regions 注册表 display 对齐）。
+_REGION_LABELS = {
+    "hangzhou": "杭州",
+    "vanke": "万科&大莲花&团购",
+    "shaoxing": "绍兴",
+    "junpin": "君品雅院",
+    "qudao": "渠道",
+    "offline_all": "线下整体",
+}
+
+#: 服务标识 → 中文名（策展映射，展示层；robot-/pages- 家族按区域动态生成）。
+_SERVICE_NAMES = {
+    "roll-manifest": "滚动清单",
+    "sync-dingtalk": "钉钉 AI 表同步",
+    "sync-wdt": "旺店通同步",
+    "project-mart": "投影重建（修复工具）",
+    "extract-mart": "提取加工",
+    "sync-channel-sales": "渠道日销补采",
+    "extract-channel": "渠道日销提取",
+    "channel-missing-check": "渠道到齐校验催办",
+    "channel-daily-qudao": "渠道日报播报",
+    "pages-qudao-t1": "渠道榜单 T+1 重算",
+    "offline-daily-summary": "线下每日汇总",
+    "offline-weekly-summary": "线下每周汇总",
+    "offline-monthly-summary": "线下每月汇总",
+    "dingtalk-gateway": "钉钉网关",
+    "sync-runner": "合并同步（旧）",
+    "bi-web": "BI 看板",
+    "scheduler": "调度器",
+    "ops-web": "运维台",
+}
+
+
+def _service_name(service_id):
+    """服务中文名：策展映射优先，robot-/pages- 家族按区域中文名生成。"""
+    name = _SERVICE_NAMES.get(service_id)
+    if name is not None:
+        return name
+    for prefix, tpl in (
+        ("robot-", "「{region}」日报机器人"),
+        ("pages-", "「{region}」榜单页"),
+    ):
+        if service_id.startswith(prefix):
+            region = service_id[len(prefix):]
+            return tpl.format(region=_REGION_LABELS.get(region, region))
+    return service_id
+
+
+def _service_name_cell(service_id):
+    """服务标识列：中文名为主、原始 id 小字备查；无中文名只显示 id。"""
+    name = _service_name(service_id)
+    if name == service_id:
+        return _esc(service_id)
+    return f"{_esc(name)}<span class=\"hint\">（{_esc(service_id)}）</span>"
+
 
 def _service_label(service_id, description):
     """服务中文说明：策展映射优先，robot-/pages- 家族动态生成，兜底注册表原文。"""
@@ -225,7 +280,8 @@ def _service_label(service_id, description):
         ("pages-", "「{region}」榜单页生成"),
     ):
         if service_id.startswith(prefix):
-            return tpl.format(region=service_id[len(prefix):])
+            region = service_id[len(prefix):]
+            return tpl.format(region=_REGION_LABELS.get(region, region))
     return description
 
 
@@ -674,8 +730,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 if has_command(config.service_id) else ""
             )
             rows.append(
-                f"<tr><td>{_esc(config.service_id)}</td>"
-                f"<td>{_esc(config.kind)}</td>"
+                f"<tr><td>{_service_name_cell(config.service_id)}</td>"
+                f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
