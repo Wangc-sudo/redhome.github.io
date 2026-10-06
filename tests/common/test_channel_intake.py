@@ -249,7 +249,10 @@ class _Cursor:
 
     def execute(self, sql, params=None):
         self._conn.executed.append((sql, params))
-        if "fact_channel_store_target" in sql:
+        if "dim_report_roster" in sql:
+            # 名册表（2026-10-06 切源）：默认空表 → 回退 legacy owners_json
+            self._rows = list(self._conn.roster_table_rows)
+        elif "fact_channel_store_target" in sql:
             self._rows = list(self._conn.roster_rows)
         elif "channel_sales_robot_inbox" in sql and sql.lstrip().startswith(
             "SELECT"
@@ -285,10 +288,12 @@ class _Cursor:
 
 
 class _Conn:
-    def __init__(self, *, roster_rows=None, inbox_latest=None, fact_rows=()):
+    def __init__(self, *, roster_rows=None, inbox_latest=None, fact_rows=(),
+                 roster_table_rows=()):
         self.roster_rows = roster_rows if roster_rows is not None else make_rows()
         self.inbox_latest = dict(inbox_latest or {})
         self.fact_rows = list(fact_rows)
+        self.roster_table_rows = list(roster_table_rows)
         self.inbox_rows = []
         self.executed = []
 
@@ -400,6 +405,27 @@ class HandleChannelFillTest(unittest.TestCase):
         self.assertIn("不是你负责的店铺", outcome.reply)
         self.assertIn("JD习水村酒类专营店", outcome.reply)  # 列出本人店
         self.assertEqual(conn.inbox_rows[0][8], "rejected")
+
+    def test_roster_table_overrides_legacy_owners(self):
+        # 名册切源（2026-10-06）：dim_report_roster 有启用记录时负责人归属以
+        # 名册表为准，legacy owners_json 不再生效。名册表把饶佳君改到
+        # 京东 1（legacy 拒）→ 放行；京东 2（legacy 放）→ 拒。
+        roster_table = [{"entity_key": "JD购喝", "person_name": "饶佳君"}]
+
+        allowed = handle_channel_fill(
+            _Conn(roster_table_rows=roster_table), region_cfg=_cfg(),
+            text="京东 1 100", sender_uid="u-rjj", sender_name="饶佳君",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual("recorded", allowed.status)
+
+        denied = handle_channel_fill(
+            _Conn(roster_table_rows=roster_table), region_cfg=_cfg(),
+            text="京东 2 100", sender_uid="u-rjj", sender_name="饶佳君",
+            conversation_id="conv-qudao", now=_NOW,
+        )
+        self.assertEqual("no_number", denied.status)
+        self.assertIn("不是你负责的店铺", denied.reply)
 
     def test_co_owner_allowed(self):
         # 共管店：任一共管人可报（朴朴=黄贤宋、杨情情）

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
-from common.public_data import ops_control
+from common.public_data import ops_control, report_roster
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -634,6 +634,166 @@ class PipelineRunOnceTests(unittest.TestCase):
                 400, client.post("/api/pipelines/run-once",
                                  json={"service_id": "robot-hangzhou"}).status_code
             )
+
+
+class _RosterStore:
+    """report_roster 读写函数的插桩替身集合（填报名册页/API 离线测）。"""
+
+    def __init__(self):
+        self.rows = []
+        self.audit_rows = []
+        self.upserted = []       # (entry, actor)
+        self.toggled = []        # (id, enabled, actor)
+        self.deleted = []        # (id, actor)
+        self.hit = True          # toggle/delete 是否命中
+
+    def patch_fetch(self):
+        return mock.patch.object(
+            report_roster, "fetch_roster", lambda conn, scope=None:
+            tuple(self.rows))
+
+    def patch_audit(self):
+        return mock.patch.object(
+            report_roster, "fetch_roster_audit", lambda conn, limit=200:
+            tuple(self.audit_rows))
+
+    def patch_upsert(self):
+        return mock.patch.object(
+            report_roster, "upsert_roster_entry",
+            lambda conn, entry, *, actor: self.upserted.append((entry, actor)))
+
+    def patch_toggle(self):
+        return mock.patch.object(
+            report_roster, "set_roster_enabled",
+            lambda conn, rid, enabled, *, actor:
+            self.toggled.append((rid, enabled, actor)) or self.hit)
+
+    def patch_delete(self):
+        return mock.patch.object(
+            report_roster, "delete_roster_entry",
+            lambda conn, rid, *, actor:
+            self.deleted.append((rid, actor)) or self.hit)
+
+
+def _roster_row(**kw):
+    row = {
+        "id": 1, "scope": "qudao", "entity_type": "store",
+        "entity_key": "JD购喝", "person_name": "饶佳君",
+        "aliases": '["小饶"]', "enabled": 1, "note": "共管",
+        "updated_by": "admin", "updated_at": "2026-10-06 11:00:00",
+    }
+    row.update(kw)
+    return row
+
+
+class RosterPageTests(unittest.TestCase):
+    def test_roster_page_groups_by_scope_with_chinese_labels(self):
+        store = _RosterStore()
+        store.rows = [_roster_row()]
+        store.audit_rows = [{
+            "actor": "admin", "action": "add", "scope": "qudao",
+            "entity_type": "store", "entity_key": "JD购喝",
+            "person_name": "饶佳君", "detail": "共管",
+            "created_at": "2026-10-06 11:00:00",
+        }]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        self.assertIn("填报名册", body)
+        self.assertIn("渠道门店", body)          # scope 中文化
+        self.assertIn("门店", body)              # entity_type 中文化
+        self.assertIn("JD购喝", body)
+        self.assertIn("饶佳君", body)
+        self.assertIn("小饶", body)              # aliases JSON 展开
+        self.assertIn("停用", body)              # 操作按钮
+        self.assertIn("新增名册记录", body)
+        self.assertIn("暂无记录", body)          # 空 scope 分组提示
+        self.assertIn("fail-open", body)
+        self.assertIn("2026-10-06 19:00:00", body)  # 审计时间转北京时
+
+    def test_roster_page_requires_admin(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        response = client.get("/roster", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+
+
+class RosterApiTests(unittest.TestCase):
+    def test_add_validates_and_upserts_with_actor(self):
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_upsert():
+            response = client.post("/api/roster/add", json={
+                "scope": "qudao", "entity_type": "store",
+                "entity_key": "JD购喝", "person_name": "饶佳君",
+                "aliases": ["小饶"], "note": "共管",
+            })
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, len(store.upserted))
+        entry, actor = store.upserted[0]
+        self.assertEqual("JD购喝", entry.entity_key)
+        self.assertEqual(("小饶",), entry.aliases)
+        self.assertEqual(ADMIN_USERID, actor)
+
+    def test_add_rejects_invalid_fields(self):
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        for payload in (
+            {"scope": "nope", "entity_type": "store",
+             "entity_key": "店", "person_name": "张三"},
+            {"scope": "qudao", "entity_type": "alien",
+             "entity_key": "店", "person_name": "张三"},
+            {"scope": "qudao", "entity_type": "store",
+             "entity_key": "店", "person_name": "  "},
+            {"scope": "qudao", "entity_type": "store",
+             "entity_key": "店", "person_name": "张三", "aliases": "not-a-list"},
+        ):
+            self.assertEqual(
+                400, client.post("/api/roster/add", json=payload).status_code,
+                payload,
+            )
+        self.assertEqual([], store.upserted)
+
+    def test_toggle_and_delete_with_hit_and_miss(self):
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+
+        with store.patch_toggle():
+            self.assertEqual(200, client.post(
+                "/api/roster/toggle", json={"id": 5, "enabled": False},
+            ).status_code)
+        self.assertEqual([(5, False, ADMIN_USERID)], store.toggled)
+
+        with store.patch_delete():
+            self.assertEqual(200, client.post(
+                "/api/roster/delete", json={"id": 7},
+            ).status_code)
+        self.assertEqual([(7, ADMIN_USERID)], store.deleted)
+
+        # 未命中 → 400；非法载荷 → 400
+        store.hit = False
+        with store.patch_toggle():
+            self.assertEqual(400, client.post(
+                "/api/roster/toggle", json={"id": 99, "enabled": True},
+            ).status_code)
+        self.assertEqual(400, client.post(
+            "/api/roster/toggle", json={"id": "x", "enabled": True},
+        ).status_code)
+        self.assertEqual(400, client.post(
+            "/api/roster/delete", json={"id": True},
+        ).status_code)
+
+    def test_apis_require_admin_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.post(
+            "/api/roster/add", json={"scope": "qudao", "entity_type": "store",
+                                     "entity_key": "店", "person_name": "张三"},
+        ).status_code)
 
 
 class MembersPageTests(unittest.TestCase):

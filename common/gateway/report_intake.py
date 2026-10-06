@@ -37,6 +37,7 @@ from common.metrics.daily_report import (
     summarize_people,
     unfilled_members,
 )
+from common.public_data import report_roster
 
 
 _WEEKDAYS = "一二三四五六日"
@@ -725,6 +726,14 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
     name = member["name"]
     sender_dept = member.get("dept_name")
     root_dept = region_cfg.dept_order[0] if region_cfg.dept_order else None
+
+    # 填报名册白名单（2026-10-06 运维裁决，fail-open）：该 scope 有启用
+    # 在册人员时才强制——无记录维持现状（dim 成员 + 部门归属门禁）。
+    if not via_admin and not report_roster.person_allowed(
+        connection, region_cfg.region, name, region_cfg.aliases
+    ):
+        return IntakeOutcome("not_member", build_not_member_reply(),
+                             region=region_cfg.region)
 
     # “/” 辅助指令优先于报数解析（如「/补签 张三 12800」含数字，不能误录）。
     aux = parse_aux_command(text)

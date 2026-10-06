@@ -35,6 +35,9 @@ _DDL_WHITELIST = frozenset(
         # DDL 源：pd_ops_run_request / pd_ops_pipeline_audit；与 bi_authz
         # 同属「被 live_migrations 引用的 DDL 定义模块」）
         "common/public_data/ops_control.py",
+        # 填报人名册 schema 定义模块（mart-ops-report-roster-v1 的 DDL 源：
+        # dim_report_roster / dim_report_roster_audit；同上引用关系）
+        "common/public_data/report_roster.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关

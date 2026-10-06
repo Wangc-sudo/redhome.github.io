@@ -17,6 +17,7 @@ unavailable / bad_request），异常只记一条带类名的 WARNING；页面 H
 """
 
 import html
+import json
 import logging
 import os
 import sys
@@ -30,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common.public_data import bi_authz, ops_control
+from common.public_data import bi_authz, ops_control, report_roster
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.scheduler import has_command
 
@@ -142,6 +143,27 @@ function addPipeline(ev) {
     description: f.description.value.trim(),
   });
 }
+function addRoster(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  postJSON('/api/roster/add', {
+    scope: f.scope.value,
+    entity_type: f.entity_type.value,
+    entity_key: f.entity_key.value.trim(),
+    person_name: f.person_name.value.trim(),
+    aliases: f.aliases.value.split(/[\\s,，、]+/).filter(Boolean),
+    note: f.note.value.trim(),
+  });
+}
+function toggleRoster(id, enabled) {
+  const action = enabled ? '启用' : '停用';
+  if (!confirm('确认' + action + '该名册记录？')) return;
+  postJSON('/api/roster/toggle', {id: id, enabled: enabled});
+}
+function deleteRoster(id) {
+  if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
+  postJSON('/api/roster/delete', {id: id});
+}
 """
 
 
@@ -205,7 +227,22 @@ _RUN_STATUS_LABEL = {
     "pending": "等待调度",
     "launched": "运行中",
 }
-_ACTION_LABEL = {"add": "新增", "enable": "启用", "disable": "停用"}
+_ACTION_LABEL = {
+    "add": "新增", "enable": "启用", "disable": "停用",
+    "delete": "删除", "seed": "种子导入",
+}
+
+#: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
+_SCOPE_LABEL = {
+    "qudao": "渠道门店",
+    "hangzhou": "杭州",
+    "shaoxing": "绍兴",
+    "junpin": "君品雅院",
+    "vanke": "万科&大莲花&团购",
+    "offline_all": "线下整体",
+    "dining": "餐饮/部门",
+}
+_ENTITY_LABEL = {"store": "门店", "person": "人员", "dept": "部门"}
 
 
 def _label(mapping, value):
@@ -943,6 +980,178 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning("ops-web run-once write failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "request_id": request_id})
+
+    # -- 填报名册（dim_report_roster，ops-web 唯一写方）---------------------
+
+    @app.get("/roster")
+    def roster_page(request: Request):
+        viewer = require_admin(request)
+        try:
+            with db_connector() as connection:
+                entries = report_roster.fetch_roster(connection)
+                audits = report_roster.fetch_roster_audit(connection, limit=20)
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+
+        by_scope = {scope: [] for scope in report_roster.SCOPES}
+        for row in entries:
+            by_scope.setdefault(row["scope"], []).append(row)
+
+        sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
+        for scope in report_roster.SCOPES:
+            rows = by_scope.get(scope) or []
+            scope_label = _label(_SCOPE_LABEL, scope)
+            sections.append(f"<h2>{_esc(scope_label)}"
+                            f"<span class=\"hint\">（{_esc(scope)}，{len(rows)} 条）</span></h2>")
+            if not rows:
+                sections.append("<p class=\"hint\">暂无记录"
+                                + ("——该范围当前不拦截（fail-open，维持现状）。"
+                                   if scope != "qudao" else
+                                   "——渠道机器人回退读月目标表 owners_json。")
+                                + "</p>")
+                continue
+            body = []
+            for row in rows:
+                aliases_text = ""
+                if row.get("aliases"):
+                    try:
+                        aliases_text = "、".join(json.loads(row["aliases"]))
+                    except (ValueError, TypeError):
+                        aliases_text = ""
+                enabled = bool(row["enabled"])
+                toggle_label = "停用" if enabled else "启用"
+                status_cell = "✓" if enabled else "<span class=\"hint\">已停用</span>"
+                updated = _fmt_time(row.get("updated_at")) or "—"
+                body.append(
+                    f"<tr><td>{_esc(_label(_ENTITY_LABEL, row['entity_type']))}</td>"
+                    f"<td>{_esc(row['entity_key'])}</td>"
+                    f"<td>{_esc(row['person_name'])}</td>"
+                    f"<td>{_esc(aliases_text)}</td>"
+                    f"<td>{status_cell}</td>"
+                    f"<td>{_esc(row.get('note'))}</td>"
+                    f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
+                    f"<td><button onclick=\"toggleRoster("
+                    f"{int(row['id'])}, {str(not enabled).lower()})\">{toggle_label}</button> "
+                    f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button></td></tr>"
+                )
+            sections.append(
+                "<table><tr><th>类型</th><th>对象</th><th>填报人</th><th>别名</th>"
+                "<th>启用</th><th>备注</th><th>更新</th><th>操作</th></tr>"
+                + "".join(body) + "</table>"
+            )
+
+        scope_options = "".join(
+            f"<option value=\"{_esc(scope)}\">{_esc(_label(_SCOPE_LABEL, scope))}</option>"
+            for scope in report_roster.SCOPES
+        )
+        entity_options = "".join(
+            f"<option value=\"{_esc(entity)}\">{_esc(_label(_ENTITY_LABEL, entity))}</option>"
+            for entity in report_roster.ENTITY_TYPES
+        )
+        add_form = (
+            "<h2>新增名册记录</h2>"
+            "<form class=\"inline\" onsubmit=\"addRoster(event)\">"
+            f"<select name=\"scope\">{scope_options}</select>"
+            f"<select name=\"entity_type\">{entity_options}</select>"
+            "<input name=\"entity_key\" placeholder=\"对象（店名/部门名/区域）\" required>"
+            "<input name=\"person_name\" placeholder=\"填报人姓名\" required>"
+            "<input name=\"aliases\" placeholder=\"别名，逗号分隔（可空）\">"
+            "<input name=\"note\" placeholder=\"备注（可空）\">"
+            "<button type=\"submit\">新增</button></form>"
+            "<p class=\"hint\">渠道门店（qudao）：管理「谁可以填哪些店」，渠道机器人"
+            "实时生效；日报区域（杭州/绍兴等）：该范围一旦有人名记录即启用白名单"
+            "（只准在册人员填报），无记录则不拦截；餐饮/部门先登记，机器人后续接入。"
+            "「删除」会留审计，日常调整建议用「停用」。</p>"
+        )
+        audit_rows = "".join(
+            f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
+            f"<td>{_esc(row['actor'])}</td>"
+            f"<td>{_esc(_label(_ACTION_LABEL, row['action']))}</td>"
+            f"<td>{_esc(_label(_SCOPE_LABEL, row['scope']))}</td>"
+            f"<td>{_esc(row['entity_key'])}</td>"
+            f"<td>{_esc(row['person_name'])}</td>"
+            f"<td>{_esc(row.get('detail'))}</td></tr>"
+            for row in audits
+        )
+        audit_table = (
+            "<h2>名册变更流水（最近 20 条）</h2>"
+            "<table><tr><th>时间</th><th>操作人</th><th>动作</th><th>范围</th>"
+            "<th>对象</th><th>填报人</th><th>详情</th></tr>"
+            + (audit_rows or "<tr><td colspan=\"7\" class=\"hint\">暂无变更</td></tr>")
+            + "</table>"
+        )
+        return HTMLResponse(_page("填报名册", "".join(sections), add_form,
+                                  audit_table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.post("/api/roster/add")
+    async def roster_add(request: Request):
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        aliases = payload.get("aliases") or []
+        if not isinstance(aliases, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            entry = report_roster.validate_roster_fields(
+                payload.get("scope"),
+                payload.get("entity_type"),
+                payload.get("entity_key"),
+                payload.get("person_name"),
+                aliases=aliases,
+                note=payload.get("note", ""),
+            )
+        except report_roster.ReportRosterError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                report_roster.upsert_roster_entry(
+                    connection, entry, actor=viewer.userid
+                )
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster add failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/roster/toggle")
+    async def roster_toggle(request: Request):
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        roster_id = payload.get("id")
+        enabled = payload.get("enabled")
+        if (isinstance(roster_id, bool) or not isinstance(roster_id, int)
+                or not isinstance(enabled, bool)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = report_roster.set_roster_enabled(
+                    connection, roster_id, enabled, actor=viewer.userid
+                )
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster toggle failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/roster/delete")
+    async def roster_delete(request: Request):
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        roster_id = payload.get("id")
+        if isinstance(roster_id, bool) or not isinstance(roster_id, int):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = report_roster.delete_roster_entry(
+                    connection, roster_id, actor=viewer.userid
+                )
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
 
     return app
 

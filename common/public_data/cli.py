@@ -609,6 +609,26 @@ def _handle_migrate(args):
         sys.exit(1)
 
 
+def _handle_seed_report_roster(args):
+    """一次性种子：渠道月目标表 owners_json → dim_report_roster（幂等）。"""
+    try:
+        settings = load_settings()
+        from common.public_data.db import connect
+        from common.public_data.report_roster import seed_from_channel_targets
+
+        mart_conn = connect(settings.mart_database)
+        try:
+            inserted, skipped = seed_from_channel_targets(mart_conn, actor="seed")
+        finally:
+            mart_conn.close()
+        print(f"report roster seed: inserted={inserted} skipped={skipped}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="seed_report_roster_error")
+        sys.exit(1)
+
+
 def _handle_load_target(args):
     # Safety pre-check: the write-confirmation flag is required BEFORE any work.
     if not args.confirm_local_test_write:
@@ -708,6 +728,12 @@ def main(argv=None):
 
     # -- migrate -------------------------------------------------------------
     subparsers.add_parser("migrate", help="Apply live migrations")
+
+    # -- seed-report-roster --------------------------------------------------
+    subparsers.add_parser(
+        "seed-report-roster",
+        help="Seed dim_report_roster from channel target owners_json (idempotent)",
+    )
 
     # -- status --------------------------------------------------------------
     subparsers.add_parser("status", help="Show sync run status")
@@ -874,6 +900,7 @@ def main(argv=None):
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
         "load-ops-seed": _handle_load_ops_seed,
+        "seed-report-roster": _handle_seed_report_roster,
         "import-manual": _handle_import_manual,
         "status": _handle_status,
     }

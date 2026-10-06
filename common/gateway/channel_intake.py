@@ -493,12 +493,35 @@ def _fetch_all(conn, sql, params=()):
 
 
 def fetch_roster_rows(conn):
-    """填报名册源行（fact_channel_store_target 全店，含目标与负责人）。"""
-    return _fetch_all(
+    """填报名册源行（fact_channel_store_target 全店，含目标与负责人）。
+
+    名册切源（2026-10-06 运维裁决）：负责人归属以 ``dim_report_roster``
+    为准（ops-web 管理面），月目标仍取 ``fact_channel_store_target``；
+    名册表 qudao 无启用记录时回退 legacy ``owners_json``（种子导入前的
+    行为保持不变）。
+    """
+    import json as _json
+
+    from common.public_data import report_roster
+
+    rows = _fetch_all(
         conn,
         "SELECT `store_name`, `channel`, `monthly_target`, `owners_json` "
         "FROM `fact_channel_store_target`",
     )
+    owner_map = report_roster.fetch_store_owner_map(conn, "qudao")
+    if not owner_map:
+        return rows
+    switched = []
+    for row in rows:
+        store = str(row.get("store_name") or "").strip()
+        owners = sorted(owner_map.get(store, ()))
+        switched_row = dict(row)
+        switched_row["owners_json"] = (
+            _json.dumps(owners, ensure_ascii=False) if owners else None
+        )
+        switched.append(switched_row)
+    return switched
 
 
 def _fetch_prev_inbox(conn, entry):
