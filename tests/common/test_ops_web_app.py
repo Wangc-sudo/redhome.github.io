@@ -397,8 +397,11 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("robot-hangzhou", body)
         self.assertIn("0 2 * * *", body)
         self.assertIn("运行一次", body)          # 有命令模板 → 可运行
-        self.assertIn("finished", body)          # 最近运行请求
-        self.assertIn("新增管道", body)
+        self.assertIn("成功", body)              # 最近运行（finished 中文化）
+        self.assertIn("新增定时任务", body)
+        self.assertIn("应用线", body)            # kind=apps 中文化
+        self.assertIn("服务标识", body)          # 表头中文化
+        self.assertNotIn(">finished<", body)     # 英文状态值不外显
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
@@ -409,7 +412,7 @@ class PipelinePageTests(unittest.TestCase):
             body = client.get("/pipelines/audit").text
 
         self.assertIn("robot-x", body)
-        self.assertIn("add", body)
+        self.assertIn("新增", body)  # action=add 中文化
 
 
 class PipelineToggleTests(unittest.TestCase):

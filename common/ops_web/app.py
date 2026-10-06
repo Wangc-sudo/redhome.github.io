@@ -167,6 +167,25 @@ def _esc(value):
     return html.escape("" if value is None else str(value))
 
 
+# -- 展示层中文标签（底层值不动：审计/状态存量英文值仅在渲染时映射） --------
+_KIND_LABEL = {"apps": "应用线", "business": "业务线"}
+_RUN_STATUS_LABEL = {
+    "finished": "成功",
+    "failed": "失败",
+    "rejected": "已拒绝",
+    "pending": "等待调度",
+    "launched": "运行中",
+}
+_ACTION_LABEL = {"add": "新增", "enable": "启用", "disable": "停用"}
+
+
+def _label(mapping, value):
+    """注册值 → 中文标签；未注册的原样返回（渲染处仍过 _esc）。"""
+    if value is None:
+        return value
+    return mapping.get(value, value)
+
+
 # ---------------------------------------------------------------------------
 # 应用工厂
 # ---------------------------------------------------------------------------
@@ -547,7 +566,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                          "exit_code", "created_at", "finished_at").index(key)])
                 )
                 request_cell = (
-                    f"{_esc(get('status'))}"
+                    f"{_esc(_label(_RUN_STATUS_LABEL, get('status')))}"
                     f"<span class=\"hint\">（{_esc(get('requested_by'))} "
                     f"{_esc(get('created_at'))}）</span>"
                 )
@@ -576,31 +595,31 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         table = (
             "<h1>定时任务（管道注册表）</h1>"
-            "<table><tr><th>service_id</th><th>kind</th><th>启用</th>"
-            "<th>cron</th><th>依赖</th><th>描述</th><th>模板</th>"
-            "<th>最近运行请求</th><th>操作</th></tr>"
+            "<table><tr><th>服务标识</th><th>类型</th><th>启用</th>"
+            "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
+            "<th>最近运行</th><th>操作</th></tr>"
             + "".join(rows) + "</table>"
-            "<p class=\"hint\">配置存 Nacos（PIPELINES 组），开关与新增在"
-            "下一个调度 tick（≤30s）生效；「模板」= 调度器是否能把该 "
-            "service_id 翻译成可执行命令。</p>"
+            "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
+            "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
+            "翻译成可执行命令。</p>"
         )
         add_form = (
-            "<h2>新增管道</h2>"
+            "<h2>新增定时任务</h2>"
             "<form class=\"inline\" onsubmit=\"addPipeline(event)\">"
-            "<input name=\"service_id\" placeholder=\"service_id\" required>"
+            "<input name=\"service_id\" placeholder=\"服务标识（小写字母/数字/-/_）\" required>"
             "<select name=\"kind\">"
-            "<option value=\"business\">business</option>"
-            "<option value=\"apps\">apps</option>"
+            "<option value=\"business\">业务线</option>"
+            "<option value=\"apps\">应用线</option>"
             "</select>"
-            "<input name=\"schedule\" placeholder=\"cron，如 0 18 * * *\" required>"
+            "<input name=\"schedule\" placeholder=\"定时规则（分 时 日 月 周，如 0 18 * * * = 每天 18:00）\" required>"
             "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
-            "<input name=\"depends_on\" placeholder=\"依赖 id，逗号分隔（可空）\">"
+            "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"
             "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;region&gt; / pages-&lt;region&gt; "
-            "家族自动按后缀解析区域，注册即可调度；其他任意 id 也可注册，"
+            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; "
+            "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
-            "自查）。已存在的 id 请用「操作」列开关，不可重复新增。</p>"
+            "自查）。已存在的标识请用「操作」列开关，不可重复新增。</p>"
         )
         return HTMLResponse(_page("定时任务", table, add_form,
                                   viewer_name=viewer.name or viewer.userid))
@@ -625,16 +644,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             actor, action, service_id, detail, created_at = values
             rows.append(
                 f"<tr><td>{_esc(created_at)}</td><td>{_esc(actor)}</td>"
-                f"<td>{_esc(action)}</td><td>{_esc(service_id)}</td>"
+                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
+                f"<td>{_esc(service_id)}</td>"
                 f"<td>{_esc(detail)}</td></tr>"
             )
         table = (
             "<h1>定时任务审计流水</h1>"
             "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
-            "<th>service_id</th><th>详情</th></tr>"
+            "<th>服务标识</th><th>详情</th></tr>"
             + "".join(rows) + "</table>"
-            "<p class=\"hint\">「立即运行一次」不经本表——其 "
-            "requested_by 直接落在运行请求行上（定时任务页「最近运行请求」列）。</p>"
+            "<p class=\"hint\">「立即运行一次」不经本表——其发起人"
+            "直接落在运行请求行上（定时任务页「最近运行」列）。</p>"
         )
         return HTMLResponse(_page("任务审计", table,
                                   viewer_name=viewer.name or viewer.userid))
