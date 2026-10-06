@@ -24,6 +24,7 @@ import time
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -165,6 +166,34 @@ def _page(title, *sections, viewer_name=""):
 
 def _esc(value):
     return html.escape("" if value is None else str(value))
+
+
+#: 北京时间（全库时间列约定存 UTC，展示层统一转北京时）。
+_BJT = timezone(timedelta(hours=8))
+
+
+def _fmt_time(value):
+    """UTC 存储时间 → 北京时间字符串；None/认不出的原样返回。
+
+    入参兼容 pymysql 返回的 datetime 与字符串两种形态；naive 一律按 UTC
+    解读（与 sync_runs/robot_outbox 等表的存储约定一致）。
+    """
+    if value is None or value == "":
+        return value
+    dt = value if isinstance(value, datetime) else None
+    if dt is None:
+        text = str(value).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_BJT).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # -- 展示层中文标签（底层值不动：审计/状态存量英文值仅在渲染时映射） --------
@@ -717,7 +746,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 request_cell = (
                     f"{_esc(_label(_RUN_STATUS_LABEL, get('status')))}"
                     f"<span class=\"hint\">（{_esc(get('requested_by'))} "
-                    f"{_esc(get('created_at'))}）</span>"
+                    f"{_esc(_fmt_time(get('created_at')))}）</span>"
                 )
             template = (
                 "✓" if has_command(config.service_id)
@@ -792,7 +821,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 values = row
             actor, action, service_id, detail, created_at = values
             rows.append(
-                f"<tr><td>{_esc(created_at)}</td><td>{_esc(actor)}</td>"
+                f"<tr><td>{_esc(_fmt_time(created_at))}</td><td>{_esc(actor)}</td>"
                 f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
                 f"<td>{_esc(service_id)}</td>"
                 f"<td>{_esc(detail)}</td></tr>"

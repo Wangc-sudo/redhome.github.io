@@ -405,6 +405,8 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("应用线", body)            # kind=apps 中文化
         self.assertIn("服务标识", body)          # 表头中文化
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
+        self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
+        self.assertNotIn("10:00:00", body)           # UTC 原文不外显
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
@@ -467,6 +469,24 @@ class ZhLabelTests(unittest.TestCase):
         self.assertIn("「杭州」日报机器人", cell)
         self.assertIn("（robot-hangzhou）", cell)
         self.assertEqual("mystery", _service_name_cell("mystery"))
+
+    def test_fmt_time_converts_utc_to_beijing(self):
+        from datetime import datetime, timezone
+        from common.ops_web.app import _fmt_time
+        # 字符串（naive 按 UTC 解读）
+        self.assertEqual("2026-09-30 18:00:00",
+                         _fmt_time("2026-09-30 10:00:00"))
+        self.assertEqual("2026-10-06 19:13:03",
+                         _fmt_time("2026-10-06 11:13:03.465847"))
+        # datetime 对象（naive / 带 tz 都支持）
+        self.assertEqual("2026-09-30 18:00:00",
+                         _fmt_time(datetime(2026, 9, 30, 10, 0, 0)))
+        self.assertEqual("2026-09-30 18:00:00",
+                         _fmt_time(datetime(2026, 9, 30, 10, 0, 0,
+                                            tzinfo=timezone.utc)))
+        # None / 认不出的原样
+        self.assertIsNone(_fmt_time(None))
+        self.assertEqual("not-a-time", _fmt_time("not-a-time"))
 
 
 class PipelineToggleTests(unittest.TestCase):
