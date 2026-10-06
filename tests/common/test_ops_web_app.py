@@ -395,7 +395,9 @@ class PipelinePageTests(unittest.TestCase):
             body = client.get("/pipelines").text
 
         self.assertIn("robot-hangzhou", body)
-        self.assertIn("0 2 * * *", body)
+        self.assertIn("0 2 * * *", body)         # 原表达式作小字备查
+        self.assertIn("每天 02:00", body)        # cron 人性化
+        self.assertIn("日报机器人", body)        # robot- 家族中文说明（动态生成）
         self.assertIn("运行一次", body)          # 有命令模板 → 可运行
         self.assertIn("成功", body)              # 最近运行（finished 中文化）
         self.assertIn("新增定时任务", body)
@@ -413,6 +415,45 @@ class PipelinePageTests(unittest.TestCase):
 
         self.assertIn("robot-x", body)
         self.assertIn("新增", body)  # action=add 中文化
+
+
+class ZhLabelTests(unittest.TestCase):
+    """中文化 helper：cron 人性化与服务中文说明（纯函数，无 IO）。"""
+
+    def test_cron_zh_daily_multi_hours(self):
+        from common.ops_web.app import _cron_zh
+        self.assertEqual("每天 01:55、06:55、13:55、15:55",
+                         _cron_zh("55 1,6,13,15 * * *"))
+        self.assertEqual("每天 02:00", _cron_zh("0 2 * * *"))
+
+    def test_cron_zh_weekly_and_monthly(self):
+        from common.ops_web.app import _cron_zh
+        self.assertEqual("每周一 09:30", _cron_zh("30 9 * * 1"))
+        self.assertEqual("每月 1 日 10:00", _cron_zh("0 10 1 * *"))
+
+    def test_cron_zh_minutely_hourly_and_fallback(self):
+        from common.ops_web.app import _cron_zh
+        self.assertEqual("每 5 分钟", _cron_zh("*/5 * * * *"))
+        self.assertEqual("每小时第 30 分", _cron_zh("30 * * * *"))
+        self.assertIsNone(_cron_zh("0 0 1 1 *"))     # 带月份字段 → 回退
+        self.assertIsNone(_cron_zh("not a cron"))
+
+    def test_schedule_cell_keeps_raw_as_hint(self):
+        from common.ops_web.app import _schedule_cell
+        cell = _schedule_cell("55 1,6,13,15 * * *")
+        self.assertIn("每天 01:55", cell)
+        self.assertIn("55 1,6,13,15 * * *", cell)
+        self.assertIn("常驻", _schedule_cell(None))
+        self.assertEqual("weird cron", _schedule_cell("weird cron"))
+
+    def test_service_label_curated_family_and_fallback(self):
+        from common.ops_web.app import _service_label
+        self.assertIn("滚动源清单", _service_label("roll-manifest", "rolls..."))
+        self.assertEqual("「hangzhou」日报机器人（报数汇总 → 群内播报/催办）",
+                         _service_label("robot-hangzhou", "hangzhou daily..."))
+        self.assertEqual("「vanke」榜单页生成",
+                         _service_label("pages-vanke", "vanke leaderboard..."))
+        self.assertEqual("原文保留", _service_label("mystery", "原文保留"))
 
 
 class PipelineToggleTests(unittest.TestCase):

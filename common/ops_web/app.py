@@ -186,6 +186,99 @@ def _label(mapping, value):
     return mapping.get(value, value)
 
 
+#: 服务标识 → 中文说明（策展映射，展示层；注册表 description 真源不动）。
+#: 未收录的 robot-/pages- 家族按后缀动态生成，其余回退注册表原文。
+_SERVICE_LABELS = {
+    "roll-manifest": "滚动源清单的 WDT 采集窗口（每轮同步前先把窗口往前推）",
+    "sync-dingtalk": "钉钉 AI 表 → raw_dingtalk 同步",
+    "sync-wdt": "旺店通读接口 → raw_wdt 同步",
+    "project-mart": "raw → mart_ops 投影重建（参数化修复工具，不参与定时调度）",
+    "extract-mart": "raw_dingtalk → mart_ops 提取（事实表 + 日历维表）",
+    "sync-channel-sales": "渠道日销 T+1 补采（钉钉 AI 表渠道日销 + 月目标）",
+    "extract-channel": "渠道日销 T+1 提取（门店事实表 + 目标，点名册依赖）",
+    "channel-missing-check": "渠道门店到齐校验与催办（同步失败自动跳过不发）",
+    "channel-daily-qudao": "渠道日报播报（已并入渠道榜单页，2026-09-23 停单独播报）",
+    "pages-qudao-t1": "渠道榜单页 T+1 重算",
+    "offline-daily-summary": "线下整体每日汇总（板块 + 日环比 + 月累计）",
+    "offline-weekly-summary": "线下整体每周汇总（上周总量 + 周环比 + 排名）",
+    "offline-monthly-summary": "线下整体每月汇总（上月总量 + 月环比 + 达成率排名）",
+    "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
+    "sync-runner": "旧版合并同步（双源，遗留入口）",
+    "bi-web": "BI 看板（L1/L2，只读 mart_ops，常驻）",
+    "scheduler": "调度器（按注册表定时触发各管道，自身无定时，常驻）",
+    "ops-web": "运维台（权限管理 + 定时任务管理，常驻）",
+}
+
+_CRON_DOW = {
+    "0": "日", "1": "一", "2": "二", "3": "三",
+    "4": "四", "5": "五", "6": "六", "7": "日",
+}
+
+
+def _service_label(service_id, description):
+    """服务中文说明：策展映射优先，robot-/pages- 家族动态生成，兜底注册表原文。"""
+    label = _SERVICE_LABELS.get(service_id)
+    if label is not None:
+        return label
+    for prefix, tpl in (
+        ("robot-", "「{region}」日报机器人（报数汇总 → 群内播报/催办）"),
+        ("pages-", "「{region}」榜单页生成"),
+    ):
+        if service_id.startswith(prefix):
+            return tpl.format(region=service_id[len(prefix):])
+    return description
+
+
+def _cron_zh(schedule):
+    """常见 cron 的人性化中文（仅展示；不认识的形态返回 None → 原文显示）。
+
+    覆盖注册表全部形态：每天（多）时点、每周 X、每月 D 日、每 N 分钟、
+    每小时第 M 分；其余（含月份字段）一律回退原文。
+    """
+    parts = schedule.split()
+    if len(parts) != 5:
+        return None
+    minute, hour, dom, month, dow = parts
+    if month != "*":
+        return None
+
+    def _times():
+        if not minute.isdigit():
+            return None
+        hours = hour.split(",")
+        if not all(h.isdigit() for h in hours):
+            return None
+        return "、".join(f"{int(h):02d}:{int(minute):02d}" for h in hours)
+
+    if dom == "*" and dow == "*":
+        if minute.startswith("*/") and hour == "*" and minute[2:].isdigit():
+            return f"每 {int(minute[2:])} 分钟"
+        if hour == "*" and minute.isdigit():
+            return f"每小时第 {int(minute)} 分"
+        times = _times()
+        return f"每天 {times}" if times else None
+    if dom == "*" and dow != "*":
+        days = dow.split(",")
+        times = _times()
+        if times and all(d in _CRON_DOW for d in days):
+            return "每周" + "、周".join(_CRON_DOW[d] for d in days) + f" {times}"
+        return None
+    if dom != "*" and dow == "*" and dom.isdigit():
+        times = _times()
+        return f"每月 {int(dom)} 日 {times}" if times else None
+    return None
+
+
+def _schedule_cell(schedule):
+    """定时规则列：中文人性化为主、原表达式作小字备查；无定时=常驻。"""
+    if not schedule:
+        return "<span class=\"hint\">常驻</span>"
+    zh = _cron_zh(schedule)
+    if zh is None:
+        return _esc(schedule)
+    return f"{_esc(zh)}<span class=\"hint\">（{_esc(schedule)}）</span>"
+
+
 # ---------------------------------------------------------------------------
 # 应用工厂
 # ---------------------------------------------------------------------------
@@ -584,9 +677,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<tr><td>{_esc(config.service_id)}</td>"
                 f"<td>{_esc(config.kind)}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
-                f"<td>{_esc(config.schedule)}</td>"
+                f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
-                f"<td>{_esc(config.description)}</td>"
+                f"<td>{_esc(_service_label(config.service_id, config.description))}</td>"
                 f"<td>{template}</td>"
                 f"<td>{request_cell}</td>"
                 f"<td><button onclick=\"togglePipeline("
