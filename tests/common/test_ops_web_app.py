@@ -951,13 +951,15 @@ class RosterSortTests(unittest.TestCase):
         store.rows = self._rows()
         body = self._page(store)
 
-        # 天猫两店聚合：渠道单元格 rowspan=2 只显示一次，组内编号升序
-        self.assertIn('<td rowspan="2">天猫</td>', body)
+        # 链接行模板：天猫 2 店共 3 条链接 → 渠道单元格 rowspan=3 只显示一次；
+        # 同店链接相邻：TM旗舰A（1 负责人 + 1 代填）店铺格 rowspan=2
+        self.assertIn('<td rowspan="3">天猫</td>', body)
+        self.assertIn('<td rowspan="2">TM旗舰A</td>', body)
         self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
         # 渠道序按 CHANNELS canonical：京东（idx 2）在天猫（idx 3）前
         self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
         # 默认表头带当前排序标记
-        self.assertIn('href="?sort=channel">渠道 ▾', body)
+        self.assertIn('href="?sort=channel">渠道/地区 ▾', body)
 
     def test_sort_by_target_descending(self):
         store = _RosterStore()
@@ -967,8 +969,10 @@ class RosterSortTests(unittest.TestCase):
         # 目标降序：300万 TM旗舰A > 200万 TM旗舰B > 150万 JD购喝
         self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
         self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
-        # 非渠道序不聚合：渠道单元格逐行出现、无 rowspan
-        self.assertNotIn("rowspan", body)
+        # 非渠道序渠道格不合并、逐链接行出现（天猫 3 行 = 2+1）；
+        # 店铺格仍按链接数合并
+        self.assertEqual(3, body.count("<td>天猫</td>"))
+        self.assertIn('<td rowspan="2">TM旗舰A</td>', body)
 
     def test_sort_by_owner_and_deputy(self):
         store = _RosterStore()
@@ -987,7 +991,54 @@ class RosterSortTests(unittest.TestCase):
         store = _RosterStore()
         store.rows = self._rows()
         body = self._page(store, sort="bogus")
-        self.assertIn('<td rowspan="2">天猫</td>', body)
+        self.assertIn('<td rowspan="3">天猫</td>', body)
+
+
+class RosterRegionTemplateTests(unittest.TestCase):
+    """区域区段统一链接行模板 + 个人月目标列（2026-10-07 运维裁决）。"""
+
+    def test_region_section_unified_template_with_personal_targets(self):
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note="", enabled=0),
+            _roster_row(id=13, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨项目部", person_name="周亚平",
+                        aliases=None, note=""),
+        ]
+        app = create_app(
+            settings=_fake_settings(), session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            region_targets_source=lambda: {
+                "shaoxing": {"潘良峰": 383000, "洪强": 351000},
+            },
+        )
+        client = TestClient(app)
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        # 与渠道门店同构的统一表头
+        self.assertIn(
+            "<th>渠道/地区</th><th>店铺/对象</th><th>负责人</th>"
+            "<th>代填报人</th><th>月目标（元）</th>"
+            "<th>状态</th><th>备注</th><th>更新</th><th>操作</th>",
+            body,
+        )
+        # 地区整段合并（3 行）、对象按部门合并（绍兴项目部 2 行）
+        self.assertIn('<td rowspan="3">绍兴</td>', body)
+        self.assertIn('<td rowspan="2">绍兴项目部</td>', body)
+        # 个人月目标（千分位展示）
+        self.assertIn("383,000", body)
+        self.assertIn("351,000", body)
+        # 停用链接：下拉当前值=停用
+        self.assertIn('setRosterStatus(12, this.value)', body)
+        self.assertIn('<option value="0" selected>停用</option>', body)
 
 
 class RosterPublishTests(unittest.TestCase):

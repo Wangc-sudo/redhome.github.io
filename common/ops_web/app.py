@@ -31,6 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
+from common import region_config
 from common.public_data import bi_authz, channel_target, ops_control, report_roster
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
@@ -250,6 +251,7 @@ _RUN_STATUS_LABEL = {
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
+    "update": "修正",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -428,13 +430,8 @@ def _schedule_cell(schedule):
     return f"{_esc(zh)}<span class=\"hint\">（{_esc(schedule)}）</span>"
 
 
-def _roster_link_cell(row):
-    """一条名册链接的操作单元：姓名（别名）+ 状态下拉 + 删除按钮。
-
-    状态用下拉直接修改（2026-10-07 运维裁决，取代启用/停用按钮）；
-    下拉当前值即链接状态，无需另设「(停)」标记。
-    """
-    enabled = bool(row["enabled"])
+def _link_name_html(row):
+    """链接的姓名单元（别名折叠为小字）。"""
     name_html = _esc(row["person_name"])
     if row.get("aliases"):
         try:
@@ -443,14 +440,22 @@ def _roster_link_cell(row):
             alias_text = ""
         if alias_text:
             name_html += f"<span class=\"hint\">（{_esc(alias_text)}）</span>"
+    return name_html
+
+
+def _status_select_html(row):
+    """链接的状态下拉（2026-10-07 运维裁决：下拉直接改状态，当前值即状态）。"""
+    enabled = bool(row["enabled"])
     return (
-        f"<div>{name_html}"
         f"<select onchange=\"setRosterStatus({int(row['id'])}, this.value)\">"
         f"<option value=\"1\"{' selected' if enabled else ''}>启用</option>"
         f"<option value=\"0\"{'' if enabled else ' selected'}>停用</option>"
         f"</select>"
-        f"<button onclick=\"deleteRoster({int(row['id'])})\">删</button></div>"
     )
+
+
+def _delete_btn_html(row):
+    return f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button>"
 
 
 #: 渠道门店表可排序列（2026-10-07 运维裁决）：?sort= 白名单，非法值回退默认。
@@ -460,11 +465,12 @@ _QUDAO_SORTS = ("channel", "store", "owner", "deputy", "target")
 def _qudao_section(rows, targets, numbers, sort="channel"):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
-    排序与聚合（2026-10-07 运维裁决）：渠道/店铺/负责人/代填报人/月目标
-    五列点表头排序；``sort=channel``（默认）时同渠道行聚合——渠道单元格
-    rowspan 合并只显示一次，组内按编号升序（编号冻结不随目标洗牌）。
-    目标列输入框即「草稿」，点「发布月度快照」才落 raw（publishSnapshot
-    JS 收集）。
+    统一链接行模板（2026-10-07 运维裁决）：每条名册链接一行，列为
+    渠道/地区▾ | 店铺/对象 | 负责人 | 代填报人 | 月目标（元）| 状态 | 备注 | 更新 | 操作；
+    人名按角色落列（同行只填其一），同店链接相邻、店铺与月目标单元格
+    rowspan 合并。排序：五列点表头；``sort=channel``（默认）时渠道单元格
+    同样合并、组内按编号升序。目标列输入框即「草稿」，点「发布月度快照」
+    才落 raw（publishSnapshot JS 收集）。
     """
     store_rows = {}
     for row in rows:
@@ -484,7 +490,12 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
                              if r.get("role") != "deputy"),
             "deputies": sorted(r["person_name"] for r in links
                                if r.get("role") == "deputy"),
-            "links": links,
+            # 链接行序：负责人在前、代填报人在后，各自按姓名
+            "links": sorted(
+                links,
+                key=lambda r: (1 if r.get("role") == "deputy" else 0,
+                               r["person_name"], int(r["id"])),
+            ),
         }
 
     def _channel_rank(channel):
@@ -523,67 +534,89 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
         mark = " ▾" if sort == key else ""
         return f"<th><a href=\"?sort={key}\">{_esc(label)}{mark}</a></th>"
 
+    # 展开为链接行：无链接的店保留一行（目标仍可编辑）
+    flat = []
+    for store in ordered:
+        meta = metas[store]
+        store_links = meta["links"] or [None]
+        for link in store_links:
+            flat.append((store, meta, link))
+
     body = []
     total = 0.0
-    span_left = 0
-    for position, store in enumerate(ordered):
-        meta = metas[store]
+    channel_span_left = 0
+    store_span_left = 0
+    for position, (store, meta, link) in enumerate(flat):
         cells = []
         if sort == "channel":
-            if span_left == 0:
+            if channel_span_left == 0:
                 span = 1
-                for nxt in ordered[position + 1:]:
-                    if metas[nxt]["channel"] == meta["channel"]:
+                for nxt_store, nxt_meta, _link in flat[position + 1:]:
+                    if nxt_meta["channel"] == meta["channel"]:
                         span += 1
                     else:
                         break
-                span_left = span
+                channel_span_left = span
                 channel_text = _esc(meta["channel"]) or "—"
                 cells.append(
                     f"<td rowspan=\"{span}\">{channel_text}</td>"
                     if span > 1 else f"<td>{channel_text}</td>"
                 )
-            span_left -= 1
+            channel_span_left -= 1
         else:
             cells.append(f"<td>{_esc(meta['channel']) or '—'}</td>")
-        owner_cells = [
-            _roster_link_cell(row)
-            for row in sorted(meta["links"], key=lambda r: r["person_name"])
-            if row.get("role") != "deputy"
-        ]
-        deputy_cells = [
-            _roster_link_cell(row)
-            for row in sorted(meta["links"], key=lambda r: r["person_name"])
-            if row.get("role") == "deputy"
-        ]
-        target = meta["target"]
-        target_value = "" if target is None else f"{float(target):.0f}"
-        if target:
-            total += float(target)
-        body.append(
-            "<tr>" + "".join(cells)
-            + f"<td>{_esc(meta['store_no']) if meta['store_no'] else '—'}</td>"
-            f"<td>{_esc(store)}</td>"
-            f"<td>{''.join(owner_cells) or '<span class=\"hint\">无负责人在册</span>'}</td>"
-            f"<td>{''.join(deputy_cells) or '<span class=\"hint\">—</span>'}</td>"
-            f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
-            f"data-channel=\"{_esc(meta['channel'])}\" "
-            f"value=\"{_esc(target_value)}\" "
-            f"placeholder=\"目标（元）\"></td></tr>"
-        )
+        first_of_store = store_span_left == 0
+        if first_of_store:
+            store_span = len(meta["links"]) or 1
+            store_span_left = store_span
+            target = meta["target"]
+            if target:
+                total += float(target)
+            cells.append(
+                f"<td rowspan=\"{store_span}\">{_esc(store)}</td>"
+                if store_span > 1 else f"<td>{_esc(store)}</td>"
+            )
+        store_span_left -= 1
+        if link is None:
+            cells.append(
+                "<td><span class=\"hint\">无负责人在册</span></td><td></td>"
+            )
+        elif link.get("role") == "deputy":
+            cells.append(f"<td></td><td>{_link_name_html(link)}</td>")
+        else:
+            cells.append(f"<td>{_link_name_html(link)}</td><td></td>")
+        if first_of_store:
+            target = meta["target"]
+            target_value = "" if target is None else f"{float(target):.0f}"
+            cells.append(
+                f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
+                f"data-channel=\"{_esc(meta['channel'])}\" "
+                f"value=\"{_esc(target_value)}\" "
+                f"placeholder=\"目标（元）\"></td>"
+            )
+        if link is None:
+            cells.append("<td></td><td></td><td></td><td></td>")
+        else:
+            updated = _fmt_time(link.get("updated_at")) or "—"
+            cells.append(
+                f"<td>{_status_select_html(link)}</td>"
+                f"<td>{_esc(link.get('note'))}</td>"
+                f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
+                f"<td>{_delete_btn_html(link)}</td>"
+            )
+        body.append("<tr>" + "".join(cells) + "</tr>")
     return (
         "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
         "点表头排序，默认按渠道聚合）</span></h2>"
         "<table><tr>"
-        + _th("渠道", "channel")
-        + "<th>编号</th>"
-        + _th("店铺", "store")
+        + _th("渠道/地区", "channel")
+        + _th("店铺/对象", "store")
         + _th("负责人", "owner")
         + _th("代填报人", "deputy")
         + _th("月目标（元）", "target")
-        + "</tr>"
+        + "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
         + ("".join(body)
-           or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
+           or "<tr><td colspan=\"9\" class=\"hint\">暂无记录</td></tr>")
         + "</table>"
         f"<p>合计：<strong>{total:.0f}</strong> 元 "
         "<button onclick=\"publishSnapshot()\">发布月度快照</button>"
@@ -596,10 +629,37 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
 # 应用工厂
 # ---------------------------------------------------------------------------
 
+def _build_region_targets_source():
+    """区域个人月目标源（名册页月目标列）：Nacos region-<scope>.yaml 的
+    monthlyTargets（表内用名 → 元）。未配 Nacos 返回 ``None``（页面显示 —）；
+    单区域拉取失败跳过该区域（fail-open，不拖垮名册页）。"""
+    overlay = region_config.build_nacos_region_overlay()
+    if overlay is None:
+        return None
+
+    def _fetch():
+        result = {}
+        for scope in report_roster.SCOPES:
+            if scope in ("qudao", "dining"):
+                continue
+            try:
+                data = overlay(f"region-{scope}.yaml")
+            except Exception:
+                data = None
+            targets = (data or {}).get("monthlyTargets") or {}
+            if targets:
+                result[scope] = targets
+        return result
+
+    return _fetch
+
+
+
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
                fleet_source=None, config_source=None,
-               config_publisher=None, corp_id=None, agent_id=None) -> FastAPI:
+               config_publisher=None, corp_id=None, agent_id=None,
+               region_targets_source=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -1204,6 +1264,18 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
 
+        try:
+            # 区域个人月目标（Nacos region-<scope>.yaml monthlyTargets）；
+            # fail-open：注册表抖动时该区域目标列显示 —。
+            region_targets = (
+                region_targets_source() if region_targets_source else {}
+            )
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web region targets fetch failed: %s", type(exc).__name__
+            )
+            region_targets = {}
+
         by_scope = {scope: [] for scope in report_roster.SCOPES}
         for row in entries:
             by_scope.setdefault(row["scope"], []).append(row)
@@ -1229,42 +1301,56 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                                    "——渠道机器人回退读月目标表 owners_json。")
                                 + "</p>")
                 continue
+            # 统一链接行模板（2026-10-07 运维裁决，与渠道门店同构）：
+            # 渠道/地区 | 店铺/对象 | 负责人 | 代填报人 | 月目标（元）|
+            # 状态 | 备注 | 更新 | 操作。地区列整段合并、对象列按值合并；
+            # 月目标取区域 Nacos monthlyTargets（个人粒度，无则 —）。
+            person_targets = region_targets.get(scope) or {}
+            sorted_rows = sorted(
+                rows,
+                key=lambda r: (str(r["entity_key"]), str(r["person_name"]),
+                               int(r["id"])),
+            )
+            spans: dict = {}
+            for row in sorted_rows:
+                key = str(row["entity_key"])
+                spans[key] = spans.get(key, 0) + 1
+            seen: set = set()
             body = []
-            for row in rows:
-                aliases_text = ""
-                if row.get("aliases"):
-                    try:
-                        aliases_text = "、".join(json.loads(row["aliases"]))
-                    except (ValueError, TypeError):
-                        aliases_text = ""
-                enabled = bool(row["enabled"])
-                status_select = (
-                    f"<select onchange=\"setRosterStatus({int(row['id'])}, "
-                    f"this.value)\">"
-                    f"<option value=\"1\"{' selected' if enabled else ''}>启用</option>"
-                    f"<option value=\"0\"{'' if enabled else ' selected'}>停用</option>"
-                    f"</select>"
+            for position, row in enumerate(sorted_rows):
+                cells = []
+                if position == 0:
+                    cells.append(
+                        f"<td rowspan=\"{len(sorted_rows)}\">"
+                        f"{_esc(scope_label)}</td>"
+                        if len(sorted_rows) > 1
+                        else f"<td>{_esc(scope_label)}</td>"
+                    )
+                key = str(row["entity_key"])
+                if key not in seen:
+                    seen.add(key)
+                    cells.append(
+                        f"<td rowspan=\"{spans[key]}\">{_esc(key)}</td>"
+                        if spans[key] > 1 else f"<td>{_esc(key)}</td>"
+                    )
+                personal_target = person_targets.get(row["person_name"])
+                target_text = (
+                    f"{float(personal_target):,.0f}"
+                    if personal_target else "—"
                 )
                 updated = _fmt_time(row.get("updated_at")) or "—"
-                role_text = (
-                    _label(_ROLE_LABEL, row.get("role") or "owner")
-                    if row["entity_type"] == "store" else "—"
-                )
-                body.append(
-                    f"<tr><td>{_esc(_label(_ENTITY_LABEL, row['entity_type']))}</td>"
-                    f"<td>{_esc(row['entity_key'])}</td>"
-                    f"<td>{_esc(row['person_name'])}</td>"
-                    f"<td>{_esc(role_text)}</td>"
-                    f"<td>{_esc(aliases_text)}</td>"
-                    f"<td>{status_select}</td>"
+                cells.append(
+                    f"<td>{_link_name_html(row)}</td><td></td>"
+                    f"<td>{target_text}</td>"
+                    f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
                     f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
-                    f"<td><button onclick=\"deleteRoster({int(row['id'])})\">"
-                    f"删除</button></td></tr>"
+                    f"<td>{_delete_btn_html(row)}</td>"
                 )
+                body.append("<tr>" + "".join(cells) + "</tr>")
             sections.append(
-                "<table><tr><th>类型</th><th>对象</th><th>填报人</th>"
-                "<th>角色</th><th>别名</th>"
+                "<table><tr><th>渠道/地区</th><th>店铺/对象</th><th>负责人</th>"
+                "<th>代填报人</th><th>月目标（元）</th>"
                 "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
             )
@@ -1494,6 +1580,7 @@ def main():
             config_publisher=build_config_publisher(),
             corp_id=corp_id,
             agent_id=agent_id,
+            region_targets_source=_build_region_targets_source(),
         )
     except Exception as exc:
         print(f"ops-web startup failed: invalid configuration ({type(exc).__name__})")
