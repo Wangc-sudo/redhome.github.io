@@ -34,6 +34,13 @@ from common.bi_web import auth, authz
 from common.public_data import bi_authz, channel_target, ops_control, report_roster
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
+from common.public_data.pipeline_taxonomy import (
+    CATEGORY_CLASS,
+    CATEGORY_FAMILY,
+    CLASS_ORDER,
+    SUPPORTED_CATEGORIES,
+    resolve_category,
+)
 from common.public_data.scheduler import has_command
 
 _LOGGER = logging.getLogger(__name__)
@@ -170,6 +177,7 @@ function addPipeline(ev) {
   postJSON('/api/pipelines/add', {
     service_id: f.service_id.value.trim(),
     kind: f.kind.value,
+    category: f.category.value,
     schedule: f.schedule.value.trim(),
     enabled: f.enabled.checked,
     depends_on: f.depends_on.value.split(/[\\s,]+/).filter(Boolean),
@@ -434,26 +442,9 @@ def _service_label(service_id, description):
     return description
 
 
-#: 功能分类（定时任务页「功能」列）：显式映射优先，家族按前缀归类。
-_SERVICE_FUNCTIONS = {
-    "roll-manifest": "同步",
-    "sync-dingtalk": "同步",
-    "sync-wdt": "同步",
-    "sync-runner": "同步",
-    "sync-channel-sales": "同步",
-    "project-mart": "加工",
-    "extract-mart": "加工",
-    "extract-channel": "加工",
-    "channel-missing-check": "催办",
-    "channel-daily-qudao": "播报",
-    "offline-daily-summary": "播报",
-    "offline-weekly-summary": "播报",
-    "offline-monthly-summary": "播报",
-    "dingtalk-gateway": "钉钉",
-    "bi-web": "平台",
-    "scheduler": "平台",
-    "ops-web": "平台",
-}
+#: 功能分类已沉为注册表真源（PipelineConfig.category，七值与推导逻辑
+#: 见 common.public_data.pipeline_taxonomy）；本页只保留展示层：
+#: 真源优先、未配置的存量条目按 service_id 推导兜底。
 
 #: 无 family 前缀但绑定区域的服务（「管理群」列用；pages-qudao-t1 的
 #: pages- 后缀是 qudao-t1 不是区域，必须显式登记）。
@@ -466,22 +457,9 @@ _SERVICE_REGIONS = {
     "offline-monthly-summary": "offline_all",
 }
 
-_FUNCTION_FAMILY = (
-    ("robot-", "催办"),
-    ("pages-", "页面"),
-    ("leaderboard-", "播报"),
-)
-
-
-def _service_function(service_id):
-    """功能列：显式映射 → 家族前缀 → 空（未归类）。"""
-    label = _SERVICE_FUNCTIONS.get(service_id)
-    if label is not None:
-        return label
-    for prefix, function in _FUNCTION_FAMILY:
-        if service_id.startswith(prefix):
-            return function
-    return "—"
+def _category_label(config):
+    """功能列：注册表 category 真源优先，未配置按 service_id 推导兜底。"""
+    return resolve_category(config.service_id, config.category) or "—"
 
 
 def _service_region(service_id):
@@ -489,7 +467,7 @@ def _service_region(service_id):
     region = _SERVICE_REGIONS.get(service_id)
     if region is not None:
         return region
-    for prefix, _ in _FUNCTION_FAMILY:
+    for prefix, _ in CATEGORY_FAMILY:
         if service_id.startswith(prefix):
             return service_id[len(prefix):]
     return None
@@ -503,25 +481,12 @@ def _group_cell(service_id):
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
-#: 三表分类（定时任务页分表）：数据线=同步/加工，应用类=平台/钉钉，
-#: 业务线=播报/催办/页面；未归类按注册表 kind 兜底。
-_CLASS_BY_FUNCTION = {
-    "同步": "数据线",
-    "加工": "数据线",
-    "播报": "业务线",
-    "催办": "业务线",
-    "页面": "业务线",
-    "钉钉": "应用类",
-    "平台": "应用类",
-}
-
-
-def _service_class(service_id, kind):
-    """三表分类：功能映射优先；未归类按注册表 kind 兜底。"""
-    label = _CLASS_BY_FUNCTION.get(_service_function(service_id))
-    if label is not None:
-        return label
-    return "业务线" if kind == "business" else "应用类"
+def _service_class(config):
+    """三表分类：category（真源/推导）→ 归类映射；未归类按注册表 kind 兜底。"""
+    category = resolve_category(config.service_id, config.category)
+    if category is not None:
+        return CATEGORY_CLASS[category]
+    return "业务线" if config.kind == "business" else "应用类"
 
 
 def _cron_zh(schedule):
@@ -1169,7 +1134,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             service_id = row.get("service_id") if isinstance(row, dict) else row[1]
             if service_id not in latest:
                 latest[service_id] = row
-        buckets = {"应用类": [], "业务线": [], "数据线": []}
+        buckets = {title: [] for title in CLASS_ORDER}
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -1204,11 +1169,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<option value=\"toggle\">{toggle_label}</option>"
                 f"{run_option}</select>"
             )
-            buckets[_service_class(config.service_id, config.kind)].append(
+            buckets[_service_class(config)].append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{_group_cell(config.service_id)}</td>"
-                f"<td>{_esc(_service_function(config.service_id))}</td>"
+                f"<td>{_esc(_category_label(config))}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
@@ -1224,7 +1189,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<th>最近运行</th><th>操作</th></tr>"
         )
         table = ["<h1>定时任务（管道注册表）</h1>"]
-        for title in ("应用类", "业务线", "数据线"):
+        for title in CLASS_ORDER:
             table.append(
                 f"<h2>{title}</h2><table>{header}"
                 + "".join(buckets[title]) + "</table>"
@@ -1233,8 +1198,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
             "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
-            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台；分表=按功能归类"
-            "（应用类/业务线/数据线），与注册表「类型」真源无关。</p>"
+            "「功能」= 注册表 category 真源（未配置按服务标识推导兜底）；"
+            "分表=按功能归类（应用类/业务线/数据线），与注册表「类型」"
+            "（kind）无关。</p>"
             "<div id=\"confirm-mask\" class=\"modal-mask\">"
             "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
             "<div class=\"modal-btns\">"
@@ -1251,6 +1217,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<option value=\"business\">业务线</option>"
             "<option value=\"apps\">应用线</option>"
             "</select>"
+            "<select name=\"category\">"
+            "<option value=\"\">功能（留空按标识推导）</option>"
+            + "".join(
+                f"<option value=\"{_esc(c)}\">{_esc(c)}</option>"
+                for c in SUPPORTED_CATEGORIES
+            )
+            + "</select>"
             "<input name=\"schedule\" placeholder=\"定时规则（分 时 日 月 周，如 0 18 * * * = 每天 18:00）\" required>"
             "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
@@ -1404,6 +1377,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 enabled=payload.get("enabled", True),
                 description=payload.get("description", ""),
                 depends_on=depends_on,
+                category=payload.get("category") or None,
             )
         except ops_control.OpsControlError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)

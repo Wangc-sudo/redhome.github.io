@@ -480,6 +480,47 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("钉钉", body)                    # dingtalk-gateway
         self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
 
+    def test_pipelines_page_category_truth_overrides_derivation(self):
+        """category 真源优先：注册表配置覆盖 service_id 推导（功能列+分表）。
+
+        sync-wdt 推导=同步（数据线）；注册表配 category=催办 后，
+        功能列显示催办、整行落在业务线段。
+        """
+        configs = {"sync-wdt": {"schedule": "0 2 * * *", "category": "催办"}}
+        app = create_app(
+            settings=_fake_settings(),
+            session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            fleet_source=lambda: ("sync-wdt",),
+            config_source=StaticConfigSource(configs),
+            config_publisher=None,
+        )
+        client = TestClient(app)
+        _login(client)
+        body = client.get("/pipelines").text
+
+        biz_i = body.index("<h2>业务线</h2>")
+        data_i = body.index("<h2>数据线</h2>")
+        row_i = body.index("sync-wdt")
+        self.assertLess(biz_i, row_i)          # 落业务线段（真源胜出）
+        self.assertLess(row_i, data_i)
+        row_html = body[row_i:data_i]
+        # 功能单元格（管理群列之后）显示真源「催办」，推导值「同步」不占位
+        self.assertIn("</td><td>催办</td>", row_html)
+        self.assertNotIn("</td><td>同步</td>", row_html)
+
+    def test_pipelines_page_add_form_offers_category_select(self):
+        """新增表单带 category 下拉：空值=按标识推导，七值可选。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn('name="category"', body)
+        self.assertIn("功能（留空按标识推导）", body)
+        for category in ("同步", "加工", "播报", "催办", "页面", "钉钉", "平台"):
+            self.assertIn(f'<option value="{category}">{category}</option>', body)
+
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
         store.audit_rows = [("admin", "add", "robot-x", "0 2 * * *", "2026-09-30 10:00:00")]
@@ -681,6 +722,28 @@ class PipelineAddTests(unittest.TestCase):
         self.assertEqual(
             [(ADMIN_USERID, "add", "robot-x", "0 2 * * *")], store.audit
         )
+
+    def test_add_publishes_category_and_rejects_unknown(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=publisher))
+        _login(client)
+        with store.patch_audit():
+            ok = client.post(
+                "/api/pipelines/add",
+                json={"service_id": "robot-x", "kind": "business",
+                      "category": "催办", "schedule": "0 2 * * *"},
+            )
+            bad = client.post(
+                "/api/pipelines/add",
+                json={"service_id": "robot-y", "kind": "business",
+                      "category": "别的", "schedule": "0 2 * * *"},
+            )
+
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual("催办", publisher.published[0].category)
+        self.assertEqual(400, bad.status_code)
+        self.assertEqual(1, len(publisher.published))  # 非法 category 不落注册表
 
     def test_add_rejects_invalid_fields(self):
         store = _PipelineStore()

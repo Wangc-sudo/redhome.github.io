@@ -10,6 +10,7 @@ from common.public_data.pipeline_config import (
     NacosConfigSource,
     PipelineConfigError,
     StaticConfigSource,
+    backfill_categories,
     build_config_source,
     parse_pipeline_config,
     publish_pipelines,
@@ -187,6 +188,86 @@ class PublishPipelinesTests(unittest.TestCase):
     def test_rejects_invalid_entry(self):
         with self.assertRaises(PipelineConfigError):
             publish_pipelines(_FakeNacosClient(), {"x": {"enabled": "nope"}})
+
+
+class CategoryFieldTests(unittest.TestCase):
+    def test_category_parsed_and_round_trips(self):
+        config = parse_pipeline_config("robot-hangzhou", {"category": "催办"})
+        self.assertEqual(config.category, "催办")
+        self.assertEqual(config.to_mapping()["category"], "催办")
+        self.assertEqual(
+            parse_pipeline_config("robot-hangzhou", config.to_mapping()), config
+        )
+
+    def test_category_defaults_to_none_and_omitted(self):
+        config = parse_pipeline_config("sync-wdt", {"kind": "apps"})
+        self.assertIsNone(config.category)
+        self.assertNotIn("category", config.to_mapping())
+
+    def test_rejects_unknown_category(self):
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"category": "别的"})
+
+
+class BackfillCategoriesTests(unittest.TestCase):
+    def setUp(self):
+        self.client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP):
+                "enabled: true\nkind: apps\nschedule: '0 2 * * *'\n",
+            ("robot-hangzhou.yaml", DEFAULT_GROUP):
+                "enabled: false\nkind: business\ncategory: 催办\n",
+            ("mystery-line.yaml", DEFAULT_GROUP): "kind: business\n",
+        })
+
+    def test_apply_fills_missing_and_preserves_fields(self):
+        result = backfill_categories(
+            self.client,
+            ("sync-wdt", "robot-hangzhou", "mystery-line", "ghost"),
+            apply=True,
+        )
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual(["robot-hangzhou"], result["skipped"])
+        self.assertEqual(["mystery-line"], result["unclassified"])
+
+        import yaml
+        data = yaml.safe_load(self.client.configs[("sync-wdt.yaml", DEFAULT_GROUP)])
+        self.assertEqual("同步", data["category"])
+        self.assertEqual("apps", data["kind"])        # 原文字段原样保留
+        self.assertEqual("0 2 * * *", data["schedule"])
+        # 已配置/未归类/无条目的均不写
+        self.assertEqual(1, len(self.client.published))
+
+    def test_dry_run_writes_nothing(self):
+        result = backfill_categories(self.client, ("sync-wdt",), apply=False)
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual([], self.client.published)
+
+    def test_invalid_existing_category_not_clobbered(self):
+        client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP): "category: 别的\n"
+        })
+        result = backfill_categories(client, ("sync-wdt",), apply=True)
+        self.assertEqual(["sync-wdt"], result["unclassified"])
+        self.assertEqual([], client.published)
+
+
+class SeedCategoryConsistencyTests(unittest.TestCase):
+    def test_seed_categories_match_taxonomy_derivation(self):
+        """seed 每条目的 category 合法且与 service_id 推导一致（防双源漂移）。"""
+        from pathlib import Path
+
+        from common.public_data.pipeline_config import load_seed
+        from common.public_data.pipeline_taxonomy import (
+            SUPPORTED_CATEGORIES,
+            derive_category,
+        )
+
+        seed = load_seed(Path("docker/integration/pipelines.seed.yaml"))
+        self.assertTrue(seed)
+        for service_id, raw in seed.items():
+            category = raw.get("category")
+            self.assertIn(category, SUPPORTED_CATEGORIES, service_id)
+            self.assertEqual(derive_category(service_id), category, service_id)
 
 
 if __name__ == "__main__":

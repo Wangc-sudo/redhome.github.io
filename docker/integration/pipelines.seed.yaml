@@ -7,14 +7,20 @@
 # (a) the fallback used when Nacos is unreachable and (b) the default for a
 # fresh environment.  Keys are service ids; the data-id is "<key>.yaml" in
 # the "PIPELINES" group under the environment's namespace.
+#
+# category（功能分类真源，七值：同步/加工/播报/催办/页面/钉钉/平台）——
+# 2026-10-07 起落库；未配置时读路径按 service_id 推导兜底
+# （common.public_data.pipeline_taxonomy）。
 roll-manifest:
   kind: apps
+  category: 同步
   enabled: true
   schedule: "55 1,6,13,15 * * *"
   reads: []
   description: "rolls the source manifest's WDT windows forward (runs before each sync round)"
 sync-dingtalk:
   kind: apps
+  category: 同步
   enabled: true
   sources: [dingtalk]
   schedule: "0 2,7,14,16 * * *"
@@ -22,6 +28,7 @@ sync-dingtalk:
   description: "DingTalk AI sheets -> raw_dingtalk"
 sync-wdt:
   kind: apps
+  category: 同步
   enabled: true
   sources: [wdt]
   schedule: "0 2,7,14,16 * * *"
@@ -30,36 +37,42 @@ sync-wdt:
   description: "WDT read APIs -> raw_wdt"
 project-mart:
   kind: apps
+  category: 加工
   enabled: true
   schedule: "0 3 * * *"
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "raw -> mart_ops projection rebuild"
 extract-mart:
   kind: apps
+  category: 加工
   enabled: true
   schedule: "0 4,8,15,17 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
 robot-hangzhou:
   kind: business
+  category: 催办
   enabled: true
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "hangzhou daily-report robot (mart_ops -> robot_outbox)"
 pages-hangzhou:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "hangzhou leaderboard HTML page generation"
 channel-daily-qudao:
   kind: business
+  category: 播报
   enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "qudao channel daily report broadcast - 已并入 qudao 榜单页（渠道日销快报板块），2026-09-23 停单独播报"
 robot-vanke:
   kind: business
+  category: 催办
   # 2026-09-30 关停：催办口径错配（fact 按单元名、名单按人名 → 恒判 6 人全未填，
   # 每天 18:00 @6 + 20:00 check + DING 全员；吴金澎 7 天被 @ 12 次）。Nacos 同步置 false。
   # 数据通道不受影响（sync-dingtalk / 报数流 / pages-vanke 榜单照常）。
@@ -69,24 +82,28 @@ robot-vanke:
   description: "vanke daily-report robot (mart_ops -> robot_outbox)"
 pages-vanke:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "vanke leaderboard HTML page generation"
 pages-shaoxing:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "shaoxing leaderboard HTML page generation"
 pages-junpin:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "junpin leaderboard HTML page generation"
 pages-qudao:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8,15,17 * * *"
   reads: [mart_ops]
@@ -95,12 +112,14 @@ pages-qudao:
 # 灰度发布：四条线先 enabled:false 手工 dry-run，确认后放行（P4）。
 sync-channel-sales:
   kind: apps
+  category: 同步
   enabled: false
   schedule: "31 10 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "渠道日销 T+1 补采（dingtalk channel_daily_sales* + channel_monthly_target）"
 extract-channel:
   kind: apps
+  category: 加工
   enabled: false
   schedule: "35 10 * * *"
   reads: [raw_dingtalk, mart_ops]
@@ -108,6 +127,7 @@ extract-channel:
   description: "渠道日销 T+1 提取（fact_channel_daily_sales + fact_channel_store_target，点名册依赖）"
 channel-missing-check:
   kind: business
+  category: 催办
   enabled: false
   schedule: "40 10 * * *"
   reads: [mart_ops]
@@ -115,6 +135,7 @@ channel-missing-check:
   description: "渠道门店到齐校验与催办（region=qudao，同步失败 fail-closed 跳过）"
 pages-qudao-t1:
   kind: business
+  category: 页面
   enabled: false
   schedule: "45 10 * * *"
   reads: [mart_ops]
@@ -122,6 +143,7 @@ pages-qudao-t1:
   description: "qudao 榜单页 T+1 重算（leaderboard-html --date yesterday）"
 pages-offline_all:
   kind: business
+  category: 页面
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
@@ -132,94 +154,110 @@ pages-offline_all:
 # 播报时间由 ops-web 定时任务（管道注册表）单线调整，Nacos 为准。
 leaderboard-hangzhou:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "hangzhou leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-shaoxing:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "shaoxing leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-vanke:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "vanke leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-qudao:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-offline_all:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "offline_all leaderboard group broadcast (mart_ops -> robot_outbox)"
 offline-daily-summary:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 20 * * *"
   reads: [mart_ops]
   description: "offline_all daily aggregation summary (scopes + dod/wow + mtd)"
 offline-weekly-summary:
   kind: business
+  category: 播报
   enabled: true
   schedule: "30 9 * * 1"
   reads: [mart_ops]
   description: "offline_all weekly summary (last week totals + wow + ranking)"
 offline-monthly-summary:
   kind: business
+  category: 播报
   enabled: true
   schedule: "0 10 1 * *"
   reads: [mart_ops]
   description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
 robot-shaoxing:
   kind: business
+  category: 催办
   enabled: true
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "shaoxing daily-report robot (mart_ops -> robot_outbox)"
 robot-junpin:
   kind: business
+  category: 催办
   enabled: true
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "junpin daily-report robot (mart_ops -> robot_outbox)"
 robot-qudao:
   kind: business
+  category: 催办
   enabled: true
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "qudao daily-report robot (mart_ops -> robot_outbox)"
 robot-offline_all:
   kind: business
+  category: 催办
   enabled: true
   schedule: "0 18,20 * * *"
   reads: [mart_ops]
   description: "offline_all daily-report robot (mart_ops -> robot_outbox)"
 dingtalk-gateway:
   kind: apps
+  category: 钉钉
   enabled: true
   reads: [mart_ops]
   description: "robot_outbox delivery + DingTalk interaction gateway"
 sync-runner:
   kind: apps
+  category: 同步
   enabled: true
   schedule: "0 2 * * *"
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "legacy combined sync (both sources)"
 bi-web:
   kind: business
+  category: 平台
   enabled: true
   reads: [mart_ops]
   description: "BI dashboards (L1/L2), read-only on mart_ops"
 scheduler:
   kind: apps
+  category: 平台
   enabled: true
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "fires registered pipelines on their registry cron schedules (no own schedule)"
