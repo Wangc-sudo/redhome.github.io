@@ -24,7 +24,9 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
-from common.public_data import channel_target, ops_control, report_roster
+from common.public_data import (
+    bi_authz, channel_target, ops_control, report_roster,
+)
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -444,6 +446,74 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("同步", body)                    # sync-wdt
         self.assertIn("钉钉", body)                    # dingtalk-gateway
         self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
+
+    def test_pipelines_page_reminder_targets(self):
+        """收受影响人列：robot=名册在册人员（绑定）；渠道到齐=名册店铺负责人。"""
+        connection = _Connection({
+            "dim_robot_member": [
+                ("u1", "张三", "hangzhou", "门店一部"),
+                ("u2", "李四", "hangzhou", "门店二部"),
+                ("u3", "王五", "shaoxing", "项目部"),
+            ],
+            "entity_type` = 'person'": [("张三",)],   # 名册：hangzhou 只登记张三
+            "entity_type` = 'store'": [
+                ("天猫-A店", "赵六"),
+                ("京东-B店", "钱七"),
+                ("京东-B店", "赵六"),
+            ],
+        })
+        fleet = ("robot-hangzhou", "channel-missing-check", "sync-wdt")
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=fleet, connection=connection))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("收受影响人", body)     # 新列表头
+        self.assertIn("张三", body)
+        self.assertIn("（1 人 · 名册）", body)  # robot- 名册绑定：只列在册的张三
+        self.assertNotIn("李四", body)         # 非在册成员不收影响
+        self.assertIn("赵六、钱七", body)      # 渠道名册负责人（去重排序）
+        self.assertIn("（2 人 · 2 店）", body)
+        self.assertNotIn("王五", body)         # 无 robot-shaoxing 行不展示
+        self.assertNotIn("读取失败", body)
+
+    def test_pipelines_page_reminder_targets_fail_open_all_members(self):
+        """名册无记录 → 区域在册填报人全员兜底（与机器人 fail-open 同语义）。"""
+        connection = _Connection({
+            "dim_robot_member": [
+                ("u1", "张三", "hangzhou", "门店一部"),
+                ("u2", "李四", "hangzhou", "门店二部"),
+            ],
+        })
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("robot-hangzhou",),
+            connection=connection))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("张三、李四", body)
+        self.assertIn("（2 人 · 全员兜底）", body)
+
+    def test_pipelines_page_reminder_targets_empty_roster_hint(self):
+        """渠道名册未登记 → 如实标注机器人回退月目标表 owners_json。"""
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("channel-missing-check",)))
+        _login(client)
+        body = client.get("/pipelines").text
+        self.assertIn("回退月目标表 owners_json", body)
+
+    def test_pipelines_page_reminder_targets_fail_soft(self):
+        """收受影响人读取故障 → 本列「读取失败」，整页不拖垮。"""
+        def _boom(conn):
+            raise RuntimeError("db down")
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("robot-hangzhou",)))
+        _login(client)
+        with mock.patch.object(bi_authz, "fetch_active_members", _boom):
+            response = client.get("/pipelines")
+        self.assertEqual(200, response.status_code)
+        self.assertIn("读取失败", response.text)
+        self.assertIn("robot-hangzhou", response.text)
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()

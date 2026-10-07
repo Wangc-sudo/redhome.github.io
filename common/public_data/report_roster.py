@@ -725,10 +725,12 @@ def fetch_intake_target(connection, scope, person_name, year_month):
     return float(value) if value is not None else None
 
 
-def person_allowed(connection, scope, name, aliases=None):
-    """日报区域 fail-open 白名单：该 scope 无启用在册人员 → 放行（维持现状）。
+def fetch_scope_person_names(connection, scope):
+    """该 scope 启用在册人员名集合（``entity_type='person'``）；无记录 → ``None``。
 
-    有启用记录时，*name* 本人或其 aliases 映射后的表内用名须在册。
+    ``None`` 即 fail-open（维持现状）：与 :func:`person_allowed` 同一查询、
+    同一「缺字段的非名册行不计入」纪律。消费面：报数门禁（person_allowed）
+    与催办绑定（2026-10-07 运维裁决「催办只催名册在册的人」）共用此真源。
     """
     rows = _fetch_all(
         connection,
@@ -736,14 +738,21 @@ def person_allowed(connection, scope, name, aliases=None):
         "WHERE `scope` = %s AND `entity_type` = 'person' AND `enabled` = 1",
         (scope,),
     )
-    # 只认带有效 person_name 的行：缺字段的非名册行过滤后为空，仍按
-    # fail-open 处理（与「无启用记录不拦截」语义一致）。
-    allowed = set()
+    names = set()
     for row in rows:
         value = row.get("person_name") if isinstance(row, dict) else row[0]
         if value:
-            allowed.add(value)
-    if not allowed:
+            names.add(value)
+    return frozenset(names) if names else None
+
+
+def person_allowed(connection, scope, name, aliases=None):
+    """日报区域 fail-open 白名单：该 scope 无启用在册人员 → 放行（维持现状）。
+
+    有启用记录时，*name* 本人或其 aliases 映射后的表内用名须在册。
+    """
+    allowed = fetch_scope_person_names(connection, scope)
+    if allowed is None:
         return True
     table_name = (aliases or {}).get(name, name)
     return name in allowed or table_name in allowed

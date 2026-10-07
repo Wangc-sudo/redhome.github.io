@@ -5,7 +5,9 @@
 ``do_check`` 的区别只在**数据来源与投递方式**，文案逐字一致：
 
 * 名单来自 ``mart_ops``（``dim_robot_member`` + 事实表反连接，经
-  :mod:`common.metrics.daily_report`），不再直连钉钉 AI 表；
+  :mod:`common.metrics.daily_report`），不再直连钉钉 AI 表；催办覆盖面
+  绑定填报名册（``dim_report_roster``，fail-open：该 scope 无启用
+  在册人员时维持全员口径）；
 * 消息写 ``robot_outbox`` 由 ``dingtalk-gateway`` 投递，不再调钉钉 client；
 * 幂等由 outbox 唯一键承载（``region:kind:business_date``），不再用
   ``stateFile``——机器人变为无状态。
@@ -23,6 +25,7 @@ from common.metrics.daily_report import (
     fetch_workdays,
     unfilled_members,
 )
+from common.public_data.report_roster import fetch_scope_person_names
 
 
 _WEEKDAYS = "一二三四五六日"
@@ -108,6 +111,12 @@ def _require_workday(connection, business_date):
 
 def _unfilled(connection, region, business_date, aliases):
     members = fetch_region_members(connection, region=region)
+    # 催办绑定名册（2026-10-07 运维裁决「催办应该绑定在填报名册里的人，
+    # 其他人不收影响」）：该 scope 有启用在册人员时只催在册的；名册无
+    # 记录（fail-open）维持现状，与报数门禁同一真源同一语义。
+    roster = fetch_scope_person_names(connection, region)
+    if roster is not None:
+        members = [m for m in members if m["name"] in roster]
     filled = fetch_filled_names(
         connection, region=region, business_date=business_date
     )
