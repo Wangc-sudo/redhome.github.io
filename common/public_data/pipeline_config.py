@@ -368,6 +368,55 @@ def backfill_categories(client, service_ids, group=DEFAULT_GROUP, apply=True):
     return result
 
 
+def split_robot_check(client, service_ids, group=DEFAULT_GROUP, apply=True):
+    """robot-<region> 一拆二（2026-10-07 裁决）：check 独立成线。
+
+    对舰队中每个 ``robot-<region>``（``robot-check-`` 除外）：
+    - ``robot-<r>.yaml``：schedule 重写为 ``0 18 * * *``（填报提醒），
+      其余字段（enabled/category/reads/description 等）原样保留；
+    - ``robot-check-<r>.yaml``：以 robot 原文复制、schedule 改为
+      ``0 20 * * *``（催办未填人+DING，继承 enabled——vanke 关停随之
+      继承）；已存在则整条跳过（不覆盖人工调整）。
+
+    ``apply=False`` 为 dry-run：只报告将要发生的动作。
+    返回 ``{"remind_fixed": [...], "check_created": [...], "skipped": [...]}``。
+    """
+    result = {"remind_fixed": [], "check_created": [], "skipped": []}
+    for service_id in service_ids:
+        if not service_id.startswith("robot-"):
+            continue
+        if service_id.startswith("robot-check-"):
+            continue
+        region = service_id[len("robot-"):]
+        if not region:
+            continue
+        data_id = f"{service_id}.yaml"
+        content = client.get_config(data_id, group)
+        if not content:
+            continue
+        data = _load_yaml(content, f"nacos config {data_id}")
+        if not isinstance(data, dict):
+            raise PipelineConfigError(f"pipeline '{service_id}' must be a mapping")
+        check_id = f"robot-check-{region}"
+        if client.get_config(f"{check_id}.yaml", group):
+            result["skipped"].append(service_id)
+            continue
+        if apply:
+            remind = dict(data)
+            remind["schedule"] = "0 18 * * *"
+            client.publish_config(
+                data_id, group, _dump_yaml(remind), config_type="yaml"
+            )
+            check = dict(data)
+            check["schedule"] = "0 20 * * *"
+            client.publish_config(
+                f"{check_id}.yaml", group, _dump_yaml(check), config_type="yaml"
+            )
+        result["remind_fixed"].append(service_id)
+        result["check_created"].append(check_id)
+    return result
+
+
 def build_config_publisher(environ=None):
     """Nacos 管道注册表发布器（ops-web 写面）；未配置 Nacos 返回 None。
 

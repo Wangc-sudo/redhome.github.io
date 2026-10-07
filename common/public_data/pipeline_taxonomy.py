@@ -50,7 +50,10 @@ SERVICE_CATEGORIES = {
 }
 
 #: 家族前缀归类（新区域服务注册即自动归类，无需改代码）。
+#: robot-check- 必须排在 robot- 前（同前缀，长者优先；2026-10-07
+#: robot 一拆二：robot-=填报提醒、robot-check-=催办未填人+DING）。
 CATEGORY_FAMILY = (
+    ("robot-check-", "催办"),
     ("robot-", "催办"),
     ("pages-", "页面"),
     ("leaderboard-", "播报"),

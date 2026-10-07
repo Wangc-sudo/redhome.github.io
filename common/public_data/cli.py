@@ -800,6 +800,55 @@ def _handle_import_manual(args):
         sys.exit(1)
 
 
+def _handle_split_robot_check(args):
+    """robot-<region> 一拆二（默认 dry-run，--apply 才写 Nacos）。
+
+    robot-=填报提醒(18:00)、robot-check-=催办未填+DING(20:00)；
+    robot 条目 schedule 改写为 18 点，robot-check 条目复制创建（已存在
+    跳过），其余字段原样保留。
+    """
+    try:
+        import os
+
+        from common.public_data.nacos_client import build_nacos_client
+        from common.public_data.pipeline_config import (
+            DEFAULT_GROUP,
+            split_robot_check,
+        )
+        from common.public_data.scheduler import build_fleet_source
+
+        env = os.environ
+        server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+        if not server:
+            raise RuntimeError("PUBLIC_DATA_NACOS_SERVER is required")
+        client = build_nacos_client(
+            server,
+            namespace=(env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip(),
+            username=(env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None,
+            password=(env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None,
+        )
+        group = (env.get("PUBLIC_DATA_NACOS_GROUP") or "").strip() or DEFAULT_GROUP
+        fleet = build_fleet_source()()
+        result = split_robot_check(client, fleet, group=group, apply=args.apply)
+        mode = "apply" if args.apply else "dry-run"
+        print(
+            f"split-robot-check({mode}): remind_fixed={len(result['remind_fixed'])}"
+            f" check_created={len(result['check_created'])}"
+            f" skipped={len(result['skipped'])}"
+        )
+        for service_id in result["remind_fixed"]:
+            print(f"  remind->18:00 {service_id}")
+        for service_id in result["check_created"]:
+            print(f"  check->20:00  {service_id}")
+        for service_id in result["skipped"]:
+            print(f"  skipped(check exists): {service_id}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="split_robot_check_error")
+        sys.exit(1)
+
+
 def _handle_status(args):
     print("status: ok")
 
@@ -913,6 +962,16 @@ def main(argv=None):
         help="write to Nacos (default: dry-run classification report only)",
     )
 
+    # -- split-robot-check ----------------------------------------------------
+    split = subparsers.add_parser(
+        "split-robot-check",
+        help="Split robot-<region> into remind (18:00) + robot-check (20:00)",
+    )
+    split.add_argument(
+        "--apply", action="store_true", default=False,
+        help="write to Nacos (default: dry-run action report only)",
+    )
+
     # -- roll-manifest --------------------------------------------------------
     roll = subparsers.add_parser(
         "roll-manifest",
@@ -1005,6 +1064,7 @@ def main(argv=None):
         "extract-mart": _handle_extract_mart,
         "publish-pipelines": _handle_publish_pipelines,
         "backfill-pipeline-categories": _handle_backfill_pipeline_categories,
+        "split-robot-check": _handle_split_robot_check,
         "roll-manifest": _handle_roll_manifest,
         "publish-bi": _handle_publish_bi,
         "migrate": _handle_migrate,

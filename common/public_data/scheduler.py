@@ -117,7 +117,9 @@ def _pages_entry(region, *extra):
     )
 
 
-#: 日报机器人区域（robot-<region> → mart_cli once）
+#: 日报机器人区域（robot-<region> → mart_cli remind 填报提醒；
+#: robot-check-<region> → mart_cli check 催办未填人+DING，
+#: 2026-10-07 裁决：check 从 once 小时分流拆出，独立注册/调度/可手动运行）
 _ROBOT_REGIONS = ("hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all")
 
 #: 榜单页区域（pages-<region> → mart_cli leaderboard-html）
@@ -159,7 +161,11 @@ _COMMAND_TABLE = {
     # 偏离执行提示词 §2.4——其 yesterday 前提与 resolve_channel_business_date
     # 的既有锚定语义冲突）。
     "pages-qudao-t1": _pages_entry("qudao"),
-    **{f"robot-{r}": _mart_cli_entry("once", region=r) for r in _ROBOT_REGIONS},
+    **{f"robot-{r}": _mart_cli_entry("remind", region=r) for r in _ROBOT_REGIONS},
+    **{
+        f"robot-check-{r}": _mart_cli_entry("check", region=r)
+        for r in _ROBOT_REGIONS
+    },
     "channel-daily-qudao": _mart_cli_entry("channel-daily", region="qudao"),
     **{f"pages-{r}": _pages_entry(r) for r in _PAGES_REGIONS},
     **{
@@ -185,7 +191,8 @@ def command_spec(service_id):
     """调度命令模板：显式命令表优先，robot-/pages- 家族按后缀泛化解析。
 
     泛化（2026-09-30，ops-web「可添加」A 方案）：``robot-<region>`` →
-    ``mart_cli once``、``pages-<region>`` → ``leaderboard-html``，新区域
+    ``mart_cli remind``、``robot-check-<region>`` → ``mart_cli check``
+    （2026-10-07 拆分）、``pages-<region>`` → ``leaderboard-html``，新区域
     注册即可调度、无需改代码；region 合法性由 mart_cli 运行时校验
     （未知 region 子进程非零退出，日志可观测）。无模板返回 None。
     """
@@ -193,7 +200,9 @@ def command_spec(service_id):
     if spec is not None:
         return spec
     for prefix, builder in (
-        ("robot-", lambda region: _mart_cli_entry("once", region=region)),
+        # robot-check- 必须先于 robot-（同前缀，长者优先）。
+        ("robot-check-", lambda region: _mart_cli_entry("check", region=region)),
+        ("robot-", lambda region: _mart_cli_entry("remind", region=region)),
         ("pages-", _pages_entry),
         ("leaderboard-", lambda region: _mart_cli_entry("leaderboard", region=region)),
     ):
