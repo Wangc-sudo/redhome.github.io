@@ -408,7 +408,8 @@ def _service_name(service_id):
     if name is not None:
         return name
     for prefix, tpl in (
-        ("robot-", "「{region}」日报机器人"),
+        ("robot-check-", "「{region}」催办未填+DING"),
+        ("robot-", "「{region}」填报提醒"),
         ("pages-", "「{region}」榜单页"),
         ("leaderboard-", "「{region}」榜单播报"),
     ):
@@ -432,7 +433,8 @@ def _service_label(service_id, description):
     if label is not None:
         return label
     for prefix, tpl in (
-        ("robot-", "「{region}」日报机器人（报数汇总 → 群内播报/催办）"),
+        ("robot-check-", "「{region}」催办未填人 + DING（报数核对 → 群内 @ + DING）"),
+        ("robot-", "「{region}」填报提醒（报数汇总 → 群内提醒）"),
         ("pages-", "「{region}」榜单页生成"),
         ("leaderboard-", "「{region}」榜单群播报（销售完成率榜 → 群）"),
     ):
@@ -1229,7 +1231,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"
             "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; / "
+            "<p class=\"hint\">robot-&lt;区域&gt;（填报提醒）/ "
+            "robot-check-&lt;区域&gt;（催办未填+DING）/ pages-&lt;区域&gt; / "
             "leaderboard-&lt;区域&gt; "
             "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"

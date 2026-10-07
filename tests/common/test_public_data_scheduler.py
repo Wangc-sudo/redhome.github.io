@@ -497,7 +497,14 @@ def test_scheduler_consults_registered_dep_probes_first():
 
 def test_command_spec_robot_family_generalizes_region():
     spec = command_spec("robot-hangzhou")
-    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "once"]
+    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "remind"]
+    assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
+
+
+def test_command_spec_robot_check_family_maps_to_check():
+    """robot-check-<region> → mart_cli check（2026-10-07 拆分：催办未填+DING 独立成线）。"""
+    spec = command_spec("robot-check-hangzhou")
+    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "check"]
     assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
 
 
@@ -524,12 +531,14 @@ def test_command_spec_explicit_wins_over_family():
 def test_command_spec_rejects_dash_in_family_region():
     # 家族 region 不允许中划线（显式表已优先）
     assert command_spec("robot-qudao-t1") is None
+    assert command_spec("robot-check-qudao-t1") is None
     assert command_spec("pages-foo-bar") is None
     assert command_spec("leaderboard-qudao-t1") is None
 
 
 def test_command_spec_empty_region_is_none():
     assert command_spec("robot-") is None
+    assert command_spec("robot-check-") is None
     assert command_spec("pages-") is None
     assert command_spec("leaderboard-") is None
 
@@ -541,6 +550,7 @@ def test_command_spec_unknown_is_none():
 
 def test_has_command_mirrors_command_spec():
     assert has_command("robot-hangzhou") is True
+    assert has_command("robot-check-hangzhou") is True
     assert has_command("pages-qudao") is True
     assert has_command("leaderboard-hangzhou") is True
     assert has_command("sync-wdt") is True

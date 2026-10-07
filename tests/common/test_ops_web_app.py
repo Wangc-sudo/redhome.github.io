@@ -407,7 +407,7 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("杭州", body)              # 服务中文名（区域中文化）
         self.assertIn("0 2 * * *", body)         # 原表达式作小字备查
         self.assertIn("每天 02:00", body)        # cron 人性化
-        self.assertIn("日报机器人", body)        # robot- 家族中文说明（动态生成）
+        self.assertIn("填报提醒", body)          # robot- 家族中文说明（动态生成）
         self.assertIn("运行一次", body)          # 有命令模板 → 可运行
         self.assertIn("成功", body)              # 最近运行（finished 中文化）
         self.assertIn("新增定时任务", body)
@@ -608,8 +608,10 @@ class ZhLabelTests(unittest.TestCase):
     def test_service_label_curated_family_and_fallback(self):
         from common.ops_web.app import _service_label
         self.assertIn("滚动源清单", _service_label("roll-manifest", "rolls..."))
-        self.assertEqual("「杭州」日报机器人（报数汇总 → 群内播报/催办）",
+        self.assertEqual("「杭州」填报提醒（报数汇总 → 群内提醒）",
                          _service_label("robot-hangzhou", "hangzhou daily..."))
+        self.assertEqual("「杭州」催办未填人 + DING（报数核对 → 群内 @ + DING）",
+                         _service_label("robot-check-hangzhou", "hangzhou..."))
         self.assertEqual("「万科&大莲花&团购」榜单页生成",
                          _service_label("pages-vanke", "vanke leaderboard..."))
         self.assertEqual("原文保留", _service_label("mystery", "原文保留"))
@@ -617,14 +619,22 @@ class ZhLabelTests(unittest.TestCase):
     def test_service_name_curated_family_and_fallback(self):
         from common.ops_web.app import _service_name, _service_name_cell
         self.assertEqual("滚动清单", _service_name("roll-manifest"))
-        self.assertEqual("「杭州」日报机器人", _service_name("robot-hangzhou"))
+        self.assertEqual("「杭州」填报提醒", _service_name("robot-hangzhou"))
+        self.assertEqual("「杭州」催办未填+DING",
+                         _service_name("robot-check-hangzhou"))
         self.assertEqual("「绍兴」榜单页", _service_name("pages-shaoxing"))
         self.assertEqual("mystery", _service_name("mystery"))
         # 有中文名：中文为主、id 小字备查；无中文名：只显示 id
         cell = _service_name_cell("robot-hangzhou")
-        self.assertIn("「杭州」日报机器人", cell)
+        self.assertIn("「杭州」填报提醒", cell)
         self.assertIn("（robot-hangzhou）", cell)
         self.assertEqual("mystery", _service_name_cell("mystery"))
+
+    def test_service_region_robot_check_maps_region(self):
+        """robot-check-<region> 管理群区域解析（家族长者优先于 robot-）。"""
+        from common.ops_web.app import _group_cell
+        self.assertIn("「杭州」群", _group_cell("robot-check-hangzhou"))
+        self.assertIn("「杭州」群", _group_cell("robot-hangzhou"))
 
     def test_fmt_time_converts_utc_to_beijing(self):
         from datetime import datetime, timezone

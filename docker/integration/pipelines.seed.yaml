@@ -49,13 +49,23 @@ extract-mart:
   schedule: "0 4,8,15,17 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
+# robot 一拆二（2026-10-07 裁决）：robot-<区域>=填报提醒(18:00)，
+# robot-check-<区域>=催办未填人+DING(20:00)，独立注册/调度/可手动运行，
+# 手动触发不再受 mart_cli once 的小时分流限制。
 robot-hangzhou:
   kind: business
   category: 催办
   enabled: true
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "hangzhou daily-report robot (mart_ops -> robot_outbox)"
+  description: "hangzhou daily-report remind (mart_ops -> robot_outbox)"
+robot-check-hangzhou:
+  kind: business
+  category: 催办
+  enabled: true
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "hangzhou unfilled check + DING (mart_ops -> robot_outbox)"
 pages-hangzhou:
   kind: business
   category: 页面
@@ -77,9 +87,17 @@ robot-vanke:
   # 每天 18:00 @6 + 20:00 check + DING 全员；吴金澎 7 天被 @ 12 次）。Nacos 同步置 false。
   # 数据通道不受影响（sync-dingtalk / 报数流 / pages-vanke 榜单照常）。
   enabled: false
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "vanke daily-report robot (mart_ops -> robot_outbox)"
+  description: "vanke daily-report remind (mart_ops -> robot_outbox)"
+robot-check-vanke:
+  kind: business
+  category: 催办
+  # 随 robot-vanke 一并关停（同一口径错配根因）。
+  enabled: false
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "vanke unfilled check + DING (mart_ops -> robot_outbox)"
 pages-vanke:
   kind: business
   category: 页面
@@ -212,30 +230,58 @@ robot-shaoxing:
   kind: business
   category: 催办
   enabled: true
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "shaoxing daily-report robot (mart_ops -> robot_outbox)"
+  description: "shaoxing daily-report remind (mart_ops -> robot_outbox)"
+robot-check-shaoxing:
+  kind: business
+  category: 催办
+  enabled: true
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "shaoxing unfilled check + DING (mart_ops -> robot_outbox)"
 robot-junpin:
   kind: business
   category: 催办
   enabled: true
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "junpin daily-report robot (mart_ops -> robot_outbox)"
+  description: "junpin daily-report remind (mart_ops -> robot_outbox)"
+robot-check-junpin:
+  kind: business
+  category: 催办
+  enabled: true
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "junpin unfilled check + DING (mart_ops -> robot_outbox)"
 robot-qudao:
   kind: business
   category: 催办
   enabled: true
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "qudao daily-report robot (mart_ops -> robot_outbox)"
+  description: "qudao daily-report remind (mart_ops -> robot_outbox)"
+robot-check-qudao:
+  kind: business
+  category: 催办
+  enabled: true
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "qudao unfilled check + DING (mart_ops -> robot_outbox)"
 robot-offline_all:
   kind: business
   category: 催办
   enabled: true
-  schedule: "0 18,20 * * *"
+  schedule: "0 18 * * *"
   reads: [mart_ops]
-  description: "offline_all daily-report robot (mart_ops -> robot_outbox)"
+  description: "offline_all daily-report remind (mart_ops -> robot_outbox)"
+robot-check-offline_all:
+  kind: business
+  category: 催办
+  enabled: true
+  schedule: "0 20 * * *"
+  reads: [mart_ops]
+  description: "offline_all unfilled check + DING (mart_ops -> robot_outbox)"
 dingtalk-gateway:
   kind: apps
   category: 钉钉
