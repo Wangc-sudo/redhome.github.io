@@ -11,6 +11,7 @@ import unittest
 
 from common.public_data import ops_control
 from common.public_data.ops_control import (
+    DbRunHistoryGateway,
     DbRunRequestGateway,
     OpsControlError,
     RunRequest,
@@ -90,6 +91,17 @@ def _make_db():
         " service_id VARCHAR(64) NOT NULL,"
         " detail VARCHAR(255) DEFAULT NULL,"
         " created_at VARCHAR(32) NOT NULL)"
+    )
+    wrapper.cursor().execute(
+        "CREATE TABLE pd_ops_run_history ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " service_id VARCHAR(64) NOT NULL,"
+        " trigger_type TEXT NOT NULL,"
+        " status TEXT NOT NULL DEFAULT 'running',"
+        " exit_code INT DEFAULT NULL,"
+        " note VARCHAR(255) DEFAULT NULL,"
+        " started_at VARCHAR(32) NOT NULL,"
+        " finished_at VARCHAR(32) DEFAULT NULL)"
     )
     conn.commit()
     return wrapper
@@ -249,6 +261,78 @@ class PipelineAuditTests(unittest.TestCase):
             ops_control.fetch_pipeline_audit(self.db, 1001)
 
 
+# -- 定时任务执行流水生命周期 -------------------------------------------------
+
+class RunHistoryLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_insert_and_fetch_running_row(self):
+        hid = ops_control.insert_run_history(self.db, "robot-hangzhou", "cron")
+        self.assertTrue(hid)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["service_id"], "robot-hangzhou")
+        self.assertEqual(rows[0]["trigger_type"], "cron")
+        self.assertEqual(rows[0]["status"], "running")
+        self.assertIsNone(rows[0]["finished_at"])
+
+    def test_invalid_trigger_type_rejected(self):
+        with self.assertRaises(OpsControlError):
+            ops_control.insert_run_history(self.db, "robot-x", "manual")
+
+    def test_finish_zero_is_finished(self):
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.finish_run_history(self.db, hid, 0)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["status"], "finished")
+        self.assertEqual(rows[0]["exit_code"], 0)
+        self.assertIsNotNone(rows[0]["finished_at"])
+
+    def test_finish_nonzero_is_failed(self):
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.finish_run_history(self.db, hid, 3)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertEqual(rows[0]["exit_code"], 3)
+
+    def test_finish_none_is_failed_with_note(self):
+        # 锁被占用/运行异常（无退出码）：failed + 说明。
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.finish_run_history(self.db, hid, None)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertIsNone(rows[0]["exit_code"])
+        self.assertIsNotNone(rows[0]["note"])
+
+    def test_finish_is_idempotent_on_already_finished(self):
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.finish_run_history(self.db, hid, 0)
+        ops_control.finish_run_history(self.db, hid, 1)  # 迟到回写不覆盖
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["status"], "finished")
+        self.assertEqual(rows[0]["exit_code"], 0)
+
+    def test_fetch_filter_by_service_id(self):
+        ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.insert_run_history(self.db, "robot-hangzhou", "run_once")
+        rows = ops_control.fetch_run_history(self.db, service_id="sync-wdt")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["service_id"], "sync-wdt")
+
+    def test_fetch_rejects_bad_service_id_filter(self):
+        with self.assertRaises(OpsControlError):
+            ops_control.fetch_run_history(self.db, service_id="BAD ID' OR 1=1")
+
+    def test_fetch_limit_validation(self):
+        with self.assertRaises(OpsControlError):
+            ops_control.fetch_run_history(self.db, 0)
+        with self.assertRaises(OpsControlError):
+            ops_control.fetch_run_history(self.db, 1001)
+        with self.assertRaises(OpsControlError):
+            ops_control.fetch_run_history(self.db, True)
+
+
 # -- scheduler 侧网关（DbRunRequestGateway） --------------------------------
 
 class DbRunRequestGatewayTests(unittest.TestCase):
@@ -273,6 +357,24 @@ class DbRunRequestGatewayTests(unittest.TestCase):
         self.gateway.mark_rejected(rid, "无调度命令映射")
         rows = ops_control.fetch_recent_requests(self.db)
         self.assertEqual(rows[0]["status"], "rejected")
+
+
+# -- scheduler 侧网关（DbRunHistoryGateway） ---------------------------------
+
+class DbRunHistoryGatewayTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+        self.connect = lambda settings: self.db
+        self.gateway = DbRunHistoryGateway(self.connect, None)
+
+    def test_gateway_roundtrip(self):
+        hid = self.gateway.record_start("pages-qudao", "cron")
+        self.assertTrue(hid)
+        self.gateway.record_finish(hid, 0)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["service_id"], "pages-qudao")
+        self.assertEqual(rows[0]["trigger_type"], "cron")
+        self.assertEqual(rows[0]["status"], "finished")
 
 
 if __name__ == "__main__":
