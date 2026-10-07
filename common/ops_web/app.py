@@ -1157,7 +1157,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<p class=\"hint\">渠道门店（qudao）：管理「谁可以填哪些店」，渠道机器人"
             "实时生效；日报区域（杭州/绍兴等）：该范围一旦有人名记录即启用白名单"
             "（只准在册人员填报），无记录则不拦截；餐饮/部门先登记，机器人后续接入。"
-            "「删除」会留审计，日常调整建议用「停用」。</p>"
+            "「删除」会留审计，日常调整建议用「停用」。"
+            "<strong>人名一律用通讯录本名（不用花名/昵称）</strong>；"
+            "别名仅用于群昵称与本名不一致的匹配容错。</p>"
         )
         audit_rows = "".join(
             f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
@@ -1272,12 +1274,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except channel_target.ChannelTargetError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         try:
-            with db_connector() as connection:
-                deleted, inserted, missing = channel_target.publish_snapshot(
-                    connection, target_rows, actor=viewer.userid
-                )
+            with db_connector() as mart_connection:
+                raw_connection = connect(settings.dingtalk_database)
+                try:
+                    deleted, inserted, missing = channel_target.publish_snapshot(
+                        raw_connection, target_rows, actor=viewer.userid,
+                        roster_connection=mart_connection,
+                    )
+                finally:
+                    raw_connection.close()
                 request_id = ops_control.insert_run_request(
-                    connection, "extract-mart", viewer.userid
+                    mart_connection, "extract-mart", viewer.userid
                 )
         except Exception as exc:
             _LOGGER.warning("ops-web publish snapshot failed: %s", type(exc).__name__)

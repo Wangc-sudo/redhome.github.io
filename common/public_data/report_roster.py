@@ -16,6 +16,11 @@
 唯一写方，每次变更与同事务的一行 audit 同生共死。月目标仍归
 ``channel_monthly_target``（AI 表人工维护 → 后续程序维护），名册与目标
 自此分表，互不覆盖。
+
+命名纪律（2026-10-07 运维裁决）：``person_name`` 一律使用**通讯录本名**
+（如 NDJX、张瑾萱），不登记花名/昵称（历史上的「习酒酒旗-夏惠敏」等
+仅存在于停用审计行）。``aliases`` 列仅用于群昵称与本名不一致时的匹配
+容错，不是花名登记处。
 """
 
 import json
@@ -205,12 +210,21 @@ def _insert_audit(connection, actor, action, entry, detail=""):
 
 
 def write_audit(connection, actor, action, scope, entity_key, detail=""):
-    """公开审计入口（如 channel_target 发布快照）；entity_type 推定。"""
+    """公开审计入口（如 channel_target 发布快照）；entity_type 推定。
+
+    自包事务——供已在其他事务/其他库完成主写入后独立落一行审计的场景
+    （名册内部写路径仍用 ``_insert_audit`` 同事务语义，不经过本函数）。
+    """
     entity_type = "store" if scope == "qudao" else "person"
-    _insert_audit(
-        connection, actor, action,
-        RosterEntry(scope, entity_type, entity_key, "*"), detail=detail,
-    )
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            _insert_audit(
+                connection, actor, action,
+                RosterEntry(scope, entity_type, entity_key, "*"), detail=detail,
+            )
+    finally:
+        cursor.close()
 
 
 # ---------------------------------------------------------------------------
