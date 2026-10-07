@@ -466,11 +466,12 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
     统一链接行模板（2026-10-07 运维裁决）：每条名册链接一行，列为
-    渠道/地区▾ | 店铺/对象 | 负责人 | 代填报人 | 月目标（元）| 状态 | 备注 | 更新 | 操作；
-    人名按角色落列（同行只填其一），同店链接相邻、店铺与月目标单元格
-    rowspan 合并。排序：五列点表头；``sort=channel``（默认）时渠道单元格
-    同样合并、组内按编号升序。目标列输入框即「草稿」，点「发布月度快照」
-    才落 raw（publishSnapshot JS 收集）。
+    渠道/地区▾ | 店铺/对象 | 月目标（元）| 负责人 | 代填报人 | 状态 | 备注 | 更新 | 操作
+    ——聚合列（渠道/店铺/月目标）靠左、链接列靠右。人名按角色落列
+    （同行只填其一），同店链接相邻、店铺与月目标单元格 rowspan 合并。
+    排序：五列点表头；``sort=channel``（默认）时渠道单元格同样合并、
+    组内按编号升序。目标列输入框即「草稿」，点「发布月度快照」才落
+    raw（publishSnapshot JS 收集）。
     """
     store_rows = {}
     for row in rows:
@@ -615,9 +616,9 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
         "<table><tr>"
         + _th("渠道/地区", "channel")
         + _th("店铺/对象", "store")
+        + _th("月目标（元）", "target")
         + _th("负责人", "owner")
         + _th("代填报人", "deputy")
-        + _th("月目标（元）", "target")
         + "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
         + ("".join(body)
            or "<tr><td colspan=\"9\" class=\"hint\">暂无记录</td></tr>")
@@ -1344,8 +1345,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 )
                 updated = _fmt_time(row.get("updated_at")) or "—"
                 cells.append(
-                    f"<td>{_link_name_html(row)}</td><td></td>"
                     f"<td>{target_text}</td>"
+                    f"<td>{_link_name_html(row)}</td><td></td>"
                     f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
                     f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
@@ -1353,8 +1354,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 )
                 body.append("<tr>" + "".join(cells) + "</tr>")
             sections.append(
-                "<table><tr><th>渠道/地区</th><th>店铺/对象</th><th>负责人</th>"
-                "<th>代填报人</th><th>月目标（元）</th>"
+                "<table><tr><th>渠道/地区</th><th>店铺/对象</th>"
+                "<th>月目标（元）</th><th>负责人</th><th>代填报人</th>"
                 "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
             )

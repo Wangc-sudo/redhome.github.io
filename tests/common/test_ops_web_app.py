@@ -1078,10 +1078,10 @@ class RosterRegionTemplateTests(unittest.TestCase):
         with store.patch_fetch(), store.patch_audit():
             body = client.get("/roster").text
 
-        # 与渠道门店同构的统一表头
+        # 与渠道门店同构的统一表头（聚合列靠左：月目标在店铺之后）
         self.assertIn(
-            "<th>渠道/地区</th><th>店铺/对象</th><th>负责人</th>"
-            "<th>代填报人</th><th>月目标（元）</th>"
+            "<th>渠道/地区</th><th>店铺/对象</th><th>月目标（元）</th>"
+            "<th>负责人</th><th>代填报人</th>"
             "<th>状态</th><th>备注</th><th>更新</th><th>操作</th>",
             body,
         )
