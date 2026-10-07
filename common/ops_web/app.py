@@ -573,10 +573,22 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
             target = meta["target"]
             if target:
                 total += float(target)
-            cells.append(
+            store_cell = (
                 f"<td rowspan=\"{store_span}\">{_esc(store)}</td>"
                 if store_span > 1 else f"<td>{_esc(store)}</td>"
             )
+            target_value = "" if target is None else f"{float(target):.0f}"
+            # 月目标格参与店铺聚合（与店铺格同 rowspan，紧随店铺格）——
+            # 聚合列（渠道/店铺/月目标）靠左、链接列靠右（2026-10-07 裁决）。
+            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
+            target_cell = (
+                f"<td{rowspan}><input class=\"roster-target\" "
+                f"data-store=\"{_esc(store)}\" "
+                f"data-channel=\"{_esc(meta['channel'])}\" "
+                f"value=\"{_esc(target_value)}\" "
+                f"placeholder=\"目标（元）\"></td>"
+            )
+            cells.append(store_cell + target_cell)
         store_span_left -= 1
         if link is None:
             cells.append(
@@ -586,19 +598,6 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
             cells.append(f"<td></td><td>{_link_name_html(link)}</td>")
         else:
             cells.append(f"<td>{_link_name_html(link)}</td><td></td>")
-        if first_of_store:
-            target = meta["target"]
-            target_value = "" if target is None else f"{float(target):.0f}"
-            # 月目标格参与店铺聚合（与店铺格同 rowspan）——否则该店第 2 条
-            # 链接行少一格，后续列整体错位。
-            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
-            cells.append(
-                f"<td{rowspan}><input class=\"roster-target\" "
-                f"data-store=\"{_esc(store)}\" "
-                f"data-channel=\"{_esc(meta['channel'])}\" "
-                f"value=\"{_esc(target_value)}\" "
-                f"placeholder=\"目标（元）\"></td>"
-            )
         if link is None:
             cells.append("<td></td><td></td><td></td><td></td>")
         else:

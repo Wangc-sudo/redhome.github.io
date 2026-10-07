@@ -1029,6 +1029,20 @@ class RosterSortTests(unittest.TestCase):
         self.assertIn('<td rowspan="2"><input class="roster-target"', body)
         self.assertEqual(1, body.count('data-store="TM旗舰A"'))
 
+    def test_data_cells_follow_header_column_order(self):
+        # 单元格内容序 = 表头列序（2026-10-07 列序调整回归：
+        # 月目标格必须出现在负责人格之前，而非仅表头换序）
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store)
+        first_row = re.search(
+            r"<tr><td>京东</td>(.*?)</tr>", body, re.S
+        ).group(1)
+        self.assertLess(
+            first_row.index('data-store="JD购喝"'),   # 月目标格
+            first_row.index("娄灿斌"),                 # 负责人格
+        )
+
         # 区域表（绍兴 3 链接）同样平衡
         store2 = _RosterStore()
         store2.rows = [
