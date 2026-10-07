@@ -127,6 +127,33 @@ def report_roster_v3_ddl_statements() -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# v4（2026-10-07，运维裁决「所有数据入库」）：区域个人月目标表
+# ---------------------------------------------------------------------------
+
+#: 区域个人月目标真源（取代 Nacos region-<scope>.yaml monthlyTargets 的
+#: 运维通道；Nacos 值保留为机器人快照的兜底）。按月键控（year_month），
+#: 每月换新键录入；审计复用 dim_report_roster_audit（action='target'）。
+_TARGET_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_report_target` (\n"
+    "  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+    "  `scope` VARCHAR(32) NOT NULL,\n"
+    "  `person_name` VARCHAR(64) NOT NULL,\n"
+    "  `year_month` VARCHAR(7) NOT NULL,\n"
+    "  `monthly_target` DECIMAL(14,4) DEFAULT NULL,\n"
+    "  `note` VARCHAR(255) DEFAULT NULL,\n"
+    "  `updated_by` VARCHAR(64) DEFAULT NULL,\n"
+    "  `updated_at` DATETIME(6) DEFAULT NULL,\n"
+    "  UNIQUE KEY `uk_report_target` (`scope`, `person_name`, `year_month`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def report_roster_v4_ddl_statements() -> tuple:
+    """v4 增量 DDL：dim_report_target（区域个人月目标入库，2026-10-07）。"""
+    return (_TARGET_DDL,)
+
+
+# ---------------------------------------------------------------------------
 # 写面校验（ops-web 名册表单）
 # ---------------------------------------------------------------------------
 
@@ -580,6 +607,122 @@ def fetch_store_role_map(connection, scope="qudao"):
         }
         for key, buckets in role_map.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# 区域个人月目标（dim_report_target，v4「所有数据入库」）
+# ---------------------------------------------------------------------------
+
+_YEAR_MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
+
+
+@dataclass(frozen=True)
+class ReportTarget:
+    """一条规范化后的区域个人月目标（upsert 的输入）。"""
+
+    scope: str
+    person_name: str
+    year_month: str
+    monthly_target: float | None
+    note: str = ""
+
+
+def validate_target_fields(scope, person_name, year_month, monthly_target,
+                           note=""):
+    """校验区域月目标字段，返回规范化的 :class:`ReportTarget`。
+
+    monthly_target 单位为元、可空（空 = 清除该人当月目标）；非法抛
+    :class:`ReportRosterError`（消息只含字段名，不含值）。
+    """
+    if scope not in SCOPES or scope == "qudao":
+        raise ReportRosterError("scope must be a registered region scope")
+    person_name = (
+        person_name.strip() if isinstance(person_name, str) else person_name
+    )
+    if not person_name or not isinstance(person_name, str) \
+            or not _NAME_RE.match(person_name):
+        raise ReportRosterError("person_name is required (no spaces/commas)")
+    if not isinstance(year_month, str) or not _YEAR_MONTH_RE.match(year_month):
+        raise ReportRosterError("year_month must be YYYY-MM")
+    if monthly_target is not None:
+        if isinstance(monthly_target, bool) or not isinstance(
+                monthly_target, (int, float)):
+            raise ReportRosterError("monthly_target must be a number or null")
+        monthly_target = float(monthly_target)
+        if monthly_target != monthly_target or monthly_target < 0 \
+                or monthly_target == float("inf"):
+            raise ReportRosterError("monthly_target must be a finite >= 0")
+    if note is None:
+        note = ""
+    if not isinstance(note, str) or len(note) > 255:
+        raise ReportRosterError("note must be a string of at most 255 chars")
+    return ReportTarget(scope, person_name, year_month, monthly_target,
+                        note.strip())
+
+
+def upsert_report_target(connection, entry, *, actor):
+    """新增/更新一条区域个人月目标，同事务落一行审计（action='target'）。"""
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "INSERT INTO `dim_report_target` "
+                "(`scope`, `person_name`, `year_month`, `monthly_target`, "
+                "`note`, `updated_by`, `updated_at`) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                "`monthly_target` = VALUES(`monthly_target`), "
+                "`note` = VALUES(`note`), "
+                "`updated_by` = VALUES(`updated_by`), "
+                "`updated_at` = VALUES(`updated_at`)",
+                (entry.scope, entry.person_name, entry.year_month,
+                 entry.monthly_target, entry.note or None, actor,
+                 _utc_now_text()),
+            )
+            _insert_audit(
+                connection, actor, "target",
+                RosterEntry(entry.scope, "person", entry.year_month,
+                            entry.person_name),
+                detail=(f"月目标={entry.monthly_target:.0f}"
+                        if entry.monthly_target is not None else "月目标=清除"),
+            )
+    finally:
+        cursor.close()
+
+
+def fetch_person_targets(connection, scope, year_month):
+    """名册页月目标列：``{person_name: monthly_target}``（指定年月）。"""
+    rows = _fetch_all(
+        connection,
+        "SELECT `person_name`, `monthly_target` FROM `dim_report_target` "
+        "WHERE `scope` = %s AND `year_month` = %s",
+        (scope, year_month),
+    )
+    result = {}
+    for row in rows:
+        name = row.get("person_name") if isinstance(row, dict) else row[0]
+        value = (
+            row.get("monthly_target") if isinstance(row, dict) else row[1]
+        )
+        if name and value is not None:
+            result[name] = float(value)
+    return result
+
+
+def fetch_intake_target(connection, scope, person_name, year_month):
+    """机器人报数快照源：该人该月目标（无记录 → ``None``，调用方兜底）。"""
+    rows = _fetch_all(
+        connection,
+        "SELECT `monthly_target` FROM `dim_report_target` "
+        "WHERE `scope` = %s AND `person_name` = %s AND `year_month` = %s "
+        "LIMIT 1",
+        (scope, person_name, year_month),
+    )
+    if not rows:
+        return None
+    value = rows[0].get("monthly_target") if isinstance(rows[0], dict) \
+        else rows[0][0]
+    return float(value) if value is not None else None
 
 
 def person_allowed(connection, scope, name, aliases=None):

@@ -1,5 +1,5 @@
 """ops-web 应用装配：权限管理（grant 增删 + 审计流水 + 批量区域开通）
-与定时任务管理（管道列表 / 开关 / 新增 / 立即运行一次）。
+与定时任务管理（管道列表 / 开关 / 新增 / 立即运行一次 / 执行流水）。
 
 访问控制双闸（铁律 8）：
 
@@ -31,7 +31,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common import region_config
 from common.public_data import bi_authz, channel_target, ops_control, report_roster
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
@@ -161,6 +160,20 @@ function addRoster(ev) {
 function setRosterStatus(id, value) {
   postJSON('/api/roster/toggle', {id: id, enabled: value === '1'});
 }
+async function saveRegionTargets(scope) {
+  const rows = [];
+  document.querySelectorAll('input.person-target[data-scope="' + scope + '"]').forEach(function (el) {
+    const raw = el.value.trim();
+    rows.push({person_name: el.dataset.name, monthly_target: raw === '' ? null : Number(raw)});
+  });
+  const resp = await fetch('/api/roster/region-targets', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scope: scope, rows: rows}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('保存失败（' + resp.status + '）');
+}
 function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
   postJSON('/api/roster/delete', {id: id});
@@ -199,6 +212,7 @@ def _page(title, *sections, viewer_name=""):
         "<a href=\"/audit\">审计流水</a>"
         "<a href=\"/pipelines\">定时任务</a>"
         "<a href=\"/pipelines/audit\">任务审计</a>"
+        "<a href=\"/pipelines/history\">执行流水</a>"
         "<a href=\"/roster\">填报名册</a>"
         "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
@@ -215,9 +229,13 @@ def _esc(value):
 _BJT = timezone(timedelta(hours=8))
 
 
+def _current_year_month():
+    """当前年月（北京时间，``YYYY-MM``）——区域月目标的键。"""
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m")
+
+
 def _fmt_time(value):
     """UTC 存储时间 → 北京时间字符串；None/认不出的原样返回。
-
     入参兼容 pymysql 返回的 datetime 与字符串两种形态；naive 一律按 UTC
     解读（与 sync_runs/robot_outbox 等表的存储约定一致）。
     """
@@ -247,7 +265,9 @@ _RUN_STATUS_LABEL = {
     "rejected": "已拒绝",
     "pending": "等待调度",
     "launched": "运行中",
+    "running": "运行中",
 }
+_TRIGGER_LABEL = {"cron": "定时", "run_once": "手动"}
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
@@ -350,7 +370,6 @@ def _service_name(service_id):
     for prefix, tpl in (
         ("robot-", "「{region}」日报机器人"),
         ("pages-", "「{region}」榜单页"),
-        ("leaderboard-", "「{region}」榜单播报"),
     ):
         if service_id.startswith(prefix):
             region = service_id[len(prefix):]
@@ -367,88 +386,18 @@ def _service_name_cell(service_id):
 
 
 def _service_label(service_id, description):
-    """服务中文说明：策展映射优先，家族动态生成，兜底注册表原文。"""
+    """服务中文说明：策展映射优先，robot-/pages- 家族动态生成，兜底注册表原文。"""
     label = _SERVICE_LABELS.get(service_id)
     if label is not None:
         return label
     for prefix, tpl in (
         ("robot-", "「{region}」日报机器人（报数汇总 → 群内播报/催办）"),
         ("pages-", "「{region}」榜单页生成"),
-        ("leaderboard-", "「{region}」榜单群播报（销售完成率榜 → 群）"),
     ):
         if service_id.startswith(prefix):
             region = service_id[len(prefix):]
             return tpl.format(region=_REGION_LABELS.get(region, region))
     return description
-
-
-#: 功能分类（定时任务页「功能」列）：显式映射优先，家族按前缀归类。
-_SERVICE_FUNCTIONS = {
-    "roll-manifest": "同步",
-    "sync-dingtalk": "同步",
-    "sync-wdt": "同步",
-    "sync-runner": "同步",
-    "sync-channel-sales": "同步",
-    "project-mart": "加工",
-    "extract-mart": "加工",
-    "extract-channel": "加工",
-    "channel-missing-check": "催办",
-    "channel-daily-qudao": "播报",
-    "offline-daily-summary": "播报",
-    "offline-weekly-summary": "播报",
-    "offline-monthly-summary": "播报",
-    "dingtalk-gateway": "钉钉",
-    "bi-web": "平台",
-    "scheduler": "平台",
-    "ops-web": "平台",
-}
-
-#: 无 family 前缀但绑定区域的服务（「管理群」列用；pages-qudao-t1 的
-#: pages- 后缀是 qudao-t1 不是区域，必须显式登记）。
-_SERVICE_REGIONS = {
-    "channel-daily-qudao": "qudao",
-    "channel-missing-check": "qudao",
-    "pages-qudao-t1": "qudao",
-    "offline-daily-summary": "offline_all",
-    "offline-weekly-summary": "offline_all",
-    "offline-monthly-summary": "offline_all",
-}
-
-_FUNCTION_FAMILY = (
-    ("robot-", "催办"),
-    ("pages-", "页面"),
-    ("leaderboard-", "播报"),
-)
-
-
-def _service_function(service_id):
-    """功能列：显式映射 → 家族前缀 → 空（未归类）。"""
-    label = _SERVICE_FUNCTIONS.get(service_id)
-    if label is not None:
-        return label
-    for prefix, function in _FUNCTION_FAMILY:
-        if service_id.startswith(prefix):
-            return function
-    return "—"
-
-
-def _service_region(service_id):
-    """服务绑定区域：显式映射 → 家族后缀 → None（应用线/平台）。"""
-    region = _SERVICE_REGIONS.get(service_id)
-    if region is not None:
-        return region
-    for prefix, _ in _FUNCTION_FAMILY:
-        if service_id.startswith(prefix):
-            return service_id[len(prefix):]
-    return None
-
-
-def _group_cell(service_id):
-    """管理群列：区域线 → 「<区域中文名>」群；非区域线 → —。"""
-    region = _service_region(service_id)
-    if region is None:
-        return "<span class=\"hint\">—</span>"
-    return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
 def _cron_zh(schedule):
@@ -673,10 +622,10 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
         else:
             cells.append(f"<td>{_link_name_html(link)}</td>")
         if first_of_store:
-            # 代填报人店铺格（不显示备注）：逐人 姓名+状态下拉+删除
+            # 代填报人店铺格（2026-10-07 运维裁决）：只读展示——不带状态
+            # 下拉与删除（代填授权不在此办理），不显示备注。
             deputy_html = "".join(
-                f"<div>{_link_name_html(l)}"
-                f"{_status_select_html(l)}{_delete_btn_html(l)}</div>"
+                f"<div>{_link_name_html(l)}</div>"
                 for l in meta["deputy_links"]
             ) or "<span class=\"hint\">—</span>"
             rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
@@ -716,37 +665,11 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
 # 应用工厂
 # ---------------------------------------------------------------------------
 
-def _build_region_targets_source():
-    """区域个人月目标源（名册页月目标列）：Nacos region-<scope>.yaml 的
-    monthlyTargets（表内用名 → 元）。未配 Nacos 返回 ``None``（页面显示 —）；
-    单区域拉取失败跳过该区域（fail-open，不拖垮名册页）。"""
-    overlay = region_config.build_nacos_region_overlay()
-    if overlay is None:
-        return None
-
-    def _fetch():
-        result = {}
-        for scope in report_roster.SCOPES:
-            if scope in ("qudao", "dining"):
-                continue
-            try:
-                data = overlay(f"region-{scope}.yaml")
-            except Exception:
-                data = None
-            targets = (data or {}).get("monthlyTargets") or {}
-            if targets:
-                result[scope] = targets
-        return result
-
-    return _fetch
-
-
 
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
                fleet_source=None, config_source=None,
-               config_publisher=None, corp_id=None, agent_id=None,
-               region_targets_source=None) -> FastAPI:
+               config_publisher=None, corp_id=None, agent_id=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -1153,8 +1076,6 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             rows.append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
-                f"<td>{_group_cell(config.service_id)}</td>"
-                f"<td>{_esc(_service_function(config.service_id))}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
@@ -1167,15 +1088,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         table = (
             "<h1>定时任务（管道注册表）</h1>"
-            "<table><tr><th>服务标识</th><th>类型</th><th>管理群</th>"
-            "<th>功能</th><th>启用</th>"
+            "<table><tr><th>服务标识</th><th>类型</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
             + "".join(rows) + "</table>"
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-            "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
-            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台。</p>"
+            "翻译成可执行命令。</p>"
         )
         add_form = (
             "<h2>新增定时任务</h2>"
@@ -1190,8 +1109,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"
             "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; / "
-            "leaderboard-&lt;区域&gt; "
+            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; "
             "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
             "自查）。已存在的标识请用「操作」列开关，不可重复新增。</p>"
@@ -1228,10 +1146,58 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
             "<th>服务标识</th><th>详情</th></tr>"
             + "".join(rows) + "</table>"
-            "<p class=\"hint\">「立即运行一次」不经本表——其发起人"
-            "直接落在运行请求行上（定时任务页「最近运行」列）。</p>"
+            "<p class=\"hint\">本表只记注册表变更（开关/新增）；每次实际"
+            "运行（定时与「立即运行一次」）见「执行流水」页。</p>"
         )
         return HTMLResponse(_page("任务审计", table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.get("/pipelines/history")
+    def pipeline_history_page(request: Request, service_id: str = ""):
+        viewer = require_admin(request)
+        service_filter = service_id.strip()
+        try:
+            with db_connector() as connection:
+                entries = ops_control.fetch_run_history(
+                    connection, service_id=service_filter or None
+                )
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web run history load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        history_keys = ("id", "service_id", "trigger_type", "status",
+                        "exit_code", "note", "started_at", "finished_at")
+        rows = []
+        for row in entries:
+            if isinstance(row, dict):
+                get = row.get
+            else:
+                get = lambda key, r=row: r[history_keys.index(key)]
+            exit_code = get("exit_code")
+            rows.append(
+                f"<tr><td>{_esc(_fmt_time(get('started_at')))}</td>"
+                f"<td>{_service_name_cell(get('service_id'))}</td>"
+                f"<td>{_esc(_label(_TRIGGER_LABEL, get('trigger_type')))}</td>"
+                f"<td>{_esc(_label(_RUN_STATUS_LABEL, get('status')))}</td>"
+                f"<td>{'—' if exit_code is None else _esc(exit_code)}</td>"
+                f"<td>{_esc(_fmt_time(get('finished_at')))}</td>"
+                f"<td>{_esc(get('note'))}</td></tr>"
+            )
+        table = (
+            "<h1>定时任务执行流水</h1>"
+            "<form class=\"inline\" method=\"get\" action=\"/pipelines/history\">"
+            "<input name=\"service_id\" placeholder=\"按服务标识过滤（可空）\""
+            f" value=\"{_esc(service_filter)}\">"
+            "<button type=\"submit\">过滤</button></form>"
+            "<table><tr><th>开始时间</th><th>服务标识</th><th>触发</th>"
+            "<th>状态</th><th>退出码</th><th>结束时间</th><th>备注</th></tr>"
+            + "".join(rows) + "</table>"
+            "<p class=\"hint\">调度器每次实际点火（定时与「立即运行一次」同"
+            "路径）落一行；锁被占用/运行异常记为失败且无退出码。依赖未满足"
+            "的暂缓与非法 cron 不是运行，只走调度器日志。时间为北京时间。</p>"
+        )
+        return HTMLResponse(_page("执行流水", table,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.post("/api/pipelines/toggle")
@@ -1352,21 +1318,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 audits = report_roster.fetch_roster_audit(connection, limit=20)
                 qudao_targets = channel_target.fetch_store_targets(connection)
                 qudao_numbers = report_roster.fetch_store_numbers(connection)
+                # 区域个人月目标（dim_report_target，「所有数据入库」）：
+                # 当月（北京时间）各人目标，月目标列可编辑保存。
+                current_month = _current_year_month()
+                region_targets = {
+                    scope: report_roster.fetch_person_targets(
+                        connection, scope, current_month)
+                    for scope in report_roster.SCOPES if scope != "qudao"
+                }
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-
-        try:
-            # 区域个人月目标（Nacos region-<scope>.yaml monthlyTargets）；
-            # fail-open：注册表抖动时该区域目标列显示 —。
-            region_targets = (
-                region_targets_source() if region_targets_source else {}
-            )
-        except Exception as exc:
-            _LOGGER.warning(
-                "ops-web region targets fetch failed: %s", type(exc).__name__
-            )
-            region_targets = {}
 
         by_scope = {scope: [] for scope in report_roster.SCOPES}
         for row in entries:
@@ -1426,13 +1388,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                         if spans[key] > 1 else f"<td>{_esc(key)}</td>"
                     )
                 personal_target = person_targets.get(row["person_name"])
-                target_text = (
-                    f"{float(personal_target):,.0f}"
-                    if personal_target else "—"
+                target_value = (
+                    f"{float(personal_target):.0f}"
+                    if personal_target is not None else ""
                 )
                 updated = _fmt_time(row.get("updated_at")) or "—"
                 cells.append(
-                    f"<td>{target_text}</td>"
+                    f"<td><input class=\"person-target\" "
+                    f"data-scope=\"{_esc(scope)}\" "
+                    f"data-name=\"{_esc(row['person_name'])}\" "
+                    f"value=\"{_esc(target_value)}\" "
+                    f"placeholder=\"目标（元）\"></td>"
                     f"<td>{_link_name_html(row)}</td><td></td>"
                     f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
@@ -1445,6 +1411,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "<th>月目标（元）</th><th>负责人</th><th>代填报人</th>"
                 "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
+                f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}')\">"
+                f"保存{_esc(scope_label)}{_esc(current_month)}月目标</button>"
+                "<span class=\"hint\">（单位：元，空白 = 清除该人当月目标；"
+                "保存即生效——机器人报数快照同步读取，逐条落审计）</span></p>"
             )
 
         scope_options = "".join(
@@ -1569,6 +1539,45 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if not hit:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         return JSONResponse({"status": "ok"})
+
+    @app.post("/api/roster/region-targets")
+    async def roster_region_targets(request: Request):
+        """保存某区域当月个人月目标（dim_report_target，「所有数据入库」）：
+        逐条校验+upsert+审计；空白（null）= 清除该人当月目标。"""
+        viewer = require_roster_manager(request)
+        payload = await _json_body(request)
+        scope = payload.get("scope")
+        rows = payload.get("rows")
+        if scope not in report_roster.SCOPES or scope == "qudao" \
+                or not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        year_month = _current_year_month()
+        try:
+            entries = [
+                report_roster.validate_target_fields(
+                    scope,
+                    (row or {}).get("person_name") if isinstance(row, dict)
+                    else None,
+                    year_month,
+                    (row or {}).get("monthly_target")
+                    if isinstance(row, dict) else None,
+                )
+                for row in rows
+            ]
+        except report_roster.ReportRosterError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                for entry in entries:
+                    report_roster.upsert_report_target(
+                        connection, entry, actor=viewer.userid
+                    )
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web region targets save failed: %s", type(exc).__name__
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "saved": len(entries)})
 
     @app.post("/api/roster/publish-snapshot")
     async def roster_publish_snapshot(request: Request):

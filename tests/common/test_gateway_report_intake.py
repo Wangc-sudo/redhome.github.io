@@ -42,6 +42,9 @@ class _Cursor:
         elif "bi_authz_grant" in sql:
             self._rows = []
             self._one = {"x": 1} if self._conn.admin else None
+        elif "dim_report_target" in sql:
+            # 区域个人月目标（v4 入库）：默认空 → 回退 Nacos monthlyTargets
+            self._rows = list(self._conn.db_target_rows)
         elif "ORDER BY (`monthly_target` IS NULL)" in sql:
             # 当日已有行（业务键）查询
             self._rows = []
@@ -68,11 +71,12 @@ class _Cursor:
 
 class _Conn:
     def __init__(self, *, workdays=_WORKDAYS, members=(), facts=(), existing=None,
-                 admin=False):
+                 admin=False, db_targets=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.member_rows = list(members)
         self.fact_rows = list(facts)
         self.existing_row = existing
+        self.db_target_rows = list(db_targets)
         self.executed = []
         self.commits = 0
         self.admin = admin
@@ -285,6 +289,29 @@ class HandleReportTests(unittest.TestCase):
         self.assertIn("`monthly_target`", insert_sql)
         self.assertEqual(params[1:3], ("vanke", "张三"))
         self.assertEqual(params[6], 300000)
+
+    def test_db_target_wins_over_nacos_config(self):
+        """月目标快照（2026-10-07「所有数据入库」）：dim_report_target
+        优先于 Nacos monthlyTargets；DB 无记录才回退配置。"""
+        cfg = RegionConfig(
+            region="vanke", display="万科&大莲花&团购",
+            table_url="https://example.com/board",
+            robot_code="rc", open_conversation_id="conv-vk",
+            aliases={}, cc_user_ids=(),
+            monthly_targets={"张三": 300000},
+        )
+        conn = _Conn(
+            members=[_member(region="vanke", dept="体验中心")],
+            db_targets=[{"monthly_target": 288000}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=cfg, text="12800", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        _insert_sql, params = next(
+            (s, p) for s, p in conn.executed if s.lstrip().startswith("INSERT")
+        )
+        self.assertEqual(params[6], 288000)  # DB 值胜出（非 Nacos 300000）
 
     def test_update_path_preserves_the_existing_target(self):
         """业务键原地更新只动 sales_amount，monthly_target 列不被覆盖。"""

@@ -27,10 +27,14 @@ class _PctCursor:
         sql = sql.replace("%s", "?")
         sql = sql.replace("INSERT IGNORE INTO", "INSERT OR IGNORE INTO")
         if "ON DUPLICATE KEY UPDATE" in sql:
-            sql = sql.replace(
-                "ON DUPLICATE KEY UPDATE",
+            # 自然键按表分流：名册表（scope+type+key+name）/ 目标表（scope+name+month）
+            conflict = (
+                "ON CONFLICT(`scope`, `person_name`, `year_month`)"
+                if "dim_report_target" in sql else
                 "ON CONFLICT(`scope`, `entity_type`, `entity_key`, `person_name`)"
-                " DO UPDATE SET",
+            )
+            sql = sql.replace(
+                "ON DUPLICATE KEY UPDATE", conflict + " DO UPDATE SET",
             )
             sql = re.sub(r"VALUES\(`(\w+)`\)", r"excluded.`\1`", sql)
         self._c.execute(sql, params or ())
@@ -86,6 +90,18 @@ def _make_db(with_targets=False):
         " store_no INT DEFAULT NULL,"
         " role VARCHAR(16) NOT NULL DEFAULT 'owner',"
         " UNIQUE (scope, entity_type, entity_key, person_name))"
+    )
+    wrapper.cursor().execute(
+        "CREATE TABLE dim_report_target ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " scope VARCHAR(32) NOT NULL,"
+        " person_name VARCHAR(64) NOT NULL,"
+        " year_month VARCHAR(7) NOT NULL,"
+        " monthly_target REAL DEFAULT NULL,"
+        " note VARCHAR(255) DEFAULT NULL,"
+        " updated_by VARCHAR(64) DEFAULT NULL,"
+        " updated_at VARCHAR(32) DEFAULT NULL,"
+        " UNIQUE (scope, person_name, year_month))"
     )
     wrapper.cursor().execute(
         "CREATE TABLE dim_report_roster_audit ("
@@ -470,6 +486,64 @@ class RoleTests(unittest.TestCase):
             {"owners": ["饶佳君"], "deputies": ["代填人"]},
             role_map["京东1店"],
         )
+
+
+# -- 区域个人月目标（v4「所有数据入库」） --------------------------------------
+
+class ReportTargetTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_validate_rules(self):
+        entry = report_roster.validate_target_fields(
+            "shaoxing", "潘良峰", "2026-10", 383000)
+        self.assertEqual(383000.0, entry.monthly_target)
+        # 空值 = 清除
+        self.assertIsNone(report_roster.validate_target_fields(
+            "shaoxing", "潘良峰", "2026-10", None).monthly_target)
+        for bad in (
+            ("qudao", "潘良峰", "2026-10", 1),      # qudao 不走本表
+            ("nope", "潘良峰", "2026-10", 1),
+            ("shaoxing", "  ", "2026-10", 1),
+            ("shaoxing", "潘良峰", "2026-13", 1),   # 非法年月
+            ("shaoxing", "潘良峰", "2026-1", 1),
+            ("shaoxing", "潘良峰", "2026-10", -1),  # 负目标
+            ("shaoxing", "潘良峰", "2026-10", "abc"),
+        ):
+            with self.assertRaises(ReportRosterError, msg=bad):
+                report_roster.validate_target_fields(*bad)
+
+    def test_upsert_fetch_and_overwrite(self):
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "潘良峰", "2026-10", 383000),
+            actor="admin")
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "洪强", "2026-10", 351000),
+            actor="admin")
+        targets = report_roster.fetch_person_targets(
+            self.db, "shaoxing", "2026-10")
+        self.assertEqual({"潘良峰": 383000.0, "洪强": 351000.0}, targets)
+        # 改值覆盖（同键 upsert）
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "潘良峰", "2026-10", 400000),
+            actor="admin")
+        self.assertEqual(400000.0, report_roster.fetch_intake_target(
+            self.db, "shaoxing", "潘良峰", "2026-10"))
+        # 月份隔离 + 未录入返回 None
+        self.assertEqual({}, report_roster.fetch_person_targets(
+            self.db, "shaoxing", "2026-11"))
+        self.assertIsNone(report_roster.fetch_intake_target(
+            self.db, "shaoxing", "周亚平", "2026-10"))
+        # 审计（action='target'）
+        actions = [r["action"]
+                   for r in report_roster.fetch_roster_audit(self.db)]
+        self.assertEqual(["target", "target", "target"], actions)
 
 
 if __name__ == "__main__":
