@@ -91,8 +91,11 @@ class Roster:
     stores: dict  # store -> channel
     numbers: dict  # (channel, number) -> store
     store_numbers: dict  # store -> (channel, number)
-    owners: dict  # name -> [(channel, number, store)]
+    owners: dict  # name -> [(channel, number, store)]（权限面：负责人∪代填报人）
     owners_casefold: dict = field(default_factory=dict)
+    # 展示面（v3 角色）：仅名册切源行携带；legacy 行缺省 → 全部按负责人展示。
+    store_owner_names: dict = field(default_factory=dict)  # store -> [负责人名]
+    store_deputies: dict = field(default_factory=dict)  # store -> [代填报人名]
 
 
 def build_roster(rows):
@@ -113,17 +116,45 @@ def build_roster(rows):
         by_channel[channel].append((store, row.get("monthly_target")))
     numbers = {}
     store_numbers = {}
-    for channel, items in by_channel.items():
-        def sort_key(item):
-            store, target = item
-            if target is None:
-                return (1, 0.0, store)
-            return (0, -float(target), store)
 
-        for idx, (store, _target) in enumerate(sorted(items, key=sort_key), 1):
-            numbers[(channel, idx)] = store
-            store_numbers[store] = (channel, idx)
+    def sort_key(item):
+        store, target = item
+        if target is None:
+            return (1, 0.0, store)
+        return (0, -float(target), store)
+
+    if any(row.get("store_no") is not None for row in rows):
+        # 编号冻结（2026-10-07 统一管理方案 §6-A）：名册 store_no 为准——
+        # 月目标变化不再洗牌；未编号的店按目标降序排在该渠道已编号之后。
+        tail = defaultdict(list)
+        for row in rows:
+            store = str(row.get("store_name") or "").strip()
+            if not store:
+                continue
+            channel = str(row.get("channel") or "").strip()
+            store_no = row.get("store_no")
+            if store_no is not None:
+                numbers[(channel, int(store_no))] = store
+                store_numbers[store] = (channel, int(store_no))
+            else:
+                tail[channel].append((store, row.get("monthly_target")))
+        for channel, items in tail.items():
+            used = [no for (ch, no) in numbers if ch == channel]
+            for idx, (store, _target) in enumerate(
+                sorted(items, key=sort_key), max(used, default=0) + 1
+            ):
+                numbers[(channel, idx)] = store
+                store_numbers[store] = (channel, idx)
+    else:
+        for channel, items in by_channel.items():
+            for idx, (store, _target) in enumerate(
+                sorted(items, key=sort_key), 1
+            ):
+                numbers[(channel, idx)] = store
+                store_numbers[store] = (channel, idx)
     owners = defaultdict(list)
+    store_owner_names = {}
+    store_deputies = {}
     for row in rows:
         store = str(row.get("store_name") or "").strip()
         if not store or store not in store_numbers:
@@ -131,10 +162,15 @@ def build_roster(rows):
         channel, number = store_numbers[store]
         for entry in parse_owner_entries(row.get("owners_json")):
             owners[entry["name"]].append((channel, number, store))
+        if row.get("owner_names"):
+            store_owner_names[store] = sorted(row["owner_names"])
+        if row.get("deputy_names"):
+            store_deputies[store] = sorted(row["deputy_names"])
     owners_casefold = {name.casefold(): name for name in owners}
     return Roster(
         stores=stores, numbers=numbers, store_numbers=store_numbers,
         owners=dict(owners), owners_casefold=owners_casefold,
+        store_owner_names=store_owner_names, store_deputies=store_deputies,
     )
 
 
@@ -405,7 +441,7 @@ def build_channel_help():
         "补填带日期：9.27 京东 1 82059\n"
         "当天无销售报 0；填错了重发一条同店同日即可覆盖～\n"
         "/店铺映射表 — 查看全部编号与负责人\n"
-        "权限：只能报自己负责的店（群昵称须为本人姓名）；代报请联系群管理员"
+        "权限：负责人/代填报人可报名下店铺（群昵称须为本人姓名）"
     )
 
 
@@ -418,7 +454,12 @@ def build_format_hint():
 
 
 def build_mapping_table(roster):
-    """``/店铺映射表`` 全表：渠道｜编号｜店名｜负责人（目标降序，新店标尾注）。"""
+    """``/店铺映射表`` 全表：渠道｜编号｜店名｜负责人/代填报人（编号升序）。
+
+    展示（2026-10-07 运维裁决）：负责人与代填报人分列标识、左对齐；
+    同店多个负责人时换行、续行用全角空格对齐姓名列（"　负责人："≈5
+    全角宽）。legacy 行（名册未切源）owners_json 全部按负责人展示。
+    """
     by_channel = defaultdict(list)
     for store, (channel, number) in roster.store_numbers.items():
         by_channel[channel].append((number, store))
@@ -433,8 +474,32 @@ def build_mapping_table(roster):
             continue
         lines.append(f"【{channel}】")
         for number, store in sorted(items):
-            names = "、".join(owner_names.get(store) or []) or "—"
-            lines.append(f"{number}={store}（{names}）")
+            deputies = list(roster.store_deputies.get(store) or ())
+            if store in roster.store_owner_names or deputies:
+                owners = list(roster.store_owner_names.get(store) or ())
+            else:
+                owners = sorted(owner_names.get(store) or [])
+            deputy_text = (
+                f"｜代填报人：{'、'.join(deputies)}" if deputies else ""
+            )
+            if len(owners) <= 1:
+                if owners:
+                    lines.append(
+                        f"{number}={store}（负责人：{owners[0]}{deputy_text}）"
+                    )
+                elif deputies:
+                    lines.append(
+                        f"{number}={store}（代填报人：{'、'.join(deputies)}）"
+                    )
+                else:
+                    lines.append(f"{number}={store}（—）")
+                continue
+            lines.append(f"{number}={store}")
+            for index, name in enumerate(owners):
+                prefix = "　负责人：" if index == 0 else "　　　　　"
+                lines.append(f"{prefix}{name}")
+            if deputies:
+                lines.append(f"　代填报人：{'、'.join(deputies)}")
     return "\n".join(lines)
 
 
@@ -509,17 +574,24 @@ def fetch_roster_rows(conn):
         "SELECT `store_name`, `channel`, `monthly_target`, `owners_json` "
         "FROM `fact_channel_store_target`",
     )
-    owner_map = report_roster.fetch_store_owner_map(conn, "qudao")
-    if not owner_map:
+    role_map = report_roster.fetch_store_role_map(conn, "qudao")
+    if not role_map:
         return rows
+    number_map = report_roster.fetch_store_numbers(conn, "qudao")
     switched = []
     for row in rows:
         store = str(row.get("store_name") or "").strip()
-        owners = sorted(owner_map.get(store, ()))
+        buckets = role_map.get(store) or {"owners": [], "deputies": []}
+        # 权限面（owners_json）：负责人 ∪ 代填报人皆可填（v3 语义不变）；
+        # 展示面（owner_names/deputy_names）：映射表分列标识。
+        fillable = sorted(set(buckets["owners"]) | set(buckets["deputies"]))
         switched_row = dict(row)
         switched_row["owners_json"] = (
-            _json.dumps(owners, ensure_ascii=False) if owners else None
+            _json.dumps(fillable, ensure_ascii=False) if fillable else None
         )
+        switched_row["owner_names"] = buckets["owners"]
+        switched_row["deputy_names"] = buckets["deputies"]
+        switched_row["store_no"] = number_map.get(store, (None, None))[1]
         switched.append(switched_row)
     return switched
 

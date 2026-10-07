@@ -10,6 +10,7 @@
 全部 TestClient + FakeConnection：不联网、不碰凭据。
 """
 
+import re
 import unittest
 import warnings
 from contextlib import contextmanager
@@ -23,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
-from common.public_data import ops_control, report_roster
+from common.public_data import channel_target, ops_control, report_roster
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -339,6 +340,7 @@ class _PipelineStore:
         self.pending = False     # has_pending_request 的应答
         self.recent = []         # fetch_recent_requests 的应答
         self.audit_rows = []     # fetch_pipeline_audit 的应答
+        self.history_rows = []   # fetch_run_history 的应答
 
     def patch_audit(self):
         return mock.patch.object(
@@ -365,6 +367,13 @@ class _PipelineStore:
         return mock.patch.object(
             ops_control, "fetch_pipeline_audit",
             lambda conn, limit=200: tuple(self.audit_rows))
+
+    def patch_history_rows(self):
+        return mock.patch.object(
+            ops_control, "fetch_run_history",
+            lambda conn, limit=200, service_id=None:
+            tuple(r for r in self.history_rows
+                  if service_id is None or r["service_id"] == service_id))
 
 
 def _pipeline_app(*, viewer=None, fleet=("robot-hangzhou",), publisher=None,
@@ -446,6 +455,49 @@ class PipelinePageTests(unittest.TestCase):
 
         self.assertIn("robot-x", body)
         self.assertIn("新增", body)  # action=add 中文化
+
+    def test_pipeline_history_page_renders_entries(self):
+        store = _PipelineStore()
+        store.history_rows = [
+            {"id": 2, "service_id": "robot-hangzhou", "trigger_type": "cron",
+             "status": "failed", "exit_code": None,
+             "note": "调度锁被占用或运行异常，未产生退出码",
+             "started_at": "2026-10-07 02:00:01", "finished_at": "2026-10-07 02:00:02"},
+            {"id": 1, "service_id": "sync-wdt", "trigger_type": "run_once",
+             "status": "finished", "exit_code": 0, "note": None,
+             "started_at": "2026-10-07 01:00:00", "finished_at": "2026-10-07 01:05:00"},
+        ]
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_history_rows():
+            body = client.get("/pipelines/history").text
+
+        self.assertIn("robot-hangzhou", body)
+        self.assertIn("sync-wdt", body)
+        self.assertIn("定时", body)          # trigger=cron 中文化
+        self.assertIn("手动", body)          # trigger=run_once 中文化
+        self.assertIn("失败", body)
+        self.assertIn("成功", body)
+
+    def test_pipeline_history_page_filters_by_service_id(self):
+        store = _PipelineStore()
+        store.history_rows = [
+            {"id": 1, "service_id": "sync-wdt", "trigger_type": "cron",
+             "status": "finished", "exit_code": 0, "note": None,
+             "started_at": "2026-10-07 01:00:00", "finished_at": "2026-10-07 01:05:00"},
+            {"id": 2, "service_id": "robot-hangzhou", "trigger_type": "cron",
+             "status": "finished", "exit_code": 0, "note": None,
+             "started_at": "2026-10-07 02:00:00", "finished_at": "2026-10-07 02:01:00"},
+        ]
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_history_rows():
+            body = client.get(
+                "/pipelines/history", params={"service_id": "sync-wdt"}
+            ).text
+
+        self.assertIn("sync-wdt", body)
+        self.assertNotIn("robot-hangzhou<", body)
 
 
 class ZhLabelTests(unittest.TestCase):
@@ -746,6 +798,33 @@ class RosterPageTests(unittest.TestCase):
         response = client.get("/roster", follow_redirects=False)
         self.assertEqual(302, response.status_code)
 
+    def test_roster_page_splits_owner_deputy_columns_with_status_select(self):
+        # 2026-10-07 运维裁决：负责人/代填报人分两列；启用/停用改下拉
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=1, entity_key="TM习酒旗舰店", person_name="卢雅玲",
+                        aliases=None, note=""),
+            _roster_row(id=2, entity_key="TM习酒旗舰店", person_name="卢雅莹",
+                        aliases=None, note="", role="deputy"),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        self.assertIn('href="?sort=owner">负责人', body)   # 两列可排序表头
+        self.assertIn('href="?sort=deputy">代填报人', body)
+        self.assertIn("卢雅玲", body)
+        self.assertIn("卢雅莹", body)
+        # 负责人链接：状态下拉（当前值即链接状态）+ 删除按钮
+        self.assertIn('setRosterStatus(1, this.value)', body)
+        self.assertIn('<option value="1" selected>启用</option>', body)
+        # 代填报人店铺格只读（2026-10-07 裁决：授权不在此办理）——
+        # 代填人（id=2）无状态下拉、无删除按钮
+        self.assertNotIn('setRosterStatus(2, this.value)', body)
+        self.assertNotIn("deleteRoster(2)", body)
+        self.assertNotIn("toggleRoster", body)
+
 
 class RosterApiTests(unittest.TestCase):
     def test_add_validates_and_upserts_with_actor(self):
@@ -779,12 +858,30 @@ class RosterApiTests(unittest.TestCase):
              "entity_key": "店", "person_name": "  "},
             {"scope": "qudao", "entity_type": "store",
              "entity_key": "店", "person_name": "张三", "aliases": "not-a-list"},
+            {"scope": "qudao", "entity_type": "store",
+             "entity_key": "店", "person_name": "张三", "role": "boss"},
         ):
             self.assertEqual(
                 400, client.post("/api/roster/add", json=payload).status_code,
                 payload,
             )
         self.assertEqual([], store.upserted)
+
+    def test_add_with_deputy_role(self):
+        # v3 角色：代填报人经表单 role 字段入库（2026-10-07 运维裁决）
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_upsert():
+            response = client.post("/api/roster/add", json={
+                "scope": "qudao", "entity_type": "store",
+                "entity_key": "TM习酒旗舰店", "person_name": "卢雅莹",
+                "role": "deputy",
+            })
+
+        self.assertEqual(200, response.status_code)
+        entry, _actor = store.upserted[0]
+        self.assertEqual("deputy", entry.role)
 
     def test_toggle_and_delete_with_hit_and_miss(self):
         store = _RosterStore()
@@ -822,6 +919,404 @@ class RosterApiTests(unittest.TestCase):
             "/api/roster/add", json={"scope": "qudao", "entity_type": "store",
                                      "entity_key": "店", "person_name": "张三"},
         ).status_code)
+
+
+def _roster_manager_viewer():
+    """持 scope='roster' 授权的非 admin 成员（名册管理员）。"""
+    return authz.Viewer(
+        userid="u-manager", name="卢雅玲", scopes=frozenset({"roster"}),
+        allowed_regions=frozenset(), is_admin=False, admitted=True,
+    )
+
+
+def _plain_member_viewer():
+    return authz.Viewer(
+        userid="u-plain", name="路人甲", scopes=frozenset({"fin"}),
+        allowed_regions=frozenset(), is_admin=False, admitted=True,
+    )
+
+
+class RosterManageGateTests(unittest.TestCase):
+    """名册新增/删除/状态修改绑定「名册管理」授权（scope=roster，
+    2026-10-07 运维裁决）；admin 隐式持有。"""
+
+    def test_manager_can_view_and_write(self):
+        viewer = _roster_manager_viewer()
+        store = _RosterStore()
+        client = TestClient(_app(viewer=viewer))
+        _login(client, userid="u-manager")
+        with store.patch_fetch(), store.patch_audit():
+            self.assertEqual(200, client.get("/roster").status_code)
+        with store.patch_upsert():
+            self.assertEqual(200, client.post("/api/roster/add", json={
+                "scope": "qudao", "entity_type": "store",
+                "entity_key": "JD购喝", "person_name": "饶佳君",
+            }).status_code)
+        with store.patch_toggle():
+            self.assertEqual(200, client.post(
+                "/api/roster/toggle", json={"id": 1, "enabled": False},
+            ).status_code)
+        with store.patch_delete():
+            self.assertEqual(200, client.post(
+                "/api/roster/delete", json={"id": 1},
+            ).status_code)
+        entry, actor = store.upserted[0]
+        self.assertEqual("u-manager", actor)
+
+    def test_plain_member_forbidden(self):
+        viewer = _plain_member_viewer()
+        store = _RosterStore()
+        client = TestClient(_app(viewer=viewer))
+        _login(client, userid="u-plain")
+        page = client.get("/roster", follow_redirects=False)
+        self.assertEqual(302, page.status_code)
+        self.assertEqual("/auth/entry?reason=forbidden",
+                         page.headers["location"])
+        for path, payload in (
+            ("/api/roster/add", {"scope": "qudao", "entity_type": "store",
+                                 "entity_key": "店", "person_name": "张三"}),
+            ("/api/roster/toggle", {"id": 1, "enabled": False}),
+            ("/api/roster/delete", {"id": 1}),
+        ):
+            self.assertEqual(
+                403, client.post(path, json=payload).status_code, path,
+            )
+        self.assertEqual([], store.upserted)
+
+    def test_admin_remains_implicit_manager(self):
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_delete():
+            self.assertEqual(200, client.post(
+                "/api/roster/delete", json={"id": 1},
+            ).status_code)
+
+
+class RosterSortTests(unittest.TestCase):
+    """渠道门店表排序与渠道聚合（2026-10-07 运维裁决）。"""
+
+    def _rows(self):
+        return [
+            _roster_row(id=1, entity_key="JD购喝", person_name="娄灿斌",
+                        aliases=None, note=""),
+            _roster_row(id=2, entity_key="TM旗舰A", person_name="钟甜",
+                        aliases=None, note=""),
+            _roster_row(id=3, entity_key="TM旗舰B", person_name="周嘉炜",
+                        aliases=None, note=""),
+            _roster_row(id=4, entity_key="TM旗舰A", person_name="张瑾萱",
+                        aliases=None, note="", role="deputy"),
+        ]
+
+    def _page(self, store, sort=None):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        targets = {
+            "JD购喝": ("京东", 1500000),
+            "TM旗舰A": ("天猫", 3000000),
+            "TM旗舰B": ("天猫", 2000000),
+        }
+        numbers = {
+            "JD购喝": ("京东", 1),
+            "TM旗舰A": ("天猫", 1),
+            "TM旗舰B": ("天猫", 2),
+        }
+        url = "/roster" + (f"?sort={sort}" if sort else "")
+        with store.patch_fetch(), store.patch_audit(), \
+             mock.patch.object(channel_target, "fetch_store_targets",
+                               lambda conn: targets), \
+             mock.patch.object(report_roster, "fetch_store_numbers",
+                               lambda conn: numbers):
+            return client.get(url).text
+
+    def test_default_channel_sort_aggregates_with_rowspan(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store)
+
+        # 行 = 负责人链接（代填聚进店铺格）：天猫 2 店各 1 负责人 →
+        # 渠道格 rowspan=2；单负责人店铺（TM旗舰A 虽有代填）店铺格不聚合
+        self.assertIn('<td rowspan="2">天猫</td>', body)
+        self.assertIn('<td>TM旗舰A</td>', body)
+        # 代填张瑾萱在同行代填报人格内（只读：无状态下拉与删除）
+        self.assertIn("张瑾萱", body)
+        self.assertNotIn("setRosterStatus(4, this.value)", body)
+        self.assertNotIn("deleteRoster(4)", body)
+        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
+        # 渠道序按 CHANNELS canonical：京东（idx 2）在天猫（idx 3）前
+        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
+        # 默认表头带当前排序标记
+        self.assertIn('href="?sort=channel">渠道/地区 ▾', body)
+
+    def test_sort_by_target_descending(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="target")
+
+        # 目标降序：300万 TM旗舰A > 200万 TM旗舰B > 150万 JD购喝
+        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
+        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
+        # 非渠道序渠道格不合并（天猫 2 行 = 两店各 1 负责人行）
+        self.assertEqual(2, body.count("<td>天猫</td>"))
+
+    def test_sort_by_owner_and_deputy(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="owner")
+        # 负责人首名升序（Unicode）：周嘉炜 < 娄灿斌 < 钟甜
+        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
+        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
+
+        body = self._page(store, sort="deputy")
+        # 仅 TM旗舰A 有代填（张瑾萱）排最前
+        self.assertLess(body.index("TM旗舰A"),
+                        min(body.index("TM旗舰B"), body.index("JD购喝")))
+
+    def test_invalid_sort_falls_back_to_channel(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="bogus")
+        self.assertIn('<td rowspan="2">天猫</td>', body)
+
+    def _assert_grid_balance(self, body, table_index=0, columns=9):
+        """模拟 rowspan 布局，逐行校验有效列数（防聚合错位）。"""
+        tables = re.findall(r"<table>(.*?)</table>", body, re.S)
+        rows = re.findall(r"<tr>(.*?)</tr>", tables[table_index], re.S)
+        pending = [0] * columns  # 每列被上行 rowspan 占用的剩余行数
+        for row_html in rows[1:]:  # 跳过表头
+            cells = re.findall(r'<td(?: rowspan="(\d+)")?[^>]*>', row_html)
+            col = 0
+            for span in cells:
+                while col < columns and pending[col] > 0:
+                    pending[col] -= 1
+                    col += 1
+                span_n = int(span) if span else 1
+                if span_n > 1:
+                    pending[col] = span_n - 1
+                col += 1
+            while col < columns and pending[col] > 0:
+                pending[col] -= 1
+                col += 1
+            self.assertEqual(
+                columns, col, f"行有效列数≠{columns}：{row_html[:100]}"
+            )
+
+    def test_grid_balance_all_sorts_and_region_table(self):
+        # 渠道区数据：TM旗舰A 2 链接（1 负责人+1 代填）、TM旗舰B 1、JD购喝 1
+        store = _RosterStore()
+        store.rows = self._rows()
+        for sort in (None, "store", "owner", "deputy", "target"):
+            body = self._page(store, sort=sort)
+            self._assert_grid_balance(body, table_index=0, columns=9)
+        # 单负责人店铺（含代填）整行无聚合（2026-10-07 运维裁决）：
+        # 店铺格/月目标格均无 rowspan，代填聚在同行的代填报人格
+        body = self._page(store)
+        self.assertIn('<td>TM旗舰A</td>', body)
+        self.assertIn('<td><input class="roster-target" data-store="TM旗舰A"',
+                      body)
+        self.assertEqual(1, body.count('data-store="TM旗舰A"'))
+
+    def test_aggregation_only_for_multi_owner_stores(self):
+        # 多负责人才聚合：PDD共管店 2 负责人 → 店铺格/月目标格 rowspan=2
+        store = _RosterStore()
+        store.rows = self._rows() + [
+            _roster_row(id=5, entity_key="PDD共管店", person_name="侯仙姚",
+                        aliases=None, note=""),
+            _roster_row(id=6, entity_key="PDD共管店", person_name="杨美聪",
+                        aliases=None, note=""),
+        ]
+        body = self._page(store)
+        self.assertIn('<td rowspan="2">PDD共管店</td>', body)
+        self.assertIn(
+            '<td rowspan="2"><input class="roster-target" data-store="PDD共管店"',
+            body,
+        )
+        self._assert_grid_balance(body, table_index=0, columns=9)
+
+    def test_data_cells_follow_header_column_order(self):
+        # 单元格内容序 = 表头列序（2026-10-07 列序调整回归：
+        # 月目标格必须出现在负责人格之前，而非仅表头换序）
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store)
+        first_row = re.search(
+            r"<tr><td>京东</td>(.*?)</tr>", body, re.S
+        ).group(1)
+        self.assertLess(
+            first_row.index('data-store="JD购喝"'),   # 月目标格
+            first_row.index("娄灿斌"),                 # 负责人格
+        )
+
+        # 区域表（绍兴 3 链接）同样平衡
+        store2 = _RosterStore()
+        store2.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note=""),
+            _roster_row(id=13, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨项目部", person_name="周亚平",
+                        aliases=None, note=""),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store2.patch_fetch(), store2.patch_audit():
+            body2 = client.get("/roster").text
+        self._assert_grid_balance(body2, table_index=1, columns=9)
+
+
+class RosterRegionTemplateTests(unittest.TestCase):
+    """区域区段统一链接行模板 + 个人月目标列（2026-10-07 运维裁决，
+    目标真源 dim_report_target 入库）。"""
+
+    def test_region_section_unified_template_with_personal_targets(self):
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note="", enabled=0),
+            _roster_row(id=13, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨项目部", person_name="周亚平",
+                        aliases=None, note=""),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit(), \
+             mock.patch.object(
+                 report_roster, "fetch_person_targets",
+                 lambda conn, scope, ym: (
+                     {"潘良峰": 383000.0, "洪强": 351000.0}
+                     if scope == "shaoxing" else {})):
+            body = client.get("/roster").text
+
+        # 与渠道门店同构的统一表头（聚合列靠左：月目标在店铺之后）
+        self.assertIn(
+            "<th>渠道/地区</th><th>店铺/对象</th><th>月目标（元）</th>"
+            "<th>负责人</th><th>代填报人</th>"
+            "<th>状态</th><th>备注</th><th>更新</th><th>操作</th>",
+            body,
+        )
+        # 地区整段合并（3 行）、对象按部门合并（绍兴项目部 2 行）
+        self.assertIn('<td rowspan="3">绍兴</td>', body)
+        self.assertIn('<td rowspan="2">绍兴项目部</td>', body)
+        # 个人月目标为可编辑输入（入库真源），含保存按钮
+        self.assertIn('class="person-target"', body)
+        self.assertIn('data-name="潘良峰" value="383000"', body)
+        self.assertIn("saveRegionTargets('shaoxing')", body)
+        # 停用链接：下拉当前值=停用
+        self.assertIn('setRosterStatus(12, this.value)', body)
+        self.assertIn('<option value="0" selected>停用</option>', body)
+
+
+class RegionTargetsApiTests(unittest.TestCase):
+    """区域月目标保存 API（dim_report_target 入库，2026-10-07）。"""
+
+    def test_save_validates_and_upserts_with_actor(self):
+        saved = []
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                report_roster, "upsert_report_target",
+                lambda conn, entry, *, actor: saved.append((entry, actor))):
+            response = client.post("/api/roster/region-targets", json={
+                "scope": "shaoxing",
+                "rows": [
+                    {"person_name": "潘良峰", "monthly_target": 383000},
+                    {"person_name": "周亚平", "monthly_target": None},
+                ],
+            })
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(2, response.json()["saved"])
+        self.assertEqual(2, len(saved))
+        entry, actor = saved[0]
+        self.assertEqual(("shaoxing", "潘良峰", 383000.0),
+                         (entry.scope, entry.person_name,
+                          entry.monthly_target))
+        self.assertEqual(ADMIN_USERID, actor)
+        self.assertIsNone(saved[1][0].monthly_target)  # 空白 = 清除
+
+    def test_save_rejects_invalid_payload_and_requires_manager(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        for payload in (
+            {"scope": "qudao", "rows": []},                 # qudao 不走本表
+            {"scope": "nope", "rows": []},
+            {"scope": "shaoxing", "rows": "not-a-list"},
+            {"scope": "shaoxing",
+             "rows": [{"person_name": "潘良峰", "monthly_target": -1}]},
+            {"scope": "shaoxing", "rows": [{"person_name": "  "}]},
+        ):
+            self.assertEqual(
+                400, client.post("/api/roster/region-targets",
+                                 json=payload).status_code, payload,
+            )
+
+        plain = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(plain, userid="u-plain")
+        self.assertEqual(403, plain.post("/api/roster/region-targets", json={
+            "scope": "shaoxing", "rows": [],
+        }).status_code)
+
+
+class RosterPublishTests(unittest.TestCase):
+    """发布月度快照 API（S2）：校验 + 写 raw + 触发 extract run-request。"""
+
+    def test_publish_writes_and_triggers_extract(self):
+        published = []
+        requests = []
+
+        class _RawConn:
+            def close(self):
+                pass
+
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                channel_target, "publish_snapshot",
+                lambda raw_conn, rows, *, actor, roster_connection=None:
+                published.append((rows, actor, roster_connection)) or (2, 3, ["新店"])), \
+             mock.patch.object(
+                ops_control, "insert_run_request",
+                lambda conn, sid, by: requests.append((sid, by)) or 88), \
+             mock.patch.object(
+                report_roster, "fetch_store_numbers", lambda conn: {}), \
+             mock.patch("common.ops_web.app.connect", lambda _ds: _RawConn()):
+            response = client.post("/api/roster/publish-snapshot", json={
+                "rows": [{"store_name": "JD购喝", "channel": "京东",
+                          "monthly_target": 1500000}],
+            })
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual((2, 3), (body["deleted"], body["inserted"]))
+        self.assertEqual(["新店"], body["missing_owners"])
+        self.assertEqual(88, body["extract_request_id"])
+        self.assertEqual([("extract-mart", ADMIN_USERID)], requests)
+        self.assertEqual(ADMIN_USERID, published[0][1])
+        self.assertIsNotNone(published[0][2])  # roster_connection 走 mart
+
+    def test_publish_rejects_bad_payload(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(report_roster, "fetch_store_numbers",
+                               lambda conn: {}):
+            self.assertEqual(400, client.post(
+                "/api/roster/publish-snapshot", json={"rows": "x"}).status_code)
+            self.assertEqual(400, client.post(
+                "/api/roster/publish-snapshot",
+                json={"rows": [{"store_name": "店", "channel": "商超",
+                                "monthly_target": 1}]}).status_code)
+
+    def test_publish_requires_admin_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.post(
+            "/api/roster/publish-snapshot", json={"rows": []}).status_code)
 
 
 class MembersPageTests(unittest.TestCase):

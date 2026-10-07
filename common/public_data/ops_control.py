@@ -1,13 +1,19 @@
 """ops-web 定时任务管理（运维控制台）的数据访问与写面校验。
 
-两张表（迁移 ``mart-ops-run-requests-v1``，均落 mart_ops）：
+三张表（均落 mart_ops）：
 
 * ``pd_ops_run_request`` —— 「立即运行一次」触发通道：ops-web 写入
   pending 行，scheduler 每 tick 轮询认领（状态机：pending → launched
   → finished/failed；无命令映射 → rejected）。``requested_by`` 即触发
-  审计，无需另表。
+  审计，无需另表。（迁移 ``mart-ops-run-requests-v1``）
 * ``pd_ops_pipeline_audit`` —— 管道注册表变更流水：Nacos 发布本身不
   带操作人，enable/disable/add 每次变更在此落一行。
+  （迁移 ``mart-ops-run-requests-v1``）
+* ``pd_ops_run_history`` —— 定时任务**执行**流水：scheduler 每次实际
+  点火（cron 与 run-once 同路径）先落 running 行、结束回写
+  finished/failed + 退出码；锁被占用/运行异常（无退出码）也落 failed。
+  依赖未满足的暂缓与非法 cron 不是"运行"，只走日志告警、不落本表。
+  （迁移 ``mart-ops-run-history-v1``）
 
 写纪律同 ``bi_authz``：SQL 只存在于本模块，ops-web / scheduler 经函数
 调用；ops-web 侧每次变更与同事务的一行 audit 同生共死。
@@ -61,9 +67,31 @@ _PIPELINE_AUDIT_DDL = (
 )
 
 
+_RUN_HISTORY_DDL = (
+    "CREATE TABLE IF NOT EXISTS `pd_ops_run_history` (\n"
+    "  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+    "  `service_id` VARCHAR(64) NOT NULL,\n"
+    "  `trigger_type` ENUM('cron', 'run_once') NOT NULL,\n"
+    "  `status` ENUM('running', 'finished', 'failed')"
+    " NOT NULL DEFAULT 'running',\n"
+    "  `exit_code` INT DEFAULT NULL,\n"
+    "  `note` VARCHAR(255) DEFAULT NULL,\n"
+    "  `started_at` DATETIME(6) NOT NULL,\n"
+    "  `finished_at` DATETIME(6) DEFAULT NULL,\n"
+    "  KEY `idx_started` (`started_at`),\n"
+    "  KEY `idx_service_started` (`service_id`, `started_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
 def pipeline_ops_ddl_statements() -> tuple:
     """返回 run_request + pipeline_audit 两表 DDL（建表顺序即返回顺序）。"""
     return (_RUN_REQUEST_DDL, _PIPELINE_AUDIT_DDL)
+
+
+def run_history_ddl_statements() -> tuple:
+    """返回 run_history 表 DDL（独立迁移版本，校验和红线不改旧版本）。"""
+    return (_RUN_HISTORY_DDL,)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +334,75 @@ def fetch_pipeline_audit(connection, limit=200):
 
 
 # ---------------------------------------------------------------------------
+# 定时任务执行流水（pd_ops_run_history，scheduler 唯一写方）
+# ---------------------------------------------------------------------------
+
+def insert_run_history(connection, service_id, trigger_type):
+    """落一行运行开始流水（running）。返回流水 id。"""
+    if trigger_type not in ("cron", "run_once"):
+        raise OpsControlError("trigger_type must be cron or run_once")
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "INSERT INTO `pd_ops_run_history` "
+                "(`service_id`, `trigger_type`, `status`, `started_at`) "
+                "VALUES (%s, %s, 'running', %s)",
+                (service_id, trigger_type, _utc_now_text()),
+            )
+            return getattr(cursor, "lastrowid", None)
+    finally:
+        cursor.close()
+
+
+def finish_run_history(connection, history_id, returncode):
+    """运行结束回写：0 → finished；非 0 / None（锁占用或异常）→ failed。"""
+    if returncode == 0:
+        status, note = "finished", None
+    elif returncode is None:
+        status, note = "failed", "调度锁被占用或运行异常，未产生退出码"
+    else:
+        status, note = "failed", None
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "UPDATE `pd_ops_run_history` "
+                "SET `status` = %s, `exit_code` = %s, "
+                "`note` = COALESCE(%s, `note`), `finished_at` = %s "
+                "WHERE `id` = %s AND `status` = 'running'",
+                (status, returncode, note, _utc_now_text(), history_id),
+            )
+    finally:
+        cursor.close()
+
+
+def fetch_run_history(connection, limit=200, service_id=None):
+    """执行流水（ops-web 执行流水页），最新在前；可按 service_id 过滤。"""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise OpsControlError("history limit must be 1..1000")
+    if service_id is not None and not _is_service_id(service_id):
+        raise OpsControlError("service_id")
+    sql = (
+        "SELECT `id`, `service_id`, `trigger_type`, `status`, `exit_code`, "
+        "`note`, `started_at`, `finished_at` FROM `pd_ops_run_history`"
+    )
+    params = []
+    if service_id is not None:
+        sql += " WHERE `service_id` = %s"
+        params.append(service_id)
+    sql += " ORDER BY `id` DESC LIMIT %s"
+    params.append(limit)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall() if hasattr(cursor, "fetchall") else ()
+        return tuple(rows)
+    finally:
+        cursor.close()
+
+
+# ---------------------------------------------------------------------------
 # scheduler 侧网关（长驻进程：每次调用一条短连接，规避 RDS wait_timeout）
 # ---------------------------------------------------------------------------
 
@@ -338,3 +435,28 @@ class DbRunRequestGateway:
 
     def mark_rejected(self, request_id, note):
         return self._call(reject_run_request, request_id, note)
+
+
+class DbRunHistoryGateway:
+    """scheduler 落执行流水的生产实现（mart_ops 短连接，同上游网关）。
+
+    异常抛给调用方：scheduler 捕获后仅告警、绝不因流水故障阻断管道
+    运行（审计是旁路，不是门禁）。
+    """
+
+    def __init__(self, connect, database_settings):
+        self._connect = connect
+        self._settings = database_settings
+
+    def _call(self, fn, *args):
+        connection = self._connect(self._settings)
+        try:
+            return fn(connection, *args)
+        finally:
+            connection.close()
+
+    def record_start(self, service_id, trigger_type):
+        return self._call(insert_run_history, service_id, trigger_type)
+
+    def record_finish(self, history_id, returncode):
+        return self._call(finish_run_history, history_id, returncode)

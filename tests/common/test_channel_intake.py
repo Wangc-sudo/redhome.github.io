@@ -233,12 +233,50 @@ class StoreNameParseTest(unittest.TestCase):
 
 class MappingTableTest(unittest.TestCase):
     def test_table_contains_channels_numbers_owners(self):
+        # legacy 行（名册未切源）：owners_json 全部按负责人展示；
+        # 多负责人换行、续行全角空格对齐（2026-10-07 运维裁决）。
         table = build_mapping_table(_ROSTER)
         self.assertIn("【京东】", table)
-        self.assertIn("1=JD购喝（娄灿斌）", table)
-        self.assertIn("2=JD习水村酒类专营店（饶佳君）", table)
-        self.assertIn("1=朴朴（黄贤宋、杨情情）", table)
+        self.assertIn("1=JD购喝（负责人：娄灿斌）", table)
+        self.assertIn("2=JD习水村酒类专营店（负责人：饶佳君）", table)
+        self.assertIn("1=朴朴\n　负责人：杨情情\n　　　　　黄贤宋", table)
         self.assertIn("【猫超】", table)
+
+    def test_table_separates_deputies_and_wraps_multiple_owners(self):
+        # 名册切源行（v3）：负责人/代填报人分列标识、左对齐；
+        # 多负责人换行对齐，代填报人顿号连排。
+        rows = [
+            {"store_name": "TM习酒旗舰店", "channel": "天猫",
+             "monthly_target": 3000000,
+             "owners_json": json.dumps(
+                 [{"name": "卢雅玲"}, {"name": "卢雅莹"}, {"name": "周静雯"}]
+             ),
+             "owner_names": ["卢雅玲"],
+             "deputy_names": ["卢雅莹", "周静雯"]},
+            {"store_name": "DY习酒酒类旗舰店", "channel": "直播",
+             "monthly_target": 5000000,
+             "owners_json": json.dumps(
+                 [{"name": "Jevon"}, {"name": "Yan"}, {"name": "娄灿斌"}]
+             ),
+             "owner_names": ["Jevon", "Yan"],
+             "deputy_names": ["娄灿斌"]},
+            {"store_name": "JD代填专营店", "channel": "京东",
+             "monthly_target": 100000,
+             "owners_json": json.dumps([{"name": "王蕊"}]),
+             "owner_names": [], "deputy_names": ["王蕊"]},
+        ]
+        table = build_mapping_table(build_roster(rows))
+        self.assertIn(
+            "1=TM习酒旗舰店（负责人：卢雅玲｜代填报人：卢雅莹、周静雯）",
+            table,
+        )
+        self.assertIn(
+            "1=DY习酒酒类旗舰店\n"
+            "　负责人：Jevon\n　　　　　Yan\n　代填报人：娄灿斌",
+            table,
+        )
+        # 无负责人、仅代填报人的店：只显示代填段
+        self.assertIn("1=JD代填专营店（代填报人：王蕊）", table)
 
 
 class _Cursor:
@@ -405,6 +443,23 @@ class HandleChannelFillTest(unittest.TestCase):
         self.assertIn("不是你负责的店铺", outcome.reply)
         self.assertIn("JD习水村酒类专营店", outcome.reply)  # 列出本人店
         self.assertEqual(conn.inbox_rows[0][8], "rejected")
+
+    def test_frozen_store_numbers_win_over_target_order(self):
+        # 编号冻结（2026-10-07 统一管理方案 §6-A）：行带 store_no 时按冻结
+        # 编号——目标大的不再排前；未编号的店排在该渠道已编号之后。
+        rows = [
+            {"store_name": "大店", "channel": "京东", "monthly_target": 999,
+             "store_no": 2, "owners_json": None},
+            {"store_name": "小店", "channel": "京东", "monthly_target": 1,
+             "store_no": 1, "owners_json": None},
+            {"store_name": "新店", "channel": "京东", "monthly_target": 500,
+             "store_no": None, "owners_json": None},
+        ]
+        roster = build_roster(rows)
+        self.assertEqual("小店", roster.numbers[("京东", 1)])
+        self.assertEqual("大店", roster.numbers[("京东", 2)])
+        self.assertEqual("新店", roster.numbers[("京东", 3)])  # 未编号排尾
+        self.assertEqual(("京东", 2), roster.store_numbers["大店"])
 
     def test_roster_table_overrides_legacy_owners(self):
         # 名册切源（2026-10-06）：dim_report_roster 有启用记录时负责人归属以

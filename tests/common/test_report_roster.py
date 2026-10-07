@@ -27,10 +27,14 @@ class _PctCursor:
         sql = sql.replace("%s", "?")
         sql = sql.replace("INSERT IGNORE INTO", "INSERT OR IGNORE INTO")
         if "ON DUPLICATE KEY UPDATE" in sql:
-            sql = sql.replace(
-                "ON DUPLICATE KEY UPDATE",
+            # 自然键按表分流：名册表（scope+type+key+name）/ 目标表（scope+name+month）
+            conflict = (
+                "ON CONFLICT(`scope`, `person_name`, `year_month`)"
+                if "dim_report_target" in sql else
                 "ON CONFLICT(`scope`, `entity_type`, `entity_key`, `person_name`)"
-                " DO UPDATE SET",
+            )
+            sql = sql.replace(
+                "ON DUPLICATE KEY UPDATE", conflict + " DO UPDATE SET",
             )
             sql = re.sub(r"VALUES\(`(\w+)`\)", r"excluded.`\1`", sql)
         self._c.execute(sql, params or ())
@@ -82,7 +86,22 @@ def _make_db(with_targets=False):
         " note VARCHAR(255) DEFAULT NULL,"
         " updated_by VARCHAR(64) DEFAULT NULL,"
         " updated_at VARCHAR(32) DEFAULT NULL,"
+        " channel VARCHAR(32) DEFAULT NULL,"
+        " store_no INT DEFAULT NULL,"
+        " role VARCHAR(16) NOT NULL DEFAULT 'owner',"
         " UNIQUE (scope, entity_type, entity_key, person_name))"
+    )
+    wrapper.cursor().execute(
+        "CREATE TABLE dim_report_target ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " scope VARCHAR(32) NOT NULL,"
+        " person_name VARCHAR(64) NOT NULL,"
+        " year_month VARCHAR(7) NOT NULL,"
+        " monthly_target REAL DEFAULT NULL,"
+        " note VARCHAR(255) DEFAULT NULL,"
+        " updated_by VARCHAR(64) DEFAULT NULL,"
+        " updated_at VARCHAR(32) DEFAULT NULL,"
+        " UNIQUE (scope, person_name, year_month))"
     )
     wrapper.cursor().execute(
         "CREATE TABLE dim_report_roster_audit ("
@@ -99,7 +118,8 @@ def _make_db(with_targets=False):
     if with_targets:
         wrapper.cursor().execute(
             "CREATE TABLE fact_channel_store_target ("
-            " store_name VARCHAR(128), owners_json TEXT)"
+            " store_name VARCHAR(128), owners_json TEXT,"
+            " channel VARCHAR(32), monthly_target REAL)"
         )
     conn.commit()
     return wrapper
@@ -295,6 +315,99 @@ class SyncFromTargetsTests(unittest.TestCase):
         self.assertEqual((0, 0), report_roster.sync_from_targets(db, actor="admin"))
 
 
+# -- v2：编号冻结（channel / store_no） -----------------------------------------
+
+class StoreNumberTests(unittest.TestCase):
+    def _db_with_fact(self):
+        db = _make_db(with_targets=True)
+        cur = db.cursor()
+        cur.execute(
+            "INSERT INTO fact_channel_store_target "
+            "(store_name, owners_json, channel, monthly_target) VALUES "
+            "('JD购喝', '[]', '京东', 1500000),"
+            "('JD金沙', '[]', '京东', 200000),"
+            "('TM旗舰', '[]', '天猫', 4700000)",
+        )
+        db.commit()
+        return db
+
+    def test_upsert_derives_channel_and_assigns_store_no(self):
+        db = self._db_with_fact()
+        report_roster.upsert_roster_entry(db, _entry(entity_key="JD购喝"),
+                                        actor="admin")
+        report_roster.upsert_roster_entry(
+            db, _entry(entity_key="JD购喝", person_name="共管人"), actor="admin")
+        report_roster.upsert_roster_entry(db, _entry(entity_key="JD金沙"),
+                                        actor="admin")
+        report_roster.upsert_roster_entry(db, _entry(entity_key="TM旗舰"),
+                                        actor="admin")
+
+        rows = {r["entity_key"]: r for r in report_roster.fetch_roster(db)}
+        self.assertEqual("京东", rows["JD购喝"]["channel"])
+        self.assertEqual(1, rows["JD购喝"]["store_no"])
+        self.assertEqual(1, rows["JD购喝"]["store_no"])  # 同店同号
+        self.assertEqual(2, rows["JD金沙"]["store_no"])  # 渠道内 max+1
+        self.assertEqual("天猫", rows["TM旗舰"]["channel"])
+        self.assertEqual(1, rows["TM旗舰"]["store_no"])  # 渠道独立计数
+        # 共管链接与首链接同店同号
+        nos = {r["store_no"] for r in report_roster.fetch_roster(db)
+               if r["entity_key"] == "JD购喝"}
+        self.assertEqual({1}, nos)
+
+    def test_upsert_new_store_without_channel_is_unnumbered(self):
+        db = _make_db()  # 无 fact 表 → 反查不到：允许未归属（不派号）
+        report_roster.upsert_roster_entry(
+            db, _entry(entity_key="全新店"), actor="admin")
+        row = report_roster.fetch_roster(db)[0]
+        self.assertIsNone(row["channel"])
+        self.assertIsNone(row["store_no"])
+        # 显式给 channel 则正常派号
+        entry = validate_roster_fields("qudao", "store", "全新店B", "张三",
+                                       channel="京东")
+        report_roster.upsert_roster_entry(db, entry, actor="admin")
+        row = [r for r in report_roster.fetch_roster(db)
+               if r["entity_key"] == "全新店B"][0]
+        self.assertEqual("京东", row["channel"])
+        self.assertEqual(1, row["store_no"])
+
+    def test_backfill_freezes_current_numbering(self):
+        db = self._db_with_fact()
+        # 模拟 v1 存量（无 channel/store_no）
+        cur = db.cursor()
+        for store, person in (("JD购喝", "娄灿斌"), ("JD金沙", "王蕊"),
+                              ("TM旗舰", "钟甜")):
+            cur.execute(
+                "INSERT INTO dim_report_roster "
+                "(scope, entity_type, entity_key, person_name, enabled) "
+                "VALUES ('qudao', 'store', ?, ?, 1)",
+                (store, person),
+            )
+        db.commit()
+
+        patched, assigned = report_roster.backfill_store_numbers(db, actor="seed")
+        self.assertEqual((3, 3), (patched, assigned))
+        numbers = report_roster.fetch_store_numbers(db)
+        self.assertEqual(("京东", 1), numbers["JD购喝"])   # 目标高者 1 号
+        self.assertEqual(("京东", 2), numbers["JD金沙"])
+        self.assertEqual(("天猫", 1), numbers["TM旗舰"])
+        # 幂等：再跑全零
+        self.assertEqual((0, 0),
+                         report_roster.backfill_store_numbers(db, actor="seed"))
+
+    def test_sync_store_roster_with_explicit_map(self):
+        db = self._db_with_fact()
+        added, disabled = report_roster.sync_store_roster(
+            db, {"JD购喝": {"娄灿斌"}, "TM旗舰": {"钟甜"}}, actor="admin")
+        self.assertEqual((2, 0), (added, disabled))
+        # 再同步：JD购喝 换负责人 → 停娄灿斌、增新人
+        added, disabled = report_roster.sync_store_roster(
+            db, {"JD购喝": {"新人"}, "TM旗舰": {"钟甜"}}, actor="admin")
+        self.assertEqual((1, 1), (added, disabled))
+        owner_map = report_roster.fetch_store_owner_map(db, "qudao")
+        self.assertEqual({"新人"}, owner_map["JD购喝"])
+        self.assertEqual({"钟甜"}, owner_map["TM旗舰"])
+
+
 # -- 种子导入 ------------------------------------------------------------------
 
 class SeedTests(unittest.TestCase):
@@ -320,6 +433,117 @@ class SeedTests(unittest.TestCase):
         self.assertEqual({"饶佳君", "共管人"}, owner_map["京东1店"])
         self.assertEqual({"夏惠敏"}, owner_map["天猫2店"])
         self.assertNotIn("空店", owner_map)
+
+
+# -- 角色（v3：负责人/代填报人，2026-10-07 运维裁决） ---------------------------
+
+class RoleTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_validate_role_rules(self):
+        entry = _entry(role="deputy")
+        self.assertEqual("deputy", entry.role)
+        # 缺省 owner；非法值拒绝
+        self.assertEqual("owner", _entry().role)
+        with self.assertRaises(ReportRosterError):
+            _entry(role="boss")
+        # 非 store 类型一律归一 owner
+        person = _entry(scope="hangzhou", entity_type="person",
+                        entity_key="杭州", role="deputy")
+        self.assertEqual("owner", person.role)
+
+    def test_upsert_writes_and_flips_role(self):
+        report_roster.upsert_roster_entry(
+            self.db, _entry(role="deputy"), actor="admin")
+        row = report_roster.fetch_roster(self.db)[0]
+        self.assertEqual("deputy", row["role"])
+        # 改角色 = 同人同店用新角色重新新增（upsert 覆盖）
+        report_roster.upsert_roster_entry(
+            self.db, _entry(role="owner"), actor="admin")
+        rows = report_roster.fetch_roster(self.db)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("owner", rows[0]["role"])
+
+    def test_owner_map_roles_filter(self):
+        report_roster.upsert_roster_entry(self.db, _entry(), actor="admin")
+        report_roster.upsert_roster_entry(
+            self.db, _entry(person_name="代填人", role="deputy"), actor="admin")
+        # 权限面（默认）：负责人 ∪ 代填报人
+        both = report_roster.fetch_store_owner_map(self.db, "qudao")
+        self.assertEqual({"饶佳君", "代填人"}, both["京东1店"])
+        # 业绩投影面：仅 owner
+        owners_only = report_roster.fetch_store_owner_map(
+            self.db, "qudao", roles=("owner",))
+        self.assertEqual({"饶佳君"}, owners_only["京东1店"])
+
+    def test_role_map_buckets(self):
+        report_roster.upsert_roster_entry(self.db, _entry(), actor="admin")
+        report_roster.upsert_roster_entry(
+            self.db, _entry(person_name="代填人", role="deputy"), actor="admin")
+        role_map = report_roster.fetch_store_role_map(self.db, "qudao")
+        self.assertEqual(
+            {"owners": ["饶佳君"], "deputies": ["代填人"]},
+            role_map["京东1店"],
+        )
+
+
+# -- 区域个人月目标（v4「所有数据入库」） --------------------------------------
+
+class ReportTargetTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_validate_rules(self):
+        entry = report_roster.validate_target_fields(
+            "shaoxing", "潘良峰", "2026-10", 383000)
+        self.assertEqual(383000.0, entry.monthly_target)
+        # 空值 = 清除
+        self.assertIsNone(report_roster.validate_target_fields(
+            "shaoxing", "潘良峰", "2026-10", None).monthly_target)
+        for bad in (
+            ("qudao", "潘良峰", "2026-10", 1),      # qudao 不走本表
+            ("nope", "潘良峰", "2026-10", 1),
+            ("shaoxing", "  ", "2026-10", 1),
+            ("shaoxing", "潘良峰", "2026-13", 1),   # 非法年月
+            ("shaoxing", "潘良峰", "2026-1", 1),
+            ("shaoxing", "潘良峰", "2026-10", -1),  # 负目标
+            ("shaoxing", "潘良峰", "2026-10", "abc"),
+        ):
+            with self.assertRaises(ReportRosterError, msg=bad):
+                report_roster.validate_target_fields(*bad)
+
+    def test_upsert_fetch_and_overwrite(self):
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "潘良峰", "2026-10", 383000),
+            actor="admin")
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "洪强", "2026-10", 351000),
+            actor="admin")
+        targets = report_roster.fetch_person_targets(
+            self.db, "shaoxing", "2026-10")
+        self.assertEqual({"潘良峰": 383000.0, "洪强": 351000.0}, targets)
+        # 改值覆盖（同键 upsert）
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "shaoxing", "潘良峰", "2026-10", 400000),
+            actor="admin")
+        self.assertEqual(400000.0, report_roster.fetch_intake_target(
+            self.db, "shaoxing", "潘良峰", "2026-10"))
+        # 月份隔离 + 未录入返回 None
+        self.assertEqual({}, report_roster.fetch_person_targets(
+            self.db, "shaoxing", "2026-11"))
+        self.assertIsNone(report_roster.fetch_intake_target(
+            self.db, "shaoxing", "周亚平", "2026-10"))
+        # 审计（action='target'）
+        actions = [r["action"]
+                   for r in report_roster.fetch_roster_audit(self.db)]
+        self.assertEqual(["target", "target", "target"], actions)
 
 
 if __name__ == "__main__":

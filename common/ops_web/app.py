@@ -1,5 +1,5 @@
 """ops-web 应用装配：权限管理（grant 增删 + 审计流水 + 批量区域开通）
-与定时任务管理（管道列表 / 开关 / 新增 / 立即运行一次）。
+与定时任务管理（管道列表 / 开关 / 新增 / 立即运行一次 / 执行流水）。
 
 访问控制双闸（铁律 8）：
 
@@ -31,7 +31,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common.public_data import bi_authz, ops_control, report_roster
+from common.public_data import bi_authz, channel_target, ops_control, report_roster
+from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.scheduler import has_command
 
@@ -153,16 +154,48 @@ function addRoster(ev) {
     person_name: f.person_name.value.trim(),
     aliases: f.aliases.value.split(/[\\s,，、]+/).filter(Boolean),
     note: f.note.value.trim(),
+    role: f.role.value,
   });
 }
-function toggleRoster(id, enabled) {
-  const action = enabled ? '启用' : '停用';
-  if (!confirm('确认' + action + '该名册记录？')) return;
-  postJSON('/api/roster/toggle', {id: id, enabled: enabled});
+function setRosterStatus(id, value) {
+  postJSON('/api/roster/toggle', {id: id, enabled: value === '1'});
+}
+async function saveRegionTargets(scope) {
+  const rows = [];
+  document.querySelectorAll('input.person-target[data-scope="' + scope + '"]').forEach(function (el) {
+    const raw = el.value.trim();
+    rows.push({person_name: el.dataset.name, monthly_target: raw === '' ? null : Number(raw)});
+  });
+  const resp = await fetch('/api/roster/region-targets', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scope: scope, rows: rows}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('保存失败（' + resp.status + '）');
 }
 function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
   postJSON('/api/roster/delete', {id: id});
+}
+async function publishSnapshot() {
+  if (!confirm('确认发布月度快照？（目标按当前输入覆盖 raw 快照，负责人按名册投影，随后自动触发提取重建榜单）')) return;
+  const rows = [];
+  document.querySelectorAll('input.roster-target').forEach(function (el) {
+    const raw = el.value.trim();
+    rows.push({
+      store_name: el.dataset.store,
+      channel: el.dataset.channel,
+      monthly_target: raw === '' ? null : Number(raw),
+    });
+  });
+  const resp = await fetch('/api/roster/publish-snapshot', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rows: rows}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('发布失败（' + resp.status + '）');
 }
 """
 
@@ -179,6 +212,7 @@ def _page(title, *sections, viewer_name=""):
         "<a href=\"/audit\">审计流水</a>"
         "<a href=\"/pipelines\">定时任务</a>"
         "<a href=\"/pipelines/audit\">任务审计</a>"
+        "<a href=\"/pipelines/history\">执行流水</a>"
         "<a href=\"/roster\">填报名册</a>"
         "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
@@ -195,9 +229,13 @@ def _esc(value):
 _BJT = timezone(timedelta(hours=8))
 
 
+def _current_year_month():
+    """当前年月（北京时间，``YYYY-MM``）——区域月目标的键。"""
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m")
+
+
 def _fmt_time(value):
     """UTC 存储时间 → 北京时间字符串；None/认不出的原样返回。
-
     入参兼容 pymysql 返回的 datetime 与字符串两种形态；naive 一律按 UTC
     解读（与 sync_runs/robot_outbox 等表的存储约定一致）。
     """
@@ -227,10 +265,13 @@ _RUN_STATUS_LABEL = {
     "rejected": "已拒绝",
     "pending": "等待调度",
     "launched": "运行中",
+    "running": "运行中",
 }
+_TRIGGER_LABEL = {"cron": "定时", "run_once": "手动"}
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
-    "delete": "删除", "seed": "种子导入",
+    "delete": "删除", "seed": "种子导入", "publish": "发布快照",
+    "update": "修正",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -244,6 +285,13 @@ _SCOPE_LABEL = {
     "dining": "餐饮/部门",
 }
 _ENTITY_LABEL = {"store": "门店", "person": "人员", "dept": "部门"}
+
+#: 名册角色中文标签（v3：负责人/代填报人；仅 store 类型有 deputy）。
+_ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
+
+#: 名册管理能力对应的 bi_authz scope 授权键（成员与授权页单人授权：
+#: grant_type=scope、grant_key=roster；admin 隐式持有）。
+ROSTER_MANAGE_SCOPE = "roster"
 
 
 def _label(mapping, value):
@@ -473,9 +521,221 @@ def _schedule_cell(schedule):
     return f"{_esc(zh)}<span class=\"hint\">（{_esc(schedule)}）</span>"
 
 
+def _link_name_html(row):
+    """链接的姓名单元（别名折叠为小字）。"""
+    name_html = _esc(row["person_name"])
+    if row.get("aliases"):
+        try:
+            alias_text = "、".join(json.loads(row["aliases"]))
+        except (ValueError, TypeError):
+            alias_text = ""
+        if alias_text:
+            name_html += f"<span class=\"hint\">（{_esc(alias_text)}）</span>"
+    return name_html
+
+
+def _status_select_html(row):
+    """链接的状态下拉（2026-10-07 运维裁决：下拉直接改状态，当前值即状态）。"""
+    enabled = bool(row["enabled"])
+    return (
+        f"<select onchange=\"setRosterStatus({int(row['id'])}, this.value)\">"
+        f"<option value=\"1\"{' selected' if enabled else ''}>启用</option>"
+        f"<option value=\"0\"{'' if enabled else ' selected'}>停用</option>"
+        f"</select>"
+    )
+
+
+def _delete_btn_html(row):
+    return f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button>"
+
+
+#: 渠道门店表可排序列（2026-10-07 运维裁决）：?sort= 白名单，非法值回退默认。
+_QUDAO_SORTS = ("channel", "store", "owner", "deputy", "target")
+
+
+def _qudao_section(rows, targets, numbers, sort="channel"):
+    """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
+
+    统一模板（2026-10-07 运维裁决）：行 = 负责人链接，列为
+    渠道/地区▾ | 店铺/对象 | 月目标（元）| 负责人 | 代填报人 | 状态 | 备注 | 更新 | 操作
+    ——聚合列（渠道/店铺/月目标/代填报人）靠左、链接列靠右。代填报人
+    不单独占行：聚进店铺级代填报人格（同店铺格 rowspan，逐人带状态
+    下拉+删除，不显示备注）；单负责人店铺整行无聚合。排序：五列点
+    表头；``sort=channel``（默认）时渠道单元格同样合并、组内按编号
+    升序。目标列输入框即「草稿」，点「发布月度快照」才落 raw
+    （publishSnapshot JS 收集）。
+    """
+    store_rows = {}
+    for row in rows:
+        store_rows.setdefault(row["entity_key"], []).append(row)
+    all_stores = sorted(set(store_rows) | set(targets.keys()))
+    metas = {}
+    for store in all_stores:
+        channel, target = targets.get(
+            store, (numbers.get(store, ("", None))[0], None)
+        )
+        links = store_rows.get(store, [])
+        metas[store] = {
+            "channel": channel,
+            "target": target,
+            "store_no": numbers.get(store, (None, None))[1],
+            "owners": sorted(r["person_name"] for r in links
+                             if r.get("role") != "deputy"),
+            "deputies": sorted(r["person_name"] for r in links
+                               if r.get("role") == "deputy"),
+            # 链接行序：负责人在前、代填报人在后，各自按姓名
+            "links": sorted(
+                links,
+                key=lambda r: (1 if r.get("role") == "deputy" else 0,
+                               r["person_name"], int(r["id"])),
+            ),
+        }
+
+    def _channel_rank(channel):
+        if channel in CHANNELS:
+            return (0, CHANNELS.index(channel))
+        return (1, channel or "")
+
+    if sort == "store":
+        ordered = all_stores  # 店名升序
+    elif sort == "owner":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, metas[s]["owners"][0])
+                           if metas[s]["owners"] else (1, ""), s),
+        )
+    elif sort == "deputy":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, metas[s]["deputies"][0])
+                           if metas[s]["deputies"] else (1, ""), s),
+        )
+    elif sort == "target":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, -float(metas[s]["target"]))
+                           if metas[s]["target"] else (1, 0.0), s),
+        )
+    else:  # channel（默认）：渠道聚合，组内编号升序
+        ordered = sorted(
+            all_stores,
+            key=lambda s: (_channel_rank(metas[s]["channel"]),
+                           metas[s]["store_no"] or 10 ** 6, s),
+        )
+
+    def _th(label, key):
+        mark = " ▾" if sort == key else ""
+        return f"<th><a href=\"?sort={key}\">{_esc(label)}{mark}</a></th>"
+
+    # 展开为负责人链接行（2026-10-07 运维裁决）：代填报人不单独占行——
+    # 聚进店铺级「代填报人」格（与店铺/月目标格同 rowspan，格内逐人带
+    # 状态下拉+删除，不显示备注）；无负责人的店保留一行（目标仍可编辑）。
+    # 单负责人店铺因此整行无聚合。
+    flat = []
+    for store in ordered:
+        meta = metas[store]
+        meta["owner_links"] = [l for l in meta["links"]
+                               if l.get("role") != "deputy"]
+        meta["deputy_links"] = [l for l in meta["links"]
+                                if l.get("role") == "deputy"]
+        for link in meta["owner_links"] or [None]:
+            flat.append((store, meta, link))
+
+    body = []
+    total = 0.0
+    channel_span_left = 0
+    store_span_left = 0
+    for position, (store, meta, link) in enumerate(flat):
+        cells = []
+        if sort == "channel":
+            if channel_span_left == 0:
+                span = 1
+                for nxt_store, nxt_meta, _link in flat[position + 1:]:
+                    if nxt_meta["channel"] == meta["channel"]:
+                        span += 1
+                    else:
+                        break
+                channel_span_left = span
+                channel_text = _esc(meta["channel"]) or "—"
+                cells.append(
+                    f"<td rowspan=\"{span}\">{channel_text}</td>"
+                    if span > 1 else f"<td>{channel_text}</td>"
+                )
+            channel_span_left -= 1
+        else:
+            cells.append(f"<td>{_esc(meta['channel']) or '—'}</td>")
+        first_of_store = store_span_left == 0
+        if first_of_store:
+            store_span = len(meta["owner_links"]) or 1
+            store_span_left = store_span
+            target = meta["target"]
+            if target:
+                total += float(target)
+            store_cell = (
+                f"<td rowspan=\"{store_span}\">{_esc(store)}</td>"
+                if store_span > 1 else f"<td>{_esc(store)}</td>"
+            )
+            target_value = "" if target is None else f"{float(target):.0f}"
+            # 月目标格参与店铺聚合（与店铺格同 rowspan，紧随店铺格）——
+            # 聚合列（渠道/店铺/月目标）靠左、链接列靠右（2026-10-07 裁决）。
+            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
+            target_cell = (
+                f"<td{rowspan}><input class=\"roster-target\" "
+                f"data-store=\"{_esc(store)}\" "
+                f"data-channel=\"{_esc(meta['channel'])}\" "
+                f"value=\"{_esc(target_value)}\" "
+                f"placeholder=\"目标（元）\"></td>"
+            )
+            cells.append(store_cell + target_cell)
+        store_span_left -= 1
+        if link is None:
+            cells.append("<td><span class=\"hint\">无负责人在册</span></td>")
+        else:
+            cells.append(f"<td>{_link_name_html(link)}</td>")
+        if first_of_store:
+            # 代填报人店铺格（2026-10-07 运维裁决）：只读展示——不带状态
+            # 下拉与删除（代填授权不在此办理），不显示备注。
+            deputy_html = "".join(
+                f"<div>{_link_name_html(l)}</div>"
+                for l in meta["deputy_links"]
+            ) or "<span class=\"hint\">—</span>"
+            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
+            cells.append(f"<td{rowspan}>{deputy_html}</td>")
+        if link is None:
+            cells.append("<td></td><td></td><td></td><td></td>")
+        else:
+            updated = _fmt_time(link.get("updated_at")) or "—"
+            cells.append(
+                f"<td>{_status_select_html(link)}</td>"
+                f"<td>{_esc(link.get('note'))}</td>"
+                f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
+                f"<td>{_delete_btn_html(link)}</td>"
+            )
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
+        "点表头排序，默认按渠道聚合）</span></h2>"
+        "<table><tr>"
+        + _th("渠道/地区", "channel")
+        + _th("店铺/对象", "store")
+        + _th("月目标（元）", "target")
+        + _th("负责人", "owner")
+        + _th("代填报人", "deputy")
+        + "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
+        + ("".join(body)
+           or "<tr><td colspan=\"9\" class=\"hint\">暂无记录</td></tr>")
+        + "</table>"
+        f"<p>合计：<strong>{total:.0f}</strong> 元 "
+        "<button onclick=\"publishSnapshot()\">发布月度快照</button>"
+        "<span class=\"hint\">（负责人按名册投影写 raw 快照，自动触发提取重建榜单；"
+        "改动未发布前不落库）</span></p>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 应用工厂
 # ---------------------------------------------------------------------------
+
 
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
@@ -498,8 +758,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     app = FastAPI(title="ops-web")
 
-    def require_admin(request: Request) -> authz.Viewer:
-        """应用层闸：session 有效 + admin；其余一律提示页/403。"""
+    def _resolve_request_viewer(request: Request) -> authz.Viewer:
+        """session → Viewer（各闸共用的解析段；未登录 401/302，解析异常 403）。"""
         raw = request.cookies.get(auth.SESSION_COOKIE)
         userid = (
             auth.resolve_session_userid(raw, session_secret) if raw else None
@@ -512,18 +772,35 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 status_code=302, headers={"Location": "/auth/entry?reason=login"}
             )
         try:
-            viewer = viewer_resolver.resolve(userid)
+            return viewer_resolver.resolve(userid)
         except Exception as exc:
             # 权限链 fail-closed（铁律 2）：解析异常 = 拒绝。
             _LOGGER.warning("ops-web viewer resolve failed: %s", type(exc).__name__)
             raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
+
+    def _forbidden(request: Request):
+        if request.url.path.startswith("/api/"):
+            raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
+        raise HTTPException(
+            status_code=302,
+            headers={"Location": "/auth/entry?reason=forbidden"},
+        )
+
+    def require_admin(request: Request) -> authz.Viewer:
+        """应用层闸：session 有效 + admin；其余一律提示页/403。"""
+        viewer = _resolve_request_viewer(request)
         if not viewer.is_admin:
-            if request.url.path.startswith("/api/"):
-                raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
-            raise HTTPException(
-                status_code=302,
-                headers={"Location": "/auth/entry?reason=forbidden"},
-            )
+            _forbidden(request)
+        request.state.viewer = viewer
+        return viewer
+
+    def require_roster_manager(request: Request) -> authz.Viewer:
+        """名册管理闸（2026-10-07 运维裁决）：admin 或持 ``scope='roster'``
+        授权（成员与授权页单人授权分配）——名册的新增/删除/状态修改绑定
+        该授权，不再是 admin 的隐式全集。"""
+        viewer = _resolve_request_viewer(request)
+        if not (viewer.is_admin or ROSTER_MANAGE_SCOPE in viewer.scopes):
+            _forbidden(request)
         request.state.viewer = viewer
         return viewer
 
@@ -945,10 +1222,58 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
             "<th>服务标识</th><th>详情</th></tr>"
             + "".join(rows) + "</table>"
-            "<p class=\"hint\">「立即运行一次」不经本表——其发起人"
-            "直接落在运行请求行上（定时任务页「最近运行」列）。</p>"
+            "<p class=\"hint\">本表只记注册表变更（开关/新增）；每次实际"
+            "运行（定时与「立即运行一次」）见「执行流水」页。</p>"
         )
         return HTMLResponse(_page("任务审计", table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.get("/pipelines/history")
+    def pipeline_history_page(request: Request, service_id: str = ""):
+        viewer = require_admin(request)
+        service_filter = service_id.strip()
+        try:
+            with db_connector() as connection:
+                entries = ops_control.fetch_run_history(
+                    connection, service_id=service_filter or None
+                )
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web run history load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        history_keys = ("id", "service_id", "trigger_type", "status",
+                        "exit_code", "note", "started_at", "finished_at")
+        rows = []
+        for row in entries:
+            if isinstance(row, dict):
+                get = row.get
+            else:
+                get = lambda key, r=row: r[history_keys.index(key)]
+            exit_code = get("exit_code")
+            rows.append(
+                f"<tr><td>{_esc(_fmt_time(get('started_at')))}</td>"
+                f"<td>{_service_name_cell(get('service_id'))}</td>"
+                f"<td>{_esc(_label(_TRIGGER_LABEL, get('trigger_type')))}</td>"
+                f"<td>{_esc(_label(_RUN_STATUS_LABEL, get('status')))}</td>"
+                f"<td>{'—' if exit_code is None else _esc(exit_code)}</td>"
+                f"<td>{_esc(_fmt_time(get('finished_at')))}</td>"
+                f"<td>{_esc(get('note'))}</td></tr>"
+            )
+        table = (
+            "<h1>定时任务执行流水</h1>"
+            "<form class=\"inline\" method=\"get\" action=\"/pipelines/history\">"
+            "<input name=\"service_id\" placeholder=\"按服务标识过滤（可空）\""
+            f" value=\"{_esc(service_filter)}\">"
+            "<button type=\"submit\">过滤</button></form>"
+            "<table><tr><th>开始时间</th><th>服务标识</th><th>触发</th>"
+            "<th>状态</th><th>退出码</th><th>结束时间</th><th>备注</th></tr>"
+            + "".join(rows) + "</table>"
+            "<p class=\"hint\">调度器每次实际点火（定时与「立即运行一次」同"
+            "路径）落一行；锁被占用/运行异常记为失败且无退出码。依赖未满足"
+            "的暂缓与非法 cron 不是运行，只走调度器日志。时间为北京时间。</p>"
+        )
+        return HTMLResponse(_page("执行流水", table,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.post("/api/pipelines/toggle")
@@ -1062,11 +1387,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/roster")
     def roster_page(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         try:
             with db_connector() as connection:
                 entries = report_roster.fetch_roster(connection)
                 audits = report_roster.fetch_roster_audit(connection, limit=20)
+                qudao_targets = channel_target.fetch_store_targets(connection)
+                qudao_numbers = report_roster.fetch_store_numbers(connection)
+                # 区域个人月目标（dim_report_target，「所有数据入库」）：
+                # 当月（北京时间）各人目标，月目标列可编辑保存。
+                current_month = _current_year_month()
+                region_targets = {
+                    scope: report_roster.fetch_person_targets(
+                        connection, scope, current_month)
+                    for scope in report_roster.SCOPES if scope != "qudao"
+                }
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
@@ -1075,9 +1410,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         for row in entries:
             by_scope.setdefault(row["scope"], []).append(row)
 
+        sort = request.query_params.get("sort") or "channel"
+        if sort not in _QUDAO_SORTS:
+            sort = "channel"
         sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
         for scope in report_roster.SCOPES:
             rows = by_scope.get(scope) or []
+            if scope == "qudao":
+                sections.append(
+                    _qudao_section(rows, qudao_targets, qudao_numbers, sort=sort)
+                )
+                continue
             scope_label = _label(_SCOPE_LABEL, scope)
             sections.append(f"<h2>{_esc(scope_label)}"
                             f"<span class=\"hint\">（{_esc(scope)}，{len(rows)} 条）</span></h2>")
@@ -1088,34 +1431,66 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                                    "——渠道机器人回退读月目标表 owners_json。")
                                 + "</p>")
                 continue
+            # 统一链接行模板（2026-10-07 运维裁决，与渠道门店同构）：
+            # 渠道/地区 | 店铺/对象 | 负责人 | 代填报人 | 月目标（元）|
+            # 状态 | 备注 | 更新 | 操作。地区列整段合并、对象列按值合并；
+            # 月目标取区域 Nacos monthlyTargets（个人粒度，无则 —）。
+            person_targets = region_targets.get(scope) or {}
+            sorted_rows = sorted(
+                rows,
+                key=lambda r: (str(r["entity_key"]), str(r["person_name"]),
+                               int(r["id"])),
+            )
+            spans: dict = {}
+            for row in sorted_rows:
+                key = str(row["entity_key"])
+                spans[key] = spans.get(key, 0) + 1
+            seen: set = set()
             body = []
-            for row in rows:
-                aliases_text = ""
-                if row.get("aliases"):
-                    try:
-                        aliases_text = "、".join(json.loads(row["aliases"]))
-                    except (ValueError, TypeError):
-                        aliases_text = ""
-                enabled = bool(row["enabled"])
-                toggle_label = "停用" if enabled else "启用"
-                status_cell = "✓" if enabled else "<span class=\"hint\">已停用</span>"
+            for position, row in enumerate(sorted_rows):
+                cells = []
+                if position == 0:
+                    cells.append(
+                        f"<td rowspan=\"{len(sorted_rows)}\">"
+                        f"{_esc(scope_label)}</td>"
+                        if len(sorted_rows) > 1
+                        else f"<td>{_esc(scope_label)}</td>"
+                    )
+                key = str(row["entity_key"])
+                if key not in seen:
+                    seen.add(key)
+                    cells.append(
+                        f"<td rowspan=\"{spans[key]}\">{_esc(key)}</td>"
+                        if spans[key] > 1 else f"<td>{_esc(key)}</td>"
+                    )
+                personal_target = person_targets.get(row["person_name"])
+                target_value = (
+                    f"{float(personal_target):.0f}"
+                    if personal_target is not None else ""
+                )
                 updated = _fmt_time(row.get("updated_at")) or "—"
-                body.append(
-                    f"<tr><td>{_esc(_label(_ENTITY_LABEL, row['entity_type']))}</td>"
-                    f"<td>{_esc(row['entity_key'])}</td>"
-                    f"<td>{_esc(row['person_name'])}</td>"
-                    f"<td>{_esc(aliases_text)}</td>"
-                    f"<td>{status_cell}</td>"
+                cells.append(
+                    f"<td><input class=\"person-target\" "
+                    f"data-scope=\"{_esc(scope)}\" "
+                    f"data-name=\"{_esc(row['person_name'])}\" "
+                    f"value=\"{_esc(target_value)}\" "
+                    f"placeholder=\"目标（元）\"></td>"
+                    f"<td>{_link_name_html(row)}</td><td></td>"
+                    f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
                     f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
-                    f"<td><button onclick=\"toggleRoster("
-                    f"{int(row['id'])}, {str(not enabled).lower()})\">{toggle_label}</button> "
-                    f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button></td></tr>"
+                    f"<td>{_delete_btn_html(row)}</td>"
                 )
+                body.append("<tr>" + "".join(cells) + "</tr>")
             sections.append(
-                "<table><tr><th>类型</th><th>对象</th><th>填报人</th><th>别名</th>"
-                "<th>启用</th><th>备注</th><th>更新</th><th>操作</th></tr>"
+                "<table><tr><th>渠道/地区</th><th>店铺/对象</th>"
+                "<th>月目标（元）</th><th>负责人</th><th>代填报人</th>"
+                "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
+                f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}')\">"
+                f"保存{_esc(scope_label)}{_esc(current_month)}月目标</button>"
+                "<span class=\"hint\">（单位：元，空白 = 清除该人当月目标；"
+                "保存即生效——机器人报数快照同步读取，逐条落审计）</span></p>"
             )
 
         scope_options = "".join(
@@ -1133,13 +1508,23 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             f"<select name=\"entity_type\">{entity_options}</select>"
             "<input name=\"entity_key\" placeholder=\"对象（店名/部门名/区域）\" required>"
             "<input name=\"person_name\" placeholder=\"填报人姓名\" required>"
+            "<select name=\"role\">"
+            "<option value=\"owner\">负责人</option>"
+            "<option value=\"deputy\">代填报人</option>"
+            "</select>"
             "<input name=\"aliases\" placeholder=\"别名，逗号分隔（可空）\">"
             "<input name=\"note\" placeholder=\"备注（可空）\">"
             "<button type=\"submit\">新增</button></form>"
             "<p class=\"hint\">渠道门店（qudao）：管理「谁可以填哪些店」，渠道机器人"
             "实时生效；日报区域（杭州/绍兴等）：该范围一旦有人名记录即启用白名单"
             "（只准在册人员填报），无记录则不拦截；餐饮/部门先登记，机器人后续接入。"
-            "「删除」会留审计，日常调整建议用「停用」。</p>"
+            "「删除」会留审计，日常调整建议用「停用」。"
+            "<strong>人名一律用通讯录本名（不用花名/昵称）</strong>；"
+            "别名仅用于群昵称与本名不一致的匹配容错。"
+            "角色：负责人占业绩归属，代填报人仅可填报不占业绩；"
+            "改角色 = 用新角色重新「新增」同人同对象（覆盖生效）。"
+            "本页新增/删除/状态修改需「名册管理」授权"
+            "（成员与授权页单人授权：scope = roster）。</p>"
         )
         audit_rows = "".join(
             f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
@@ -1164,7 +1549,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/add")
     async def roster_add(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         aliases = payload.get("aliases") or []
         if not isinstance(aliases, list):
@@ -1177,6 +1562,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 payload.get("person_name"),
                 aliases=aliases,
                 note=payload.get("note", ""),
+                role=payload.get("role") or "owner",
             )
         except report_roster.ReportRosterError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
@@ -1192,7 +1578,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/toggle")
     async def roster_toggle(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         enabled = payload.get("enabled")
@@ -1213,7 +1599,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/delete")
     async def roster_delete(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         if isinstance(roster_id, bool) or not isinstance(roster_id, int):
@@ -1229,6 +1615,89 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if not hit:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         return JSONResponse({"status": "ok"})
+
+    @app.post("/api/roster/region-targets")
+    async def roster_region_targets(request: Request):
+        """保存某区域当月个人月目标（dim_report_target，「所有数据入库」）：
+        逐条校验+upsert+审计；空白（null）= 清除该人当月目标。"""
+        viewer = require_roster_manager(request)
+        payload = await _json_body(request)
+        scope = payload.get("scope")
+        rows = payload.get("rows")
+        if scope not in report_roster.SCOPES or scope == "qudao" \
+                or not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        year_month = _current_year_month()
+        try:
+            entries = [
+                report_roster.validate_target_fields(
+                    scope,
+                    (row or {}).get("person_name") if isinstance(row, dict)
+                    else None,
+                    year_month,
+                    (row or {}).get("monthly_target")
+                    if isinstance(row, dict) else None,
+                )
+                for row in rows
+            ]
+        except report_roster.ReportRosterError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                for entry in entries:
+                    report_roster.upsert_report_target(
+                        connection, entry, actor=viewer.userid
+                    )
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web region targets save failed: %s", type(exc).__name__
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "saved": len(entries)})
+
+    @app.post("/api/roster/publish-snapshot")
+    async def roster_publish_snapshot(request: Request):
+        """发布月度目标快照（S2）：目标覆盖 raw + 名册投影 owners + 触发提取。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        # 渠道缺省时从名册编号表反查（页面只对有把握的店带 channel）。
+        try:
+            with db_connector() as connection:
+                numbers = report_roster.fetch_store_numbers(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web publish preflight failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        for row in rows if isinstance(rows, list) else ():
+            if isinstance(row, dict) and not (row.get("channel") or "").strip():
+                store = row.get("store_name")
+                row["channel"] = numbers.get(store, ("", None))[0]
+        try:
+            target_rows = channel_target.validate_target_rows(rows)
+        except channel_target.ChannelTargetError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as mart_connection:
+                raw_connection = connect(settings.dingtalk_database)
+                try:
+                    deleted, inserted, missing = channel_target.publish_snapshot(
+                        raw_connection, target_rows, actor=viewer.userid,
+                        roster_connection=mart_connection,
+                    )
+                finally:
+                    raw_connection.close()
+                request_id = ops_control.insert_run_request(
+                    mart_connection, "extract-mart", viewer.userid
+                )
+        except Exception as exc:
+            _LOGGER.warning("ops-web publish snapshot failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok", "deleted": deleted, "inserted": inserted,
+            "missing_owners": missing, "extract_request_id": request_id,
+        })
 
     return app
 

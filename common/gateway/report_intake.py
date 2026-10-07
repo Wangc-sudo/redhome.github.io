@@ -45,6 +45,18 @@ from common.metrics.daily_report import (
 from common.public_data import report_roster
 
 
+def _monthly_target_for(connection, region_cfg, table_name, business_date):
+    """月目标快照源（2026-10-07「所有数据入库」）：``dim_report_target``
+    优先，Nacos ``monthlyTargets`` 兜底（未迁库区域的过渡通道）。"""
+    db_value = report_roster.fetch_intake_target(
+        connection, region_cfg.region, table_name,
+        business_date.strftime("%Y-%m"),
+    )
+    if db_value is not None:
+        return db_value
+    return region_cfg.monthly_targets.get(table_name)
+
+
 _WEEKDAYS = "一二三四五六日"
 
 #: stream 来源写入的占位 run id（全零）：报数落库不属于任何同步 run，
@@ -547,7 +559,8 @@ def _record_value(connection, *, region_cfg, member, table_name,
         region=region_cfg.region,
         member=member,
         table_name=table_name,
-        monthly_target=region_cfg.monthly_targets.get(table_name),
+        monthly_target=_monthly_target_for(
+            connection, region_cfg, table_name, business_date),
         business_date=business_date,
         value=value,
         now=now,
@@ -840,8 +853,10 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
         region=region_cfg.region,
         member=member,
         table_name=table_name,
-        # 无 AI 表区域的月目标快照（有表区域为 None，目标由表行携带）。
-        monthly_target=region_cfg.monthly_targets.get(table_name),
+        # 月目标快照：dim_report_target 优先（「所有数据入库」），
+        # Nacos monthlyTargets 兜底；有表区域为 None（目标由表行携带）。
+        monthly_target=_monthly_target_for(
+            connection, region_cfg, table_name, business_date),
         business_date=business_date,
         value=value,
         now=now,

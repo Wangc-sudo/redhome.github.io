@@ -32,8 +32,16 @@ from common.public_data.mart_extract_schema import (
     stock_flow_ddl_statements,
 )
 from common.public_data.db import transaction
-from common.public_data.ops_control import pipeline_ops_ddl_statements
-from common.public_data.report_roster import report_roster_ddl_statements
+from common.public_data.ops_control import (
+    pipeline_ops_ddl_statements,
+    run_history_ddl_statements,
+)
+from common.public_data.report_roster import (
+    report_roster_ddl_statements,
+    report_roster_v2_ddl_statements,
+    report_roster_v3_ddl_statements,
+    report_roster_v4_ddl_statements,
+)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -316,6 +324,31 @@ def _build_mart_report_roster_ddl() -> tuple[str, ...]:
     return report_roster_ddl_statements()
 
 
+# 名册 v2（2026-10-07，统一管理方案 §6-A）：channel / store_no 两列，
+# 编号冻结——新店渠道内 max+1，目标变化不再洗牌。
+def _build_mart_report_roster_v2_ddl() -> tuple[str, ...]:
+    return report_roster_v2_ddl_statements()
+
+
+# 名册 v3（2026-10-07，运维裁决）：role 列——负责人/代填报人区分；
+# 权限取并集、业绩投影只取 owner，存量行默认 owner 语义不变。
+def _build_mart_report_roster_v3_ddl() -> tuple[str, ...]:
+    return report_roster_v3_ddl_statements()
+
+
+# 名册 v4（2026-10-07，运维裁决「所有数据入库」）：dim_report_target——
+# 区域个人月目标真源入库，取代 Nacos monthlyTargets 运维通道。
+def _build_mart_report_roster_v4_ddl() -> tuple[str, ...]:
+    return report_roster_v4_ddl_statements()
+
+
+# 定时任务执行流水（2026-10-07）：pd_ops_run_history——scheduler 每次
+# 点火（cron/run-once）落一行，ops-web「执行流水」页与巡检共用。
+# 独立版本而非改写 mart-ops-run-requests-v1（校验和红线）。
+def _build_mart_run_history_ddl() -> tuple[str, ...]:
+    return run_history_ddl_statements()
+
+
 def _build_raw_manual_ddl() -> tuple[str, ...]:
     """人工报表导入通道的 raw 表（C 类数据源，见 docs/manual-import-channel.md）。"""
     return raw_manual_ddl_statements()
@@ -438,6 +471,26 @@ _MIGRATIONS = (
         "mart-ops-report-roster-v1",
         "mart",
         _build_mart_report_roster_ddl(),
+    ),
+    (
+        "mart-ops-report-roster-v2",
+        "mart",
+        _build_mart_report_roster_v2_ddl(),
+    ),
+    (
+        "mart-ops-report-roster-v3",
+        "mart",
+        _build_mart_report_roster_v3_ddl(),
+    ),
+    (
+        "mart-ops-report-roster-v4",
+        "mart",
+        _build_mart_report_roster_v4_ddl(),
+    ),
+    (
+        "mart-ops-run-history-v1",
+        "mart",
+        _build_mart_run_history_ddl(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

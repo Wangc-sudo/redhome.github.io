@@ -654,3 +654,96 @@ def test_run_once_leaves_pending_on_unsatisfied_deps():
     assert scheduler._runner.calls == []
     assert store.claims == []
     assert store.rejected == []
+
+
+# -- 执行流水（pd_ops_run_history，旁路审计） ---------------------------------
+
+class FakeRunHistoryStore:
+    """scheduler._record_start/_record_finish 依赖的最小 store 接口。"""
+
+    def __init__(self):
+        self.started = []    # (service_id, trigger_type)
+        self.finished = []   # (history_id, returncode)
+        self._next_id = 0
+
+    def record_start(self, service_id, trigger_type):
+        self._next_id += 1
+        self.started.append((service_id, trigger_type))
+        return self._next_id
+
+    def record_finish(self, history_id, returncode):
+        self.finished.append((history_id, returncode))
+
+
+def _history_scheduler(configs, history, **kwargs):
+    kwargs.setdefault("clock", FakeClock(datetime(2026, 9, 21, 2, 0, 5)))
+    scheduler = make_scheduler(configs, **kwargs)
+    scheduler._run_history = history
+    return scheduler
+
+
+def test_cron_fire_records_history_start_and_finish():
+    history = FakeRunHistoryStore()
+    scheduler = _history_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, history
+    )
+    scheduler.tick()
+    assert history.started == [("sync-wdt", "cron")]
+    assert history.finished == [(1, 0)]
+
+
+def test_nonzero_exit_recorded_as_failed_history():
+    history = FakeRunHistoryStore()
+    scheduler = _history_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, history,
+        runner=RecordingRunner(returncode=3),
+    )
+    scheduler.tick()
+    assert history.finished == [(1, 3)]
+
+
+def test_lock_unavailable_recorded_as_failed_history():
+    # 锁被占用：无退出码（None）→ 流水落 failed，仍能看出"点过火"。
+    history = FakeRunHistoryStore()
+    scheduler = _history_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, history,
+        lock_factory=lambda service_id: LockedOutLock(),
+    )
+    scheduler.tick()
+    assert history.started == [("sync-wdt", "cron")]
+    assert history.finished == [(1, None)]
+
+
+def test_history_store_failure_never_blocks_run():
+    class BrokenHistory:
+        def record_start(self, service_id, trigger_type):
+            raise ConnectionError("db down")
+
+        def record_finish(self, history_id, returncode):  # pragma: no cover
+            raise AssertionError("不应被调用（start 已失败 → id=None）")
+
+    scheduler = _history_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, BrokenHistory()
+    )
+    scheduler.tick()
+    assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
+
+
+def test_run_once_records_run_once_trigger_type():
+    history = FakeRunHistoryStore()
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(9, "sync-wdt", "alice")]
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+    )
+    scheduler._run_history = history
+    scheduler.tick()
+    assert history.started == [("sync-wdt", "run_once")]
+    assert history.finished == [(1, 0)]
+
+
+def test_no_history_injection_means_no_recording():
+    # 默认不注入（测试/遗留装配）：行为与旧版一致，不炸。
+    scheduler, _ = due_scheduler({"sync-wdt": {"schedule": "0 2 * * *"}})
+    scheduler.tick()
+    assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]

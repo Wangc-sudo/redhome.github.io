@@ -39,6 +39,12 @@ Design notes:
 * 「立即运行一次」channel: when *run_requests* is injected, each tick also
   drains ``pd_ops_run_request`` pending rows (ops-web writes them), firing
   them through the same lock/executor path as cron fires.
+* 执行流水 channel: when *run_history* is injected, every actual fire
+  (cron and run-once alike, same ``_run`` path) writes a running row to
+  ``pd_ops_run_history`` before lock acquisition and finishes it with the
+  exit code afterwards -- lock-unavailable / crash (no exit code) lands as
+  failed.  History is a side-channel: a DB failure there only logs a
+  WARNING and never blocks the pipeline itself.
 
 All collaborators (config source, runner, lock factory, executor, clock,
 sleeper) are injected, so unit tests need no Nacos, MySQL or subprocess.
@@ -436,7 +442,7 @@ class Scheduler:
     def __init__(self, *, config_source, service_ids, runner, lock_factory,
                  settings=None, executor=None, clock=None, sleeper=None,
                  poll_seconds=DEFAULT_POLL_SECONDS, dep_probe=None,
-                 dep_probes=None, run_requests=None):
+                 dep_probes=None, run_requests=None, run_history=None):
         self._config_source = config_source
         if callable(service_ids):
             self._fleet_source = service_ids
@@ -446,6 +452,7 @@ class Scheduler:
             self._service_ids = tuple(service_ids)
         self._runner = runner
         self._run_requests = run_requests
+        self._run_history = run_history
         self._lock_factory = lock_factory
         self._settings = settings or SchedulerSettings.from_env()
         self._executor = executor or ThreadExecutor()
@@ -638,9 +645,37 @@ class Scheduler:
                     self._run_once(sid, cmd, rid)
             )
 
+    # -- 执行流水（pd_ops_run_history，旁路审计：故障只告警、绝不阻断运行）----
+
+    def _record_start(self, service_id, trigger_type):
+        """点火前落 running 行；未注入或 DB 故障返回 None（不影响运行）。"""
+        store = self._run_history
+        if store is None:
+            return None
+        try:
+            return store.record_start(service_id, trigger_type)
+        except Exception:
+            logger.warning(
+                "service=%s 运行流水登记失败（旁路故障，不影响本次运行）",
+                service_id, exc_info=True,
+            )
+            return None
+
+    def _record_finish(self, history_id, returncode):
+        """结束回写；失败只告警（流水滞留 running，由巡检 stale 检测兜出）。"""
+        if history_id is None:
+            return
+        try:
+            self._run_history.record_finish(history_id, returncode)
+        except Exception:
+            logger.warning(
+                "运行流水 #%s 结果回写失败（该行将滞留 running）",
+                history_id, exc_info=True,
+            )
+
     def _run_once(self, service_id, argv, request_id):
         """run-once 包装：复用 _run 的锁/运行路径，结束后回写结果。"""
-        returncode = self._run(service_id, argv)
+        returncode = self._run(service_id, argv, trigger_type="run_once")
         try:
             self._run_requests.mark_finished(request_id, returncode)
         except Exception:
@@ -649,8 +684,14 @@ class Scheduler:
                 request_id, exc_info=True,
             )
 
-    def _run(self, service_id, argv):
-        """持锁运行一条管道；返回子进程退出码（锁失败/异常返回 None）。"""
+    def _run(self, service_id, argv, trigger_type="cron"):
+        """持锁运行一条管道；返回子进程退出码（锁失败/异常返回 None）。
+
+        *trigger_type* 仅用于执行流水（cron / run_once）；流水行在取锁
+        之前落库，锁被占用/运行异常（无退出码）也会留下 failed 记录。
+        """
+        history_id = self._record_start(service_id, trigger_type)
+        returncode = None
         try:
             try:
                 lock = self._lock_factory(service_id)
@@ -678,6 +719,7 @@ class Scheduler:
             return returncode
         finally:
             self._running.discard(service_id)
+            self._record_finish(history_id, returncode)
 
     # -- main loop ------------------------------------------------------------
 
@@ -786,7 +828,10 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
     import time
 
     from common.public_data.db import connect
-    from common.public_data.ops_control import DbRunRequestGateway
+    from common.public_data.ops_control import (
+        DbRunHistoryGateway,
+        DbRunRequestGateway,
+    )
     from common.public_data.settings import Settings
 
     settings = SchedulerSettings.from_env()
@@ -810,6 +855,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
         sleeper=time.sleep,
         dep_probes=dep_probes,
         run_requests=DbRunRequestGateway(connect, mart_database),
+        run_history=DbRunHistoryGateway(connect, mart_database),
     )
     scheduler.run_forever()
 
