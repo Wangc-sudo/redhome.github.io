@@ -84,6 +84,7 @@ def _make_db(with_targets=False):
         " updated_at VARCHAR(32) DEFAULT NULL,"
         " channel VARCHAR(32) DEFAULT NULL,"
         " store_no INT DEFAULT NULL,"
+        " role VARCHAR(16) NOT NULL DEFAULT 'owner',"
         " UNIQUE (scope, entity_type, entity_key, person_name))"
     )
     wrapper.cursor().execute(
@@ -416,6 +417,59 @@ class SeedTests(unittest.TestCase):
         self.assertEqual({"饶佳君", "共管人"}, owner_map["京东1店"])
         self.assertEqual({"夏惠敏"}, owner_map["天猫2店"])
         self.assertNotIn("空店", owner_map)
+
+
+# -- 角色（v3：负责人/代填报人，2026-10-07 运维裁决） ---------------------------
+
+class RoleTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_validate_role_rules(self):
+        entry = _entry(role="deputy")
+        self.assertEqual("deputy", entry.role)
+        # 缺省 owner；非法值拒绝
+        self.assertEqual("owner", _entry().role)
+        with self.assertRaises(ReportRosterError):
+            _entry(role="boss")
+        # 非 store 类型一律归一 owner
+        person = _entry(scope="hangzhou", entity_type="person",
+                        entity_key="杭州", role="deputy")
+        self.assertEqual("owner", person.role)
+
+    def test_upsert_writes_and_flips_role(self):
+        report_roster.upsert_roster_entry(
+            self.db, _entry(role="deputy"), actor="admin")
+        row = report_roster.fetch_roster(self.db)[0]
+        self.assertEqual("deputy", row["role"])
+        # 改角色 = 同人同店用新角色重新新增（upsert 覆盖）
+        report_roster.upsert_roster_entry(
+            self.db, _entry(role="owner"), actor="admin")
+        rows = report_roster.fetch_roster(self.db)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("owner", rows[0]["role"])
+
+    def test_owner_map_roles_filter(self):
+        report_roster.upsert_roster_entry(self.db, _entry(), actor="admin")
+        report_roster.upsert_roster_entry(
+            self.db, _entry(person_name="代填人", role="deputy"), actor="admin")
+        # 权限面（默认）：负责人 ∪ 代填报人
+        both = report_roster.fetch_store_owner_map(self.db, "qudao")
+        self.assertEqual({"饶佳君", "代填人"}, both["京东1店"])
+        # 业绩投影面：仅 owner
+        owners_only = report_roster.fetch_store_owner_map(
+            self.db, "qudao", roles=("owner",))
+        self.assertEqual({"饶佳君"}, owners_only["京东1店"])
+
+    def test_role_map_buckets(self):
+        report_roster.upsert_roster_entry(self.db, _entry(), actor="admin")
+        report_roster.upsert_roster_entry(
+            self.db, _entry(person_name="代填人", role="deputy"), actor="admin")
+        role_map = report_roster.fetch_store_role_map(self.db, "qudao")
+        self.assertEqual(
+            {"owners": ["饶佳君"], "deputies": ["代填人"]},
+            role_map["京东1店"],
+        )
 
 
 if __name__ == "__main__":

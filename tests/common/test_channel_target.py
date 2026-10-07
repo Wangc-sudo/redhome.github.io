@@ -70,6 +70,7 @@ def _make_db(with_roster=False):
             " note VARCHAR(255) DEFAULT NULL, updated_by VARCHAR(64) DEFAULT NULL,"
             " updated_at VARCHAR(32) DEFAULT NULL,"
             " channel VARCHAR(32) DEFAULT NULL, store_no INT DEFAULT NULL,"
+            " role VARCHAR(16) NOT NULL DEFAULT 'owner',"
             " UNIQUE (scope, entity_type, entity_key, person_name))"
         )
         wrapper.cursor().execute(
@@ -187,10 +188,11 @@ class PublishSnapshotTests(unittest.TestCase):
         cur = db.cursor()
         cur.execute(
             "INSERT INTO dim_report_roster "
-            "(scope, entity_type, entity_key, person_name, enabled) VALUES "
-            "('qudao', 'store', 'JD购喝', '娄灿斌', 1),"
-            "('qudao', 'store', 'JD购喝', '共管人', 1),"
-            "('qudao', 'store', 'JD金沙', '停用人', 0)"
+            "(scope, entity_type, entity_key, person_name, enabled, role) VALUES "
+            "('qudao', 'store', 'JD购喝', '娄灿斌', 1, 'owner'),"
+            "('qudao', 'store', 'JD购喝', '共管人', 1, 'owner'),"
+            "('qudao', 'store', 'JD购喝', '代填人', 1, 'deputy'),"
+            "('qudao', 'store', 'JD金沙', '停用人', 0, 'owner')"
         )
         db.commit()
         return db
@@ -227,6 +229,7 @@ class PublishSnapshotTests(unittest.TestCase):
         )
         rows = {r["store_name"]: r for r in cur.fetchall()}
         owners = json.loads(rows["JD购喝"]["responsible_person"])
+        # 业绩投影仅 owner（v3）：代填人可填报但不占业绩归属
         self.assertEqual([{"name": "共管人"}, {"name": "娄灿斌"}],
                          sorted(owners, key=lambda x: x["name"]))
         self.assertEqual([], json.loads(rows["JD无负责人店"]["responsible_person"]))

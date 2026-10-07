@@ -152,27 +152,33 @@ def fetch_store_targets(connection):
         cursor.close()
 
 
-def publish_snapshot(connection, rows, *, actor, now=None):
+def publish_snapshot(raw_connection, rows, *, actor, roster_connection=None,
+                     now=None):
     """发布月度目标快照（统一管理方案 S2）：目标行 + 名册投影 owners 写 raw。
 
-    ``responsible_person`` 由 ``dim_report_roster``（qudao 启用链接）投影
-    生成——名册是负责人唯一真源，快照不再手工维护 owners。同事务：
-    DELETE+INSERT raw 快照 + 一行发布审计（名册审计表 action='publish'）。
+    跨库纪律：raw 快照写 ``raw_connection``（dingtalk 库）；名册投影与发布
+    审计走 ``roster_connection``（mart 库，缺省同 raw_connection，便于单库
+    测试）。``responsible_person`` 由 ``dim_report_roster``（qudao 启用
+    链接、**仅 owner 角色**——代填报人可填报但不占业绩归属）投影生成——
+    名册是负责人唯一真源，快照不再手工维护 owners。
     返回 (deleted, inserted, missing_owners)（无负责人在册的店名列表）。
     """
     from common.public_data import report_roster
 
     rows = validate_target_rows(rows)
-    owner_map = report_roster.fetch_store_owner_map(connection, "qudao")
+    roster_connection = roster_connection or raw_connection
+    owner_map = report_roster.fetch_store_owner_map(
+        roster_connection, "qudao", roles=("owner",)
+    )
     missing_owners = []
     now = now or datetime.now(timezone.utc)
-    cursor = connection.cursor()
+    total = 0.0
+    cursor = raw_connection.cursor()
     try:
-        with transaction(connection):
+        with transaction(raw_connection):
             cursor.execute("DELETE FROM `channel_monthly_target`")
             deleted = getattr(cursor, "rowcount", 0)
             inserted = 0
-            total = 0.0
             for row in rows:
                 store = row["store_name"]
                 owners = sorted(owner_map.get(store, ()))
@@ -191,15 +197,14 @@ def publish_snapshot(connection, rows, *, actor, now=None):
                 )
                 inserted += 1
                 total += float(row["monthly_target"] or 0)
-            report_roster.write_audit(
-                connection, actor, "publish", "qudao", "*",
-                detail=f"发布快照 {inserted} 行，合计 {total:.0f} 元"
-                       + (f"；无负责人 {len(missing_owners)} 店"
-                          if missing_owners else ""),
-            )
-            return deleted, inserted, missing_owners
     finally:
         cursor.close()
+    report_roster.write_audit(
+        roster_connection, actor, "publish", "qudao", "*",
+        detail=f"发布快照 {inserted} 行，合计 {total:.0f} 元"
+               + (f"；无负责人 {len(missing_owners)} 店" if missing_owners else ""),
+    )
+    return deleted, inserted, missing_owners
 
 
 def replace_snapshot(connection, rows, *, sync_run_id=MANUAL_SYNC_RUN_ID,

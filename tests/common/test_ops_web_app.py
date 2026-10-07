@@ -718,6 +718,23 @@ class RosterPageTests(unittest.TestCase):
         response = client.get("/roster", follow_redirects=False)
         self.assertEqual(302, response.status_code)
 
+    def test_roster_page_marks_deputies_in_qudao_section(self):
+        # v3 角色展示：渠道区段代填报人带【代填】标识，表头分列
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=1, entity_key="TM习酒旗舰店", person_name="卢雅玲",
+                        aliases=None, note=""),
+            _roster_row(id=2, entity_key="TM习酒旗舰店", person_name="卢雅莹",
+                        aliases=None, note="", role="deputy"),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        self.assertIn("【代填】", body)
+        self.assertIn("负责人/代填报人", body)
+
 
 class RosterApiTests(unittest.TestCase):
     def test_add_validates_and_upserts_with_actor(self):
@@ -751,12 +768,30 @@ class RosterApiTests(unittest.TestCase):
              "entity_key": "店", "person_name": "  "},
             {"scope": "qudao", "entity_type": "store",
              "entity_key": "店", "person_name": "张三", "aliases": "not-a-list"},
+            {"scope": "qudao", "entity_type": "store",
+             "entity_key": "店", "person_name": "张三", "role": "boss"},
         ):
             self.assertEqual(
                 400, client.post("/api/roster/add", json=payload).status_code,
                 payload,
             )
         self.assertEqual([], store.upserted)
+
+    def test_add_with_deputy_role(self):
+        # v3 角色：代填报人经表单 role 字段入库（2026-10-07 运维裁决）
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_upsert():
+            response = client.post("/api/roster/add", json={
+                "scope": "qudao", "entity_type": "store",
+                "entity_key": "TM习酒旗舰店", "person_name": "卢雅莹",
+                "role": "deputy",
+            })
+
+        self.assertEqual(200, response.status_code)
+        entry, _actor = store.upserted[0]
+        self.assertEqual("deputy", entry.role)
 
     def test_toggle_and_delete_with_hit_and_miss(self):
         store = _RosterStore()
@@ -802,17 +837,23 @@ class RosterPublishTests(unittest.TestCase):
     def test_publish_writes_and_triggers_extract(self):
         published = []
         requests = []
+
+        class _RawConn:
+            def close(self):
+                pass
+
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         with mock.patch.object(
                 channel_target, "publish_snapshot",
-                lambda conn, rows, *, actor:
-                published.append((rows, actor)) or (2, 3, ["新店"])), \
+                lambda raw_conn, rows, *, actor, roster_connection=None:
+                published.append((rows, actor, roster_connection)) or (2, 3, ["新店"])), \
              mock.patch.object(
                 ops_control, "insert_run_request",
                 lambda conn, sid, by: requests.append((sid, by)) or 88), \
              mock.patch.object(
-                report_roster, "fetch_store_numbers", lambda conn: {}):
+                report_roster, "fetch_store_numbers", lambda conn: {}), \
+             mock.patch("common.ops_web.app.connect", lambda _ds: _RawConn()):
             response = client.post("/api/roster/publish-snapshot", json={
                 "rows": [{"store_name": "JD购喝", "channel": "京东",
                           "monthly_target": 1500000}],
@@ -825,6 +866,7 @@ class RosterPublishTests(unittest.TestCase):
         self.assertEqual(88, body["extract_request_id"])
         self.assertEqual([("extract-mart", ADMIN_USERID)], requests)
         self.assertEqual(ADMIN_USERID, published[0][1])
+        self.assertIsNotNone(published[0][2])  # roster_connection 走 mart
 
     def test_publish_rejects_bad_payload(self):
         client = TestClient(_app(viewer=_admin_viewer()))

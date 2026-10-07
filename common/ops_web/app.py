@@ -153,6 +153,7 @@ function addRoster(ev) {
     person_name: f.person_name.value.trim(),
     aliases: f.aliases.value.split(/[\\s,，、]+/).filter(Boolean),
     note: f.note.value.trim(),
+    role: f.role.value,
   });
 }
 function toggleRoster(id, enabled) {
@@ -263,6 +264,9 @@ _SCOPE_LABEL = {
     "dining": "餐饮/部门",
 }
 _ENTITY_LABEL = {"store": "门店", "person": "人员", "dept": "部门"}
+
+#: 名册角色中文标签（v3：负责人/代填报人；仅 store 类型有 deputy）。
+_ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
 
 
 def _label(mapping, value):
@@ -443,9 +447,16 @@ def _qudao_section(rows, targets, numbers):
         )
         store_no = numbers.get(store, (None, None))[1]
         owner_cells = []
-        for row in store_rows.get(store, []):
+        store_links = sorted(
+            store_rows.get(store, []),
+            key=lambda row: (1 if row.get("role") == "deputy" else 0,
+                             row["person_name"]),
+        )
+        for row in store_links:
             enabled = bool(row["enabled"])
             name_html = _esc(row["person_name"])
+            if row.get("role") == "deputy":
+                name_html += "<span class=\"hint\">【代填】</span>"
             if row.get("aliases"):
                 try:
                     alias_text = "、".join(json.loads(row["aliases"]))
@@ -478,7 +489,8 @@ def _qudao_section(rows, targets, numbers):
         "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
         "编号已冻结不随目标洗牌）</span></h2>"
         "<table><tr><th>编号</th><th>店铺</th><th>渠道</th>"
-        "<th>月目标（元）</th><th>负责人（停用/删除即改填报权限）</th></tr>"
+        "<th>月目标（元）</th>"
+        "<th>负责人/代填报人（停用/删除即改填报权限）</th></tr>"
         + ("".join(body)
            or "<tr><td colspan=\"5\" class=\"hint\">暂无记录</td></tr>")
         + "</table>"
@@ -1118,10 +1130,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 toggle_label = "停用" if enabled else "启用"
                 status_cell = "✓" if enabled else "<span class=\"hint\">已停用</span>"
                 updated = _fmt_time(row.get("updated_at")) or "—"
+                role_text = (
+                    _label(_ROLE_LABEL, row.get("role") or "owner")
+                    if row["entity_type"] == "store" else "—"
+                )
                 body.append(
                     f"<tr><td>{_esc(_label(_ENTITY_LABEL, row['entity_type']))}</td>"
                     f"<td>{_esc(row['entity_key'])}</td>"
                     f"<td>{_esc(row['person_name'])}</td>"
+                    f"<td>{_esc(role_text)}</td>"
                     f"<td>{_esc(aliases_text)}</td>"
                     f"<td>{status_cell}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
@@ -1131,7 +1148,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button></td></tr>"
                 )
             sections.append(
-                "<table><tr><th>类型</th><th>对象</th><th>填报人</th><th>别名</th>"
+                "<table><tr><th>类型</th><th>对象</th><th>填报人</th>"
+                "<th>角色</th><th>别名</th>"
                 "<th>启用</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
             )
@@ -1151,6 +1169,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             f"<select name=\"entity_type\">{entity_options}</select>"
             "<input name=\"entity_key\" placeholder=\"对象（店名/部门名/区域）\" required>"
             "<input name=\"person_name\" placeholder=\"填报人姓名\" required>"
+            "<select name=\"role\">"
+            "<option value=\"owner\">负责人</option>"
+            "<option value=\"deputy\">代填报人</option>"
+            "</select>"
             "<input name=\"aliases\" placeholder=\"别名，逗号分隔（可空）\">"
             "<input name=\"note\" placeholder=\"备注（可空）\">"
             "<button type=\"submit\">新增</button></form>"
@@ -1159,7 +1181,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "（只准在册人员填报），无记录则不拦截；餐饮/部门先登记，机器人后续接入。"
             "「删除」会留审计，日常调整建议用「停用」。"
             "<strong>人名一律用通讯录本名（不用花名/昵称）</strong>；"
-            "别名仅用于群昵称与本名不一致的匹配容错。</p>"
+            "别名仅用于群昵称与本名不一致的匹配容错。"
+            "角色：负责人占业绩归属，代填报人仅可填报不占业绩；"
+            "改角色 = 用新角色重新「新增」同人同对象（覆盖生效）。</p>"
         )
         audit_rows = "".join(
             f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
@@ -1197,6 +1221,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 payload.get("person_name"),
                 aliases=aliases,
                 note=payload.get("note", ""),
+                role=payload.get("role") or "owner",
             )
         except report_roster.ReportRosterError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)

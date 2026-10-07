@@ -233,12 +233,50 @@ class StoreNameParseTest(unittest.TestCase):
 
 class MappingTableTest(unittest.TestCase):
     def test_table_contains_channels_numbers_owners(self):
+        # legacy 行（名册未切源）：owners_json 全部按负责人展示；
+        # 多负责人换行、续行全角空格对齐（2026-10-07 运维裁决）。
         table = build_mapping_table(_ROSTER)
         self.assertIn("【京东】", table)
-        self.assertIn("1=JD购喝（娄灿斌）", table)
-        self.assertIn("2=JD习水村酒类专营店（饶佳君）", table)
-        self.assertIn("1=朴朴（黄贤宋、杨情情）", table)
+        self.assertIn("1=JD购喝（负责人：娄灿斌）", table)
+        self.assertIn("2=JD习水村酒类专营店（负责人：饶佳君）", table)
+        self.assertIn("1=朴朴\n　负责人：杨情情\n　　　　　黄贤宋", table)
         self.assertIn("【猫超】", table)
+
+    def test_table_separates_deputies_and_wraps_multiple_owners(self):
+        # 名册切源行（v3）：负责人/代填报人分列标识、左对齐；
+        # 多负责人换行对齐，代填报人顿号连排。
+        rows = [
+            {"store_name": "TM习酒旗舰店", "channel": "天猫",
+             "monthly_target": 3000000,
+             "owners_json": json.dumps(
+                 [{"name": "卢雅玲"}, {"name": "卢雅莹"}, {"name": "周静雯"}]
+             ),
+             "owner_names": ["卢雅玲"],
+             "deputy_names": ["卢雅莹", "周静雯"]},
+            {"store_name": "DY习酒酒类旗舰店", "channel": "直播",
+             "monthly_target": 5000000,
+             "owners_json": json.dumps(
+                 [{"name": "Jevon"}, {"name": "Yan"}, {"name": "娄灿斌"}]
+             ),
+             "owner_names": ["Jevon", "Yan"],
+             "deputy_names": ["娄灿斌"]},
+            {"store_name": "JD代填专营店", "channel": "京东",
+             "monthly_target": 100000,
+             "owners_json": json.dumps([{"name": "王蕊"}]),
+             "owner_names": [], "deputy_names": ["王蕊"]},
+        ]
+        table = build_mapping_table(build_roster(rows))
+        self.assertIn(
+            "1=TM习酒旗舰店（负责人：卢雅玲｜代填报人：卢雅莹、周静雯）",
+            table,
+        )
+        self.assertIn(
+            "1=DY习酒酒类旗舰店\n"
+            "　负责人：Jevon\n　　　　　Yan\n　代填报人：娄灿斌",
+            table,
+        )
+        # 无负责人、仅代填报人的店：只显示代填段
+        self.assertIn("1=JD代填专营店（代填报人：王蕊）", table)
 
 
 class _Cursor:

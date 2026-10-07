@@ -107,6 +107,26 @@ def report_roster_v2_ddl_statements() -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# v3（2026-10-07，运维裁决）：角色列——负责人（owner）与代填报人（deputy）
+# ---------------------------------------------------------------------------
+
+#: 合法角色：owner=负责人（业绩归属）；deputy=代填报人（可填报、不占业绩）。
+ROLES = ("owner", "deputy")
+
+#: 角色列：权限取 owner∪deputy，业绩投影只取 owner；存量行默认 owner
+#: （与引入角色前的语义一致）。ALTER 无 IF NOT EXISTS，已应用版本靠校验和跳过。
+_ROSTER_ROLE_DDL = (
+    "ALTER TABLE `dim_report_roster`\n"
+    "  ADD COLUMN `role` VARCHAR(16) NOT NULL DEFAULT 'owner'"
+)
+
+
+def report_roster_v3_ddl_statements() -> tuple:
+    """v3 增量 DDL：role 列（负责人/代填报人区分，2026-10-07 运维裁决）。"""
+    return (_ROSTER_ROLE_DDL,)
+
+
+# ---------------------------------------------------------------------------
 # 写面校验（ops-web 名册表单）
 # ---------------------------------------------------------------------------
 
@@ -125,19 +145,25 @@ class RosterEntry:
     aliases: tuple = ()
     note: str = ""
     channel: str | None = None  # store 类型的渠道归属（v2；缺省写库时反查）
+    role: str = "owner"  # owner=负责人 / deputy=代填报人（v3）
 
 
 def validate_roster_fields(scope, entity_type, entity_key, person_name,
-                           aliases=(), note="", channel=None):
+                           aliases=(), note="", channel=None, role="owner"):
     """校验名册表单字段，返回规范化的 :class:`RosterEntry`。
 
     任何字段非法抛 :class:`ReportRosterError`（消息只含字段名，不含值）。
     aliases 逐条按姓名形态校验、去重保序、不得与 person_name 重复。
+    role 仅 owner/deputy（v3；非 store 类型一律按 owner 归一）。
     """
     if scope not in SCOPES:
         raise ReportRosterError("scope must be a registered business scope")
     if entity_type not in ENTITY_TYPES:
         raise ReportRosterError("entity_type must be one of store/person/dept")
+    if role not in ROLES:
+        raise ReportRosterError("role must be one of owner/deputy")
+    if entity_type != "store":
+        role = "owner"
     entity_key = entity_key.strip() if isinstance(entity_key, str) else entity_key
     if not entity_key or not isinstance(entity_key, str) or len(entity_key) > 128:
         raise ReportRosterError("entity_key is required (at most 128 chars)")
@@ -170,7 +196,7 @@ def validate_roster_fields(scope, entity_type, entity_key, person_name,
     return RosterEntry(
         scope=scope, entity_type=entity_type, entity_key=entity_key,
         person_name=person_name, aliases=tuple(normalized_aliases),
-        note=note.strip(), channel=channel,
+        note=note.strip(), channel=channel, role=role,
     )
 
 
@@ -300,17 +326,18 @@ def upsert_roster_entry(connection, entry, *, actor):
                 "INSERT INTO `dim_report_roster` "
                 "(`scope`, `entity_type`, `entity_key`, `person_name`, "
                 "`aliases`, `enabled`, `note`, `updated_by`, `updated_at`, "
-                "`channel`, `store_no`) "
-                "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s) "
+                "`channel`, `store_no`, `role`) "
+                "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s) "
                 "ON DUPLICATE KEY UPDATE "
                 "`aliases` = VALUES(`aliases`), `enabled` = 1, "
                 "`note` = VALUES(`note`), "
                 "`updated_by` = VALUES(`updated_by`), "
                 "`updated_at` = VALUES(`updated_at`), "
-                "`channel` = COALESCE(VALUES(`channel`), `channel`)",
+                "`channel` = COALESCE(VALUES(`channel`), `channel`), "
+                "`role` = VALUES(`role`)",
                 (entry.scope, entry.entity_type, entry.entity_key,
                  entry.person_name, aliases_json, entry.note or None,
-                 actor, _utc_now_text(), channel, store_no),
+                 actor, _utc_now_text(), channel, store_no, entry.role),
             )
             _insert_audit(connection, actor, "add", entry, detail=entry.note)
     finally:
@@ -479,7 +506,7 @@ def fetch_roster(connection, scope=None):
     sql = (
         "SELECT `id`, `scope`, `entity_type`, `entity_key`, `person_name`, "
         "`aliases`, `enabled`, `note`, `updated_by`, `updated_at`, "
-        "`channel`, `store_no` "
+        "`channel`, `store_no`, `role` "
         "FROM `dim_report_roster`"
     )
     params = ()
@@ -503,16 +530,20 @@ def fetch_roster_audit(connection, limit=200):
     ))
 
 
-def fetch_store_owner_map(connection, scope="qudao"):
-    """渠道机器人名册源：``{entity_key(店名): {负责人名}}``（仅启用行）。
+def fetch_store_owner_map(connection, scope="qudao", roles=ROLES):
+    """渠道机器人名册源：``{entity_key(店名): {人名}}``（仅启用行）。
 
     空 dict = 名册表该 scope 无启用记录，调用方回退 legacy owners_json。
+    *roles* 控制计入的角色（v3）：权限面取默认 ``("owner", "deputy")``
+    （负责人 ∪ 代填报人皆可填）；业绩投影面取 ``("owner",)``。
     """
+    marks = ", ".join(["%s"] * len(roles))
     rows = _fetch_all(
         connection,
         "SELECT `entity_key`, `person_name` FROM `dim_report_roster` "
-        "WHERE `scope` = %s AND `entity_type` = 'store' AND `enabled` = 1",
-        (scope,),
+        "WHERE `scope` = %s AND `entity_type` = 'store' AND `enabled` = 1 "
+        f"AND `role` IN ({marks})",
+        (scope, *roles),
     )
     owner_map = {}
     for row in rows:
@@ -522,6 +553,33 @@ def fetch_store_owner_map(connection, scope="qudao"):
             continue
         owner_map.setdefault(key, set()).add(name)
     return owner_map
+
+
+def fetch_store_role_map(connection, scope="qudao"):
+    """角色分桶名册源：``{entity_key: {"owners": [...], "deputies": [...]}}``
+    （仅启用行，名单各自按姓名排序；展示面用，如 /店铺映射表）。"""
+    rows = _fetch_all(
+        connection,
+        "SELECT `entity_key`, `person_name`, `role` FROM `dim_report_roster` "
+        "WHERE `scope` = %s AND `entity_type` = 'store' AND `enabled` = 1",
+        (scope,),
+    )
+    role_map: dict = {}
+    for row in rows:
+        key = row.get("entity_key") if isinstance(row, dict) else row[0]
+        name = row.get("person_name") if isinstance(row, dict) else row[1]
+        role = row.get("role") if isinstance(row, dict) else row[2]
+        if not key or not name:
+            continue
+        bucket = role_map.setdefault(key, {"owners": set(), "deputies": set()})
+        bucket["deputies" if role == "deputy" else "owners"].add(name)
+    return {
+        key: {
+            "owners": sorted(buckets["owners"]),
+            "deputies": sorted(buckets["deputies"]),
+        }
+        for key, buckets in role_map.items()
+    }
 
 
 def person_allowed(connection, scope, name, aliases=None):

@@ -485,3 +485,20 @@ class ReportRosterMigrationTests(unittest.TestCase):
         mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
         self.assertIn("ADD COLUMN `channel` VARCHAR(32)", mart_sql)
         self.assertIn("ADD COLUMN `store_no` INT", mart_sql)
+
+    def test_v3_registered_after_v2_and_adds_role_column(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-ops-report-roster-v3", versions)
+        self.assertLess(
+            versions.index("mart-ops-report-roster-v2"),
+            versions.index("mart-ops-report-roster-v3"),
+        )
+
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+        apply_live_migrations(dingtalk, wdt, mart)
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn(
+            "ADD COLUMN `role` VARCHAR(16) NOT NULL DEFAULT 'owner'", mart_sql
+        )
