@@ -348,6 +348,70 @@ def person_allowed(connection, scope, name, aliases=None):
 # 种子导入（一次性：渠道月目标表 owners_json → 名册）
 # ---------------------------------------------------------------------------
 
+def sync_from_targets(connection, *, scope="qudao", actor):
+    """按 ``fact_channel_store_target`` 当前 owners_json 整订名册（门店粒度）。
+
+    desired = fact 表 {店: {负责人}}；current = 名册表该 scope 启用链接。
+    desired-current → 增（审计 add）；current-desired → 停（审计 disable，
+    含已跌出目标表的店铺链接）。月目标换月滚动后跑本函数一次即对齐。
+    返回 (added, disabled)。
+    """
+    from common.daily_robot.channel_missing import parse_owner_entries
+
+    rows = _fetch_all(
+        connection,
+        "SELECT `store_name`, `owners_json` FROM `fact_channel_store_target`",
+    )
+    desired = {}
+    for row in rows:
+        store = str(
+            (row["store_name"] if isinstance(row, dict) else row[0]) or ""
+        ).strip()
+        if not store:
+            continue
+        owners_raw = row["owners_json"] if isinstance(row, dict) else row[1]
+        names = {
+            str(entry.get("name") or "").strip()
+            for entry in parse_owner_entries(owners_raw)
+        }
+        names.discard("")
+        if names:
+            desired[store] = names
+
+    current_rows = _fetch_all(
+        connection,
+        "SELECT `id`, `entity_key`, `person_name` FROM `dim_report_roster` "
+        "WHERE `scope` = %s AND `entity_type` = 'store' AND `enabled` = 1",
+        (scope,),
+    )
+    added = disabled = 0
+    for store, names in desired.items():
+        current = {
+            (row["person_name"] if isinstance(row, dict) else row[2])
+            for row in current_rows
+            if (row["entity_key"] if isinstance(row, dict) else row[1]) == store
+        }
+        for name in sorted(names - current):
+            upsert_roster_entry(
+                connection,
+                RosterEntry(scope, "store", store, name,
+                            note="sync_from_targets 对齐"),
+                actor=actor,
+            )
+            added += 1
+    for row in current_rows:
+        store = row["entity_key"] if isinstance(row, dict) else row[1]
+        name = row["person_name"] if isinstance(row, dict) else row[2]
+        if name not in desired.get(store, set()):
+            set_roster_enabled(
+                connection,
+                row["id"] if isinstance(row, dict) else row[0],
+                False, actor=actor,
+            )
+            disabled += 1
+    return added, disabled
+
+
 def seed_from_channel_targets(connection, *, actor="seed"):
     """把 ``fact_channel_store_target.owners_json`` 的负责人导入名册。
 
