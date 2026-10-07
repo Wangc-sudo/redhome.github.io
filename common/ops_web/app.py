@@ -1681,7 +1681,6 @@ def main():
             config_publisher=build_config_publisher(),
             corp_id=corp_id,
             agent_id=agent_id,
-            region_targets_source=_build_region_targets_source(),
         )
     except Exception as exc:
         print(f"ops-web startup failed: invalid configuration ({type(exc).__name__})")
