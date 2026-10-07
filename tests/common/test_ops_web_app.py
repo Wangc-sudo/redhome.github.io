@@ -417,9 +417,44 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("功能", body)              # 新列表头
         self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
         self.assertIn("催办", body)              # 功能（robot- 家族归类）
+        self.assertIn("操作…", body)             # 操作列改下拉
+        self.assertIn('data-service="robot-hangzhou"', body)
+        self.assertIn('id="confirm-mask"', body)     # 弹窗确认挂载点
+        self.assertIn('id="confirm-text"', body)
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
+
+    def test_pipelines_page_splits_three_class_tables(self):
+        """分表：应用类/业务线/数据线三段标题与归类落位。"""
+        fleet = (
+            "scheduler",            # 平台 → 应用类
+            "dingtalk-gateway",     # 钉钉 → 应用类
+            "robot-hangzhou",       # 催办 → 业务线
+            "leaderboard-qudao",    # 播报 → 业务线
+            "sync-wdt",             # 同步 → 数据线
+            "extract-mart",         # 加工 → 数据线
+        )
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        for title in ("<h2>应用类</h2>", "<h2>业务线</h2>", "<h2>数据线</h2>"):
+            self.assertIn(title, body)
+        app_i = body.index("<h2>应用类</h2>")
+        biz_i = body.index("<h2>业务线</h2>")
+        data_i = body.index("<h2>数据线</h2>")
+        self.assertLess(app_i, biz_i)
+        self.assertLess(biz_i, data_i)
+        # 平台/钉钉线落在应用类段
+        self.assertLess(app_i, body.index("scheduler"))
+        self.assertLess(body.index("dingtalk-gateway"), biz_i)
+        # 机器人/榜单播报落在业务线段
+        self.assertLess(biz_i, body.index("robot-hangzhou"))
+        self.assertLess(body.index("leaderboard-qudao"), data_i)
+        # 同步/提取落在数据线段（表末无更多段）
+        self.assertLess(data_i, body.index("sync-wdt"))
+        self.assertLess(data_i, body.index("extract-mart"))
 
     def test_pipelines_page_group_and_function_classification(self):
         """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""
@@ -444,6 +479,47 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("同步", body)                    # sync-wdt
         self.assertIn("钉钉", body)                    # dingtalk-gateway
         self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
+
+    def test_pipelines_page_category_truth_overrides_derivation(self):
+        """category 真源优先：注册表配置覆盖 service_id 推导（功能列+分表）。
+
+        sync-wdt 推导=同步（数据线）；注册表配 category=催办 后，
+        功能列显示催办、整行落在业务线段。
+        """
+        configs = {"sync-wdt": {"schedule": "0 2 * * *", "category": "催办"}}
+        app = create_app(
+            settings=_fake_settings(),
+            session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            fleet_source=lambda: ("sync-wdt",),
+            config_source=StaticConfigSource(configs),
+            config_publisher=None,
+        )
+        client = TestClient(app)
+        _login(client)
+        body = client.get("/pipelines").text
+
+        biz_i = body.index("<h2>业务线</h2>")
+        data_i = body.index("<h2>数据线</h2>")
+        row_i = body.index("sync-wdt")
+        self.assertLess(biz_i, row_i)          # 落业务线段（真源胜出）
+        self.assertLess(row_i, data_i)
+        row_html = body[row_i:data_i]
+        # 功能单元格（管理群列之后）显示真源「催办」，推导值「同步」不占位
+        self.assertIn("</td><td>催办</td>", row_html)
+        self.assertNotIn("</td><td>同步</td>", row_html)
+
+    def test_pipelines_page_add_form_offers_category_select(self):
+        """新增表单带 category 下拉：空值=按标识推导，七值可选。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn('name="category"', body)
+        self.assertIn("功能（留空按标识推导）", body)
+        for category in ("同步", "加工", "播报", "催办", "页面", "钉钉", "平台"):
+            self.assertIn(f'<option value="{category}">{category}</option>', body)
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
@@ -646,6 +722,28 @@ class PipelineAddTests(unittest.TestCase):
         self.assertEqual(
             [(ADMIN_USERID, "add", "robot-x", "0 2 * * *")], store.audit
         )
+
+    def test_add_publishes_category_and_rejects_unknown(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=publisher))
+        _login(client)
+        with store.patch_audit():
+            ok = client.post(
+                "/api/pipelines/add",
+                json={"service_id": "robot-x", "kind": "business",
+                      "category": "催办", "schedule": "0 2 * * *"},
+            )
+            bad = client.post(
+                "/api/pipelines/add",
+                json={"service_id": "robot-y", "kind": "business",
+                      "category": "别的", "schedule": "0 2 * * *"},
+            )
+
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual("催办", publisher.published[0].category)
+        self.assertEqual(400, bad.status_code)
+        self.assertEqual(1, len(publisher.published))  # 非法 category 不落注册表
 
     def test_add_rejects_invalid_fields(self):
         store = _PipelineStore()

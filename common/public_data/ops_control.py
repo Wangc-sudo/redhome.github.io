@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 
 from common.public_data.db import transaction
 from common.public_data.pipeline_config import SUPPORTED_KINDS, PipelineConfig
+from common.public_data.pipeline_taxonomy import SUPPORTED_CATEGORIES
 
 #: service_id 形态：小写字母开头，小写字母/数字/下划线/中划线（与既有
 #: 注册表键一致，如 robot-offline_all、pages-qudao-t1）。
@@ -107,7 +108,7 @@ def _is_service_id(value):
 
 
 def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
-                             description="", depends_on=()):
+                             description="", depends_on=(), category=None):
     """校验「新增管道」表单字段，返回规范化的 :class:`PipelineConfig`。
 
     schedule 必填且必须是合法 cron（这是定时任务管理面）；depends_on
@@ -146,6 +147,8 @@ def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
             deps.append(dep)
     if len(deps) > 8:
         raise OpsControlError("depends_on supports at most 8 entries")
+    if category is not None and category not in SUPPORTED_CATEGORIES:
+        raise OpsControlError("category must be a supported pipeline category")
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -153,6 +156,7 @@ def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
         schedule=schedule,
         description=description,
         depends_on=tuple(deps),
+        category=category,
     )
 
 
