@@ -404,9 +404,37 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("新增定时任务", body)
         self.assertIn("应用线", body)            # kind=apps 中文化
         self.assertIn("服务标识", body)          # 表头中文化
+        self.assertIn("管理群", body)            # 新列表头
+        self.assertIn("功能", body)              # 新列表头
+        self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
+        self.assertIn("催办", body)              # 功能（robot- 家族归类）
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
+
+    def test_pipelines_page_group_and_function_classification(self):
+        """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""
+        fleet = (
+            "leaderboard-hangzhou",   # 家族：播报 + 「杭州」群
+            "pages-qudao-t1",         # 显式区域：页面 + 「渠道」群（后缀非区域）
+            "channel-missing-check",  # 显式：催办 + 「渠道」群
+            "sync-wdt",               # 应用线：同步 + 无群
+            "dingtalk-gateway",       # 平台线：钉钉 + 无群
+        )
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=fleet,
+        ))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("「杭州」群", body)
+        self.assertEqual(2, body.count("「渠道」群"))  # 两条渠道线各自映射
+        self.assertIn("播报", body)                    # leaderboard- 家族
+        self.assertIn("页面", body)                    # pages- 家族
+        self.assertIn("催办", body)                    # channel-missing-check
+        self.assertIn("同步", body)                    # sync-wdt
+        self.assertIn("钉钉", body)                    # dingtalk-gateway
+        self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
