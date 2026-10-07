@@ -126,6 +126,40 @@ pages-offline_all:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "offline_all scope leaderboard HTML page generation"
+# --- 榜单群播报（mart_cli leaderboard，kind='leaderboard'） ---
+# 上云切换漏配补登（2026-10-07）：旧 Windows cron「8:30 榜单」停后无注册线
+# 触发，09-23 起五区域榜单群播报全停。默认 08:30 随 pages 同批次，
+# 播报时间由 ops-web 定时任务（管道注册表）单线调整，Nacos 为准。
+leaderboard-hangzhou:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "hangzhou leaderboard group broadcast (mart_ops -> robot_outbox)"
+leaderboard-shaoxing:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "shaoxing leaderboard group broadcast (mart_ops -> robot_outbox)"
+leaderboard-vanke:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "vanke leaderboard group broadcast (mart_ops -> robot_outbox)"
+leaderboard-qudao:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "qudao leaderboard group broadcast (mart_ops -> robot_outbox)"
+leaderboard-offline_all:
+  kind: business
+  enabled: true
+  schedule: "30 8 * * *"
+  reads: [mart_ops]
+  description: "offline_all leaderboard group broadcast (mart_ops -> robot_outbox)"
 offline-daily-summary:
   kind: business
   enabled: true

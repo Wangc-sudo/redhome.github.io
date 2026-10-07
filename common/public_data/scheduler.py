@@ -27,7 +27,8 @@ Design notes:
   fire hours-old misses at 09:00 -- those surface via the data-watermark
   checks instead.
 * Command templates are generic for the ``robot-<region>`` /
-  ``pages-<region>`` families (:func:`command_spec`): a new region can be
+  ``pages-<region>`` / ``leaderboard-<region>`` families
+  (:func:`command_spec`): a new region can be
   registered in Nacos (e.g. via ops-web) and scheduled without a code
   change -- the region suffix is validated and passed to ``mart_cli``,
   which owns region legitimacy at runtime.
@@ -118,6 +119,12 @@ _PAGES_REGIONS = (
     "hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all",
 )
 
+#: 榜单群播报区域（leaderboard-<region> → mart_cli leaderboard）。
+#: 上云切换漏配（2026-10-07 查实）：mart_cli leaderboard 子命令一直存在，
+#: 但旧 Windows cron「8:30 榜单」停后无任何注册线触发，09-23 起五区域
+#: 榜单群播报全停；此处补齐，播报时间由 ops-web 注册表单线调整。
+_LEADERBOARD_REGIONS = ("hangzhou", "shaoxing", "vanke", "qudao", "offline_all")
+
 _COMMAND_TABLE = {
     "sync-runner": _sync_entry(),
     "sync-dingtalk": _sync_entry("--source", "dingtalk"),
@@ -149,6 +156,10 @@ _COMMAND_TABLE = {
     **{f"robot-{r}": _mart_cli_entry("once", region=r) for r in _ROBOT_REGIONS},
     "channel-daily-qudao": _mart_cli_entry("channel-daily", region="qudao"),
     **{f"pages-{r}": _pages_entry(r) for r in _PAGES_REGIONS},
+    **{
+        f"leaderboard-{r}": _mart_cli_entry("leaderboard", region=r)
+        for r in _LEADERBOARD_REGIONS
+    },
     "offline-daily-summary": _mart_cli_entry("offline-daily", region="offline_all"),
     "offline-weekly-summary": _mart_cli_entry("offline-weekly", region="offline_all"),
     "offline-monthly-summary": _mart_cli_entry("offline-monthly", region="offline_all"),
@@ -178,6 +189,7 @@ def command_spec(service_id):
     for prefix, builder in (
         ("robot-", lambda region: _mart_cli_entry("once", region=region)),
         ("pages-", _pages_entry),
+        ("leaderboard-", lambda region: _mart_cli_entry("leaderboard", region=region)),
     ):
         if service_id.startswith(prefix):
             region = service_id[len(prefix):]
