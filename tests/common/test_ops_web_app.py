@@ -405,9 +405,37 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("新增定时任务", body)
         self.assertIn("应用线", body)            # kind=apps 中文化
         self.assertIn("服务标识", body)          # 表头中文化
+        self.assertIn("管理群", body)            # 新列表头
+        self.assertIn("功能", body)              # 新列表头
+        self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
+        self.assertIn("催办", body)              # 功能（robot- 家族归类）
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
+
+    def test_pipelines_page_group_and_function_classification(self):
+        """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""
+        fleet = (
+            "leaderboard-hangzhou",   # 家族：播报 + 「杭州」群
+            "pages-qudao-t1",         # 显式区域：页面 + 「渠道」群（后缀非区域）
+            "channel-missing-check",  # 显式：催办 + 「渠道」群
+            "sync-wdt",               # 应用线：同步 + 无群
+            "dingtalk-gateway",       # 平台线：钉钉 + 无群
+        )
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=fleet,
+        ))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("「杭州」群", body)
+        self.assertEqual(2, body.count("「渠道」群"))  # 两条渠道线各自映射
+        self.assertIn("播报", body)                    # leaderboard- 家族
+        self.assertIn("页面", body)                    # pages- 家族
+        self.assertIn("催办", body)                    # channel-missing-check
+        self.assertIn("同步", body)                    # sync-wdt
+        self.assertIn("钉钉", body)                    # dingtalk-gateway
+        self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
@@ -952,10 +980,14 @@ class RosterSortTests(unittest.TestCase):
         store.rows = self._rows()
         body = self._page(store)
 
-        # 链接行模板：天猫 2 店共 3 条链接 → 渠道单元格 rowspan=3 只显示一次；
-        # 同店链接相邻：TM旗舰A（1 负责人 + 1 代填）店铺格 rowspan=2
-        self.assertIn('<td rowspan="3">天猫</td>', body)
-        self.assertIn('<td rowspan="2">TM旗舰A</td>', body)
+        # 行 = 负责人链接（代填聚进店铺格）：天猫 2 店各 1 负责人 →
+        # 渠道格 rowspan=2；单负责人店铺（TM旗舰A 虽有代填）店铺格不聚合
+        self.assertIn('<td rowspan="2">天猫</td>', body)
+        self.assertIn('<td>TM旗舰A</td>', body)
+        # 代填张瑾萱在同行代填报人格内（带自己的状态下拉与删除）
+        self.assertIn("张瑾萱", body)
+        self.assertIn("setRosterStatus(4, this.value)", body)
+        self.assertIn("deleteRoster(4)", body)
         self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
         # 渠道序按 CHANNELS canonical：京东（idx 2）在天猫（idx 3）前
         self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
@@ -970,10 +1002,8 @@ class RosterSortTests(unittest.TestCase):
         # 目标降序：300万 TM旗舰A > 200万 TM旗舰B > 150万 JD购喝
         self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
         self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
-        # 非渠道序渠道格不合并、逐链接行出现（天猫 3 行 = 2+1）；
-        # 店铺格仍按链接数合并
-        self.assertEqual(3, body.count("<td>天猫</td>"))
-        self.assertIn('<td rowspan="2">TM旗舰A</td>', body)
+        # 非渠道序渠道格不合并（天猫 2 行 = 两店各 1 负责人行）
+        self.assertEqual(2, body.count("<td>天猫</td>"))
 
     def test_sort_by_owner_and_deputy(self):
         store = _RosterStore()
@@ -992,7 +1022,7 @@ class RosterSortTests(unittest.TestCase):
         store = _RosterStore()
         store.rows = self._rows()
         body = self._page(store, sort="bogus")
-        self.assertIn('<td rowspan="3">天猫</td>', body)
+        self.assertIn('<td rowspan="2">天猫</td>', body)
 
     def _assert_grid_balance(self, body, table_index=0, columns=9):
         """模拟 rowspan 布局，逐行校验有效列数（防聚合错位）。"""
@@ -1024,10 +1054,30 @@ class RosterSortTests(unittest.TestCase):
         for sort in (None, "store", "owner", "deputy", "target"):
             body = self._page(store, sort=sort)
             self._assert_grid_balance(body, table_index=0, columns=9)
-        # 月目标输入格与店铺格同 rowspan（参与店铺聚合）
+        # 单负责人店铺（含代填）整行无聚合（2026-10-07 运维裁决）：
+        # 店铺格/月目标格均无 rowspan，代填聚在同行的代填报人格
         body = self._page(store)
-        self.assertIn('<td rowspan="2"><input class="roster-target"', body)
+        self.assertIn('<td>TM旗舰A</td>', body)
+        self.assertIn('<td><input class="roster-target" data-store="TM旗舰A"',
+                      body)
         self.assertEqual(1, body.count('data-store="TM旗舰A"'))
+
+    def test_aggregation_only_for_multi_owner_stores(self):
+        # 多负责人才聚合：PDD共管店 2 负责人 → 店铺格/月目标格 rowspan=2
+        store = _RosterStore()
+        store.rows = self._rows() + [
+            _roster_row(id=5, entity_key="PDD共管店", person_name="侯仙姚",
+                        aliases=None, note=""),
+            _roster_row(id=6, entity_key="PDD共管店", person_name="杨美聪",
+                        aliases=None, note=""),
+        ]
+        body = self._page(store)
+        self.assertIn('<td rowspan="2">PDD共管店</td>', body)
+        self.assertIn(
+            '<td rowspan="2"><input class="roster-target" data-store="PDD共管店"',
+            body,
+        )
+        self._assert_grid_balance(body, table_index=0, columns=9)
 
     def test_data_cells_follow_header_column_order(self):
         # 单元格内容序 = 表头列序（2026-10-07 列序调整回归：

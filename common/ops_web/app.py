@@ -343,13 +343,14 @@ _SERVICE_NAMES = {
 
 
 def _service_name(service_id):
-    """服务中文名：策展映射优先，robot-/pages- 家族按区域中文名生成。"""
+    """服务中文名：策展映射优先，robot-/pages-/leaderboard- 家族按区域生成。"""
     name = _SERVICE_NAMES.get(service_id)
     if name is not None:
         return name
     for prefix, tpl in (
         ("robot-", "「{region}」日报机器人"),
         ("pages-", "「{region}」榜单页"),
+        ("leaderboard-", "「{region}」榜单播报"),
     ):
         if service_id.startswith(prefix):
             region = service_id[len(prefix):]
@@ -366,18 +367,88 @@ def _service_name_cell(service_id):
 
 
 def _service_label(service_id, description):
-    """服务中文说明：策展映射优先，robot-/pages- 家族动态生成，兜底注册表原文。"""
+    """服务中文说明：策展映射优先，家族动态生成，兜底注册表原文。"""
     label = _SERVICE_LABELS.get(service_id)
     if label is not None:
         return label
     for prefix, tpl in (
         ("robot-", "「{region}」日报机器人（报数汇总 → 群内播报/催办）"),
         ("pages-", "「{region}」榜单页生成"),
+        ("leaderboard-", "「{region}」榜单群播报（销售完成率榜 → 群）"),
     ):
         if service_id.startswith(prefix):
             region = service_id[len(prefix):]
             return tpl.format(region=_REGION_LABELS.get(region, region))
     return description
+
+
+#: 功能分类（定时任务页「功能」列）：显式映射优先，家族按前缀归类。
+_SERVICE_FUNCTIONS = {
+    "roll-manifest": "同步",
+    "sync-dingtalk": "同步",
+    "sync-wdt": "同步",
+    "sync-runner": "同步",
+    "sync-channel-sales": "同步",
+    "project-mart": "加工",
+    "extract-mart": "加工",
+    "extract-channel": "加工",
+    "channel-missing-check": "催办",
+    "channel-daily-qudao": "播报",
+    "offline-daily-summary": "播报",
+    "offline-weekly-summary": "播报",
+    "offline-monthly-summary": "播报",
+    "dingtalk-gateway": "钉钉",
+    "bi-web": "平台",
+    "scheduler": "平台",
+    "ops-web": "平台",
+}
+
+#: 无 family 前缀但绑定区域的服务（「管理群」列用；pages-qudao-t1 的
+#: pages- 后缀是 qudao-t1 不是区域，必须显式登记）。
+_SERVICE_REGIONS = {
+    "channel-daily-qudao": "qudao",
+    "channel-missing-check": "qudao",
+    "pages-qudao-t1": "qudao",
+    "offline-daily-summary": "offline_all",
+    "offline-weekly-summary": "offline_all",
+    "offline-monthly-summary": "offline_all",
+}
+
+_FUNCTION_FAMILY = (
+    ("robot-", "催办"),
+    ("pages-", "页面"),
+    ("leaderboard-", "播报"),
+)
+
+
+def _service_function(service_id):
+    """功能列：显式映射 → 家族前缀 → 空（未归类）。"""
+    label = _SERVICE_FUNCTIONS.get(service_id)
+    if label is not None:
+        return label
+    for prefix, function in _FUNCTION_FAMILY:
+        if service_id.startswith(prefix):
+            return function
+    return "—"
+
+
+def _service_region(service_id):
+    """服务绑定区域：显式映射 → 家族后缀 → None（应用线/平台）。"""
+    region = _SERVICE_REGIONS.get(service_id)
+    if region is not None:
+        return region
+    for prefix, _ in _FUNCTION_FAMILY:
+        if service_id.startswith(prefix):
+            return service_id[len(prefix):]
+    return None
+
+
+def _group_cell(service_id):
+    """管理群列：区域线 → 「<区域中文名>」群；非区域线 → —。"""
+    region = _service_region(service_id)
+    if region is None:
+        return "<span class=\"hint\">—</span>"
+    return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
 def _cron_zh(schedule):
@@ -465,13 +536,14 @@ _QUDAO_SORTS = ("channel", "store", "owner", "deputy", "target")
 def _qudao_section(rows, targets, numbers, sort="channel"):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
-    统一链接行模板（2026-10-07 运维裁决）：每条名册链接一行，列为
+    统一模板（2026-10-07 运维裁决）：行 = 负责人链接，列为
     渠道/地区▾ | 店铺/对象 | 月目标（元）| 负责人 | 代填报人 | 状态 | 备注 | 更新 | 操作
-    ——聚合列（渠道/店铺/月目标）靠左、链接列靠右。人名按角色落列
-    （同行只填其一），同店链接相邻、店铺与月目标单元格 rowspan 合并。
-    排序：五列点表头；``sort=channel``（默认）时渠道单元格同样合并、
-    组内按编号升序。目标列输入框即「草稿」，点「发布月度快照」才落
-    raw（publishSnapshot JS 收集）。
+    ——聚合列（渠道/店铺/月目标/代填报人）靠左、链接列靠右。代填报人
+    不单独占行：聚进店铺级代填报人格（同店铺格 rowspan，逐人带状态
+    下拉+删除，不显示备注）；单负责人店铺整行无聚合。排序：五列点
+    表头；``sort=channel``（默认）时渠道单元格同样合并、组内按编号
+    升序。目标列输入框即「草稿」，点「发布月度快照」才落 raw
+    （publishSnapshot JS 收集）。
     """
     store_rows = {}
     for row in rows:
@@ -535,12 +607,18 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
         mark = " ▾" if sort == key else ""
         return f"<th><a href=\"?sort={key}\">{_esc(label)}{mark}</a></th>"
 
-    # 展开为链接行：无链接的店保留一行（目标仍可编辑）
+    # 展开为负责人链接行（2026-10-07 运维裁决）：代填报人不单独占行——
+    # 聚进店铺级「代填报人」格（与店铺/月目标格同 rowspan，格内逐人带
+    # 状态下拉+删除，不显示备注）；无负责人的店保留一行（目标仍可编辑）。
+    # 单负责人店铺因此整行无聚合。
     flat = []
     for store in ordered:
         meta = metas[store]
-        store_links = meta["links"] or [None]
-        for link in store_links:
+        meta["owner_links"] = [l for l in meta["links"]
+                               if l.get("role") != "deputy"]
+        meta["deputy_links"] = [l for l in meta["links"]
+                                if l.get("role") == "deputy"]
+        for link in meta["owner_links"] or [None]:
             flat.append((store, meta, link))
 
     body = []
@@ -568,7 +646,7 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
             cells.append(f"<td>{_esc(meta['channel']) or '—'}</td>")
         first_of_store = store_span_left == 0
         if first_of_store:
-            store_span = len(meta["links"]) or 1
+            store_span = len(meta["owner_links"]) or 1
             store_span_left = store_span
             target = meta["target"]
             if target:
@@ -591,13 +669,18 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
             cells.append(store_cell + target_cell)
         store_span_left -= 1
         if link is None:
-            cells.append(
-                "<td><span class=\"hint\">无负责人在册</span></td><td></td>"
-            )
-        elif link.get("role") == "deputy":
-            cells.append(f"<td></td><td>{_link_name_html(link)}</td>")
+            cells.append("<td><span class=\"hint\">无负责人在册</span></td>")
         else:
-            cells.append(f"<td>{_link_name_html(link)}</td><td></td>")
+            cells.append(f"<td>{_link_name_html(link)}</td>")
+        if first_of_store:
+            # 代填报人店铺格（不显示备注）：逐人 姓名+状态下拉+删除
+            deputy_html = "".join(
+                f"<div>{_link_name_html(l)}"
+                f"{_status_select_html(l)}{_delete_btn_html(l)}</div>"
+                for l in meta["deputy_links"]
+            ) or "<span class=\"hint\">—</span>"
+            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
+            cells.append(f"<td{rowspan}>{deputy_html}</td>")
         if link is None:
             cells.append("<td></td><td></td><td></td><td></td>")
         else:
@@ -1070,6 +1153,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             rows.append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
+                f"<td>{_group_cell(config.service_id)}</td>"
+                f"<td>{_esc(_service_function(config.service_id))}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
@@ -1082,13 +1167,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         table = (
             "<h1>定时任务（管道注册表）</h1>"
-            "<table><tr><th>服务标识</th><th>类型</th><th>启用</th>"
+            "<table><tr><th>服务标识</th><th>类型</th><th>管理群</th>"
+            "<th>功能</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
             + "".join(rows) + "</table>"
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-            "翻译成可执行命令。</p>"
+            "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
+            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台。</p>"
         )
         add_form = (
             "<h2>新增定时任务</h2>"
@@ -1103,7 +1190,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"
             "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; "
+            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; / "
+            "leaderboard-&lt;区域&gt; "
             "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
             "自查）。已存在的标识请用「操作」列开关，不可重复新增。</p>"
