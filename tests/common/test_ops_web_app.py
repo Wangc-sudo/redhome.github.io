@@ -732,7 +732,8 @@ class RosterPageTests(unittest.TestCase):
         with store.patch_fetch(), store.patch_audit():
             body = client.get("/roster").text
 
-        self.assertIn("<th>负责人</th><th>代填报人</th>", body)  # 两列表头
+        self.assertIn('href="?sort=owner">负责人', body)   # 两列可排序表头
+        self.assertIn('href="?sort=deputy">代填报人', body)
         self.assertIn("卢雅玲", body)
         self.assertIn("卢雅莹", body)
         # 状态下拉（当前值即链接状态）+ 删除按钮
@@ -907,6 +908,86 @@ class RosterManageGateTests(unittest.TestCase):
             self.assertEqual(200, client.post(
                 "/api/roster/delete", json={"id": 1},
             ).status_code)
+
+
+class RosterSortTests(unittest.TestCase):
+    """渠道门店表排序与渠道聚合（2026-10-07 运维裁决）。"""
+
+    def _rows(self):
+        return [
+            _roster_row(id=1, entity_key="JD购喝", person_name="娄灿斌",
+                        aliases=None, note=""),
+            _roster_row(id=2, entity_key="TM旗舰A", person_name="钟甜",
+                        aliases=None, note=""),
+            _roster_row(id=3, entity_key="TM旗舰B", person_name="周嘉炜",
+                        aliases=None, note=""),
+            _roster_row(id=4, entity_key="TM旗舰A", person_name="张瑾萱",
+                        aliases=None, note="", role="deputy"),
+        ]
+
+    def _page(self, store, sort=None):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        targets = {
+            "JD购喝": ("京东", 1500000),
+            "TM旗舰A": ("天猫", 3000000),
+            "TM旗舰B": ("天猫", 2000000),
+        }
+        numbers = {
+            "JD购喝": ("京东", 1),
+            "TM旗舰A": ("天猫", 1),
+            "TM旗舰B": ("天猫", 2),
+        }
+        url = "/roster" + (f"?sort={sort}" if sort else "")
+        with store.patch_fetch(), store.patch_audit(), \
+             mock.patch.object(channel_target, "fetch_store_targets",
+                               lambda conn: targets), \
+             mock.patch.object(report_roster, "fetch_store_numbers",
+                               lambda conn: numbers):
+            return client.get(url).text
+
+    def test_default_channel_sort_aggregates_with_rowspan(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store)
+
+        # 天猫两店聚合：渠道单元格 rowspan=2 只显示一次，组内编号升序
+        self.assertIn('<td rowspan="2">天猫</td>', body)
+        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
+        # 渠道序按 CHANNELS canonical：京东（idx 2）在天猫（idx 3）前
+        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
+        # 默认表头带当前排序标记
+        self.assertIn('href="?sort=channel">渠道 ▾', body)
+
+    def test_sort_by_target_descending(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="target")
+
+        # 目标降序：300万 TM旗舰A > 200万 TM旗舰B > 150万 JD购喝
+        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
+        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
+        # 非渠道序不聚合：渠道单元格逐行出现、无 rowspan
+        self.assertNotIn("rowspan", body)
+
+    def test_sort_by_owner_and_deputy(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="owner")
+        # 负责人首名升序（Unicode）：周嘉炜 < 娄灿斌 < 钟甜
+        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
+        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
+
+        body = self._page(store, sort="deputy")
+        # 仅 TM旗舰A 有代填（张瑾萱）排最前
+        self.assertLess(body.index("TM旗舰A"),
+                        min(body.index("TM旗舰B"), body.index("JD购喝")))
+
+    def test_invalid_sort_falls_back_to_channel(self):
+        store = _RosterStore()
+        store.rows = self._rows()
+        body = self._page(store, sort="bogus")
+        self.assertIn('<td rowspan="2">天猫</td>', body)
 
 
 class RosterPublishTests(unittest.TestCase):

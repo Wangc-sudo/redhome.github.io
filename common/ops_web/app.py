@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from common.bi_web import auth, authz
 from common.public_data import bi_authz, channel_target, ops_control, report_roster
+from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.scheduler import has_command
 
@@ -452,57 +453,135 @@ def _roster_link_cell(row):
     )
 
 
-def _qudao_section(rows, targets, numbers):
+#: 渠道门店表可排序列（2026-10-07 运维裁决）：?sort= 白名单，非法值回退默认。
+_QUDAO_SORTS = ("channel", "store", "owner", "deputy", "target")
+
+
+def _qudao_section(rows, targets, numbers, sort="channel"):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
-    行 = 店铺（名册链接 ∪ fact 目标表，编号冻结排序）；目标列输入框即
-    「草稿」，点「发布月度快照」才落 raw（publishSnapshot JS 收集）。
+    排序与聚合（2026-10-07 运维裁决）：渠道/店铺/负责人/代填报人/月目标
+    五列点表头排序；``sort=channel``（默认）时同渠道行聚合——渠道单元格
+    rowspan 合并只显示一次，组内按编号升序（编号冻结不随目标洗牌）。
+    目标列输入框即「草稿」，点「发布月度快照」才落 raw（publishSnapshot
+    JS 收集）。
     """
     store_rows = {}
     for row in rows:
         store_rows.setdefault(row["entity_key"], []).append(row)
-    all_stores = sorted(
-        set(store_rows) | set(targets.keys()),
-        key=lambda store: (numbers.get(store, (None, 10 ** 6))[1] or 10 ** 6,
-                           store),
-    )
-    body = []
-    total = 0.0
+    all_stores = sorted(set(store_rows) | set(targets.keys()))
+    metas = {}
     for store in all_stores:
         channel, target = targets.get(
             store, (numbers.get(store, ("", None))[0], None)
         )
-        store_no = numbers.get(store, (None, None))[1]
+        links = store_rows.get(store, [])
+        metas[store] = {
+            "channel": channel,
+            "target": target,
+            "store_no": numbers.get(store, (None, None))[1],
+            "owners": sorted(r["person_name"] for r in links
+                             if r.get("role") != "deputy"),
+            "deputies": sorted(r["person_name"] for r in links
+                               if r.get("role") == "deputy"),
+            "links": links,
+        }
+
+    def _channel_rank(channel):
+        if channel in CHANNELS:
+            return (0, CHANNELS.index(channel))
+        return (1, channel or "")
+
+    if sort == "store":
+        ordered = all_stores  # 店名升序
+    elif sort == "owner":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, metas[s]["owners"][0])
+                           if metas[s]["owners"] else (1, ""), s),
+        )
+    elif sort == "deputy":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, metas[s]["deputies"][0])
+                           if metas[s]["deputies"] else (1, ""), s),
+        )
+    elif sort == "target":
+        ordered = sorted(
+            all_stores,
+            key=lambda s: ((0, -float(metas[s]["target"]))
+                           if metas[s]["target"] else (1, 0.0), s),
+        )
+    else:  # channel（默认）：渠道聚合，组内编号升序
+        ordered = sorted(
+            all_stores,
+            key=lambda s: (_channel_rank(metas[s]["channel"]),
+                           metas[s]["store_no"] or 10 ** 6, s),
+        )
+
+    def _th(label, key):
+        mark = " ▾" if sort == key else ""
+        return f"<th><a href=\"?sort={key}\">{_esc(label)}{mark}</a></th>"
+
+    body = []
+    total = 0.0
+    span_left = 0
+    for position, store in enumerate(ordered):
+        meta = metas[store]
+        cells = []
+        if sort == "channel":
+            if span_left == 0:
+                span = 1
+                for nxt in ordered[position + 1:]:
+                    if metas[nxt]["channel"] == meta["channel"]:
+                        span += 1
+                    else:
+                        break
+                span_left = span
+                channel_text = _esc(meta["channel"]) or "—"
+                cells.append(
+                    f"<td rowspan=\"{span}\">{channel_text}</td>"
+                    if span > 1 else f"<td>{channel_text}</td>"
+                )
+            span_left -= 1
+        else:
+            cells.append(f"<td>{_esc(meta['channel']) or '—'}</td>")
         owner_cells = [
             _roster_link_cell(row)
-            for row in sorted(store_rows.get(store, []),
-                              key=lambda r: r["person_name"])
+            for row in sorted(meta["links"], key=lambda r: r["person_name"])
             if row.get("role") != "deputy"
         ]
         deputy_cells = [
             _roster_link_cell(row)
-            for row in sorted(store_rows.get(store, []),
-                              key=lambda r: r["person_name"])
+            for row in sorted(meta["links"], key=lambda r: r["person_name"])
             if row.get("role") == "deputy"
         ]
+        target = meta["target"]
         target_value = "" if target is None else f"{float(target):.0f}"
         if target:
             total += float(target)
         body.append(
-            f"<tr><td>{_esc(store_no) if store_no else '—'}</td>"
+            "<tr>" + "".join(cells)
+            + f"<td>{_esc(meta['store_no']) if meta['store_no'] else '—'}</td>"
             f"<td>{_esc(store)}</td>"
-            f"<td>{_esc(channel)}</td>"
-            f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
-            f"data-channel=\"{_esc(channel)}\" value=\"{_esc(target_value)}\" "
-            f"placeholder=\"目标（元）\"></td>"
             f"<td>{''.join(owner_cells) or '<span class=\"hint\">无负责人在册</span>'}</td>"
-            f"<td>{''.join(deputy_cells) or '<span class=\"hint\">—</span>'}</td></tr>"
+            f"<td>{''.join(deputy_cells) or '<span class=\"hint\">—</span>'}</td>"
+            f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
+            f"data-channel=\"{_esc(meta['channel'])}\" "
+            f"value=\"{_esc(target_value)}\" "
+            f"placeholder=\"目标（元）\"></td></tr>"
         )
     return (
         "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
-        "编号已冻结不随目标洗牌）</span></h2>"
-        "<table><tr><th>编号</th><th>店铺</th><th>渠道</th>"
-        "<th>月目标（元）</th><th>负责人</th><th>代填报人</th></tr>"
+        "点表头排序，默认按渠道聚合）</span></h2>"
+        "<table><tr>"
+        + _th("渠道", "channel")
+        + "<th>编号</th>"
+        + _th("店铺", "store")
+        + _th("负责人", "owner")
+        + _th("代填报人", "deputy")
+        + _th("月目标（元）", "target")
+        + "</tr>"
         + ("".join(body)
            or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
         + "</table>"
@@ -1129,12 +1208,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         for row in entries:
             by_scope.setdefault(row["scope"], []).append(row)
 
+        sort = request.query_params.get("sort") or "channel"
+        if sort not in _QUDAO_SORTS:
+            sort = "channel"
         sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
         for scope in report_roster.SCOPES:
             rows = by_scope.get(scope) or []
             if scope == "qudao":
                 sections.append(
-                    _qudao_section(rows, qudao_targets, qudao_numbers)
+                    _qudao_section(rows, qudao_targets, qudao_numbers, sort=sort)
                 )
                 continue
             scope_label = _label(_SCOPE_LABEL, scope)
