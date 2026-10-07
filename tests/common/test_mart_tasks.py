@@ -207,6 +207,38 @@ class RunRemindTests(unittest.TestCase):
         self.assertEqual(outcome.status, "already_sent")
         self.assertFalse(outcome.enqueued)
 
+    def test_dedupe_suffix_threads_to_enqueue(self):
+        """run-once --force：suffix 穿透入队（另起去重键强制重发）。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三")),
+            filled=set(),
+        )
+        outbox = self._outbox()
+        run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+            dedupe_suffix="manual-20261008093000",
+        )
+        self.assertEqual(
+            outbox.enqueue.call_args.kwargs["dedupe_suffix"],
+            "manual-20261008093000",
+        )
+
+    def test_default_dedupe_suffix_is_none(self):
+        """cron 窗口：不带 suffix，维持当日幂等。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三")),
+            filled=set(),
+        )
+        outbox = self._outbox()
+        run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+        )
+        self.assertIsNone(outbox.enqueue.call_args.kwargs["dedupe_suffix"])
+
     def test_aliases_map_table_names_back_to_members(self):
         conn = _RouterConn(
             workdays={_DAY},
@@ -327,6 +359,27 @@ class RunCheckTests(unittest.TestCase):
 
         self.assertEqual(outcome.status, "enqueued")
         self.assertTrue(outcome.enqueued)
+
+    def test_check_force_suffix_on_both_rows(self):
+        """check + ding 两行同 suffix（强制重发不能只重发一半）。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三")),
+            filled=set(),
+        )
+        outbox = Mock()
+        outbox.enqueue.return_value = True
+
+        run_check(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW, dedupe_suffix="manual-20261008093000",
+        )
+
+        self.assertEqual(outbox.enqueue.call_count, 2)
+        for call in outbox.enqueue.call_args_list:
+            self.assertEqual(
+                call.kwargs["dedupe_suffix"], "manual-20261008093000"
+            )
 
     def test_check_all_filled_enqueues_nothing(self):
         conn = _RouterConn(

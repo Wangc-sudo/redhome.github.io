@@ -189,6 +189,18 @@ def _print_failure(code):
     print(f"status=failed code={code}")
 
 
+def _force_suffix(args, now):
+    """``--force``（run-once 手动触发）：另起去重键后缀强制重发；缺省 None。
+
+    2026-10-08 裁决「手动触发不应该被幂等」：cron 窗口已发时手动触发
+    会被 already_sent 静默吞掉；--force 以 ``manual-<时间戳>`` 后缀
+    入队（历史行保留作审计，不覆盖不删除），当日定时窗口仍按原键幂等。
+    """
+    if not getattr(args, "force", False):
+        return None
+    return f"manual-{now:%Y%m%d%H%M%S}"
+
+
 def _resolve_business_date(args, now):
     """``--date`` 解析：YYYY-MM-DD，或特殊值 ``yesterday``（= 今天 -1 天）。
 
@@ -238,6 +250,7 @@ def _handle(args, kind=None):
 
         now = datetime.now()
         business_date = _resolve_business_date(args, now)
+        dedupe_suffix = _force_suffix(args, now)
 
         kinds = (kind,) if kind else route_by_hour(now.hour, cfg)
         if not kinds:
@@ -257,6 +270,7 @@ def _handle(args, kind=None):
                     table_url=cfg.table_url,
                     business_date=business_date, now=now,
                     aliases=cfg.aliases,
+                    dedupe_suffix=dedupe_suffix,
                 )
             else:
                 outcome = run_check_task(
@@ -265,6 +279,7 @@ def _handle(args, kind=None):
                     table_url=cfg.table_url,
                     business_date=business_date, now=now,
                     cc_user_ids=cfg.cc_user_ids, aliases=cfg.aliases,
+                    dedupe_suffix=dedupe_suffix,
                 )
             conn.commit()
             print(
@@ -507,17 +522,21 @@ def _handle_offline_summary(args, *, period):
 
         conn = connect_mart(settings)
         outbox = build_outbox(conn)
+        dedupe_suffix = _force_suffix(args, now)
         if period == "daily":
             status = run_offline_daily_task(
-                conn, outbox, business_date=reference, now=now
+                conn, outbox, business_date=reference, now=now,
+                dedupe_suffix=dedupe_suffix,
             )
         elif period == "weekly":
             status = run_offline_weekly_task(
-                conn, outbox, reference=reference, now=now
+                conn, outbox, reference=reference, now=now,
+                dedupe_suffix=dedupe_suffix,
             )
         else:
             status = run_offline_monthly_task(
-                conn, outbox, reference=reference, now=now
+                conn, outbox, reference=reference, now=now,
+                dedupe_suffix=dedupe_suffix,
             )
         conn.commit()
         print(
@@ -585,6 +604,7 @@ def _handle_channel_missing(args):
             store_exclude=cfg.store_exclude,
             dry=args.dry,
             report=report,
+            dedupe_suffix=_force_suffix(args, now),
         )
         if args.dry:
             print(f"roster={len(report.get('roster', []))} "
@@ -734,6 +754,16 @@ def main(argv=None):
             help="business date override (YYYY-MM-DD or 'yesterday', "
                  "default: today)",
         )
+        if name in (
+            "remind", "check", "once",
+            "offline-daily", "offline-weekly", "offline-monthly",
+        ):
+            sub.add_argument(
+                "--force", action="store_true", default=False,
+                help="bypass the daily dedupe and resend (run-once 手动触发 "
+                     "由调度器自动附加；leaderboard/channel-daily 自带时分 "
+                     "后缀天然可重跑，无此 flag)",
+            )
 
     # -- channel-missing --------------------------------------------------------
     missing_sub = subparsers.add_parser(
@@ -760,6 +790,10 @@ def main(argv=None):
     missing_sub.add_argument(
         "--dry", action="store_true", default=False,
         help="print roster/missing/zero/@ lists only; nothing enqueued",
+    )
+    missing_sub.add_argument(
+        "--force", action="store_true", default=False,
+        help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
 
     # -- leaderboard-html ------------------------------------------------------

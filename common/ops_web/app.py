@@ -168,7 +168,8 @@ function pipelineAction(sel) {
       url: '/api/pipelines/run-once',
       body: {service_id: sid},
     };
-    showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发）');
+    showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发；' +
+                '提醒/催办/汇总类当日已发的会绕开去重重发）');
   }
 }
 function addPipeline(ev) {

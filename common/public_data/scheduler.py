@@ -272,6 +272,31 @@ def build_argv(service_id, settings):
     return argv
 
 
+#: run-once 手动触发可附加 ``--force`` 的 mart_cli 子命令（2026-10-08 裁决
+#: 「手动触发不应该被幂等」）：这些是 outbox 按 ``region:kind:date`` 去重
+#: 的线——cron 窗口已发时手动触发会被 already_sent 静默吞掉；--force 以
+#: ``manual-<时间戳>`` 后缀另起去重键强制重发（历史行保留作审计）。
+#: leaderboard / channel-daily 自带 HHMM 后缀天然可重跑，leaderboard-html
+#: 写页面文件无去重语义，同步/加工线幂等由数据层承载，均不在列。
+_FORCEABLE_MART_SUBCOMMANDS = frozenset({
+    "remind", "check", "once",
+    "offline-daily", "offline-weekly", "offline-monthly",
+    "channel-missing",
+})
+
+
+def with_run_force(argv):
+    """run-once 手动触发：outbox 去重线附加 ``--force``（明确意图重发）。"""
+    if (
+        argv is not None
+        and len(argv) >= 4
+        and argv[2] == "common.daily_robot.mart_cli"
+        and argv[3] in _FORCEABLE_MART_SUBCOMMANDS
+    ):
+        return [*argv, "--force"]
+    return argv
+
+
 def build_child_env(service_id, environ=None):
     """Child environment: pass-through + the line's own registry identity."""
     env = dict(os.environ if environ is None else environ)
@@ -615,7 +640,7 @@ class Scheduler:
             service_id = request.service_id
             if service_id in self._running:
                 continue  # 在途（含刚被 cron 点燃）：下 tick 再认领
-            argv = build_argv(service_id, self._settings)
+            argv = with_run_force(build_argv(service_id, self._settings))
             if service_id in _UNSCHEDULABLE or argv is None:
                 try:
                     store.mark_rejected(request.request_id, "无调度命令映射")
