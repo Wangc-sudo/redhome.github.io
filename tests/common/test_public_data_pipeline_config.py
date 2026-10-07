@@ -10,10 +10,12 @@ from common.public_data.pipeline_config import (
     NacosConfigSource,
     PipelineConfigError,
     StaticConfigSource,
+    backfill_categories,
     build_config_source,
     parse_pipeline_config,
     publish_pipelines,
     resolve_service_id,
+    split_robot_check,
 )
 
 
@@ -187,6 +189,154 @@ class PublishPipelinesTests(unittest.TestCase):
     def test_rejects_invalid_entry(self):
         with self.assertRaises(PipelineConfigError):
             publish_pipelines(_FakeNacosClient(), {"x": {"enabled": "nope"}})
+
+
+class CategoryFieldTests(unittest.TestCase):
+    def test_category_parsed_and_round_trips(self):
+        config = parse_pipeline_config("robot-hangzhou", {"category": "催办"})
+        self.assertEqual(config.category, "催办")
+        self.assertEqual(config.to_mapping()["category"], "催办")
+        self.assertEqual(
+            parse_pipeline_config("robot-hangzhou", config.to_mapping()), config
+        )
+
+    def test_category_defaults_to_none_and_omitted(self):
+        config = parse_pipeline_config("sync-wdt", {"kind": "apps"})
+        self.assertIsNone(config.category)
+        self.assertNotIn("category", config.to_mapping())
+
+    def test_rejects_unknown_category(self):
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"category": "别的"})
+
+    def test_derive_robot_check_belongs_to_reminder_family(self):
+        """robot-check-<region> 家族推导=催办（robot 一拆二后区域/归类正确）。"""
+        from common.public_data.pipeline_taxonomy import derive_category
+        self.assertEqual(derive_category("robot-check-hangzhou"), "催办")
+        self.assertEqual(derive_category("robot-hangzhou"), "催办")
+
+
+class BackfillCategoriesTests(unittest.TestCase):
+    def setUp(self):
+        self.client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP):
+                "enabled: true\nkind: apps\nschedule: '0 2 * * *'\n",
+            ("robot-hangzhou.yaml", DEFAULT_GROUP):
+                "enabled: false\nkind: business\ncategory: 催办\n",
+            ("mystery-line.yaml", DEFAULT_GROUP): "kind: business\n",
+        })
+
+    def test_apply_fills_missing_and_preserves_fields(self):
+        result = backfill_categories(
+            self.client,
+            ("sync-wdt", "robot-hangzhou", "mystery-line", "ghost"),
+            apply=True,
+        )
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual(["robot-hangzhou"], result["skipped"])
+        self.assertEqual(["mystery-line"], result["unclassified"])
+
+        import yaml
+        data = yaml.safe_load(self.client.configs[("sync-wdt.yaml", DEFAULT_GROUP)])
+        self.assertEqual("同步", data["category"])
+        self.assertEqual("apps", data["kind"])        # 原文字段原样保留
+        self.assertEqual("0 2 * * *", data["schedule"])
+        # 已配置/未归类/无条目的均不写
+        self.assertEqual(1, len(self.client.published))
+
+    def test_dry_run_writes_nothing(self):
+        result = backfill_categories(self.client, ("sync-wdt",), apply=False)
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual([], self.client.published)
+
+    def test_invalid_existing_category_not_clobbered(self):
+        client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP): "category: 别的\n"
+        })
+        result = backfill_categories(client, ("sync-wdt",), apply=True)
+        self.assertEqual(["sync-wdt"], result["unclassified"])
+        self.assertEqual([], client.published)
+
+
+class SplitRobotCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.client = _FakeNacosClient({
+            ("robot-hangzhou.yaml", DEFAULT_GROUP):
+                "enabled: true\nkind: business\ncategory: 催办\n"
+                "schedule: '0 18,20 * * *'\nreads: [mart_ops]\n",
+            ("robot-vanke.yaml", DEFAULT_GROUP):
+                "enabled: false\nkind: business\nschedule: '0 18,20 * * *'\n",
+            ("pages-hangzhou.yaml", DEFAULT_GROUP):
+                "kind: business\nschedule: '30 8 * * *'\n",
+        })
+
+    def test_apply_splits_and_preserves_fields(self):
+        result = split_robot_check(
+            self.client,
+            ("robot-hangzhou", "robot-vanke", "pages-hangzhou"),
+            apply=True,
+        )
+        self.assertEqual(
+            ["robot-hangzhou", "robot-vanke"], result["remind_fixed"]
+        )
+        self.assertEqual(
+            ["robot-check-hangzhou", "robot-check-vanke"],
+            result["check_created"],
+        )
+        self.assertEqual([], result["skipped"])
+
+        import yaml
+        remind = yaml.safe_load(
+            self.client.configs[("robot-hangzhou.yaml", DEFAULT_GROUP)]
+        )
+        self.assertEqual("0 18 * * *", remind["schedule"])
+        self.assertEqual("催办", remind["category"])       # 原字段保留
+        self.assertEqual(["mart_ops"], remind["reads"])
+        check = yaml.safe_load(
+            self.client.configs[("robot-check-hangzhou.yaml", DEFAULT_GROUP)]
+        )
+        self.assertEqual("0 20 * * *", check["schedule"])
+        self.assertTrue(check["enabled"])
+        vanke_check = yaml.safe_load(
+            self.client.configs[("robot-check-vanke.yaml", DEFAULT_GROUP)]
+        )
+        self.assertFalse(vanke_check["enabled"])           # 关停继承
+        # pages- 家族不受影响
+        self.assertEqual(4, len(self.client.published))
+
+    def test_existing_check_entry_skips_whole_service(self):
+        self.client.configs[("robot-check-hangzhou.yaml", DEFAULT_GROUP)] = (
+            "schedule: '5 21 * * *'\n"
+        )
+        result = split_robot_check(self.client, ("robot-hangzhou",), apply=True)
+        self.assertEqual(["robot-hangzhou"], result["skipped"])
+        # 不覆盖人工调整；robot 本体也不动（避免半拆分态）
+        self.assertEqual([], self.client.published)
+
+    def test_dry_run_writes_nothing(self):
+        result = split_robot_check(self.client, ("robot-hangzhou",), apply=False)
+        self.assertEqual(["robot-hangzhou"], result["remind_fixed"])
+        self.assertEqual(["robot-check-hangzhou"], result["check_created"])
+        self.assertEqual([], self.client.published)
+
+
+class SeedCategoryConsistencyTests(unittest.TestCase):
+    def test_seed_categories_match_taxonomy_derivation(self):
+        """seed 每条目的 category 合法且与 service_id 推导一致（防双源漂移）。"""
+        from pathlib import Path
+
+        from common.public_data.pipeline_config import load_seed
+        from common.public_data.pipeline_taxonomy import (
+            SUPPORTED_CATEGORIES,
+            derive_category,
+        )
+
+        seed = load_seed(Path("docker/integration/pipelines.seed.yaml"))
+        self.assertTrue(seed)
+        for service_id, raw in seed.items():
+            category = raw.get("category")
+            self.assertIn(category, SUPPORTED_CATEGORIES, service_id)
+            self.assertEqual(derive_category(service_id), category, service_id)
 
 
 if __name__ == "__main__":

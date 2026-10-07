@@ -22,6 +22,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.public_data.pipeline_taxonomy import SUPPORTED_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,14 @@ class PipelineConfig:
     #: 重查（2026-09-23：sync-wdt 必须先等 roll-manifest 滚动 WDT 窗口，
     #: 否则幂等重拉同一天——此前靠 cron 时刻表错位维系的隐式依赖）。
     depends_on: tuple = ()
+    #: 功能分类真源（七值，见 pipeline_taxonomy）；None = 未配置，
+    #: 读路径按 service_id 推导兜底（存量条目回填前的过渡态）。
+    category: str | None = None
 
     def to_mapping(self):
         mapping = {"enabled": self.enabled, "kind": self.kind}
+        if self.category:
+            mapping["category"] = self.category
         if self.sources:
             mapping["sources"] = list(self.sources)
         if self.schedule is not None:
@@ -125,6 +131,10 @@ def parse_pipeline_config(service_id, data):
             f"pipeline '{service_id}' has an invalid 'depends_on'"
         )
 
+    category = data.get("category")
+    if category is not None and category not in SUPPORTED_CATEGORIES:
+        raise PipelineConfigError(f"pipeline '{service_id}' has an invalid 'category'")
+
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -134,6 +144,7 @@ def parse_pipeline_config(service_id, data):
         reads=tuple(reads),
         description=description,
         depends_on=tuple(depends_on),
+        category=category,
     )
 
 
@@ -311,6 +322,99 @@ def publish_pipelines(client, mapping, group=DEFAULT_GROUP, if_missing=False):
         )
         published += 1
     return published
+
+
+def backfill_categories(client, service_ids, group=DEFAULT_GROUP, apply=True):
+    """存量注册表条目回填 category（幂等：只补缺、不覆盖、不动其他字段）。
+
+    逐条读 Nacos 原文 mapping：
+    - 已配置合法 category → ``skipped``；
+    - 未配置 → 按 taxonomy 推导，补写时「原文 + category」整体写回
+      （enabled/schedule 等运行态原样保留，避免 seed 全量发布覆盖
+      Nacos 运行态的坑）；
+    - 推导不出 / 已配置非法值（人工改坏的不代为裁决）→ ``unclassified``。
+
+    ``apply=False`` 为 dry-run：只归类不写。无条目的 id 不新建。
+    返回 ``{"filled": [...], "skipped": [...], "unclassified": [...]}``。
+    """
+    from common.public_data.pipeline_taxonomy import derive_category
+
+    result = {"filled": [], "skipped": [], "unclassified": []}
+    for service_id in service_ids:
+        data_id = f"{service_id}.yaml"
+        content = client.get_config(data_id, group)
+        if not content:
+            continue
+        data = _load_yaml(content, f"nacos config {data_id}")
+        if not isinstance(data, dict):
+            raise PipelineConfigError(f"pipeline '{service_id}' must be a mapping")
+        existing = data.get("category")
+        if existing in SUPPORTED_CATEGORIES:
+            result["skipped"].append(service_id)
+            continue
+        if existing is not None:
+            result["unclassified"].append(service_id)
+            continue
+        category = derive_category(service_id)
+        if category is None:
+            result["unclassified"].append(service_id)
+            continue
+        if apply:
+            data["category"] = category
+            client.publish_config(
+                data_id, group, _dump_yaml(data), config_type="yaml"
+            )
+        result["filled"].append(service_id)
+    return result
+
+
+def split_robot_check(client, service_ids, group=DEFAULT_GROUP, apply=True):
+    """robot-<region> 一拆二（2026-10-07 裁决）：check 独立成线。
+
+    对舰队中每个 ``robot-<region>``（``robot-check-`` 除外）：
+    - ``robot-<r>.yaml``：schedule 重写为 ``0 18 * * *``（填报提醒），
+      其余字段（enabled/category/reads/description 等）原样保留；
+    - ``robot-check-<r>.yaml``：以 robot 原文复制、schedule 改为
+      ``0 20 * * *``（催办未填人+DING，继承 enabled——vanke 关停随之
+      继承）；已存在则整条跳过（不覆盖人工调整）。
+
+    ``apply=False`` 为 dry-run：只报告将要发生的动作。
+    返回 ``{"remind_fixed": [...], "check_created": [...], "skipped": [...]}``。
+    """
+    result = {"remind_fixed": [], "check_created": [], "skipped": []}
+    for service_id in service_ids:
+        if not service_id.startswith("robot-"):
+            continue
+        if service_id.startswith("robot-check-"):
+            continue
+        region = service_id[len("robot-"):]
+        if not region:
+            continue
+        data_id = f"{service_id}.yaml"
+        content = client.get_config(data_id, group)
+        if not content:
+            continue
+        data = _load_yaml(content, f"nacos config {data_id}")
+        if not isinstance(data, dict):
+            raise PipelineConfigError(f"pipeline '{service_id}' must be a mapping")
+        check_id = f"robot-check-{region}"
+        if client.get_config(f"{check_id}.yaml", group):
+            result["skipped"].append(service_id)
+            continue
+        if apply:
+            remind = dict(data)
+            remind["schedule"] = "0 18 * * *"
+            client.publish_config(
+                data_id, group, _dump_yaml(remind), config_type="yaml"
+            )
+            check = dict(data)
+            check["schedule"] = "0 20 * * *"
+            client.publish_config(
+                f"{check_id}.yaml", group, _dump_yaml(check), config_type="yaml"
+            )
+        result["remind_fixed"].append(service_id)
+        result["check_created"].append(check_id)
+    return result
 
 
 def build_config_publisher(environ=None):

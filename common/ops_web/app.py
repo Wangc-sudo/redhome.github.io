@@ -34,6 +34,13 @@ from common.bi_web import auth, authz
 from common.public_data import bi_authz, channel_target, ops_control, report_roster
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
+from common.public_data.pipeline_taxonomy import (
+    CATEGORY_CLASS,
+    CATEGORY_FAMILY,
+    CLASS_ORDER,
+    SUPPORTED_CATEGORIES,
+    resolve_category,
+)
 from common.public_data.scheduler import has_command
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,6 +96,12 @@ _PAGE_STYLE = (
     "input,select{padding:5px 8px;font-size:13px}"
     "button{padding:6px 14px;font-size:13px;cursor:pointer}"
     ".hint{color:#888;font-size:12px}"
+    ".modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);"
+    "align-items:center;justify-content:center;z-index:99}"
+    ".modal-box{background:#fff;padding:20px 24px;border-radius:8px;"
+    "min-width:280px;max-width:420px}"
+    ".modal-btns{margin-top:16px;text-align:right}"
+    ".modal-btns button{margin-left:8px}"
 )
 
 _PAGE_JS = """
@@ -123,14 +136,40 @@ function grantRegion(ev) {
   if (!confirm('确认为 ' + region + ' 区域全部在职成员开通该区域授权？')) return;
   postJSON('/api/grants/region', {region: region});
 }
-function togglePipeline(serviceId, enabled) {
-  const action = enabled ? '启用' : '停用';
-  if (!confirm('确认' + action + ' ' + serviceId + '？（下一个调度 tick 生效，≤30s）')) return;
-  postJSON('/api/pipelines/toggle', {service_id: serviceId, enabled: enabled});
+let _pendingAction = null;
+function showConfirm(msg) {
+  document.getElementById('confirm-text').textContent = msg;
+  document.getElementById('confirm-mask').style.display = 'flex';
 }
-function runPipelineOnce(serviceId) {
-  if (!confirm('确认立即运行一次 ' + serviceId + '？（调度器下个 tick 认领触发）')) return;
-  postJSON('/api/pipelines/run-once', {service_id: serviceId});
+function closeConfirm() {
+  document.getElementById('confirm-mask').style.display = 'none';
+  _pendingAction = null;
+}
+function confirmOk() {
+  const action = _pendingAction;
+  closeConfirm();
+  if (action) postJSON(action.url, action.body);
+}
+function pipelineAction(sel) {
+  const value = sel.value;
+  sel.value = '';
+  if (!value) return;
+  const sid = sel.dataset.service;
+  if (value === 'toggle') {
+    const enable = sel.dataset.enabled !== '1';
+    _pendingAction = {
+      url: '/api/pipelines/toggle',
+      body: {service_id: sid, enabled: enable},
+    };
+    showConfirm('确认' + (enable ? '启用' : '停用') + ' ' + sid +
+                '？（下一个调度 tick 生效，≤30s）');
+  } else if (value === 'runonce') {
+    _pendingAction = {
+      url: '/api/pipelines/run-once',
+      body: {service_id: sid},
+    };
+    showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发）');
+  }
 }
 function addPipeline(ev) {
   ev.preventDefault();
@@ -138,6 +177,7 @@ function addPipeline(ev) {
   postJSON('/api/pipelines/add', {
     service_id: f.service_id.value.trim(),
     kind: f.kind.value,
+    category: f.category.value,
     schedule: f.schedule.value.trim(),
     enabled: f.enabled.checked,
     depends_on: f.depends_on.value.split(/[\\s,]+/).filter(Boolean),
@@ -368,7 +408,8 @@ def _service_name(service_id):
     if name is not None:
         return name
     for prefix, tpl in (
-        ("robot-", "「{region}」日报机器人"),
+        ("robot-check-", "「{region}」催办未填+DING"),
+        ("robot-", "「{region}」填报提醒"),
         ("pages-", "「{region}」榜单页"),
         ("leaderboard-", "「{region}」榜单播报"),
     ):
@@ -392,7 +433,8 @@ def _service_label(service_id, description):
     if label is not None:
         return label
     for prefix, tpl in (
-        ("robot-", "「{region}」日报机器人（报数汇总 → 群内播报/催办）"),
+        ("robot-check-", "「{region}」催办未填人 + DING（报数核对 → 群内 @ + DING）"),
+        ("robot-", "「{region}」填报提醒（报数汇总 → 群内提醒）"),
         ("pages-", "「{region}」榜单页生成"),
         ("leaderboard-", "「{region}」榜单群播报（销售完成率榜 → 群）"),
     ):
@@ -402,26 +444,9 @@ def _service_label(service_id, description):
     return description
 
 
-#: 功能分类（定时任务页「功能」列）：显式映射优先，家族按前缀归类。
-_SERVICE_FUNCTIONS = {
-    "roll-manifest": "同步",
-    "sync-dingtalk": "同步",
-    "sync-wdt": "同步",
-    "sync-runner": "同步",
-    "sync-channel-sales": "同步",
-    "project-mart": "加工",
-    "extract-mart": "加工",
-    "extract-channel": "加工",
-    "channel-missing-check": "催办",
-    "channel-daily-qudao": "播报",
-    "offline-daily-summary": "播报",
-    "offline-weekly-summary": "播报",
-    "offline-monthly-summary": "播报",
-    "dingtalk-gateway": "钉钉",
-    "bi-web": "平台",
-    "scheduler": "平台",
-    "ops-web": "平台",
-}
+#: 功能分类已沉为注册表真源（PipelineConfig.category，七值与推导逻辑
+#: 见 common.public_data.pipeline_taxonomy）；本页只保留展示层：
+#: 真源优先、未配置的存量条目按 service_id 推导兜底。
 
 #: 无 family 前缀但绑定区域的服务（「管理群」列用；pages-qudao-t1 的
 #: pages- 后缀是 qudao-t1 不是区域，必须显式登记）。
@@ -434,22 +459,9 @@ _SERVICE_REGIONS = {
     "offline-monthly-summary": "offline_all",
 }
 
-_FUNCTION_FAMILY = (
-    ("robot-", "催办"),
-    ("pages-", "页面"),
-    ("leaderboard-", "播报"),
-)
-
-
-def _service_function(service_id):
-    """功能列：显式映射 → 家族前缀 → 空（未归类）。"""
-    label = _SERVICE_FUNCTIONS.get(service_id)
-    if label is not None:
-        return label
-    for prefix, function in _FUNCTION_FAMILY:
-        if service_id.startswith(prefix):
-            return function
-    return "—"
+def _category_label(config):
+    """功能列：注册表 category 真源优先，未配置按 service_id 推导兜底。"""
+    return resolve_category(config.service_id, config.category) or "—"
 
 
 def _service_region(service_id):
@@ -457,7 +469,7 @@ def _service_region(service_id):
     region = _SERVICE_REGIONS.get(service_id)
     if region is not None:
         return region
-    for prefix, _ in _FUNCTION_FAMILY:
+    for prefix, _ in CATEGORY_FAMILY:
         if service_id.startswith(prefix):
             return service_id[len(prefix):]
     return None
@@ -471,20 +483,30 @@ def _group_cell(service_id):
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
+def _service_class(config):
+    """三表分类：category（真源/推导）→ 归类映射；未归类按注册表 kind 兜底。"""
+    category = resolve_category(config.service_id, config.category)
+    if category is not None:
+        return CATEGORY_CLASS[category]
+    return "业务线" if config.kind == "business" else "应用类"
+
+
 def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
                            qudao_owners):
     """收受影响人列（仅催办行调用；其余行由调用方给 —）。
 
     口径与实际催办名单同源（2026-10-07 裁决「催办绑定名册」）：
-    * ``robot-<区域>``（日报机器人 18:30 提醒 / 20:00 催办）= 该区域
-      ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员；名册无记录
-      （fail-open）= 区域在册填报人全员，与机器人 ``_unfilled`` 同真源；
+    * ``robot-<区域>``（填报提醒）/ ``robot-check-<区域>``（催办+DING）
+      = 该区域 ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员；
+      名册无记录（fail-open）= 区域在册填报人全员，与机器人
+      ``_unfilled`` 同真源；
     * 渠道线催办（channel-missing-check）= 名册店铺负责人
       （``dim_report_roster`` qudao/store/启用/role=owner 去重）；名册
       未登记时机器人回退月目标表 owners_json，此处如实标注不复制回退链。
     """
     if service_id.startswith("robot-"):
-        region = service_id[len("robot-"):]
+        # _service_region 兼容 robot-check- 长者前缀（2026-10-07 拆分）。
+        region = _service_region(service_id)
         names = members_by_region.get(region) or []
         roster = roster_by_region.get(region)
         if roster is not None:
@@ -1165,7 +1187,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         reminder_cells = {}
         reminder_ids = [
             config.service_id for config in configs
-            if _service_function(config.service_id) == "催办"
+            if resolve_category(config.service_id, config.category) == "催办"
         ]
         if reminder_ids:
             members_by_region = {}
@@ -1174,7 +1196,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             try:
                 with db_connector() as connection:
                     robot_regions = {
-                        sid[len("robot-"):] for sid in reminder_ids
+                        _service_region(sid) for sid in reminder_ids
                         if sid.startswith("robot-")
                     }
                     if robot_regions:
@@ -1202,7 +1224,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for sid in reminder_ids:
                     reminder_cells[sid] = (
                         "<span class=\"hint\">读取失败</span>")
-        rows = []
+        buckets = {title: [] for title in CLASS_ORDER}
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -1225,16 +1247,23 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 else "<span class=\"hint\">无模板</span>"
             )
             toggle_label = "停用" if config.enabled else "启用"
-            run_button = (
-                f"<button onclick=\"runPipelineOnce('{_esc(config.service_id)}')\">"
-                "运行一次</button>"
+            run_option = (
+                "<option value=\"runonce\">运行一次</option>"
                 if has_command(config.service_id) else ""
             )
-            rows.append(
+            action_cell = (
+                f"<select data-service=\"{_esc(config.service_id)}\" "
+                f"data-enabled=\"{'1' if config.enabled else '0'}\" "
+                "onchange=\"pipelineAction(this)\">"
+                "<option value=\"\">操作…</option>"
+                f"<option value=\"toggle\">{toggle_label}</option>"
+                f"{run_option}</select>"
+            )
+            buckets[_service_class(config)].append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{_group_cell(config.service_id)}</td>"
-                f"<td>{_esc(_service_function(config.service_id))}</td>"
+                f"<td>{_esc(_category_label(config))}</td>"
                 f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
@@ -1242,24 +1271,37 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{_esc(_service_label(config.service_id, config.description))}</td>"
                 f"<td>{template}</td>"
                 f"<td>{request_cell}</td>"
-                f"<td><button onclick=\"togglePipeline("
-                f"'{_esc(config.service_id)}', {str(not config.enabled).lower()})\">"
-                f"{toggle_label}</button> {run_button}</td></tr>"
+                f"<td>{action_cell}</td></tr>"
             )
-        table = (
-            "<h1>定时任务（管道注册表）</h1>"
-            "<table><tr><th>服务标识</th><th>类型</th><th>管理群</th>"
+        header = (
+            "<tr><th>服务标识</th><th>类型</th><th>管理群</th>"
             "<th>功能</th><th>收受影响人</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
-            + "".join(rows) + "</table>"
+        )
+        table = ["<h1>定时任务（管道注册表）</h1>"]
+        for title in CLASS_ORDER:
+            table.append(
+                f"<h2>{title}</h2><table>{header}"
+                + "".join(buckets[title]) + "</table>"
+            )
+        table.append(
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
             "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
-            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台；"
+            "「功能」= 注册表 category 真源（未配置按服务标识推导兜底）；"
+            "分表=按功能归类（应用类/业务线/数据线），与注册表「类型」"
+            "（kind）无关；"
             "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
             "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
+            "<div id=\"confirm-mask\" class=\"modal-mask\">"
+            "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
+            "<div class=\"modal-btns\">"
+            "<button onclick=\"confirmOk()\">确定</button>"
+            "<button onclick=\"closeConfirm()\">取消</button>"
+            "</div></div></div>"
         )
+        table = "".join(table)
         add_form = (
             "<h2>新增定时任务</h2>"
             "<form class=\"inline\" onsubmit=\"addPipeline(event)\">"
@@ -1268,12 +1310,20 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<option value=\"business\">业务线</option>"
             "<option value=\"apps\">应用线</option>"
             "</select>"
+            "<select name=\"category\">"
+            "<option value=\"\">功能（留空按标识推导）</option>"
+            + "".join(
+                f"<option value=\"{_esc(c)}\">{_esc(c)}</option>"
+                for c in SUPPORTED_CATEGORIES
+            )
+            + "</select>"
             "<input name=\"schedule\" placeholder=\"定时规则（分 时 日 月 周，如 0 18 * * * = 每天 18:00）\" required>"
             "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"
             "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;区域&gt; / pages-&lt;区域&gt; / "
+            "<p class=\"hint\">robot-&lt;区域&gt;（填报提醒）/ "
+            "robot-check-&lt;区域&gt;（催办未填+DING）/ pages-&lt;区域&gt; / "
             "leaderboard-&lt;区域&gt; "
             "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
@@ -1421,6 +1471,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 enabled=payload.get("enabled", True),
                 description=payload.get("description", ""),
                 depends_on=depends_on,
+                category=payload.get("category") or None,
             )
         except ops_control.OpsControlError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
