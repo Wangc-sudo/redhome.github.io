@@ -621,6 +621,66 @@ def test_run_once_drains_pending_and_fires():
     assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
     assert store.claims == [1]
     assert store.finished == [(1, 0)]
+    # 同步线不附 --force（幂等由数据层承载）
+    assert "--force" not in scheduler._runner.calls[0][1]
+
+
+# -- run-once --force（2026-10-08 裁决「手动触发不应该被幂等」） --------------
+
+def test_with_run_force_appends_only_for_outbox_mart_lines():
+    from common.public_data.scheduler import with_run_force
+
+    check_argv = [
+        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli", "check",
+        "--confirm-local-test-write",
+    ]
+    assert with_run_force(check_argv)[-1] == "--force"
+    # leaderboard / channel-daily 自带 HHMM 后缀天然可重跑，不附加
+    lb_argv = [
+        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli", "leaderboard",
+        "--confirm-local-test-write",
+    ]
+    assert "--force" not in with_run_force(lb_argv)
+    # 页面生成写文件无去重语义，不附加
+    pages_argv = [
+        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli",
+        "leaderboard-html", "--output", "x.html",
+    ]
+    assert "--force" not in with_run_force(pages_argv)
+    # 同步线不附加
+    sync_argv = [
+        "/usr/bin/python3", "-m", "common.public_data.cli", "live-sync",
+        "--live-read",
+    ]
+    assert "--force" not in with_run_force(sync_argv)
+    assert with_run_force(None) is None
+
+
+def test_run_once_appends_force_for_robot_check():
+    """手动触发 robot-check-<region>：argv 末位附 --force（绕开当日去重）。"""
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(11, "robot-check-hangzhou", "admin")]
+    scheduler = _run_once_scheduler(
+        {"robot-check-hangzhou": {"schedule": "0 20 * * *"}}, store,
+    )
+    scheduler.tick()
+    calls = scheduler._runner.calls
+    assert [sid for sid, _ in calls] == ["robot-check-hangzhou"]
+    assert calls[0][1][-1] == "--force"
+    assert calls[0][1][2:4] == ["common.daily_robot.mart_cli", "check"]
+
+
+def test_run_once_leaderboard_not_forced():
+    """leaderboard 线自带 HHMM 去重后缀，run-once 不附 --force。"""
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(12, "leaderboard-hangzhou", "admin")]
+    scheduler = _run_once_scheduler(
+        {"leaderboard-hangzhou": {"schedule": "30 8 * * *"}}, store,
+    )
+    scheduler.tick()
+    calls = scheduler._runner.calls
+    assert [sid for sid, _ in calls] == ["leaderboard-hangzhou"]
+    assert "--force" not in calls[0][1]
 
 
 def test_run_once_rejects_service_without_command():

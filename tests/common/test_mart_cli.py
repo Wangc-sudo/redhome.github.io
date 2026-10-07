@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from common.daily_robot.mart_cli import main, route_by_hour
+from common.daily_robot.mart_cli import _force_suffix, main, route_by_hour
 from common.daily_robot.mart_tasks import TaskOutcome
 from common.region_config import RegionConfig
 
@@ -60,6 +60,20 @@ def _patch_common(**kwargs):
         ),
     }
     return mocks
+
+
+class ForceSuffixTests(unittest.TestCase):
+    """--force（run-once 手动触发）：另起去重键后缀强制重发（2026-10-08 裁决）。"""
+
+    def test_force_flag_yields_manual_suffix(self):
+        args = Mock(force=True)
+        now = datetime(2026, 10, 8, 9, 30, 5)
+        self.assertEqual(_force_suffix(args, now), "manual-20261008093005")
+
+    def test_default_no_suffix(self):
+        now = datetime(2026, 10, 8, 9, 30, 5)
+        self.assertIsNone(_force_suffix(Mock(force=False), now))
+        self.assertIsNone(_force_suffix(Mock(spec=[]), now))  # 无 force 属性
 
 
 class RouteByHourTests(unittest.TestCase):

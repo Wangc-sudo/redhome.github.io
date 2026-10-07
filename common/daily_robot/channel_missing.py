@@ -359,11 +359,13 @@ def fetch_name_map(conn):
 def run_channel_missing(conn, outbox, *, region, display, business_date, now,
                         table_url, cc_user_ids=(), store_exclude=(),
                         zero_sales_mention=True, at_limit=20, dry=False,
-                        report=None):
+                        report=None, dedupe_suffix=None):
     """门店到齐校验：缺口 @ 负责人 + 零销售播报 → outbox（一条）。
 
     *dry* 只算不写（灰度核对）；*report* 传入 dict 时回填明细
     （roster/missing/zero/at/unmatched），供 CLI 打印与测试断言。
+    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）另起去重键
+    强制重发；缺省维持当日幂等。
     """
     if not fetch_sync_gate(conn, now=now):
         logger.error(
@@ -466,6 +468,7 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
         body_md=body,
         at_user_ids=[*at_ids, *cc],
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     return TaskOutcome(
         "enqueued" if enqueued else "already_sent",

@@ -389,10 +389,12 @@ def _fetch_window(connection, *, region, anchor, start, end):
     )
 
 
-def run_daily_summary(connection, outbox, *, business_date, now):
+def run_daily_summary(connection, outbox, *, business_date, now,
+                      dedupe_suffix=None):
     """每日 20:30：板块当日 + 环比 + 月累计 → agg 落表 + outbox。
 
-    返回 ``"enqueued" | "already_sent"``。
+    返回 ``"enqueued" | "already_sent"``。``dedupe_suffix``（run-once
+    手动触发 `--force` 传入）另起去重键强制重发。
     """
     prev_first, _ = previous_month(business_date)
     facts_by_scope = {}
@@ -435,12 +437,17 @@ def run_daily_summary(connection, outbox, *, business_date, now):
         title=DAILY_TITLE,
         body_md=body,
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     return "enqueued" if enqueued else "already_sent"
 
 
-def run_weekly_summary(connection, outbox, *, reference, now):
-    """每周一 09:30：上周周报（周合计/周环比/板块排名）→ outbox。"""
+def run_weekly_summary(connection, outbox, *, reference, now,
+                       dedupe_suffix=None):
+    """每周一 09:30：上周周报（周合计/周环比/板块排名）→ outbox。
+
+    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）强制重发。
+    """
     week_start, week_end = previous_week(reference)
     fetch_start = week_start - timedelta(days=7)
     facts_by_scope = {}
@@ -472,12 +479,17 @@ def run_weekly_summary(connection, outbox, *, reference, now):
         title=WEEKLY_TITLE,
         body_md=body,
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     return "enqueued" if enqueued else "already_sent"
 
 
-def run_monthly_summary(connection, outbox, *, reference, now):
-    """每月 1 日 10:00：上月月报（月合计/月环比/达成率榜）→ outbox。"""
+def run_monthly_summary(connection, outbox, *, reference, now,
+                        dedupe_suffix=None):
+    """每月 1 日 10:00：上月月报（月合计/月环比/达成率榜）→ outbox。
+
+    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）强制重发。
+    """
     month_first, month_last = previous_month(reference)
     prev_first, _ = previous_month(month_first)
     facts_by_scope = {}
@@ -515,6 +527,7 @@ def run_monthly_summary(connection, outbox, *, reference, now):
         title=MONTHLY_TITLE,
         body_md=body,
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     return "enqueued" if enqueued else "already_sent"
 

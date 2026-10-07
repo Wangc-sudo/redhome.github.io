@@ -124,8 +124,12 @@ def _unfilled(connection, region, business_date, aliases):
 
 
 def run_remind(connection, outbox, *, region, display, table_url,
-               business_date, now, aliases=None):
-    """18:30 提醒：未填名单 → outbox（kind='remind'，@未填人）。"""
+               business_date, now, aliases=None, dedupe_suffix=None):
+    """18:30 提醒：未填名单 → outbox（kind='remind'，@未填人）。
+
+    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）另起去重键
+    强制重发；缺省维持当日幂等。
+    """
     if not _require_workday(connection, business_date):
         return TaskOutcome("rest_day", "remind", business_date)
 
@@ -150,6 +154,7 @@ def run_remind(connection, outbox, *, region, display, table_url,
         body_md=body,
         at_user_ids=[m["user_id"] for m in unfilled_rows],
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     return TaskOutcome(
         "enqueued" if enqueued else "already_sent",
@@ -161,11 +166,14 @@ def run_remind(connection, outbox, *, region, display, table_url,
 
 
 def run_check(connection, outbox, *, region, display, table_url,
-              business_date, now, cc_user_ids=(), aliases=None):
+              business_date, now, cc_user_ids=(), aliases=None,
+              dedupe_suffix=None):
     """20:00 催办：群消息（@未填人 + cc）+ DING 行（仅未填人）。
 
     两行 dedupe_key 各自独立（``check`` / ``ding``），任一行已存在只跳过
     自己——比现行单一 state key 更细粒度，部分失败可独立补齐。
+    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）两行同后缀
+    强制重发；缺省维持当日幂等。
     """
     if not _require_workday(connection, business_date):
         return TaskOutcome("rest_day", "check", business_date)
@@ -193,6 +201,7 @@ def run_check(connection, outbox, *, region, display, table_url,
         body_md=body,
         at_user_ids=[*member_ids, *cc_user_ids],
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
     ding_enqueued = outbox.enqueue(
         region=region,
@@ -208,6 +217,7 @@ def run_check(connection, outbox, *, region, display, table_url,
         ),
         at_user_ids=member_ids,
         created_at=now,
+        dedupe_suffix=dedupe_suffix,
     )
 
     enqueued = check_enqueued or ding_enqueued
