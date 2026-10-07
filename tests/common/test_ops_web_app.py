@@ -718,8 +718,8 @@ class RosterPageTests(unittest.TestCase):
         response = client.get("/roster", follow_redirects=False)
         self.assertEqual(302, response.status_code)
 
-    def test_roster_page_marks_deputies_in_qudao_section(self):
-        # v3 角色展示：渠道区段代填报人带【代填】标识，表头分列
+    def test_roster_page_splits_owner_deputy_columns_with_status_select(self):
+        # 2026-10-07 运维裁决：负责人/代填报人分两列；启用/停用改下拉
         store = _RosterStore()
         store.rows = [
             _roster_row(id=1, entity_key="TM习酒旗舰店", person_name="卢雅玲",
@@ -732,8 +732,14 @@ class RosterPageTests(unittest.TestCase):
         with store.patch_fetch(), store.patch_audit():
             body = client.get("/roster").text
 
-        self.assertIn("【代填】", body)
-        self.assertIn("负责人/代填报人", body)
+        self.assertIn("<th>负责人</th><th>代填报人</th>", body)  # 两列表头
+        self.assertIn("卢雅玲", body)
+        self.assertIn("卢雅莹", body)
+        # 状态下拉（当前值即链接状态）+ 删除按钮
+        self.assertIn('setRosterStatus(1, this.value)', body)
+        self.assertIn('setRosterStatus(2, this.value)', body)
+        self.assertIn('<option value="1" selected>启用</option>', body)
+        self.assertNotIn("toggleRoster", body)
 
 
 class RosterApiTests(unittest.TestCase):
@@ -829,6 +835,78 @@ class RosterApiTests(unittest.TestCase):
             "/api/roster/add", json={"scope": "qudao", "entity_type": "store",
                                      "entity_key": "店", "person_name": "张三"},
         ).status_code)
+
+
+def _roster_manager_viewer():
+    """持 scope='roster' 授权的非 admin 成员（名册管理员）。"""
+    return authz.Viewer(
+        userid="u-manager", name="卢雅玲", scopes=frozenset({"roster"}),
+        allowed_regions=frozenset(), is_admin=False, admitted=True,
+    )
+
+
+def _plain_member_viewer():
+    return authz.Viewer(
+        userid="u-plain", name="路人甲", scopes=frozenset({"fin"}),
+        allowed_regions=frozenset(), is_admin=False, admitted=True,
+    )
+
+
+class RosterManageGateTests(unittest.TestCase):
+    """名册新增/删除/状态修改绑定「名册管理」授权（scope=roster，
+    2026-10-07 运维裁决）；admin 隐式持有。"""
+
+    def test_manager_can_view_and_write(self):
+        viewer = _roster_manager_viewer()
+        store = _RosterStore()
+        client = TestClient(_app(viewer=viewer))
+        _login(client, userid="u-manager")
+        with store.patch_fetch(), store.patch_audit():
+            self.assertEqual(200, client.get("/roster").status_code)
+        with store.patch_upsert():
+            self.assertEqual(200, client.post("/api/roster/add", json={
+                "scope": "qudao", "entity_type": "store",
+                "entity_key": "JD购喝", "person_name": "饶佳君",
+            }).status_code)
+        with store.patch_toggle():
+            self.assertEqual(200, client.post(
+                "/api/roster/toggle", json={"id": 1, "enabled": False},
+            ).status_code)
+        with store.patch_delete():
+            self.assertEqual(200, client.post(
+                "/api/roster/delete", json={"id": 1},
+            ).status_code)
+        entry, actor = store.upserted[0]
+        self.assertEqual("u-manager", actor)
+
+    def test_plain_member_forbidden(self):
+        viewer = _plain_member_viewer()
+        store = _RosterStore()
+        client = TestClient(_app(viewer=viewer))
+        _login(client, userid="u-plain")
+        page = client.get("/roster", follow_redirects=False)
+        self.assertEqual(302, page.status_code)
+        self.assertEqual("/auth/entry?reason=forbidden",
+                         page.headers["location"])
+        for path, payload in (
+            ("/api/roster/add", {"scope": "qudao", "entity_type": "store",
+                                 "entity_key": "店", "person_name": "张三"}),
+            ("/api/roster/toggle", {"id": 1, "enabled": False}),
+            ("/api/roster/delete", {"id": 1}),
+        ):
+            self.assertEqual(
+                403, client.post(path, json=payload).status_code, path,
+            )
+        self.assertEqual([], store.upserted)
+
+    def test_admin_remains_implicit_manager(self):
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_delete():
+            self.assertEqual(200, client.post(
+                "/api/roster/delete", json={"id": 1},
+            ).status_code)
 
 
 class RosterPublishTests(unittest.TestCase):

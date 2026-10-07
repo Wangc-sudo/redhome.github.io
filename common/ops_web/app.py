@@ -156,10 +156,8 @@ function addRoster(ev) {
     role: f.role.value,
   });
 }
-function toggleRoster(id, enabled) {
-  const action = enabled ? '启用' : '停用';
-  if (!confirm('确认' + action + '该名册记录？')) return;
-  postJSON('/api/roster/toggle', {id: id, enabled: enabled});
+function setRosterStatus(id, value) {
+  postJSON('/api/roster/toggle', {id: id, enabled: value === '1'});
 }
 function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
@@ -267,6 +265,10 @@ _ENTITY_LABEL = {"store": "门店", "person": "人员", "dept": "部门"}
 
 #: 名册角色中文标签（v3：负责人/代填报人；仅 store 类型有 deputy）。
 _ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
+
+#: 名册管理能力对应的 bi_authz scope 授权键（成员与授权页单人授权：
+#: grant_type=scope、grant_key=roster；admin 隐式持有）。
+ROSTER_MANAGE_SCOPE = "roster"
 
 
 def _label(mapping, value):
@@ -425,6 +427,31 @@ def _schedule_cell(schedule):
     return f"{_esc(zh)}<span class=\"hint\">（{_esc(schedule)}）</span>"
 
 
+def _roster_link_cell(row):
+    """一条名册链接的操作单元：姓名（别名）+ 状态下拉 + 删除按钮。
+
+    状态用下拉直接修改（2026-10-07 运维裁决，取代启用/停用按钮）；
+    下拉当前值即链接状态，无需另设「(停)」标记。
+    """
+    enabled = bool(row["enabled"])
+    name_html = _esc(row["person_name"])
+    if row.get("aliases"):
+        try:
+            alias_text = "、".join(json.loads(row["aliases"]))
+        except (ValueError, TypeError):
+            alias_text = ""
+        if alias_text:
+            name_html += f"<span class=\"hint\">（{_esc(alias_text)}）</span>"
+    return (
+        f"<div>{name_html}"
+        f"<select onchange=\"setRosterStatus({int(row['id'])}, this.value)\">"
+        f"<option value=\"1\"{' selected' if enabled else ''}>启用</option>"
+        f"<option value=\"0\"{'' if enabled else ' selected'}>停用</option>"
+        f"</select>"
+        f"<button onclick=\"deleteRoster({int(row['id'])})\">删</button></div>"
+    )
+
+
 def _qudao_section(rows, targets, numbers):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
@@ -446,33 +473,18 @@ def _qudao_section(rows, targets, numbers):
             store, (numbers.get(store, ("", None))[0], None)
         )
         store_no = numbers.get(store, (None, None))[1]
-        owner_cells = []
-        store_links = sorted(
-            store_rows.get(store, []),
-            key=lambda row: (1 if row.get("role") == "deputy" else 0,
-                             row["person_name"]),
-        )
-        for row in store_links:
-            enabled = bool(row["enabled"])
-            name_html = _esc(row["person_name"])
-            if row.get("role") == "deputy":
-                name_html += "<span class=\"hint\">【代填】</span>"
-            if row.get("aliases"):
-                try:
-                    alias_text = "、".join(json.loads(row["aliases"]))
-                except (ValueError, TypeError):
-                    alias_text = ""
-                if alias_text:
-                    name_html += f"<span class=\"hint\">（{_esc(alias_text)}）</span>"
-            if not enabled:
-                name_html = f"<span class=\"hint\">{name_html}(停)</span>"
-            toggle_label = "停用" if enabled else "启用"
-            owner_cells.append(
-                f"{name_html}"
-                f"<button onclick=\"toggleRoster({int(row['id'])}, "
-                f"{str(not enabled).lower()})\">{toggle_label}</button>"
-                f"<button onclick=\"deleteRoster({int(row['id'])})\">删</button>"
-            )
+        owner_cells = [
+            _roster_link_cell(row)
+            for row in sorted(store_rows.get(store, []),
+                              key=lambda r: r["person_name"])
+            if row.get("role") != "deputy"
+        ]
+        deputy_cells = [
+            _roster_link_cell(row)
+            for row in sorted(store_rows.get(store, []),
+                              key=lambda r: r["person_name"])
+            if row.get("role") == "deputy"
+        ]
         target_value = "" if target is None else f"{float(target):.0f}"
         if target:
             total += float(target)
@@ -483,16 +495,16 @@ def _qudao_section(rows, targets, numbers):
             f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
             f"data-channel=\"{_esc(channel)}\" value=\"{_esc(target_value)}\" "
             f"placeholder=\"目标（元）\"></td>"
-            f"<td>{' '.join(owner_cells) or '<span class=\"hint\">无负责人在册</span>'}</td></tr>"
+            f"<td>{''.join(owner_cells) or '<span class=\"hint\">无负责人在册</span>'}</td>"
+            f"<td>{''.join(deputy_cells) or '<span class=\"hint\">—</span>'}</td></tr>"
         )
     return (
         "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
         "编号已冻结不随目标洗牌）</span></h2>"
         "<table><tr><th>编号</th><th>店铺</th><th>渠道</th>"
-        "<th>月目标（元）</th>"
-        "<th>负责人/代填报人（停用/删除即改填报权限）</th></tr>"
+        "<th>月目标（元）</th><th>负责人</th><th>代填报人</th></tr>"
         + ("".join(body)
-           or "<tr><td colspan=\"5\" class=\"hint\">暂无记录</td></tr>")
+           or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
         + "</table>"
         f"<p>合计：<strong>{total:.0f}</strong> 元 "
         "<button onclick=\"publishSnapshot()\">发布月度快照</button>"
@@ -526,8 +538,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     app = FastAPI(title="ops-web")
 
-    def require_admin(request: Request) -> authz.Viewer:
-        """应用层闸：session 有效 + admin；其余一律提示页/403。"""
+    def _resolve_request_viewer(request: Request) -> authz.Viewer:
+        """session → Viewer（各闸共用的解析段；未登录 401/302，解析异常 403）。"""
         raw = request.cookies.get(auth.SESSION_COOKIE)
         userid = (
             auth.resolve_session_userid(raw, session_secret) if raw else None
@@ -540,18 +552,35 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 status_code=302, headers={"Location": "/auth/entry?reason=login"}
             )
         try:
-            viewer = viewer_resolver.resolve(userid)
+            return viewer_resolver.resolve(userid)
         except Exception as exc:
             # 权限链 fail-closed（铁律 2）：解析异常 = 拒绝。
             _LOGGER.warning("ops-web viewer resolve failed: %s", type(exc).__name__)
             raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
+
+    def _forbidden(request: Request):
+        if request.url.path.startswith("/api/"):
+            raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
+        raise HTTPException(
+            status_code=302,
+            headers={"Location": "/auth/entry?reason=forbidden"},
+        )
+
+    def require_admin(request: Request) -> authz.Viewer:
+        """应用层闸：session 有效 + admin；其余一律提示页/403。"""
+        viewer = _resolve_request_viewer(request)
         if not viewer.is_admin:
-            if request.url.path.startswith("/api/"):
-                raise HTTPException(status_code=403, detail=ErrorDetail.FORBIDDEN)
-            raise HTTPException(
-                status_code=302,
-                headers={"Location": "/auth/entry?reason=forbidden"},
-            )
+            _forbidden(request)
+        request.state.viewer = viewer
+        return viewer
+
+    def require_roster_manager(request: Request) -> authz.Viewer:
+        """名册管理闸（2026-10-07 运维裁决）：admin 或持 ``scope='roster'``
+        授权（成员与授权页单人授权分配）——名册的新增/删除/状态修改绑定
+        该授权，不再是 admin 的隐式全集。"""
+        viewer = _resolve_request_viewer(request)
+        if not (viewer.is_admin or ROSTER_MANAGE_SCOPE in viewer.scopes):
+            _forbidden(request)
         request.state.viewer = viewer
         return viewer
 
@@ -1085,7 +1114,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/roster")
     def roster_page(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         try:
             with db_connector() as connection:
                 entries = report_roster.fetch_roster(connection)
@@ -1127,8 +1156,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     except (ValueError, TypeError):
                         aliases_text = ""
                 enabled = bool(row["enabled"])
-                toggle_label = "停用" if enabled else "启用"
-                status_cell = "✓" if enabled else "<span class=\"hint\">已停用</span>"
+                status_select = (
+                    f"<select onchange=\"setRosterStatus({int(row['id'])}, "
+                    f"this.value)\">"
+                    f"<option value=\"1\"{' selected' if enabled else ''}>启用</option>"
+                    f"<option value=\"0\"{'' if enabled else ' selected'}>停用</option>"
+                    f"</select>"
+                )
                 updated = _fmt_time(row.get("updated_at")) or "—"
                 role_text = (
                     _label(_ROLE_LABEL, row.get("role") or "owner")
@@ -1140,17 +1174,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     f"<td>{_esc(row['person_name'])}</td>"
                     f"<td>{_esc(role_text)}</td>"
                     f"<td>{_esc(aliases_text)}</td>"
-                    f"<td>{status_cell}</td>"
+                    f"<td>{status_select}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
                     f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
-                    f"<td><button onclick=\"toggleRoster("
-                    f"{int(row['id'])}, {str(not enabled).lower()})\">{toggle_label}</button> "
-                    f"<button onclick=\"deleteRoster({int(row['id'])})\">删除</button></td></tr>"
+                    f"<td><button onclick=\"deleteRoster({int(row['id'])})\">"
+                    f"删除</button></td></tr>"
                 )
             sections.append(
                 "<table><tr><th>类型</th><th>对象</th><th>填报人</th>"
                 "<th>角色</th><th>别名</th>"
-                "<th>启用</th><th>备注</th><th>更新</th><th>操作</th></tr>"
+                "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
             )
 
@@ -1183,7 +1216,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<strong>人名一律用通讯录本名（不用花名/昵称）</strong>；"
             "别名仅用于群昵称与本名不一致的匹配容错。"
             "角色：负责人占业绩归属，代填报人仅可填报不占业绩；"
-            "改角色 = 用新角色重新「新增」同人同对象（覆盖生效）。</p>"
+            "改角色 = 用新角色重新「新增」同人同对象（覆盖生效）。"
+            "本页新增/删除/状态修改需「名册管理」授权"
+            "（成员与授权页单人授权：scope = roster）。</p>"
         )
         audit_rows = "".join(
             f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
@@ -1208,7 +1243,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/add")
     async def roster_add(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         aliases = payload.get("aliases") or []
         if not isinstance(aliases, list):
@@ -1237,7 +1272,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/toggle")
     async def roster_toggle(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         enabled = payload.get("enabled")
@@ -1258,7 +1293,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/delete")
     async def roster_delete(request: Request):
-        viewer = require_admin(request)
+        viewer = require_roster_manager(request)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         if isinstance(roster_id, bool) or not isinstance(roster_id, int):
