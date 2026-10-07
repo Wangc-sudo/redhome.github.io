@@ -179,6 +179,7 @@ def _page(title, *sections, viewer_name=""):
         "<a href=\"/audit\">审计流水</a>"
         "<a href=\"/pipelines\">定时任务</a>"
         "<a href=\"/pipelines/audit\">任务审计</a>"
+        "<a href=\"/roster\">填报名册</a>"
         "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
         + "".join(sections)
