@@ -257,6 +257,44 @@ class ConsumerTests(unittest.TestCase):
             report_roster.person_allowed(self.db, "shaoxing", "张三"))
 
 
+# -- 名册对齐（sync_from_targets） ---------------------------------------------
+
+class SyncFromTargetsTests(unittest.TestCase):
+    def test_sync_adds_missing_and_disables_stale(self):
+        db = _make_db(with_targets=True)
+        cur = db.cursor()
+        # fact 目标：京东1店=[饶佳君,共管人]、天猫2店=[夏惠敏]
+        cur.execute(
+            "INSERT INTO fact_channel_store_target (store_name, owners_json) "
+            "VALUES (?, ?), (?, ?)",
+            ("京东1店", '["饶佳君", "共管人"]', "天猫2店", '["夏惠敏"]'),
+        )
+        # 名册现状：京东1店/饶佳君(启用)、京东1店/旧人(启用)、天猫2店/夏惠敏(停用)
+        db.commit()
+        report_roster.upsert_roster_entry(db, _entry(), actor="admin")
+        report_roster.upsert_roster_entry(
+            db, _entry(person_name="旧人"), actor="admin")
+        report_roster.upsert_roster_entry(
+            db, _entry(entity_key="天猫2店", person_name="夏惠敏"), actor="admin")
+        stale = [r for r in report_roster.fetch_roster(db)
+                 if r["person_name"] == "夏惠敏"][0]
+        report_roster.set_roster_enabled(db, stale["id"], False, actor="admin")
+
+        added, disabled = report_roster.sync_from_targets(db, actor="admin")
+
+        self.assertEqual((2, 1), (added, disabled))  # 增共管人+重启夏惠敏；停旧人
+        owner_map = report_roster.fetch_store_owner_map(db, "qudao")
+        self.assertEqual({"饶佳君", "共管人"}, owner_map["京东1店"])
+        self.assertEqual({"夏惠敏"}, owner_map["天猫2店"])
+
+        actions = [r["action"] for r in report_roster.fetch_roster_audit(db)]
+        self.assertEqual(2, actions.count("add") - 3)  # 初始 3 add 之外又 +2
+        self.assertIn("disable", actions)
+
+        # 幂等：再跑全零
+        self.assertEqual((0, 0), report_roster.sync_from_targets(db, actor="admin"))
+
+
 # -- 种子导入 ------------------------------------------------------------------
 
 class SeedTests(unittest.TestCase):

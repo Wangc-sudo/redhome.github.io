@@ -2027,31 +2027,6 @@
                 "channel": "私域"
               }
             }
-          },
-          {
-            "sheet_id": "SlMvcWa",
-            "sheet_name": "渠道销售目标达成率9",
-            "dataset": "channel_monthly_target",
-            "target_table": "channel_monthly_target",
-            "max_pages": 100,
-            "field_mapping": {
-              "店铺": {
-                "column": "store_name",
-                "source_type": "text"
-              },
-              "负责人": {
-                "column": "responsible_person",
-                "source_type": "user"
-              },
-              "月目标": {
-                "column": "monthly_target",
-                "source_type": "number"
-              },
-              "渠道": {
-                "column": "channel",
-                "source_type": "text"
-              }
-            }
           }
         ]
       }
