@@ -34,6 +34,8 @@ class _RouterCursor:
             self._rows = self._conn.workday_rows
         elif "dim_robot_member" in sql:
             self._rows = self._conn.member_rows
+        elif "dim_report_roster" in sql:
+            self._rows = self._conn.roster_rows
         else:
             self._rows = self._conn.fact_rows
 
@@ -45,10 +47,11 @@ class _RouterCursor:
 
 
 class _RouterConn:
-    def __init__(self, *, workdays=(), members=(), filled=()):
+    def __init__(self, *, workdays=(), members=(), filled=(), roster=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.member_rows = list(members)
         self.fact_rows = [{"responsible_person": n} for n in filled]
+        self.roster_rows = [{"person_name": n} for n in roster]
         self.queries = []
 
     def cursor(self):
@@ -216,6 +219,60 @@ class RunRemindTests(unittest.TestCase):
             aliases={"张三丰": "老张"},
         )
         self.assertEqual(outcome.status, "all_filled")
+
+    def test_roster_binding_urges_only_roster_members(self):
+        """催办绑定名册（2026-10-07 裁决）：非在册成员不催、其他人不收影响。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三"), ("u2", "李四")),
+            filled=set(),
+            roster={"张三"},
+        )
+        outbox = self._outbox()
+
+        outcome = run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+        )
+
+        self.assertEqual(outcome.status, "enqueued")
+        self.assertEqual(outcome.unfilled, ("张三",))  # 李四不在名册 → 不催
+        kwargs = outbox.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["at_user_ids"], ["u1"])
+        self.assertNotIn("李四", kwargs["body_md"])
+
+    def test_roster_without_any_member_match_enqueues_nothing(self):
+        """名册在册但全员已填/无交集 → 视同 all_filled，不发消息。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三")),
+            filled=set(),
+            roster={"局外人"},
+        )
+        outbox = self._outbox()
+
+        outcome = run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+        )
+
+        self.assertEqual(outcome.status, "all_filled")
+        outbox.enqueue.assert_not_called()
+
+    def test_empty_roster_fails_open_to_all_members(self):
+        """名册无记录（fail-open）→ 维持全员口径（与报数门禁同语义）。"""
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三"), ("u2", "李四")),
+            filled=set(),
+            roster=(),
+        )
+        outcome = run_remind(
+            conn, self._outbox(), region="hangzhou", display="杭州",
+            table_url=_URL, business_date=_DAY, now=_NOW,
+        )
+        self.assertEqual(outcome.status, "enqueued")
+        self.assertEqual(outcome.unfilled, ("张三", "李四"))
 
 
 # ---------------------------------------------------------------------------

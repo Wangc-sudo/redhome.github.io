@@ -491,6 +491,52 @@ def _service_class(config):
     return "业务线" if config.kind == "business" else "应用类"
 
 
+def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
+                           qudao_owners):
+    """收受影响人列（仅催办行调用；其余行由调用方给 —）。
+
+    口径与实际催办名单同源（2026-10-07 裁决「催办绑定名册」）：
+    * ``robot-<区域>``（填报提醒）/ ``robot-check-<区域>``（催办+DING）
+      = 该区域 ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员；
+      名册无记录（fail-open）= 区域在册填报人全员，与机器人
+      ``_unfilled`` 同真源；
+    * 渠道线催办（channel-missing-check）= 名册店铺负责人
+      （``dim_report_roster`` qudao/store/启用/role=owner 去重）；名册
+      未登记时机器人回退月目标表 owners_json，此处如实标注不复制回退链。
+    """
+    if service_id.startswith("robot-"):
+        # _service_region 兼容 robot-check- 长者前缀（2026-10-07 拆分）。
+        region = _service_region(service_id)
+        names = members_by_region.get(region) or []
+        roster = roster_by_region.get(region)
+        if roster is not None:
+            names = [name for name in names if name in roster]
+            if not names:
+                return ("<span class=\"hint\">名册在册但通讯录"
+                        "无匹配成员</span>")
+            return (
+                f"{_esc('、'.join(names))}"
+                f"<span class=\"hint\">（{len(names)} 人 · 名册）</span>"
+            )
+        if not names:
+            return "<span class=\"hint\">该区域无在册填报人</span>"
+        return (
+            f"{_esc('、'.join(names))}"
+            f"<span class=\"hint\">（{len(names)} 人 · 全员兜底）</span>"
+        )
+    if _service_region(service_id) == "qudao":
+        owners = qudao_owners or {}
+        names = sorted({name for bucket in owners.values() for name in bucket})
+        if not names:
+            return ("<span class=\"hint\">名册未登记店铺负责人"
+                    "（机器人回退月目标表 owners_json）</span>")
+        return (
+            f"{_esc('、'.join(names))}"
+            f"<span class=\"hint\">（{len(names)} 人 · {len(owners)} 店）</span>"
+        )
+    return "<span class=\"hint\">—</span>"
+
+
 def _cron_zh(schedule):
     """常见 cron 的人性化中文（仅展示；不认识的形态返回 None → 原文显示）。
 
@@ -1136,6 +1182,48 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             service_id = row.get("service_id") if isinstance(row, dict) else row[1]
             if service_id not in latest:
                 latest[service_id] = row
+        # 收受影响人（催办行）：附属信息 fail-soft——名册/通讯录读取故障
+        # 只影响本列，不拖垮整页（注册表才是本页真源）。
+        reminder_cells = {}
+        reminder_ids = [
+            config.service_id for config in configs
+            if resolve_category(config.service_id, config.category) == "催办"
+        ]
+        if reminder_ids:
+            members_by_region = {}
+            roster_by_region = {}
+            qudao_owners = None
+            try:
+                with db_connector() as connection:
+                    robot_regions = {
+                        _service_region(sid) for sid in reminder_ids
+                        if sid.startswith("robot-")
+                    }
+                    if robot_regions:
+                        for _uid, name, region, _dept in \
+                                bi_authz.fetch_active_members(connection):
+                            members_by_region.setdefault(region, []).append(name)
+                        for region in robot_regions:
+                            roster_by_region[region] = \
+                                report_roster.fetch_scope_person_names(
+                                    connection, region)
+                    if any(not sid.startswith("robot-")
+                           and _service_region(sid) == "qudao"
+                           for sid in reminder_ids):
+                        qudao_owners = report_roster.fetch_store_owner_map(
+                            connection, "qudao", roles=("owner",))
+                for sid in reminder_ids:
+                    reminder_cells[sid] = _reminder_targets_cell(
+                        sid, members_by_region=members_by_region,
+                        roster_by_region=roster_by_region,
+                        qudao_owners=qudao_owners)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "ops-web reminder targets load failed: %s",
+                    type(exc).__name__)
+                for sid in reminder_ids:
+                    reminder_cells[sid] = (
+                        "<span class=\"hint\">读取失败</span>")
         buckets = {title: [] for title in CLASS_ORDER}
         for config in configs:
             request_row = latest.get(config.service_id)
@@ -1176,6 +1264,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{_group_cell(config.service_id)}</td>"
                 f"<td>{_esc(_category_label(config))}</td>"
+                f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
@@ -1186,7 +1275,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         header = (
             "<tr><th>服务标识</th><th>类型</th><th>管理群</th>"
-            "<th>功能</th><th>启用</th>"
+            "<th>功能</th><th>收受影响人</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
         )
@@ -1202,7 +1291,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
             "「功能」= 注册表 category 真源（未配置按服务标识推导兜底）；"
             "分表=按功能归类（应用类/业务线/数据线），与注册表「类型」"
-            "（kind）无关。</p>"
+            "（kind）无关；"
+            "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
+            "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
             "<div id=\"confirm-mask\" class=\"modal-mask\">"
             "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
             "<div class=\"modal-btns\">"
