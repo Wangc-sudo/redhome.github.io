@@ -10,7 +10,6 @@ from common.gateway.report_intake import (
     build_format_hint,
     build_multi_recorded_reply,
     build_not_member_reply,
-    build_not_workday_reply,
     handle_report,
     parse_aux_command,
     parse_report_amount,
@@ -139,9 +138,6 @@ class ReplyTextTests(unittest.TestCase):
             "如需填写日报请联系管理员，或在表格中直接填写。",
         )
 
-    def test_rest_day_reply(self):
-        self.assertEqual(build_not_workday_reply(), "今天不是销售日报工作日，无需报数～")
-
     def test_format_hint(self):
         self.assertEqual(
             build_format_hint("张三"),
@@ -196,13 +192,26 @@ class RegionRoutingTests(unittest.TestCase):
 
 class HandleReportTests(unittest.TestCase):
 
-    def test_rest_day_gets_the_rest_reply(self):
-        conn = _Conn(workdays={date(2026, 9, 10)})
+    def test_rest_day_report_is_recorded_with_note(self):
+        # 裁决 B（2026-10-07）：落库不看工作日——休息日照常受理并提示。
+        conn = _Conn(workdays={date(2026, 9, 10)}, members=[_member()])
         outcome = handle_report(
             conn, region_cfg=_cfg(), text="12800", sender_uid="u1", now=_NOW,
         )
-        self.assertEqual(outcome.status, "not_workday")
-        self.assertEqual(outcome.reply, "今天不是销售日报工作日，无需报数～")
+        self.assertEqual(outcome.status, "recorded")
+        self.assertIn("9月11日为休息日，已照常记录", outcome.reply)
+        inserts = [p for sql, p in conn.executed
+                   if sql.lstrip().startswith("INSERT")]
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][4], date(2026, 9, 11))
+
+    def test_workday_report_has_no_rest_day_note(self):
+        conn = _Conn(members=[_member()])
+        outcome = handle_report(
+            conn, region_cfg=_cfg(), text="12800", sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertNotIn("休息日", outcome.reply)
 
     def test_missing_calendar_fails_loudly(self):
         conn = _Conn(workdays=set())
@@ -903,7 +912,8 @@ class AuxCommandTests(unittest.TestCase):
         self.assertIn("超出范围", outcome.reply)
         self.assertEqual(self._inserts(conn), [])
 
-    def test_backfill_rejects_non_workday(self):
+    def test_backfill_allows_rest_day_with_note(self):
+        # 裁决 B（2026-10-07）：休息日照常可补签，回执附休息日提示。
         conn = _Conn(
             members=[_member(user_id="u1", name="王城"),
                      _member(user_id="u9", name="张三丰")],
@@ -913,8 +923,11 @@ class AuxCommandTests(unittest.TestCase):
             conn, region_cfg=_cfg(), text="/补签 张三丰 9-6 12800",
             sender_uid="u1", now=_NOW,
         )
-        self.assertIn("不是工作日", outcome.reply)
-        self.assertEqual(self._inserts(conn), [])
+        self.assertEqual(outcome.status, "recorded")
+        self.assertIn("9月6日为休息日，已照常记录", outcome.reply)
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][4], date(2026, 9, 6))
 
     def test_backfill_rejects_unknown_member(self):
         conn = _Conn(members=[_member(user_id="u1", name="王城")], admin=True)

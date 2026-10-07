@@ -19,6 +19,11 @@ extract 不再重放这些行，冲突面整体消失。
 
 **回执错误文案的有意改动**：处理异常的回执不再插值异常原文（现行
 ``f"⚠️ 处理报数时出错：{e}"`` 可能泄露内部细节），改为通用提示。
+
+**工作日闸解耦（2026-10-07 运维裁决 B）**：报数落库不再校验工作日——
+门店节假日照常营业，休息日报数一样受理、事实行照记（回执附休息日
+提示）；``dim_calendar`` 工作日口径只管催办名单与达成率分母，不再
+充当填报闸门。/补签 同理（休息日照常可补）。
 """
 
 import contextlib
@@ -115,7 +120,7 @@ def _resolve_store_fuzzy(word):
 class IntakeOutcome:
     """一条报数消息的处理结果（reply 为给发送者的回执文本）。"""
 
-    status: str  # recorded | not_workday | not_member | no_number | aux
+    status: str  # recorded | not_member | no_number | aux
     reply: str
     region: str | None = None
     name: str | None = None
@@ -233,8 +238,12 @@ def build_not_member_reply():
     )
 
 
-def build_not_workday_reply():
-    return "今天不是销售日报工作日，无需报数～"
+def _rest_day_note(day):
+    """休息日受理提示（2026-10-07 裁决 B：落库不看工作日，口径仍按工作日）。"""
+    return (
+        f"📅 {day.month}月{day.day}日为休息日，已照常记录"
+        "（当日不计催办与达成率分母）。"
+    )
 
 
 def build_format_hint(name, store=None, stores=()):
@@ -610,12 +619,7 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
     workdays = fetch_workdays(
         connection, year=business_date.year, month=business_date.month
     )
-    if business_date not in workdays:
-        return IntakeOutcome(
-            "aux",
-            f"{business_date.month}月{business_date.day}日不是工作日，无需补签～",
-            region=region_cfg.region, name=name,
-        )
+    is_rest_day = business_date not in workdays
     body = match.group("body")
     writes = []
     entries = parse_report_metrics(body)
@@ -658,6 +662,8 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
         progress_line = _progress_line(cell, progress)
         if progress_line:
             lines.append(progress_line)
+    if is_rest_day:
+        lines.append(_rest_day_note(business_date))
     return IntakeOutcome(
         "recorded", "\n".join(lines),
         region=region_cfg.region, name=name,
@@ -720,9 +726,9 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
         raise MartTaskError(
             f"dim_calendar 缺少 {now:%Y-%m} 的日历行，请先运行 extract-mart"
         )
-    if business_date not in workdays:
-        return IntakeOutcome("not_workday", build_not_workday_reply(),
-                             region=region_cfg.region)
+    # 裁决 B（2026-10-07）：落库不看工作日——休息日照常受理，回执附提示；
+    # workdays 仍下传给进度计算（催办/达成率分母口径不变）。
+    is_rest_day = business_date not in workdays
 
     member = fetch_member(connection, user_id=sender_uid)
     via_admin = (
@@ -817,6 +823,8 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
             weekday=_WEEKDAYS[business_date.weekday()],
             writes=writes,
         )
+        if is_rest_day:
+            reply += "\n" + _rest_day_note(business_date)
         return IntakeOutcome(
             "recorded", reply,
             region=region_cfg.region, name=name,
@@ -870,6 +878,8 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
         old_value=_fmt_amount(old_value) if overwritten else None,
         progress=progress,
     )
+    if is_rest_day:
+        reply += "\n" + _rest_day_note(business_date)
     return IntakeOutcome(
         "recorded", reply,
         region=region_cfg.region, name=name, value=value,
