@@ -417,9 +417,44 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("功能", body)              # 新列表头
         self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
         self.assertIn("催办", body)              # 功能（robot- 家族归类）
+        self.assertIn("操作…", body)             # 操作列改下拉
+        self.assertIn('data-service="robot-hangzhou"', body)
+        self.assertIn('id="confirm-mask"', body)     # 弹窗确认挂载点
+        self.assertIn('id="confirm-text"', body)
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
+
+    def test_pipelines_page_splits_three_class_tables(self):
+        """分表：应用类/业务线/数据线三段标题与归类落位。"""
+        fleet = (
+            "scheduler",            # 平台 → 应用类
+            "dingtalk-gateway",     # 钉钉 → 应用类
+            "robot-hangzhou",       # 催办 → 业务线
+            "leaderboard-qudao",    # 播报 → 业务线
+            "sync-wdt",             # 同步 → 数据线
+            "extract-mart",         # 加工 → 数据线
+        )
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        for title in ("<h2>应用类</h2>", "<h2>业务线</h2>", "<h2>数据线</h2>"):
+            self.assertIn(title, body)
+        app_i = body.index("<h2>应用类</h2>")
+        biz_i = body.index("<h2>业务线</h2>")
+        data_i = body.index("<h2>数据线</h2>")
+        self.assertLess(app_i, biz_i)
+        self.assertLess(biz_i, data_i)
+        # 平台/钉钉线落在应用类段
+        self.assertLess(app_i, body.index("scheduler"))
+        self.assertLess(body.index("dingtalk-gateway"), biz_i)
+        # 机器人/榜单播报落在业务线段
+        self.assertLess(biz_i, body.index("robot-hangzhou"))
+        self.assertLess(body.index("leaderboard-qudao"), data_i)
+        # 同步/提取落在数据线段（表末无更多段）
+        self.assertLess(data_i, body.index("sync-wdt"))
+        self.assertLess(data_i, body.index("extract-mart"))
 
     def test_pipelines_page_group_and_function_classification(self):
         """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""

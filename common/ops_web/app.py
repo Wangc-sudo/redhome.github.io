@@ -89,6 +89,12 @@ _PAGE_STYLE = (
     "input,select{padding:5px 8px;font-size:13px}"
     "button{padding:6px 14px;font-size:13px;cursor:pointer}"
     ".hint{color:#888;font-size:12px}"
+    ".modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);"
+    "align-items:center;justify-content:center;z-index:99}"
+    ".modal-box{background:#fff;padding:20px 24px;border-radius:8px;"
+    "min-width:280px;max-width:420px}"
+    ".modal-btns{margin-top:16px;text-align:right}"
+    ".modal-btns button{margin-left:8px}"
 )
 
 _PAGE_JS = """
@@ -123,14 +129,40 @@ function grantRegion(ev) {
   if (!confirm('确认为 ' + region + ' 区域全部在职成员开通该区域授权？')) return;
   postJSON('/api/grants/region', {region: region});
 }
-function togglePipeline(serviceId, enabled) {
-  const action = enabled ? '启用' : '停用';
-  if (!confirm('确认' + action + ' ' + serviceId + '？（下一个调度 tick 生效，≤30s）')) return;
-  postJSON('/api/pipelines/toggle', {service_id: serviceId, enabled: enabled});
+let _pendingAction = null;
+function showConfirm(msg) {
+  document.getElementById('confirm-text').textContent = msg;
+  document.getElementById('confirm-mask').style.display = 'flex';
 }
-function runPipelineOnce(serviceId) {
-  if (!confirm('确认立即运行一次 ' + serviceId + '？（调度器下个 tick 认领触发）')) return;
-  postJSON('/api/pipelines/run-once', {service_id: serviceId});
+function closeConfirm() {
+  document.getElementById('confirm-mask').style.display = 'none';
+  _pendingAction = null;
+}
+function confirmOk() {
+  const action = _pendingAction;
+  closeConfirm();
+  if (action) postJSON(action.url, action.body);
+}
+function pipelineAction(sel) {
+  const value = sel.value;
+  sel.value = '';
+  if (!value) return;
+  const sid = sel.dataset.service;
+  if (value === 'toggle') {
+    const enable = sel.dataset.enabled !== '1';
+    _pendingAction = {
+      url: '/api/pipelines/toggle',
+      body: {service_id: sid, enabled: enable},
+    };
+    showConfirm('确认' + (enable ? '启用' : '停用') + ' ' + sid +
+                '？（下一个调度 tick 生效，≤30s）');
+  } else if (value === 'runonce') {
+    _pendingAction = {
+      url: '/api/pipelines/run-once',
+      body: {service_id: sid},
+    };
+    showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发）');
+  }
 }
 function addPipeline(ev) {
   ev.preventDefault();
@@ -469,6 +501,27 @@ def _group_cell(service_id):
     if region is None:
         return "<span class=\"hint\">—</span>"
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
+
+
+#: 三表分类（定时任务页分表）：数据线=同步/加工，应用类=平台/钉钉，
+#: 业务线=播报/催办/页面；未归类按注册表 kind 兜底。
+_CLASS_BY_FUNCTION = {
+    "同步": "数据线",
+    "加工": "数据线",
+    "播报": "业务线",
+    "催办": "业务线",
+    "页面": "业务线",
+    "钉钉": "应用类",
+    "平台": "应用类",
+}
+
+
+def _service_class(service_id, kind):
+    """三表分类：功能映射优先；未归类按注册表 kind 兜底。"""
+    label = _CLASS_BY_FUNCTION.get(_service_function(service_id))
+    if label is not None:
+        return label
+    return "业务线" if kind == "business" else "应用类"
 
 
 def _cron_zh(schedule):
@@ -1116,7 +1169,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             service_id = row.get("service_id") if isinstance(row, dict) else row[1]
             if service_id not in latest:
                 latest[service_id] = row
-        rows = []
+        buckets = {"应用类": [], "业务线": [], "数据线": []}
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -1139,12 +1192,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 else "<span class=\"hint\">无模板</span>"
             )
             toggle_label = "停用" if config.enabled else "启用"
-            run_button = (
-                f"<button onclick=\"runPipelineOnce('{_esc(config.service_id)}')\">"
-                "运行一次</button>"
+            run_option = (
+                "<option value=\"runonce\">运行一次</option>"
                 if has_command(config.service_id) else ""
             )
-            rows.append(
+            action_cell = (
+                f"<select data-service=\"{_esc(config.service_id)}\" "
+                f"data-enabled=\"{'1' if config.enabled else '0'}\" "
+                "onchange=\"pipelineAction(this)\">"
+                "<option value=\"\">操作…</option>"
+                f"<option value=\"toggle\">{toggle_label}</option>"
+                f"{run_option}</select>"
+            )
+            buckets[_service_class(config.service_id, config.kind)].append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
                 f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{_group_cell(config.service_id)}</td>"
@@ -1155,22 +1215,34 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{_esc(_service_label(config.service_id, config.description))}</td>"
                 f"<td>{template}</td>"
                 f"<td>{request_cell}</td>"
-                f"<td><button onclick=\"togglePipeline("
-                f"'{_esc(config.service_id)}', {str(not config.enabled).lower()})\">"
-                f"{toggle_label}</button> {run_button}</td></tr>"
+                f"<td>{action_cell}</td></tr>"
             )
-        table = (
-            "<h1>定时任务（管道注册表）</h1>"
-            "<table><tr><th>服务标识</th><th>类型</th><th>管理群</th>"
+        header = (
+            "<tr><th>服务标识</th><th>类型</th><th>管理群</th>"
             "<th>功能</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
-            + "".join(rows) + "</table>"
+        )
+        table = ["<h1>定时任务（管道注册表）</h1>"]
+        for title in ("应用类", "业务线", "数据线"):
+            table.append(
+                f"<h2>{title}</h2><table>{header}"
+                + "".join(buckets[title]) + "</table>"
+            )
+        table.append(
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
             "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
-            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台。</p>"
+            "「功能」= 播报/催办/钉钉/页面/同步/加工/平台；分表=按功能归类"
+            "（应用类/业务线/数据线），与注册表「类型」真源无关。</p>"
+            "<div id=\"confirm-mask\" class=\"modal-mask\">"
+            "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
+            "<div class=\"modal-btns\">"
+            "<button onclick=\"confirmOk()\">确定</button>"
+            "<button onclick=\"closeConfirm()\">取消</button>"
+            "</div></div></div>"
         )
+        table = "".join(table)
         add_form = (
             "<h2>新增定时任务</h2>"
             "<form class=\"inline\" onsubmit=\"addPipeline(event)\">"
