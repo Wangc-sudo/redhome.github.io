@@ -406,6 +406,23 @@ class HandleChannelFillTest(unittest.TestCase):
         self.assertIn("JD习水村酒类专营店", outcome.reply)  # 列出本人店
         self.assertEqual(conn.inbox_rows[0][8], "rejected")
 
+    def test_frozen_store_numbers_win_over_target_order(self):
+        # 编号冻结（2026-10-07 统一管理方案 §6-A）：行带 store_no 时按冻结
+        # 编号——目标大的不再排前；未编号的店排在该渠道已编号之后。
+        rows = [
+            {"store_name": "大店", "channel": "京东", "monthly_target": 999,
+             "store_no": 2, "owners_json": None},
+            {"store_name": "小店", "channel": "京东", "monthly_target": 1,
+             "store_no": 1, "owners_json": None},
+            {"store_name": "新店", "channel": "京东", "monthly_target": 500,
+             "store_no": None, "owners_json": None},
+        ]
+        roster = build_roster(rows)
+        self.assertEqual("小店", roster.numbers[("京东", 1)])
+        self.assertEqual("大店", roster.numbers[("京东", 2)])
+        self.assertEqual("新店", roster.numbers[("京东", 3)])  # 未编号排尾
+        self.assertEqual(("京东", 2), roster.store_numbers["大店"])
+
     def test_roster_table_overrides_legacy_owners(self):
         # 名册切源（2026-10-06）：dim_report_roster 有启用记录时负责人归属以
         # 名册表为准，legacy owners_json 不再生效。名册表把饶佳君改到

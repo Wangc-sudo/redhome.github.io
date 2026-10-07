@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
-from common.public_data import ops_control, report_roster
+from common.public_data import channel_target, ops_control, report_roster
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -794,6 +794,54 @@ class RosterApiTests(unittest.TestCase):
             "/api/roster/add", json={"scope": "qudao", "entity_type": "store",
                                      "entity_key": "店", "person_name": "张三"},
         ).status_code)
+
+
+class RosterPublishTests(unittest.TestCase):
+    """发布月度快照 API（S2）：校验 + 写 raw + 触发 extract run-request。"""
+
+    def test_publish_writes_and_triggers_extract(self):
+        published = []
+        requests = []
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                channel_target, "publish_snapshot",
+                lambda conn, rows, *, actor:
+                published.append((rows, actor)) or (2, 3, ["新店"])), \
+             mock.patch.object(
+                ops_control, "insert_run_request",
+                lambda conn, sid, by: requests.append((sid, by)) or 88), \
+             mock.patch.object(
+                report_roster, "fetch_store_numbers", lambda conn: {}):
+            response = client.post("/api/roster/publish-snapshot", json={
+                "rows": [{"store_name": "JD购喝", "channel": "京东",
+                          "monthly_target": 1500000}],
+            })
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual((2, 3), (body["deleted"], body["inserted"]))
+        self.assertEqual(["新店"], body["missing_owners"])
+        self.assertEqual(88, body["extract_request_id"])
+        self.assertEqual([("extract-mart", ADMIN_USERID)], requests)
+        self.assertEqual(ADMIN_USERID, published[0][1])
+
+    def test_publish_rejects_bad_payload(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(report_roster, "fetch_store_numbers",
+                               lambda conn: {}):
+            self.assertEqual(400, client.post(
+                "/api/roster/publish-snapshot", json={"rows": "x"}).status_code)
+            self.assertEqual(400, client.post(
+                "/api/roster/publish-snapshot",
+                json={"rows": [{"store_name": "店", "channel": "商超",
+                                "monthly_target": 1}]}).status_code)
+
+    def test_publish_requires_admin_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.post(
+            "/api/roster/publish-snapshot", json={"rows": []}).status_code)
 
 
 class MembersPageTests(unittest.TestCase):

@@ -92,6 +92,116 @@ def load_target_rows(path):
     return normalized
 
 
+def validate_target_rows(rows):
+    """发布快照目标行校验（页面/API 输入，无 owners 字段）。
+
+    每行 ``{"channel", "store_name", "monthly_target"}``；非法抛
+    :class:`ChannelTargetError`（消息只含字段名/行号）。
+    """
+    if not isinstance(rows, list) or not rows:
+        raise ChannelTargetError("rows must be a non-empty list")
+    normalized = []
+    seen = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ChannelTargetError(f"rows[{index}] must be an object")
+        channel = row.get("channel")
+        if channel not in CHANNELS:
+            raise ChannelTargetError(f"rows[{index}].channel is not registered")
+        store = row.get("store_name")
+        store = store.strip() if isinstance(store, str) else store
+        if not store or not isinstance(store, str) or len(store) > 128:
+            raise ChannelTargetError(f"rows[{index}].store_name is required")
+        if store in seen:
+            raise ChannelTargetError(f"rows[{index}].store_name is duplicated")
+        seen.add(store)
+        target = row.get("monthly_target")
+        if target is not None:
+            if isinstance(target, bool) or not isinstance(target, (int, float)):
+                raise ChannelTargetError(
+                    f"rows[{index}].monthly_target must be a number or null"
+                )
+            if target < 0:
+                raise ChannelTargetError(
+                    f"rows[{index}].monthly_target must be >= 0"
+                )
+        normalized.append({
+            "store_name": store, "channel": channel, "monthly_target": target,
+        })
+    return normalized
+
+
+def fetch_store_targets(connection):
+    """fact_channel_store_target 当前目标 ``{店名: (channel, monthly_target)}``。"""
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT `store_name`, `channel`, `monthly_target` "
+            "FROM `fact_channel_store_target`"
+        )
+        rows = cursor.fetchall() if hasattr(cursor, "fetchall") else ()
+        result = {}
+        for row in rows:
+            store = row["store_name"] if isinstance(row, dict) else row[0]
+            result[store] = (
+                row["channel"] if isinstance(row, dict) else row[1],
+                row["monthly_target"] if isinstance(row, dict) else row[2],
+            )
+        return result
+    finally:
+        cursor.close()
+
+
+def publish_snapshot(connection, rows, *, actor, now=None):
+    """发布月度目标快照（统一管理方案 S2）：目标行 + 名册投影 owners 写 raw。
+
+    ``responsible_person`` 由 ``dim_report_roster``（qudao 启用链接）投影
+    生成——名册是负责人唯一真源，快照不再手工维护 owners。同事务：
+    DELETE+INSERT raw 快照 + 一行发布审计（名册审计表 action='publish'）。
+    返回 (deleted, inserted, missing_owners)（无负责人在册的店名列表）。
+    """
+    from common.public_data import report_roster
+
+    rows = validate_target_rows(rows)
+    owner_map = report_roster.fetch_store_owner_map(connection, "qudao")
+    missing_owners = []
+    now = now or datetime.now(timezone.utc)
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute("DELETE FROM `channel_monthly_target`")
+            deleted = getattr(cursor, "rowcount", 0)
+            inserted = 0
+            total = 0.0
+            for row in rows:
+                store = row["store_name"]
+                owners = sorted(owner_map.get(store, ()))
+                if not owners:
+                    missing_owners.append(store)
+                cursor.execute(
+                    "INSERT INTO `channel_monthly_target` "
+                    "(`store_name`, `channel`, `monthly_target`, "
+                    "`responsible_person`, `dingtalk_record_id`, "
+                    "`synced_at`, `sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (store, row["channel"], row["monthly_target"],
+                     json.dumps([{"name": name} for name in owners],
+                                ensure_ascii=False),
+                     f"manual:{store}", now, MANUAL_SYNC_RUN_ID),
+                )
+                inserted += 1
+                total += float(row["monthly_target"] or 0)
+            report_roster.write_audit(
+                connection, actor, "publish", "qudao", "*",
+                detail=f"发布快照 {inserted} 行，合计 {total:.0f} 元"
+                       + (f"；无负责人 {len(missing_owners)} 店"
+                          if missing_owners else ""),
+            )
+            return deleted, inserted, missing_owners
+    finally:
+        cursor.close()
+
+
 def replace_snapshot(connection, rows, *, sync_run_id=MANUAL_SYNC_RUN_ID,
                      now=None):
     """全量替换 raw 快照（同事务 DELETE + INSERT）。返回 (删除数, 插入数)。

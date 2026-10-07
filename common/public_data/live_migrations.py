@@ -33,7 +33,10 @@ from common.public_data.mart_extract_schema import (
 )
 from common.public_data.db import transaction
 from common.public_data.ops_control import pipeline_ops_ddl_statements
-from common.public_data.report_roster import report_roster_ddl_statements
+from common.public_data.report_roster import (
+    report_roster_ddl_statements,
+    report_roster_v2_ddl_statements,
+)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -316,6 +319,12 @@ def _build_mart_report_roster_ddl() -> tuple[str, ...]:
     return report_roster_ddl_statements()
 
 
+# 名册 v2（2026-10-07，统一管理方案 §6-A）：channel / store_no 两列，
+# 编号冻结——新店渠道内 max+1，目标变化不再洗牌。
+def _build_mart_report_roster_v2_ddl() -> tuple[str, ...]:
+    return report_roster_v2_ddl_statements()
+
+
 def _build_raw_manual_ddl() -> tuple[str, ...]:
     """人工报表导入通道的 raw 表（C 类数据源，见 docs/manual-import-channel.md）。"""
     return raw_manual_ddl_statements()
@@ -438,6 +447,11 @@ _MIGRATIONS = (
         "mart-ops-report-roster-v1",
         "mart",
         _build_mart_report_roster_ddl(),
+    ),
+    (
+        "mart-ops-report-roster-v2",
+        "mart",
+        _build_mart_report_roster_v2_ddl(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

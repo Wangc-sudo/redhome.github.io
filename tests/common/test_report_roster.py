@@ -82,6 +82,8 @@ def _make_db(with_targets=False):
         " note VARCHAR(255) DEFAULT NULL,"
         " updated_by VARCHAR(64) DEFAULT NULL,"
         " updated_at VARCHAR(32) DEFAULT NULL,"
+        " channel VARCHAR(32) DEFAULT NULL,"
+        " store_no INT DEFAULT NULL,"
         " UNIQUE (scope, entity_type, entity_key, person_name))"
     )
     wrapper.cursor().execute(
@@ -99,7 +101,8 @@ def _make_db(with_targets=False):
     if with_targets:
         wrapper.cursor().execute(
             "CREATE TABLE fact_channel_store_target ("
-            " store_name VARCHAR(128), owners_json TEXT)"
+            " store_name VARCHAR(128), owners_json TEXT,"
+            " channel VARCHAR(32), monthly_target REAL)"
         )
     conn.commit()
     return wrapper
@@ -293,6 +296,99 @@ class SyncFromTargetsTests(unittest.TestCase):
 
         # 幂等：再跑全零
         self.assertEqual((0, 0), report_roster.sync_from_targets(db, actor="admin"))
+
+
+# -- v2：编号冻结（channel / store_no） -----------------------------------------
+
+class StoreNumberTests(unittest.TestCase):
+    def _db_with_fact(self):
+        db = _make_db(with_targets=True)
+        cur = db.cursor()
+        cur.execute(
+            "INSERT INTO fact_channel_store_target "
+            "(store_name, owners_json, channel, monthly_target) VALUES "
+            "('JD购喝', '[]', '京东', 1500000),"
+            "('JD金沙', '[]', '京东', 200000),"
+            "('TM旗舰', '[]', '天猫', 4700000)",
+        )
+        db.commit()
+        return db
+
+    def test_upsert_derives_channel_and_assigns_store_no(self):
+        db = self._db_with_fact()
+        report_roster.upsert_roster_entry(db, _entry(entity_key="JD购喝"),
+                                        actor="admin")
+        report_roster.upsert_roster_entry(
+            db, _entry(entity_key="JD购喝", person_name="共管人"), actor="admin")
+        report_roster.upsert_roster_entry(db, _entry(entity_key="JD金沙"),
+                                        actor="admin")
+        report_roster.upsert_roster_entry(db, _entry(entity_key="TM旗舰"),
+                                        actor="admin")
+
+        rows = {r["entity_key"]: r for r in report_roster.fetch_roster(db)}
+        self.assertEqual("京东", rows["JD购喝"]["channel"])
+        self.assertEqual(1, rows["JD购喝"]["store_no"])
+        self.assertEqual(1, rows["JD购喝"]["store_no"])  # 同店同号
+        self.assertEqual(2, rows["JD金沙"]["store_no"])  # 渠道内 max+1
+        self.assertEqual("天猫", rows["TM旗舰"]["channel"])
+        self.assertEqual(1, rows["TM旗舰"]["store_no"])  # 渠道独立计数
+        # 共管链接与首链接同店同号
+        nos = {r["store_no"] for r in report_roster.fetch_roster(db)
+               if r["entity_key"] == "JD购喝"}
+        self.assertEqual({1}, nos)
+
+    def test_upsert_new_store_without_channel_is_unnumbered(self):
+        db = _make_db()  # 无 fact 表 → 反查不到：允许未归属（不派号）
+        report_roster.upsert_roster_entry(
+            db, _entry(entity_key="全新店"), actor="admin")
+        row = report_roster.fetch_roster(db)[0]
+        self.assertIsNone(row["channel"])
+        self.assertIsNone(row["store_no"])
+        # 显式给 channel 则正常派号
+        entry = validate_roster_fields("qudao", "store", "全新店B", "张三",
+                                       channel="京东")
+        report_roster.upsert_roster_entry(db, entry, actor="admin")
+        row = [r for r in report_roster.fetch_roster(db)
+               if r["entity_key"] == "全新店B"][0]
+        self.assertEqual("京东", row["channel"])
+        self.assertEqual(1, row["store_no"])
+
+    def test_backfill_freezes_current_numbering(self):
+        db = self._db_with_fact()
+        # 模拟 v1 存量（无 channel/store_no）
+        cur = db.cursor()
+        for store, person in (("JD购喝", "娄灿斌"), ("JD金沙", "王蕊"),
+                              ("TM旗舰", "钟甜")):
+            cur.execute(
+                "INSERT INTO dim_report_roster "
+                "(scope, entity_type, entity_key, person_name, enabled) "
+                "VALUES ('qudao', 'store', ?, ?, 1)",
+                (store, person),
+            )
+        db.commit()
+
+        patched, assigned = report_roster.backfill_store_numbers(db, actor="seed")
+        self.assertEqual((3, 3), (patched, assigned))
+        numbers = report_roster.fetch_store_numbers(db)
+        self.assertEqual(("京东", 1), numbers["JD购喝"])   # 目标高者 1 号
+        self.assertEqual(("京东", 2), numbers["JD金沙"])
+        self.assertEqual(("天猫", 1), numbers["TM旗舰"])
+        # 幂等：再跑全零
+        self.assertEqual((0, 0),
+                         report_roster.backfill_store_numbers(db, actor="seed"))
+
+    def test_sync_store_roster_with_explicit_map(self):
+        db = self._db_with_fact()
+        added, disabled = report_roster.sync_store_roster(
+            db, {"JD购喝": {"娄灿斌"}, "TM旗舰": {"钟甜"}}, actor="admin")
+        self.assertEqual((2, 0), (added, disabled))
+        # 再同步：JD购喝 换负责人 → 停娄灿斌、增新人
+        added, disabled = report_roster.sync_store_roster(
+            db, {"JD购喝": {"新人"}, "TM旗舰": {"钟甜"}}, actor="admin")
+        self.assertEqual((1, 1), (added, disabled))
+        owner_map = report_roster.fetch_store_owner_map(db, "qudao")
+        self.assertEqual({"新人"}, owner_map["JD购喝"])
+        self.assertEqual({"钟甜"}, owner_map["TM旗舰"])
 
 
 # -- 种子导入 ------------------------------------------------------------------

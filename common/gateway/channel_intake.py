@@ -113,16 +113,42 @@ def build_roster(rows):
         by_channel[channel].append((store, row.get("monthly_target")))
     numbers = {}
     store_numbers = {}
-    for channel, items in by_channel.items():
-        def sort_key(item):
-            store, target = item
-            if target is None:
-                return (1, 0.0, store)
-            return (0, -float(target), store)
 
-        for idx, (store, _target) in enumerate(sorted(items, key=sort_key), 1):
-            numbers[(channel, idx)] = store
-            store_numbers[store] = (channel, idx)
+    def sort_key(item):
+        store, target = item
+        if target is None:
+            return (1, 0.0, store)
+        return (0, -float(target), store)
+
+    if any(row.get("store_no") is not None for row in rows):
+        # 编号冻结（2026-10-07 统一管理方案 §6-A）：名册 store_no 为准——
+        # 月目标变化不再洗牌；未编号的店按目标降序排在该渠道已编号之后。
+        tail = defaultdict(list)
+        for row in rows:
+            store = str(row.get("store_name") or "").strip()
+            if not store:
+                continue
+            channel = str(row.get("channel") or "").strip()
+            store_no = row.get("store_no")
+            if store_no is not None:
+                numbers[(channel, int(store_no))] = store
+                store_numbers[store] = (channel, int(store_no))
+            else:
+                tail[channel].append((store, row.get("monthly_target")))
+        for channel, items in tail.items():
+            used = [no for (ch, no) in numbers if ch == channel]
+            for idx, (store, _target) in enumerate(
+                sorted(items, key=sort_key), max(used, default=0) + 1
+            ):
+                numbers[(channel, idx)] = store
+                store_numbers[store] = (channel, idx)
+    else:
+        for channel, items in by_channel.items():
+            for idx, (store, _target) in enumerate(
+                sorted(items, key=sort_key), 1
+            ):
+                numbers[(channel, idx)] = store
+                store_numbers[store] = (channel, idx)
     owners = defaultdict(list)
     for row in rows:
         store = str(row.get("store_name") or "").strip()
@@ -512,6 +538,7 @@ def fetch_roster_rows(conn):
     owner_map = report_roster.fetch_store_owner_map(conn, "qudao")
     if not owner_map:
         return rows
+    number_map = report_roster.fetch_store_numbers(conn, "qudao")
     switched = []
     for row in rows:
         store = str(row.get("store_name") or "").strip()
@@ -520,6 +547,7 @@ def fetch_roster_rows(conn):
         switched_row["owners_json"] = (
             _json.dumps(owners, ensure_ascii=False) if owners else None
         )
+        switched_row["store_no"] = number_map.get(store, (None, None))[1]
         switched.append(switched_row)
     return switched
 

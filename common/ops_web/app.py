@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common.public_data import bi_authz, ops_control, report_roster
+from common.public_data import bi_authz, channel_target, ops_control, report_roster
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.scheduler import has_command
 
@@ -164,6 +164,25 @@ function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
   postJSON('/api/roster/delete', {id: id});
 }
+async function publishSnapshot() {
+  if (!confirm('确认发布月度快照？（目标按当前输入覆盖 raw 快照，负责人按名册投影，随后自动触发提取重建榜单）')) return;
+  const rows = [];
+  document.querySelectorAll('input.roster-target').forEach(function (el) {
+    const raw = el.value.trim();
+    rows.push({
+      store_name: el.dataset.store,
+      channel: el.dataset.channel,
+      monthly_target: raw === '' ? null : Number(raw),
+    });
+  });
+  const resp = await fetch('/api/roster/publish-snapshot', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rows: rows}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('发布失败（' + resp.status + '）');
+}
 """
 
 
@@ -230,7 +249,7 @@ _RUN_STATUS_LABEL = {
 }
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
-    "delete": "删除", "seed": "种子导入",
+    "delete": "删除", "seed": "种子导入", "publish": "发布快照",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -400,6 +419,74 @@ def _schedule_cell(schedule):
     if zh is None:
         return _esc(schedule)
     return f"{_esc(zh)}<span class=\"hint\">（{_esc(schedule)}）</span>"
+
+
+def _qudao_section(rows, targets, numbers):
+    """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
+
+    行 = 店铺（名册链接 ∪ fact 目标表，编号冻结排序）；目标列输入框即
+    「草稿」，点「发布月度快照」才落 raw（publishSnapshot JS 收集）。
+    """
+    store_rows = {}
+    for row in rows:
+        store_rows.setdefault(row["entity_key"], []).append(row)
+    all_stores = sorted(
+        set(store_rows) | set(targets.keys()),
+        key=lambda store: (numbers.get(store, (None, 10 ** 6))[1] or 10 ** 6,
+                           store),
+    )
+    body = []
+    total = 0.0
+    for store in all_stores:
+        channel, target = targets.get(
+            store, (numbers.get(store, ("", None))[0], None)
+        )
+        store_no = numbers.get(store, (None, None))[1]
+        owner_cells = []
+        for row in store_rows.get(store, []):
+            enabled = bool(row["enabled"])
+            name_html = _esc(row["person_name"])
+            if row.get("aliases"):
+                try:
+                    alias_text = "、".join(json.loads(row["aliases"]))
+                except (ValueError, TypeError):
+                    alias_text = ""
+                if alias_text:
+                    name_html += f"<span class=\"hint\">（{_esc(alias_text)}）</span>"
+            if not enabled:
+                name_html = f"<span class=\"hint\">{name_html}(停)</span>"
+            toggle_label = "停用" if enabled else "启用"
+            owner_cells.append(
+                f"{name_html}"
+                f"<button onclick=\"toggleRoster({int(row['id'])}, "
+                f"{str(not enabled).lower()})\">{toggle_label}</button>"
+                f"<button onclick=\"deleteRoster({int(row['id'])})\">删</button>"
+            )
+        target_value = "" if target is None else f"{float(target):.0f}"
+        if target:
+            total += float(target)
+        body.append(
+            f"<tr><td>{_esc(store_no) if store_no else '—'}</td>"
+            f"<td>{_esc(store)}</td>"
+            f"<td>{_esc(channel)}</td>"
+            f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
+            f"data-channel=\"{_esc(channel)}\" value=\"{_esc(target_value)}\" "
+            f"placeholder=\"目标（元）\"></td>"
+            f"<td>{' '.join(owner_cells) or '<span class=\"hint\">无负责人在册</span>'}</td></tr>"
+        )
+    return (
+        "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
+        "编号已冻结不随目标洗牌）</span></h2>"
+        "<table><tr><th>编号</th><th>店铺</th><th>渠道</th>"
+        "<th>月目标（元）</th><th>负责人（停用/删除即改填报权限）</th></tr>"
+        + ("".join(body)
+           or "<tr><td colspan=\"5\" class=\"hint\">暂无记录</td></tr>")
+        + "</table>"
+        f"<p>合计：<strong>{total:.0f}</strong> 元 "
+        "<button onclick=\"publishSnapshot()\">发布月度快照</button>"
+        "<span class=\"hint\">（负责人按名册投影写 raw 快照，自动触发提取重建榜单；"
+        "改动未发布前不落库）</span></p>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1078,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             with db_connector() as connection:
                 entries = report_roster.fetch_roster(connection)
                 audits = report_roster.fetch_roster_audit(connection, limit=20)
+                qudao_targets = channel_target.fetch_store_targets(connection)
+                qudao_numbers = report_roster.fetch_store_numbers(connection)
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
@@ -1002,6 +1091,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
         for scope in report_roster.SCOPES:
             rows = by_scope.get(scope) or []
+            if scope == "qudao":
+                sections.append(
+                    _qudao_section(rows, qudao_targets, qudao_numbers)
+                )
+                continue
             scope_label = _label(_SCOPE_LABEL, scope)
             sections.append(f"<h2>{_esc(scope_label)}"
                             f"<span class=\"hint\">（{_esc(scope)}，{len(rows)} 条）</span></h2>")
@@ -1153,6 +1247,45 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if not hit:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         return JSONResponse({"status": "ok"})
+
+    @app.post("/api/roster/publish-snapshot")
+    async def roster_publish_snapshot(request: Request):
+        """发布月度目标快照（S2）：目标覆盖 raw + 名册投影 owners + 触发提取。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        # 渠道缺省时从名册编号表反查（页面只对有把握的店带 channel）。
+        try:
+            with db_connector() as connection:
+                numbers = report_roster.fetch_store_numbers(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web publish preflight failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        for row in rows if isinstance(rows, list) else ():
+            if isinstance(row, dict) and not (row.get("channel") or "").strip():
+                store = row.get("store_name")
+                row["channel"] = numbers.get(store, ("", None))[0]
+        try:
+            target_rows = channel_target.validate_target_rows(rows)
+        except channel_target.ChannelTargetError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                deleted, inserted, missing = channel_target.publish_snapshot(
+                    connection, target_rows, actor=viewer.userid
+                )
+                request_id = ops_control.insert_run_request(
+                    connection, "extract-mart", viewer.userid
+                )
+        except Exception as exc:
+            _LOGGER.warning("ops-web publish snapshot failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok", "deleted": deleted, "inserted": inserted,
+            "missing_owners": missing, "extract_request_id": request_id,
+        })
 
     return app
 

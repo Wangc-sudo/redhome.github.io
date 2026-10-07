@@ -469,3 +469,19 @@ class ReportRosterMigrationTests(unittest.TestCase):
         )
         recorded = [params[0] for _, params in mart.cursor_instance.executed if params]
         self.assertIn("mart-ops-report-roster-v1", recorded)
+
+    def test_v2_registered_after_v1_and_adds_number_columns(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-ops-report-roster-v2", versions)
+        self.assertLess(
+            versions.index("mart-ops-report-roster-v1"),
+            versions.index("mart-ops-report-roster-v2"),
+        )
+
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+        apply_live_migrations(dingtalk, wdt, mart)
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn("ADD COLUMN `channel` VARCHAR(32)", mart_sql)
+        self.assertIn("ADD COLUMN `store_no` INT", mart_sql)
