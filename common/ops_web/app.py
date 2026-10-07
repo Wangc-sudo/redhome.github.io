@@ -588,8 +588,12 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
         if first_of_store:
             target = meta["target"]
             target_value = "" if target is None else f"{float(target):.0f}"
+            # 月目标格参与店铺聚合（与店铺格同 rowspan）——否则该店第 2 条
+            # 链接行少一格，后续列整体错位。
+            rowspan = f' rowspan="{store_span}"' if store_span > 1 else ""
             cells.append(
-                f"<td><input class=\"roster-target\" data-store=\"{_esc(store)}\" "
+                f"<td{rowspan}><input class=\"roster-target\" "
+                f"data-store=\"{_esc(store)}\" "
                 f"data-channel=\"{_esc(meta['channel'])}\" "
                 f"value=\"{_esc(target_value)}\" "
                 f"placeholder=\"目标（元）\"></td>"

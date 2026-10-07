@@ -10,6 +10,7 @@
 全部 TestClient + FakeConnection：不联网、不碰凭据。
 """
 
+import re
 import unittest
 import warnings
 from contextlib import contextmanager
@@ -992,6 +993,60 @@ class RosterSortTests(unittest.TestCase):
         store.rows = self._rows()
         body = self._page(store, sort="bogus")
         self.assertIn('<td rowspan="3">天猫</td>', body)
+
+    def _assert_grid_balance(self, body, table_index=0, columns=9):
+        """模拟 rowspan 布局，逐行校验有效列数（防聚合错位）。"""
+        tables = re.findall(r"<table>(.*?)</table>", body, re.S)
+        rows = re.findall(r"<tr>(.*?)</tr>", tables[table_index], re.S)
+        pending = [0] * columns  # 每列被上行 rowspan 占用的剩余行数
+        for row_html in rows[1:]:  # 跳过表头
+            cells = re.findall(r'<td(?: rowspan="(\d+)")?[^>]*>', row_html)
+            col = 0
+            for span in cells:
+                while col < columns and pending[col] > 0:
+                    pending[col] -= 1
+                    col += 1
+                span_n = int(span) if span else 1
+                if span_n > 1:
+                    pending[col] = span_n - 1
+                col += 1
+            while col < columns and pending[col] > 0:
+                pending[col] -= 1
+                col += 1
+            self.assertEqual(
+                columns, col, f"行有效列数≠{columns}：{row_html[:100]}"
+            )
+
+    def test_grid_balance_all_sorts_and_region_table(self):
+        # 渠道区数据：TM旗舰A 2 链接（1 负责人+1 代填）、TM旗舰B 1、JD购喝 1
+        store = _RosterStore()
+        store.rows = self._rows()
+        for sort in (None, "store", "owner", "deputy", "target"):
+            body = self._page(store, sort=sort)
+            self._assert_grid_balance(body, table_index=0, columns=9)
+        # 月目标输入格与店铺格同 rowspan（参与店铺聚合）
+        body = self._page(store)
+        self.assertIn('<td rowspan="2"><input class="roster-target"', body)
+        self.assertEqual(1, body.count('data-store="TM旗舰A"'))
+
+        # 区域表（绍兴 3 链接）同样平衡
+        store2 = _RosterStore()
+        store2.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note=""),
+            _roster_row(id=13, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨项目部", person_name="周亚平",
+                        aliases=None, note=""),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store2.patch_fetch(), store2.patch_audit():
+            body2 = client.get("/roster").text
+        self._assert_grid_balance(body2, table_index=1, columns=9)
 
 
 class RosterRegionTemplateTests(unittest.TestCase):
