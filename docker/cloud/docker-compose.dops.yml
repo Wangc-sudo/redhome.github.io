@@ -105,6 +105,55 @@ services:
       retries: 3
       start_period: 15s
 
+  # 运维系统（2026-09-30 上云）：权限管理 + 定时任务管理（管道列表/开关/
+  # 新增/立即运行一次）。双闸——网络层经 SG 收紧到运维来源（见下）、应用层
+  # admin scope 校验（require_admin）；不是面向全员的服务。与 bi-web 同款桥接
+  # + 端口映射（uvicorn 固定 8080 → 宿主机 18100）。写面依赖 BI_WEB_SESSION_SECRET
+  # 必须注入（否则启动即失败），BI_DINGTALK_APPKEY/APPSECRET 提供钉钉免登。
+  # 暴露面：SG 放行 18100 ← <运维/公司办公网来源>（务必窄于 bi-web 的 18080
+  # 规则；更严可做 127.0.0.1:18100:8080 + SSH 隧道）。BI_* 凭据与 bi-web 同款
+  # 仓库外 env_file 透传，绝不写死在 repo。上线前置：①app.env 注入
+  # BI_WEB_SESSION_SECRET（必填）；②RDS mart 库应用迁移 mart-ops-run-requests-v1
+  # （建 pd_ops_run_request / pd_ops_pipeline_audit）；③scheduler 已内置
+  # run-requests 轮询，随本批次一并 up -d 重建。
+  ops-web:
+    image: dops-app:latest
+    container_name: dops-ops-web
+    restart: unless-stopped
+    # BI_* 凭据走独立的 /opt/dops/ops-web.env（服务器本地、不入库）：app.env
+    # 与 bi-web 共享，直接注入 BI_WEB_SESSION_SECRET 会让 bi-web 下次重建时
+    # 从「阶段 1.5 公网全开放」意外切到登录态，必须隔离。
+    env_file:
+      - /opt/dops/app.env
+      - /opt/dops/ops-web.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      PUBLIC_DATA_SERVICE_ID: ops-web
+      # 注册表读（管道列表/舰队源）与写（开关/新增）的 seed 路径；Nacos
+      # 不可达时回退 seed。scheduler 同款，Nacos 配置随 app.env 注入。
+      PUBLIC_DATA_PIPELINE_SEED: /opt/dops/repo/docker/integration/pipelines.seed.yaml
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.ops_web.app
+    ports:
+      - "18100:8080"
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      - /opt/dops/live:/opt/dops/live:ro
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # 榜单静态页发布（2026-09-23 提前拉起）：serve pages-output，host 网络占 80。
   # 仅静态文件，无 upstream；bi-web 公网反代待阶段 2（备案+域名+免登）再加。
   nginx:

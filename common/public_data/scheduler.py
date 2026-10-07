@@ -26,6 +26,18 @@ Design notes:
   02:00 window, but one that was down since 01:00 does not retroactively
   fire hours-old misses at 09:00 -- those surface via the data-watermark
   checks instead.
+* Command templates are generic for the ``robot-<region>`` /
+  ``pages-<region>`` families (:func:`command_spec`): a new region can be
+  registered in Nacos (e.g. via ops-web) and scheduled without a code
+  change -- the region suffix is validated and passed to ``mart_cli``,
+  which owns region legitimacy at runtime.
+* Fleet enumeration re-resolves every tick from *service_ids* when it is a
+  callable (:func:`build_fleet_source`): seed keys union the Nacos
+  ``PIPELINES`` group listing, so ops-web additions take effect without a
+  scheduler restart (Nacos listing failures degrade to seed keys).
+* 「立即运行一次」channel: when *run_requests* is injected, each tick also
+  drains ``pd_ops_run_request`` pending rows (ops-web writes them), firing
+  them through the same lock/executor path as cron fires.
 
 All collaborators (config source, runner, lock factory, executor, clock,
 sleeper) are injected, so unit tests need no Nacos, MySQL or subprocess.
@@ -34,6 +46,7 @@ sleeper) are injected, so unit tests need no Nacos, MySQL or subprocess.
 import contextlib
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -42,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from common.public_data.pipeline_config import (
+    DEFAULT_GROUP,
     PipelineConfig,
     build_config_source,
     load_seed,
@@ -144,6 +158,39 @@ _COMMAND_TABLE = {
 #: (parameterized repair tool, see module docstring).
 _UNSCHEDULABLE = ("project-mart",)
 
+#: robot-/pages- 家族泛化解析的 region 后缀形态（小写字母/数字/下划线，
+#: 字母或数字开头——拒绝中划线，避免 pages-qudao-t1 这类显式条目被
+#: 家族规则误吞；显式表永远优先）。
+_REGION_SUFFIX_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
+
+def command_spec(service_id):
+    """调度命令模板：显式命令表优先，robot-/pages- 家族按后缀泛化解析。
+
+    泛化（2026-09-30，ops-web「可添加」A 方案）：``robot-<region>`` →
+    ``mart_cli once``、``pages-<region>`` → ``leaderboard-html``，新区域
+    注册即可调度、无需改代码；region 合法性由 mart_cli 运行时校验
+    （未知 region 子进程非零退出，日志可观测）。无模板返回 None。
+    """
+    spec = _COMMAND_TABLE.get(service_id)
+    if spec is not None:
+        return spec
+    for prefix, builder in (
+        ("robot-", lambda region: _mart_cli_entry("once", region=region)),
+        ("pages-", _pages_entry),
+    ):
+        if service_id.startswith(prefix):
+            region = service_id[len(prefix):]
+            if _REGION_SUFFIX_RE.match(region):
+                return builder(region)
+            return None
+    return None
+
+
+def has_command(service_id):
+    """service_id 是否有可调度的命令模板（ops-web 写面校验用）。"""
+    return command_spec(service_id) is not None
+
 DEFAULT_POLL_SECONDS = 30.0
 _LOCK_PREFIX = "public-data-scheduler"
 
@@ -184,7 +231,7 @@ class SchedulerSettings:
 
 def build_argv(service_id, settings):
     """Full argv (including ``python -m``) for *service_id*, or None."""
-    spec = _COMMAND_TABLE.get(service_id)
+    spec = command_spec(service_id)
     if spec is None:
         return None
     argv = [sys.executable, "-m"]
@@ -202,7 +249,7 @@ def build_child_env(service_id, environ=None):
     """Child environment: pass-through + the line's own registry identity."""
     env = dict(os.environ if environ is None else environ)
     env["PUBLIC_DATA_SERVICE_ID"] = service_id
-    spec = _COMMAND_TABLE.get(service_id) or {}
+    spec = command_spec(service_id) or {}
     env.update(spec.get("extra_env") or {})
     return env
 
@@ -365,18 +412,28 @@ class Scheduler:
     """Polls the registry and fires pipelines whose cron is due.
 
     *config_source* resolves each service's :class:`PipelineConfig` (Nacos
-    with seed fallback); *service_ids* enumerates the fleet (the seed keys).
-    *runner* / *lock_factory* / *executor* / *clock* / *sleeper* are all
-    injectable -- see module docstring for the no-catch-up policy.
+    with seed fallback); *service_ids* enumerates the fleet -- either a
+    fixed tuple (tests) or a callable re-invoked every tick (production:
+    :func:`build_fleet_source`, so Nacos-only additions are picked up
+    without a restart).  *run_requests* (optional) is the 「立即运行一次」
+    store drained every tick.  *runner* / *lock_factory* / *executor* /
+    *clock* / *sleeper* are all injectable -- see module docstring for the
+    no-catch-up policy.
     """
 
     def __init__(self, *, config_source, service_ids, runner, lock_factory,
                  settings=None, executor=None, clock=None, sleeper=None,
                  poll_seconds=DEFAULT_POLL_SECONDS, dep_probe=None,
-                 dep_probes=None):
+                 dep_probes=None, run_requests=None):
         self._config_source = config_source
-        self._service_ids = tuple(service_ids)
+        if callable(service_ids):
+            self._fleet_source = service_ids
+            self._service_ids = tuple(service_ids())
+        else:
+            self._fleet_source = None
+            self._service_ids = tuple(service_ids)
         self._runner = runner
+        self._run_requests = run_requests
         self._lock_factory = lock_factory
         self._settings = settings or SchedulerSettings.from_env()
         self._executor = executor or ThreadExecutor()
@@ -424,6 +481,20 @@ class Scheduler:
     # -- configuration (re-resolved every tick: Nacos hot reload) -----------
 
     def _reload(self, now):
+        if self._fleet_source is not None:
+            try:
+                refreshed = tuple(self._fleet_source())
+            except Exception:
+                self._warn_once(
+                    "*", "fleet-refresh",
+                    "舰队清单刷新失败，沿用上次清单（下 tick 重试）",
+                )
+            else:
+                if refreshed:
+                    # 清单收缩（注册表删线）：撤掉其点火时间，不再触发。
+                    for stale in set(self._next_fire) - set(refreshed):
+                        self._next_fire.pop(stale, None)
+                    self._service_ids = refreshed
         for service_id in self._service_ids:
             try:
                 config = self._config_source.get_pipeline(service_id)
@@ -495,8 +566,79 @@ class Scheduler:
             self._executor.launch(
                 lambda sid=service_id, cmd=argv: self._run(sid, cmd)
             )
+        self._drain_run_requests()
+
+    # -- 「立即运行一次」通道（pd_ops_run_request，ops-web 写入）----------------
+
+    def _drain_run_requests(self):
+        """认领并触发 pending 的运行请求；无注入或 DB 故障时静默降级。"""
+        store = self._run_requests
+        if store is None:
+            return
+        try:
+            pending = store.fetch_pending()
+        except Exception:
+            self._warn_once(
+                "*", "runreq-read",
+                "运行一次请求读取失败（DB 不可达？），本 tick 跳过轮询",
+            )
+            return
+        for request in pending:
+            service_id = request.service_id
+            if service_id in self._running:
+                continue  # 在途（含刚被 cron 点燃）：下 tick 再认领
+            argv = build_argv(service_id, self._settings)
+            if service_id in _UNSCHEDULABLE or argv is None:
+                try:
+                    store.mark_rejected(request.request_id, "无调度命令映射")
+                except Exception:
+                    logger.warning(
+                        "run-once #%s 拒收回写失败", request.request_id,
+                        exc_info=True,
+                    )
+                continue
+            config = self._configs.get(service_id)
+            if config is None:
+                try:
+                    config = self._config_source.get_pipeline(service_id)
+                except Exception:
+                    config = PipelineConfig(service_id)
+            # 与 cron 同一套依赖门禁：未满足留 pending，下 tick 重查。
+            if self._unsatisfied_deps(service_id, config):
+                continue
+            try:
+                claimed = store.claim(request.request_id)
+            except Exception:
+                logger.warning(
+                    "run-once #%s 认领失败，下 tick 重试",
+                    request.request_id, exc_info=True,
+                )
+                continue
+            if not claimed:
+                continue  # 已被其他副本认领
+            self._running.add(service_id)
+            logger.info(
+                "service=%s 手动触发（run-once #%s，发起人 %s）",
+                service_id, request.request_id, request.requested_by,
+            )
+            self._executor.launch(
+                lambda sid=service_id, cmd=argv, rid=request.request_id:
+                    self._run_once(sid, cmd, rid)
+            )
+
+    def _run_once(self, service_id, argv, request_id):
+        """run-once 包装：复用 _run 的锁/运行路径，结束后回写结果。"""
+        returncode = self._run(service_id, argv)
+        try:
+            self._run_requests.mark_finished(request_id, returncode)
+        except Exception:
+            logger.warning(
+                "run-once #%s 结果回写失败（请求状态将滞留 launched）",
+                request_id, exc_info=True,
+            )
 
     def _run(self, service_id, argv):
+        """持锁运行一条管道；返回子进程退出码（锁失败/异常返回 None）。"""
         try:
             try:
                 lock = self._lock_factory(service_id)
@@ -505,7 +647,7 @@ class Scheduler:
                     "service=%s 获取调度锁失败（DB 不可达？），本次跳过",
                     service_id, exc_info=True,
                 )
-                return
+                return None
             try:
                 with lock:
                     returncode = self._runner(service_id, argv)
@@ -513,7 +655,7 @@ class Scheduler:
                 logger.error(
                     "service=%s 运行异常", service_id, exc_info=True
                 )
-                return
+                return None
             if returncode != 0:
                 logger.error(
                     "service=%s 退出码 %s（失败不计入禁跑，下个 cron 窗口照常重试）",
@@ -521,6 +663,7 @@ class Scheduler:
                 )
             else:
                 logger.info("service=%s 运行完成", service_id)
+            return returncode
         finally:
             self._running.discard(service_id)
 
@@ -537,7 +680,7 @@ class Scheduler:
 
 
 def load_service_ids(environ=None):
-    """Fleet enumeration: the seed keys (seed is always mounted, Nacos is not listable)."""
+    """Fleet enumeration: the seed keys (seed is always mounted)."""
     env = os.environ if environ is None else environ
     seed_path = (env.get("PUBLIC_DATA_PIPELINE_SEED") or "").strip()
     if not seed_path:
@@ -550,6 +693,79 @@ def load_service_ids(environ=None):
     return ids
 
 
+def _nacos_service_ids(env):
+    """Nacos PIPELINES 组的 service_id 列表（data-id 去 .yaml 后缀）。
+
+    未配置 Nacos / 客户端不支持列举（SDK 客户端无 list API）时返回
+    空元组；列举异常抛给调用方降级。
+    """
+    server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+    if not server:
+        return ()
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server,
+        namespace=(env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip(),
+        username=(env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None,
+        password=(env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None,
+    )
+    list_data_ids = getattr(client, "list_data_ids", None)
+    if list_data_ids is None:
+        return ()
+    group = (
+        (env.get("PUBLIC_DATA_NACOS_GROUP") or "").strip() or DEFAULT_GROUP
+    )
+    ids = []
+    for data_id in list_data_ids(group):
+        if data_id.endswith(".yaml"):
+            data_id = data_id[:-len(".yaml")]
+        if data_id:
+            ids.append(data_id)
+    return tuple(ids)
+
+
+def build_fleet_source(environ=None):
+    """舰队清单源（生产）：seed keys ∪ Nacos PIPELINES 组列举。
+
+    返回一个零参 callable，scheduler 每 tick 重调——ops-web 新增的
+    Nacos-only 管道无需重启调度器即可入列。Nacos 列举失败降级为
+    seed keys（fail-safe：宁少不多，且告警去重、恢复后可再告）。
+    seed 读不到/为空照常抛错（舰队不能没有地基）。
+    """
+    env = os.environ if environ is None else environ
+    seed_path = (env.get("PUBLIC_DATA_PIPELINE_SEED") or "").strip()
+    if not seed_path:
+        raise RuntimeError(
+            "PUBLIC_DATA_PIPELINE_SEED 未配置，无法枚举管道清单"
+        )
+    state = {"warned": False}
+
+    def enumerate_fleet():
+        ids = list(load_seed(seed_path).keys())
+        if not ids:
+            raise RuntimeError(f"管道 seed 为空：{seed_path}")
+        try:
+            extras = _nacos_service_ids(env)
+        except Exception:
+            extras = ()
+            if not state["warned"]:
+                state["warned"] = True
+                logger.warning(
+                    "nacos 管道清单列举失败，降级为 seed keys（恢复前每 tick 如此）",
+                    exc_info=True,
+                )
+        else:
+            state["warned"] = False
+        seen = set(ids)
+        for extra_id in extras:
+            if extra_id not in seen:
+                seen.add(extra_id)
+                ids.append(extra_id)
+        return tuple(ids)
+
+    return enumerate_fleet
+
+
 def main():  # pragma: no cover - thin wiring, exercised in integration env
     logging.basicConfig(
         level=logging.INFO,
@@ -558,6 +774,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
     import time
 
     from common.public_data.db import connect
+    from common.public_data.ops_control import DbRunRequestGateway
     from common.public_data.settings import Settings
 
     settings = SchedulerSettings.from_env()
@@ -573,13 +790,14 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
     }
     scheduler = Scheduler(
         config_source=build_config_source(),
-        service_ids=load_service_ids(),
+        service_ids=build_fleet_source(),
         runner=SubprocessRunner(),
         lock_factory=build_mysql_lock_factory(connect, mart_database),
         settings=settings,
         poll_seconds=settings.poll_seconds,
         sleeper=time.sleep,
         dep_probes=dep_probes,
+        run_requests=DbRunRequestGateway(connect, mart_database),
     )
     scheduler.run_forever()
 

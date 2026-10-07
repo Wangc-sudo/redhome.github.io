@@ -313,6 +313,37 @@ def publish_pipelines(client, mapping, group=DEFAULT_GROUP, if_missing=False):
     return published
 
 
+def build_config_publisher(environ=None):
+    """Nacos 管道注册表发布器（ops-web 写面）；未配置 Nacos 返回 None。
+
+    返回的 callable 接收一个 :class:`PipelineConfig`，把
+    ``config.to_mapping()`` 以 YAML 发布到 ``<service_id>.yaml``——
+    覆盖式写（enable/disable/add 都是整条目重写，与 seed 首发语义
+    一致）。写面服务（ops-web）未配 Nacos 时应把写 API 降级为 503。
+    """
+    env = os.environ if environ is None else environ
+    server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+    if not server:
+        return None
+    namespace = (env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip()
+    group = (env.get("PUBLIC_DATA_NACOS_GROUP") or "").strip() or DEFAULT_GROUP
+    username = (env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None
+    password = (env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None
+
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server, namespace=namespace, username=username, password=password
+    )
+
+    def publish(config):
+        client.publish_config(
+            f"{config.service_id}.yaml", group,
+            _dump_yaml(config.to_mapping()), config_type="yaml",
+        )
+
+    return publish
+
+
 def publish_seed_from_env(seed_path, if_missing=False, environ=None):
     """Build a Nacos client from the environment and publish *seed_path*."""
     env = os.environ if environ is None else environ

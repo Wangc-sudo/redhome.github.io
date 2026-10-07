@@ -609,6 +609,70 @@ def _handle_migrate(args):
         sys.exit(1)
 
 
+def _handle_load_channel_target(args):
+    """渠道月目标程序导入：JSON → raw channel_monthly_target 全量替换。"""
+    try:
+        from common.public_data.channel_target import (
+            ChannelTargetError,
+            load_target_rows,
+            replace_snapshot,
+        )
+
+        try:
+            rows = load_target_rows(args.file)
+        except ChannelTargetError:
+            _print_failure(code="channel_target_invalid")
+            sys.exit(1)
+        if args.dry_run:
+            total = sum(
+                (row["monthly_target"] or 0) for row in rows
+            )
+            by_channel = {}
+            for row in rows:
+                by_channel[row["channel"]] = (
+                    by_channel.get(row["channel"], 0)
+                    + (row["monthly_target"] or 0)
+                )
+            print(f"dry-run: {len(rows)} rows, total={total:.0f}")
+            for channel, amount in sorted(by_channel.items()):
+                print(f"  {channel}: {amount:.0f}")
+            return
+        settings = load_settings()
+        from common.public_data.db import connect
+
+        conn = connect(settings.dingtalk_database)
+        try:
+            deleted, inserted = replace_snapshot(conn, rows)
+        finally:
+            conn.close()
+        print(f"channel target loaded: deleted={deleted} inserted={inserted}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="load_channel_target_error")
+        sys.exit(1)
+
+
+def _handle_seed_report_roster(args):
+    """一次性种子：渠道月目标表 owners_json → dim_report_roster（幂等）。"""
+    try:
+        settings = load_settings()
+        from common.public_data.db import connect
+        from common.public_data.report_roster import seed_from_channel_targets
+
+        mart_conn = connect(settings.mart_database)
+        try:
+            inserted, skipped = seed_from_channel_targets(mart_conn, actor="seed")
+        finally:
+            mart_conn.close()
+        print(f"report roster seed: inserted={inserted} skipped={skipped}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="seed_report_roster_error")
+        sys.exit(1)
+
+
 def _handle_load_target(args):
     # Safety pre-check: the write-confirmation flag is required BEFORE any work.
     if not args.confirm_local_test_write:
@@ -708,6 +772,22 @@ def main(argv=None):
 
     # -- migrate -------------------------------------------------------------
     subparsers.add_parser("migrate", help="Apply live migrations")
+
+    # -- seed-report-roster --------------------------------------------------
+    subparsers.add_parser(
+        "seed-report-roster",
+        help="Seed dim_report_roster from channel target owners_json (idempotent)",
+    )
+
+    # -- load-channel-target -------------------------------------------------
+    load_channel_target = subparsers.add_parser(
+        "load-channel-target",
+        help="Replace raw channel_monthly_target snapshot from a JSON file",
+    )
+    load_channel_target.add_argument("--file", required=True)
+    load_channel_target.add_argument(
+        "--dry-run", action="store_true", default=False
+    )
 
     # -- status --------------------------------------------------------------
     subparsers.add_parser("status", help="Show sync run status")
@@ -874,6 +954,8 @@ def main(argv=None):
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
         "load-ops-seed": _handle_load_ops_seed,
+        "seed-report-roster": _handle_seed_report_roster,
+        "load-channel-target": _handle_load_channel_target,
         "import-manual": _handle_import_manual,
         "status": _handle_status,
     }

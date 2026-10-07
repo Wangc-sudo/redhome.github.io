@@ -409,3 +409,63 @@ class MartSplitMigrationTests(unittest.TestCase):
                 FakeConnection(),
                 applied_checksums={"mart-facts-v1": "0" * 64},
             )
+
+
+class RunRequestsMigrationTests(unittest.TestCase):
+    """ops-web 定时任务管理（2026-09-30）：「立即运行一次」触发通道表 +
+    管道注册表变更审计表（mart-ops-run-requests-v1）。
+    """
+
+    def test_run_requests_migration_registered_after_bi_authz(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-ops-run-requests-v1", versions)
+        self.assertLess(
+            versions.index("mart-ops-bi-authz-v1"),
+            versions.index("mart-ops-run-requests-v1"),
+        )
+
+    def test_fresh_database_creates_run_request_and_audit_tables(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS `pd_ops_run_request`", mart_sql
+        )
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS `pd_ops_pipeline_audit`", mart_sql
+        )
+        recorded = [params[0] for _, params in mart.cursor_instance.executed if params]
+        self.assertIn("mart-ops-run-requests-v1", recorded)
+
+
+class ReportRosterMigrationTests(unittest.TestCase):
+    """填报人名册（2026-10-06）：dim_report_roster + 变更审计
+    （mart-ops-report-roster-v1）。
+    """
+
+    def test_roster_migration_registered_after_run_requests(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-ops-report-roster-v1", versions)
+        self.assertLess(
+            versions.index("mart-ops-run-requests-v1"),
+            versions.index("mart-ops-report-roster-v1"),
+        )
+
+    def test_fresh_database_creates_roster_and_audit_tables(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS `dim_report_roster`", mart_sql)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS `dim_report_roster_audit`", mart_sql
+        )
+        recorded = [params[0] for _, params in mart.cursor_instance.executed if params]
+        self.assertIn("mart-ops-report-roster-v1", recorded)
