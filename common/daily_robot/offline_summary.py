@@ -10,6 +10,8 @@
 - 达成率一律走 ``common.metrics.daily_report.achievement_rate``；
 - 日环比 = 当日 ÷ 前一自然日；周环比 = 当日 ÷ 上周同星期几；
   月环比 = 本月 1 日至当日累计 ÷ 上月 1 日至同日日累计；
+  （页面总览表例外：周环比 = 本周累计 ÷ 上周同期累计，见
+  ``compute_overview_row``——与群消息口径不同，勿混用）；
 - 未报 = 0（与 vanke 回填口径一致）。
 
 表格样式对齐渠道日报（``channel_daily`` 的 ``_fmt_wan`` / ``_fmt_pct``）。
@@ -579,138 +581,123 @@ def _signed_pct_html(rate):
     return f"{'+' if rate >= 0 else ''}{_fmt_pct(rate)}", _rate_cls(rate)
 
 
-def build_daily_panel(*, rows, total, report_day):
-    """日维度表体：各板块当日 + 日环比 + 周环比（报告日=最近有数据自然日）。"""
+@dataclass(frozen=True)
+class OverviewRow:
+    """单板块日/周/月三期同排行（页面总览表）。"""
+
+    scope: str
+    label: str
+    day_sales: float
+    day_base: float
+    dod_rate: float | None
+    week_sales: float
+    week_base: float
+    wow_rate: float | None
+    month_completed: float
+    month_base: float
+    mom_rate: float | None
+    month_target: float | None
+    month_rate: float | None
+
+
+def compute_overview_row(scope, label, *, facts, report_day, data_date, month_target):
+    """总览行：当日（对昨日）+ 本周累计（对上周同期）+ 本月累计（对上月同期）。
+
+    *facts* 须覆盖上月 1 日至 *data_date*（缺日 = 0）；当日列锚定
+    *report_day*（最近有数据自然日），周/月列锚定 *data_date*（T-1）。
+    """
+    day_sales = facts.get(report_day, 0.0)
+    day_base = facts.get(report_day - timedelta(days=1), 0.0)
+    _, dod_rate = _diff_rate(day_sales, day_base)
+
+    week_start = data_date - timedelta(days=data_date.weekday())
+    week_sales = _sum_window(facts, week_start, data_date)
+    week_base = _sum_window(
+        facts, week_start - timedelta(days=7), data_date - timedelta(days=7)
+    )
+    _, wow_rate = _diff_rate(week_sales, week_base)
+
+    month_first = data_date.replace(day=1)
+    month_completed = _sum_window(facts, month_first, data_date)
+    prev_first, prev_last = previous_month(data_date)
+    prev_same_day = min(data_date.day, prev_last.day)
+    month_base = _sum_window(facts, prev_first, prev_first.replace(day=prev_same_day))
+    _, mom_rate = _diff_rate(month_completed, month_base)
+
+    return OverviewRow(
+        scope=scope,
+        label=label,
+        day_sales=day_sales,
+        day_base=day_base,
+        dod_rate=dod_rate,
+        week_sales=week_sales,
+        week_base=week_base,
+        wow_rate=wow_rate,
+        month_completed=month_completed,
+        month_base=month_base,
+        mom_rate=mom_rate,
+        month_target=month_target,
+        month_rate=achievement_rate(month_completed, month_target),
+    )
+
+
+def _cmp_cell(rate, base_label, base):
+    """环比单元格：百分比 + 对比基期小字（基期 0 → 比率记 --，基期仍可见）。"""
+    pct, cls = _signed_pct_html(rate)
+    return f'{pct}<div class="small muted">{base_label} {_fmt_wan(base)}</div>', cls
+
+
+def build_overview_panel(*, rows, total, report_day, week_start, data_date):
+    """日/周/月三期总览单表：板块 ×（当日 / 本周 / 本月，环比右侧带基期）。"""
     head = (
         f'<div class="small muted" style="margin-bottom:8px">'
-        f'{report_day.month}月{report_day.day}日合计 '
-        f'<b style="color:#1f2329">{_fmt_wan(total.sales)} 元</b></div>'
+        f'报告日 {report_day.month}月{report_day.day}日（最近有数据自然日）'
+        f' · 本周 {week_start.month}月{week_start.day}日 至 '
+        f'{data_date.month}月{data_date.day}日'
+        f' · 当日合计 <b style="color:#1f2329">{_fmt_wan(total.day_sales)} 元</b></div>'
     )
 
     def cells(m):
-        dod, dod_cls = _signed_pct_html(m.dod_rate)
-        wow, wow_cls = _signed_pct_html(m.wow_rate)
-        return [(_fmt_wan(m.sales), ""), (_esc(dod), dod_cls), (_esc(wow), wow_cls)]
-
-    return (
-        head
-        + '<table><thead><tr><th>板块</th><th>当日</th><th>日环比</th>'
-          '<th>周环比</th></tr></thead>'
-        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
-        + f'<div class="small muted" style="margin-top:8px">'
-          f'数据截至 {report_day.month}月{report_day.day}日（最近有数据自然日）</div>'
-    )
-
-
-def build_weekly_panel(*, rows, total, week_start, business_date):
-    """周维度表体：本周（周一至昨日，T-1）累计 + 对上周同期环比。"""
-    head = (
-        f'<div class="small muted" style="margin-bottom:8px">'
-        f'本周 {week_start.month}月{week_start.day}日 至 '
-        f'{business_date.month}月{business_date.day}日 · 合计 '
-        f'<b style="color:#1f2329">{_fmt_wan(total.sales)} 元</b></div>'
-    )
-
-    def cells(m):
-        wow, wow_cls = _signed_pct_html(m.wow_rate)
-        return [(_fmt_wan(m.sales), ""), (_esc(wow), wow_cls)]
-
-    return (
-        head
-        + '<table><thead><tr><th>板块</th><th>本周累计</th>'
-          '<th>环比上周同期</th></tr></thead>'
-        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
-        + '<div class="small muted" style="margin-top:8px">'
-          '本周=周一至昨日（T-1，自然日口径）</div>'
-    )
-
-
-def build_monthly_panel(*, rows, total, business_date):
-    """月维度表体：月累计 / 月目标 / 达成率 / 月环比。"""
-    head = (
-        f'<div class="small muted" style="margin-bottom:8px">'
-        f'{business_date.month}月累计合计 '
-        f'<b style="color:#1f2329">{_fmt_wan(total.month_completed)} 元</b>'
-        + (
-            f' · 达成率 <b style="color:#1f2329">{_fmt_pct(total.month_rate)}</b>'
-            if total.month_rate is not None else ""
-        )
-        + "</div>"
-    )
-
-    def cells(m):
-        mom, mom_cls = _signed_pct_html(m.mom_rate)
+        dod, dod_cls = _cmp_cell(m.dod_rate, "昨日", m.day_base)
+        wow, wow_cls = _cmp_cell(m.wow_rate, "上周同期", m.week_base)
+        mom, mom_cls = _cmp_cell(m.mom_rate, "上月同期", m.month_base)
         rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
         return [
+            (_fmt_wan(m.day_sales), ""),
+            (dod, dod_cls),
+            (_fmt_wan(m.week_sales), ""),
+            (wow, wow_cls),
             (_fmt_wan(m.month_completed), ""),
             (_fmt_wan(m.month_target) if m.month_target else "--", "muted"),
             (rate_txt, ""),
-            (_esc(mom), mom_cls),
+            (mom, mom_cls),
         ]
 
     return (
         head
-        + '<table><thead><tr><th>板块</th><th>月累计</th><th>月目标</th>'
+        # 窄屏（手机）9 列放不下：容器内横向滚动，不撑破面板
+        + '<div style="overflow-x:auto">'
+        + '<table><thead><tr><th>板块</th><th>当日</th><th>日环比</th>'
+          '<th>本周累计</th><th>周环比</th><th>月累计</th><th>月目标</th>'
           '<th>达成率</th><th>月环比</th></tr></thead>'
-        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table>'
+        + f'<tbody>{_scope_trs(rows, total, cells)}</tbody></table></div>'
         + '<div class="small muted" style="margin-top:8px">'
-          '月环比=本月1日至当日累计 ÷ 上月1日至同日日累计</div>'
-    )
-
-
-#: 维度标签（键, 展示名），顺序即标签顺序。
-_DIM_TABS = (("daily", "📅 日维度"), ("weekly", "📆 周维度"), ("monthly", "🗓 月维度"))
-
-_DIM_TABS_SCRIPT = """<style>#dim-tabs .tab{text-decoration:none;color:inherit}</style>
-<script>
-function swDim(el){
-  document.querySelectorAll('#dim-tabs .tab').forEach(function(t){t.classList.remove('on')});
-  el.classList.add('on');
-  ['daily','weekly','monthly'].forEach(function(k){
-    document.getElementById('dim-'+k).style.display = el.dataset.dim===k?'':'none';
-  });
-  if(history.replaceState){history.replaceState(null,'',el.getAttribute('href'));}
-}
-(function(){
-  if(location.hash){
-    var el=document.querySelector('#dim-tabs .tab[href="'+location.hash+'"]');
-    if(el){swDim(el);}
-  }
-})();
-</script>"""
-
-
-def _dim_tabs_panel(bodies):
-    """日/月/周标签面板：tab 切换 + 页内锚点（``#dim-daily`` 等可深链接）。
-
-    锚点语义：JS 正常时点击 tab 就地切换并把 hash 写入地址栏（可收藏/
-    转发定位到指定维度）；无 JS 时 ``<a href="#dim-xxx">`` 退化为普通
-    页内锚点跳转（三段落全部纵向可见，不丢内容）。
-    """
-    tabs = []
-    sections = []
-    for i, (key, label) in enumerate(_DIM_TABS):
-        on = " on" if i == 0 else ""
-        tabs.append(
-            f'<a class="tab{on}" data-dim="{key}" href="#dim-{key}" '
-            f'onclick="swDim(this);return false;">{label}</a>'
-        )
-        display = "" if i == 0 else ' style="display:none"'
-        sections.append(f'<div id="dim-{key}"{display}>{bodies[key]}</div>')
-    return (
-        '<div class="panel">\n'
-        f'  <div class="tabs" id="dim-tabs">{"".join(tabs)}</div>\n'
-        + "\n".join(sections)
-        + f"\n{_DIM_TABS_SCRIPT}\n</div>"
+          '日环比=当日÷昨日（自然日）；周环比=本周累计÷上周同期；'
+          '月环比=本月1日至报告日累计÷上月1日至同日累计；'
+          '环比下方小字为对比基期（基期为 0 时比率记 --）；'
+          f'数据截至 {data_date.month}月{data_date.day}日（T-1）</div>'
     )
 
 
 def build_offline_panels(connection, *, business_date):
-    """日/周/月三维度板块（顺序即页面顺序），**统一 T-1**。
+    """日/周/月三期总览表（单 panel 单表），**统一 T-1**。
 
-    运维裁决（2026-09-23）：今天的看板看昨天的数据——三板块全部锚定
-    ``business_date - 1``（取数窗口、月目标月份、周/月区间、日维度
-    报告日上限同移），当日填报进度不进看板。单板块异常 → 占位降级
+    运维裁决（2026-09-23）：今天的看板看昨天的数据——取数窗口、月目标
+    月份、周/月区间、当日列报告日上限全部锚定 ``business_date - 1``，
+    当日填报进度不进看板。2026-10-08 运维反馈：日/周/月分 tab 后环比
+    只有百分比没有对比基期，且日维度"周环比"（当日÷上周同日）与周维度
+    "环比上周同期"（周累计÷上周同期累计）口径不同方向相反，观感错位——
+    合并为单表，环比下方直接标注对比基期。板块异常 → 占位降级
     （同 qudao_panels 纪律），绝不拖垮整页。
     """
     import logging
@@ -733,7 +720,7 @@ def build_offline_panels(connection, *, business_date):
     merged = merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES])
     total_target = merge_targets(targets.values())
 
-    def daily():
+    def overview():
         # 报告日 = data_date 之前（含）最近一个全板块合计非零的自然日
         day_totals = {}
         for facts in facts_by_scope.values():
@@ -744,71 +731,31 @@ def build_offline_panels(connection, *, business_date):
         if not filled:
             return '<div class="muted small">本月暂无报数数据</div>'
         report_day = filled[-1]
-        rows = [
-            compute_daily_metrics(
-                scope, label, facts=facts_by_scope[scope],
-                business_date=report_day, month_target=targets[scope],
-            )
-            for scope, label, _, _ in AGG_SCOPES
-        ]
-        total = compute_daily_metrics(
-            TOTAL_SCOPE_KEY, TOTAL_LABEL, facts=merged,
-            business_date=report_day, month_target=total_target,
-        )
-        return build_daily_panel(rows=rows, total=total, report_day=report_day)
-
-    def weekly():
         week_start = data_date - timedelta(days=data_date.weekday())
-        rows = []
-        for scope, label, _, _ in AGG_SCOPES:
-            facts = facts_by_scope[scope]
-            week_total = _sum_window(facts, week_start, data_date)
-            prev_total = _sum_window(
-                facts, week_start - timedelta(days=7),
-                data_date - timedelta(days=7),
-            )
-            wow_amount, wow_rate = _diff_rate(week_total, prev_total)
-            rows.append(ScopeMetrics(
-                scope=scope, label=label, sales=week_total,
-                wow_amount=wow_amount, wow_rate=wow_rate,
-            ))
-        week_total = _sum_window(merged, week_start, data_date)
-        prev_total = _sum_window(
-            merged, week_start - timedelta(days=7),
-            data_date - timedelta(days=7),
-        )
-        wow_amount, wow_rate = _diff_rate(week_total, prev_total)
-        total = ScopeMetrics(
-            scope=TOTAL_SCOPE_KEY, label=TOTAL_LABEL, sales=week_total,
-            wow_amount=wow_amount, wow_rate=wow_rate,
-        )
-        return build_weekly_panel(
-            rows=rows, total=total,
-            week_start=week_start, business_date=data_date,
-        )
-
-    def monthly():
         rows = [
-            compute_daily_metrics(
+            compute_overview_row(
                 scope, label, facts=facts_by_scope[scope],
-                business_date=data_date, month_target=targets[scope],
+                report_day=report_day, data_date=data_date,
+                month_target=targets[scope],
             )
             for scope, label, _, _ in AGG_SCOPES
         ]
-        total = compute_daily_metrics(
+        total = compute_overview_row(
             TOTAL_SCOPE_KEY, TOTAL_LABEL, facts=merged,
-            business_date=data_date, month_target=total_target,
+            report_day=report_day, data_date=data_date,
+            month_target=total_target,
         )
-        return build_monthly_panel(rows=rows, total=total, business_date=data_date)
+        return build_overview_panel(
+            rows=rows, total=total, report_day=report_day,
+            week_start=week_start, data_date=data_date,
+        )
 
-    bodies = {}
-    for key, build in (("daily", daily), ("weekly", weekly), ("monthly", monthly)):
-        try:
-            bodies[key] = build()
-        except Exception:
-            logger.warning("offline_all 板块 %s 生成失败，降级为占位", key, exc_info=True)
-            bodies[key] = '<div class="muted small">数据暂缺</div>'
-    return [_dim_tabs_panel(bodies)]
+    try:
+        body = overview()
+    except Exception:
+        logger.warning("offline_all 总览板块生成失败，降级为占位", exc_info=True)
+        body = '<div class="muted small">数据暂缺</div>'
+    return [f'<div class="panel">\n{body}\n</div>']
 
 
 def build_offline_all_html(connection, cfg, *, business_date, now):
@@ -822,7 +769,7 @@ def build_offline_all_html(connection, cfg, *, business_date, now):
       板块（省外/线下总经办）、department 才是责任人（余云涛/谢坚钰）；
     * 杭/绍人员部门以通讯录 ``dim_robot_member`` 为准（表内部门是手工
       叫法），无匹配保留表内值兜底。
-    板块：日/周/月标签面板（``build_offline_panels``，extra_panels 插入）。
+    板块：日/周/月三期总览表（``build_offline_panels``，extra_panels 插入）。
     """
     from common.daily_robot.leaderboard import build_html
     from common.daily_robot.mart_leaderboard import (
