@@ -1579,8 +1579,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             person_targets = region_targets.get(scope) or {}
             sorted_rows = sorted(
                 rows,
-                key=lambda r: (str(r["entity_key"]), str(r["person_name"]),
-                               int(r["id"])),
+                key=lambda r: (str(r["entity_key"]),
+                               1 if r.get("role") == "deputy" else 0,
+                               str(r["person_name"]), int(r["id"])),
             )
             spans: dict = {}
             for row in sorted_rows:
@@ -1610,13 +1611,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     if personal_target is not None else ""
                 )
                 updated = _fmt_time(row.get("updated_at")) or "—"
+                name_html = _link_name_html(row)
+                # 按 role 分列（2026-10-08 修复：人员段此前忽略 role，
+                # 代填人全显示在负责人列——与 qudao 段同构）。
+                owner_cell, deputy_cell = (
+                    ("<td></td>", f"<td>{name_html}</td>")
+                    if row.get("role") == "deputy"
+                    else (f"<td>{name_html}</td>", "<td></td>")
+                )
                 cells.append(
                     f"<td><input class=\"person-target\" "
                     f"data-scope=\"{_esc(scope)}\" "
                     f"data-name=\"{_esc(row['person_name'])}\" "
                     f"value=\"{_esc(target_value)}\" "
                     f"placeholder=\"目标（元）\"></td>"
-                    f"<td>{_link_name_html(row)}</td><td></td>"
+                    f"{owner_cell}{deputy_cell}"
                     f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
                     f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
