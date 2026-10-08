@@ -182,8 +182,9 @@ class ShippedOrgSeedTests(unittest.TestCase):
         self.assertEqual(
             regions["shaoxing"], (1050416052, 1049663672, 1050408252),
         )
-        # vanke（万科&大莲花&团购日报群）组织上对应体验中心部门。
-        self.assertEqual(regions["vanke"], (1050251442,))
+        # vanke（万科&大莲花&团购日报群）组织上对应体验中心部门；
+        # 1049750665=品牌部（线下）（宣蕾凤企业团购纳编，2026-10-08 P0-1）。
+        self.assertEqual(regions["vanke"], (1050251442, 1049750665))
         # hq（总部子树，含总经办/财务部，BI 免登 admin 所在区域）。
         self.assertEqual(regions["hq"], (1050143465,))
         # other 含根部门 1050135497，递归展开即全公司——靠顺序兜底。
