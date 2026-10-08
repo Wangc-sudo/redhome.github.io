@@ -448,8 +448,55 @@ class TaskTest(unittest.TestCase):
         self.assertIn("14.3万", body)
 
 
+class OverviewRowTest(unittest.TestCase):
+    """页面总览行：当日（对昨日）+ 本周累计（对上周同期）+ 本月（对上月同期）。"""
+
+    def test_overview_row_three_periods(self):
+        from common.daily_robot.offline_summary import compute_overview_row
+
+        facts = {
+            date(2026, 9, 22): 100.0,   # 报告日当日
+            date(2026, 9, 21): 50.0,    # 昨日
+            date(2026, 9, 17): 20.0,    # 上周（不计入周环比基期）
+            date(2026, 9, 15): 30.0,    # 上周同期（9-14~9-15）
+            date(2026, 8, 22): 40.0,    # 上月同期（8-1~8-22）
+        }
+        m = compute_overview_row(
+            "hangzhou", "杭州", facts=facts,
+            report_day=date(2026, 9, 22), data_date=date(2026, 9, 22),
+            month_target=1000.0,
+        )
+        self.assertEqual(m.day_sales, 100.0)
+        self.assertEqual(m.day_base, 50.0)
+        self.assertAlmostEqual(m.dod_rate, 1.0)
+        # 本周（周一 9-21 起）累计 vs 上周同期（9-14~9-15）
+        self.assertEqual(m.week_sales, 150.0)
+        self.assertEqual(m.week_base, 30.0)
+        self.assertAlmostEqual(m.wow_rate, 4.0)
+        # 月累计含全月已填报日；月环比对上月 1~22 日
+        self.assertEqual(m.month_completed, 200.0)
+        self.assertEqual(m.month_base, 40.0)
+        self.assertAlmostEqual(m.mom_rate, 4.0)
+        self.assertAlmostEqual(m.month_rate, 0.2)
+
+    def test_overview_row_zero_base_rate_none(self):
+        from common.daily_robot.offline_summary import compute_overview_row
+
+        m = compute_overview_row(
+            "shaoxing", "绍兴", facts={date(2026, 9, 22): 100.0},
+            report_day=date(2026, 9, 22), data_date=date(2026, 9, 22),
+            month_target=None,
+        )
+        # 基期为 0 → 比率 None（页面记 --），但基期值本身保留可展示
+        self.assertIsNone(m.dod_rate)
+        self.assertEqual(m.day_base, 0.0)
+        self.assertIsNone(m.wow_rate)
+        self.assertIsNone(m.mom_rate)
+        self.assertIsNone(m.month_rate)
+
+
 class OfflineAllHtmlTest(unittest.TestCase):
-    """pages-offline_all：人员总榜（三区合并，无人例外）+ 日/周/月三板块。"""
+    """pages-offline_all：人员总榜（三区合并，无人例外）+ 日/周/月总览表。"""
 
     def _fake_people(self, region):
         rows = {
@@ -474,7 +521,7 @@ class OfflineAllHtmlTest(unittest.TestCase):
             workdays=frozenset({date(2026, 9, 22)}),
         )
 
-    def test_people_merged_no_exception_and_three_panels(self):
+    def test_people_merged_no_exception_and_overview_panel(self):
         captured = {}
 
         def fake_build_html(view, now, elapsed, people, extra_panels=None, **kw):
@@ -523,22 +570,25 @@ class OfflineAllHtmlTest(unittest.TestCase):
             OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing", "offline_extra")
         )
 
-        # 维度标签面板：单 panel 内 日/周/月 tab + 页内锚点
+        # 总览面板：单 panel 单表（日/周/月三期同行，环比带基期，无 tab）
         panels = captured["extra_panels"]
         self.assertEqual(len(panels), 1)
         panel = panels[0]
-        self.assertIn('id="dim-tabs"', panel)
-        for key in ("daily", "weekly", "monthly"):
-            self.assertIn(f'href="#dim-{key}"', panel)
-            self.assertIn(f'id="dim-{key}"', panel)
-        self.assertIn("swDim", panel)
-        # 日维度锚定 9-22（fake 里 9-23 有数据，T-1 后不可见）
-        self.assertIn("9月22日", panel)
-        self.assertNotIn("9月23日合计", panel)
-        # 月维度：杭州月累计只含 9-22 的 1.0万（9-23 的 2.0万被 T-1 排除）
+        self.assertIn('<div class="panel">', panel)
+        self.assertNotIn('id="dim-tabs"', panel)
+        for col in ("当日", "日环比", "本周累计", "周环比",
+                    "月累计", "月目标", "达成率", "月环比"):
+            self.assertIn(f"<th>{col}</th>", panel)
+        for base_label in ("昨日", "上周同期", "上月同期"):
+            self.assertIn(base_label, panel)
+        # 报告日锚定 9-22（fake 里 9-23 有数据，T-1 后不可见）
+        self.assertIn("报告日 9月22日", panel)
+        self.assertIn("本周 9月21日 至 9月22日", panel)
+        self.assertNotIn("9月23日", panel)
+        # 杭州月累计只含 9-22 的 1.0万（9-23 的 2.0万被 T-1 排除）
         self.assertIn("1.0万", panel)
         self.assertNotIn(">2.0万<", panel)
-        # 月维度板块含李树军拆分后的五个板块行
+        # 板块含李树军拆分后的五个板块行 + 整体行
         self.assertIn("李树军", panel)
         self.assertIn("线下整体", panel)
 

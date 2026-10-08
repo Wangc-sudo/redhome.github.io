@@ -248,7 +248,7 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
         rank_cls = "top" if i < 5 else ("bottom" if i >= len(people) - 5 else "")
         dept_lb = dept_label.get(p["dept"], p["dept"])
         return f"""<tr class="{rank_cls}">
-<td class="rank">{i+1 if i<5 or i>=len(people)-5 else ''}</td>
+<td class="rank">{i+1}</td>
 <td class="strong">{html_mod.escape(p['name'])}</td><td>{html_mod.escape(dept_lb)}</td>
 <td class="num">{_fmt_wan(p['completed'])}</td><td class="num muted">{_fmt_wan(p['target'])}</td>
 <td>{bar(rate)}</td><td>{diff_badge(rate)}</td>
