@@ -1390,6 +1390,29 @@ class RosterRegionTemplateTests(unittest.TestCase):
         self.assertIn('setRosterStatus(12, this.value)', body)
         self.assertIn('<option value="0" selected>停用</option>', body)
 
+    def test_region_section_splits_deputy_into_deputy_column(self):
+        # 2026-10-08 修复：区域段此前忽略 role——代填人全显示在负责人
+        # 列（宣卓萍/郑洁佩 诸暨门店实例）；应按 role 分列且负责人在前。
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=21, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨门店", person_name="郑洁佩",
+                        aliases=None, note="", role="deputy"),
+            _roster_row(id=22, scope="shaoxing", entity_type="person",
+                        entity_key="诸暨门店", person_name="蒋丽兰",
+                        aliases=None, note=""),
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        # 负责人在负责人列（代填报人列空），且排在代填人之前
+        self.assertIn("<td>蒋丽兰</td><td></td>", body)
+        # 代填人在代填报人列（负责人列空）
+        self.assertIn("<td></td><td>郑洁佩</td>", body)
+        self.assertLess(body.index("蒋丽兰"), body.index("郑洁佩"))
+
 
 class RegionTargetsApiTests(unittest.TestCase):
     """区域月目标保存 API（dim_report_target 入库，2026-10-07）。"""
