@@ -12,6 +12,9 @@ P1.1 三键定位（2026-09-29 运维定稿，实测 19 负责人 12 人管多�
 2. **负责人**（``饶佳君`` 或 ``饶佳君 京东``）：归属来自月目标表
    ``owners_json``；单店直达，多店回执给个性化编号引导（歧义→教学）；
 3. **店名模糊**（``京东 购喝 15867``）：包含互查，代填/管理精确通道。
+   容错（2026-10-09，rejected 审计驱动）：包含互查失败后查店名别名表
+   ``_STORE_ALIASES``（归一化键 → 正式店名，尊重渠道作用域；只登记
+   实测高频错名，不做模糊归一化匹配——短品牌词会错配，宁缺毋滥）。
 
 ``/店铺映射表`` 指令回复「渠道｜编号｜店名｜负责人」全表（可贴群公告）。
 
@@ -198,8 +201,42 @@ def _resolve_date(month, day, *, today):
     return candidate
 
 
+#: 店名归一化（别名键用）：去渠道前缀与店型后缀，不改正式店名。
+_STORE_CHANNEL_PREFIXES = ("PDD", "JD", "TM", "DY", "MC")
+_STORE_SUFFIXES = ("旗舰店", "专卖店", "专营店")
+
+#: 店名别名（归一化后键 → 正式店名）：包含互查救不回来的实测高频错名。
+#: 来源 = rejected 审计（2026-10-09，17 条「未找到门店」）。新增条目必须
+#: 有 rejected 审计依据，键经 :func:`_normalize_store_name` 归一。
+_STORE_ALIASES = {
+    "购喝": "JD购喝",  # 「购喝旗舰店」（王城 09-30 / 王蕊 10-07）
+    "金沙习水村": "JD金沙专卖店",  # 「金沙习水村专卖店」（王蕊 10-07）
+    "习酒习水村": "JD习水村习酒专卖店",  # 词序颠倒（王蕊 10-07）
+    "习酒平澜路习水村": "PDD习酒平澜路专卖店",  # ×12（王城/李帆/杨美聪）
+}
+
+
+def _normalize_store_name(text):
+    """店名归一：去渠道前缀与店型后缀（别名键专用）。"""
+    name = str(text or "").strip()
+    upper = name.upper()
+    for prefix in _STORE_CHANNEL_PREFIXES:
+        if upper.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    for suffix in _STORE_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name.strip()
+
+
 def _match_store(token, *, roster, channel_hint=None):
-    """店名包含互查 → ``(store, channel)`` / ``("AMBIGUOUS", candidates)`` / ``None``。"""
+    """店名匹配 → ``(store, channel)`` / ``("AMBIGUOUS", candidates)`` / ``None``。
+
+    两级：包含互查 → 店名别名（2026-10-09 容错扩展，别名命中须落在
+    渠道作用域内；不做模糊归一化匹配，短品牌词错配风险宁缺毋滥）。
+    """
     scope = roster.stores
     if channel_hint:
         scoped = {s: c for s, c in roster.stores.items() if c == channel_hint}
@@ -212,6 +249,9 @@ def _match_store(token, *, roster, channel_hint=None):
         return candidates[0], scope[candidates[0]]
     if candidates:
         return "AMBIGUOUS", sorted(candidates)
+    canonical = _STORE_ALIASES.get(_normalize_store_name(token))
+    if canonical and canonical in scope:
+        return canonical, scope[canonical]
     return None
 
 

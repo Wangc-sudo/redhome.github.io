@@ -231,6 +231,65 @@ class StoreNameParseTest(unittest.TestCase):
         self.assertEqual(entries[0].amount, 100)
 
 
+#: 归一化匹配测试用名册：补一家 PDD习酒平澜路专卖店（rejected 审计原型）。
+_NORM_ROSTER = build_roster(make_rows() + [{
+    "store_name": "PDD习酒平澜路专卖店", "channel": "拼多多",
+    "monthly_target": 300000,
+    "owners_json": json.dumps([{"name": "侯仙姚"}]),
+}])
+
+
+def _parse_norm(text):
+    return parse_fill_text(text, today=_TODAY, roster=_NORM_ROSTER)
+
+
+class StoreNameNormalizationTest(unittest.TestCase):
+    """归一化别名 + 归一化包含互查（2026-10-09 rejected 审计驱动）。"""
+
+    def test_suffix_variant_resolves(self):
+        # 「购喝旗舰店」→ JD购喝（真实 rejected：王城/王蕊 9-30/10-07）
+        entries, rejects = _parse_norm("京东 购喝旗舰店 13427")
+        self.assertEqual(rejects, [])
+        self.assertEqual(entries[0].store_name, "JD购喝")
+
+    def test_extra_brand_word_resolves(self):
+        # 「金沙习水村专卖店」→ JD金沙专卖店（真实 rejected：王蕊 10-07）
+        entries, rejects = _parse_norm("京东 金沙习水村专卖店 0")
+        self.assertEqual(rejects, [])
+        self.assertEqual(entries[0].store_name, "JD金沙专卖店")
+
+    def test_word_order_alias_resolves(self):
+        # 「习酒习水村专卖店」词序颠倒 → 别名命中 JD习水村习酒专卖店
+        entries, rejects = _parse_norm("京东 习酒习水村专卖店 18347")
+        self.assertEqual(rejects, [])
+        self.assertEqual(entries[0].store_name, "JD习水村习酒专卖店")
+
+    def test_pinglanlu_long_name_resolves(self):
+        # 「习酒平澜路习水村专卖店」→ PDD习酒平澜路专卖店
+        # （真实 rejected ×12：王城/李帆/杨美聪 9-30~10-07）
+        entries, rejects = _parse_norm("拼多多 习酒平澜路习水村专卖店 19779")
+        self.assertEqual(rejects, [])
+        self.assertEqual(entries[0].store_name, "PDD习酒平澜路专卖店")
+
+    def test_alias_respects_channel_scope(self):
+        # 别名目标是京东店；渠道词拼多多时不得越渠道命中
+        entries, rejects = _parse_norm("拼多多 习酒习水村专卖店 100")
+        self.assertEqual(entries, [])
+        self.assertIn("未找到门店", rejects[0].reason)
+
+    def test_unregistered_variant_still_rejected(self):
+        # 未登记别名的变体（「习水村专卖店」跨两家近似店）→ 仍拒，
+        # 不做模糊猜测（宁缺毋滥，引导 /店铺映射表 用编号）
+        entries, rejects = _parse_norm("京东 习水村专卖店 100")
+        self.assertEqual(entries, [])
+        self.assertIn("未找到门店", rejects[0].reason)
+
+    def test_unknown_store_still_rejected(self):
+        entries, rejects = _parse_norm("京东 不存在的店 100")
+        self.assertEqual(entries, [])
+        self.assertIn("未找到门店", rejects[0].reason)
+
+
 class MappingTableTest(unittest.TestCase):
     def test_table_contains_channels_numbers_owners(self):
         # legacy 行（名册未切源）：owners_json 全部按负责人展示；
