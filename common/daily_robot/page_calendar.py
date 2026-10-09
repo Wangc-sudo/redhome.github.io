@@ -50,14 +50,23 @@ def build_date_nav_panel(*, page_date, workday_dates, available_dates,
     )
     next_days = [d for d in available if d >= next_first]
     prev_link = (
-        f'<a href="{stem}-{max(prev_days):%Y-%m-%d}.html">'
+        f'<a class="cal-pill" href="{stem}-{max(prev_days):%Y-%m-%d}.html">'
         f'« {max(prev_days):%Y-%m}</a>'
         if prev_days else ""
     )
     next_link = (
-        f'<a href="{stem}-{min(next_days):%Y-%m-%d}.html">'
+        f'<a class="cal-pill" href="{stem}-{min(next_days):%Y-%m-%d}.html">'
         f'{min(next_days):%Y-%m} »</a>'
         if next_days else ""
+    )
+
+    # ---- 相邻存档预取（点击接近秒开：静态页整页刷新不可避免，预取补）----
+    earlier = [d for d in available if d < page_date]
+    later = [d for d in available if d > page_date]
+    prefetch = "".join(
+        f'<link rel="prefetch" href="{stem}-{d:%Y-%m-%d}.html">'
+        for d in ([max(earlier)] if earlier else [])
+        + ([min(later)] if later else [])
     )
 
     # ---- 月历格子 ----
@@ -83,14 +92,14 @@ def build_date_nav_panel(*, page_date, workday_dates, available_dates,
 
     head = "".join(f"<th>{w}</th>" for w in _WEEKDAYS)
     return (
-        '<div class="panel">\n'
-        '  <div class="cal-nav">'
-        f'<span class="cal-side">{prev_link}</span>'
-        f'<h2 style="margin:0">选择日期（蓝色为工作日）· {year}年{month}月</h2>'
-        f'<span class="cal-side">{next_link}</span></div>\n'
+        f'<div class="panel cal-panel">{prefetch}\n'
+        '  <div class="cal-head">'
+        f'<h2>选择日期<span class="muted small">　蓝色为工作日 · '
+        f'{year}年{month}月</span></h2>'
+        f'<span class="cal-nav">{prev_link}{next_link}</span></div>\n'
         f'  <table class="cal"><thead><tr>{head}</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table>\n'
-        '  <div class="small muted" style="margin-top:6px;text-align:center">'
+        '  <div class="small muted" style="margin-top:4px">'
         '蓝色加粗可点击 = 翻看当天榜单；蓝色 = 工作日（当天榜单未生成）；'
         '灰色 = 非工作日</div>\n'
         '</div>'
@@ -100,20 +109,24 @@ def build_date_nav_panel(*, page_date, workday_dates, available_dates,
 #: 注入榜单页 <style> 的月历样式（注意：榜单页 style 段在 f-string 内，
 #: 调用方拼接时本串不含花括号，无需转义）。
 DATE_NAV_CSS = (
-    ".cal{border-collapse:separate;border-spacing:4px;width:auto;"
-    "margin:0 auto}\n"
-    ".cal th{border:none;padding:4px 6px;text-align:center}\n"
+    ".cal-panel{padding:12px 16px}\n"
+    ".cal-head{display:flex;justify-content:space-between;align-items:center;"
+    "margin-bottom:6px}\n"
+    ".cal-head h2{margin:0}\n"
+    ".cal-pill{display:inline-block;background:#eef0f3;border-radius:6px;"
+    "padding:2px 10px;font-size:12px;color:#1a73e8;text-decoration:none;"
+    "margin-left:6px}\n"
+    ".cal-pill:hover{background:#e8f0fe}\n"
+    ".cal{border-collapse:separate;border-spacing:2px;width:auto;margin:0}\n"
+    ".cal th{border:none;padding:2px 4px;text-align:center}\n"
     ".cal td{border:none;padding:0;text-align:center}\n"
-    ".cal a,.cal span{display:inline-block;width:34px;height:34px;"
-    "line-height:34px;border-radius:8px;font-size:13px;text-decoration:none}\n"
+    ".cal a,.cal span{display:inline-block;width:30px;height:30px;"
+    "line-height:30px;border-radius:7px;font-size:13px;text-decoration:none;"
+    "transition:background .15s,color .15s}\n"
     ".cal a{background:#e8f0fe;color:#1a73e8;font-weight:700}\n"
-    ".cal a:hover{background:#d2e3fc}\n"
+    ".cal a:hover{background:#1a73e8;color:#fff}\n"
     ".cal .wd{color:#1a73e8;font-weight:700}\n"
     ".cal .off{color:#b8bdc7}\n"
-    ".cal .adj{color:#d6dae0}\n"
+    ".cal .adj{color:#dde1e7}\n"
     ".cal .cur a,.cal .cur span{outline:2px solid #1a73e8}\n"
-    ".cal-nav{display:flex;justify-content:space-between;align-items:center;"
-    "margin-bottom:8px}\n"
-    ".cal-nav a{color:#1a73e8;text-decoration:none;font-size:13px}\n"
-    ".cal-side{min-width:64px}\n"
 )
