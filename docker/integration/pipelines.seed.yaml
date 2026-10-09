@@ -226,6 +226,22 @@ offline-monthly-summary:
   schedule: "0 10 1 * *"
   reads: [mart_ops]
   description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
+# 月目标双管道（2026-10-09 运维裁决「结转+月度提醒」）：dim_report_target
+# 按月键控、翻月无行会静默走 Nacos 旧值兜底——1 日结转 + 28 日提醒核对。
+target-remind:
+  kind: business
+  category: 播报
+  enabled: true
+  schedule: "0 10 28 * *"
+  reads: [mart_ops]
+  description: "month-end target verification reminder to region groups (next-month carry-over notice)"
+target-rollover:
+  kind: business
+  category: 加工
+  enabled: true
+  schedule: "0 6 1 * *"
+  reads: [mart_ops]
+  description: "monthly target carry-over (prev month -> current month, idempotent, manual entries win)"
 robot-shaoxing:
   kind: business
   category: 催办
