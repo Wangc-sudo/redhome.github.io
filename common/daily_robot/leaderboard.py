@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.dingtalk import DingTalkClient
+from common.daily_robot.page_calendar import DATE_NAV_CSS as _DATE_NAV_CSS
 
 
 def _parse_num(v):
@@ -184,7 +185,7 @@ def build_bc_markdown(config, url=None, projects=None):
 
 
 def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
-               dept_overrides=None):
+               dept_overrides=None, date_nav=None):
     """榜单页 HTML。
 
     *extra_panels*：可选的预渲染 panel HTML 字符串列表（完整
@@ -193,6 +194,11 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
 
     *dept_overrides*：可选 ``{部门: {"completed", "target"}}`` 店铺粒度
     真值覆盖（qudao 专用；不传即原 Σ 成员口径，输出与历史逐字一致）。
+
+    *date_nav*：可选的日期选择月历面板 HTML（完整
+    ``<div class="panel">``，common.daily_robot.page_calendar 产出），
+    插在页头信息行之后、概览卡片之前（2026-10-09 运维裁决「日历点日期，
+    蓝为工作日」）；不传则不渲染面板与样式，输出与历史逐字一致。
     """
     if projects is not None:
         people = [p for p in people if p["dept"] in projects]
@@ -402,9 +408,11 @@ table.mini td,table.mini th{{padding:4px 6px}}
 .split{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
 @media(max-width:760px){{.split{{grid-template-columns:1fr}}.bar{{min-width:90px}}}}
 .pill{{display:inline-block;background:#eef0f3;border-radius:6px;padding:2px 10px;font-size:12px;color:#4e5761;margin-right:6px}}
-</style></head><body>
+{_DATE_NAV_CSS if date_nav else ""}</style></head><body>
 <h1>{html_mod.escape(display)}销售日报 · 完成率榜单</h1>
 <div class="sub">{now.year}年{month}月 · {now.month}月{elapsed[-1] if elapsed else now.day}日（周{weekday}） · 数据截至 {stat_thru} · 生成于 {gen_time}</div>
+
+{date_nav or ""}
 
 <div class="cards">
   <div class="card"><div class="k">时间进度</div><div class="v">{_fmt_pct(progress)}</div><div class="s">{n_elapsed} / {n_total} 个工作日</div></div>

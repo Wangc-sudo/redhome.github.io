@@ -343,6 +343,54 @@ class LeaderboardHtmlCliTests(unittest.TestCase):
         self.assertIn("status=written", text)
         self.assertIn("people=1", text)
 
+    def test_writes_archive_copy_and_passes_date_nav(self):
+        """2026-10-09「日历点日期」：同内容双写存档页，月历面板进渲染。"""
+        import tempfile
+
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        data = LeaderboardData(
+            business_date=date(2026, 10, 9),
+            elapsed=(1, 2),
+            people=({"name": "李四", "dept": "滨萧", "target": 1000,
+                     "completed": 500.0, "unfilled": 0, "rate": 0.5},),
+            workdays=frozenset({date(2026, 10, 8), date(2026, 10, 9)}),
+        )
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"hangzhou": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart"), \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.build_html_page",
+                   return_value="<html>完成率榜单</html>") as build_page, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 10, 9, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            target = Path(tmp) / "hangzhou.html"
+            with redirect_stdout(output):
+                main([
+                    "leaderboard-html", "--confirm-local-test-write",
+                    "--region", "hangzhou", "--output", str(target),
+                ])
+
+            archive = Path(tmp) / "hangzhou-2026-10-09.html"
+            self.assertEqual("<html>完成率榜单</html>",
+                             archive.read_text(encoding="utf-8"))
+            # 月历面板入参：工作日真源 + 存档可点集合（含本页）
+            kwargs = build_page.call_args.kwargs
+            self.assertIn("date_nav", kwargs)
+            self.assertIn('href="hangzhou-2026-10-09.html"',
+                          kwargs["date_nav"])
+        self.assertIn("archive=hangzhou-2026-10-09.html",
+                      output.getvalue())
+
     def test_leaderboard_html_requires_confirmation(self):
         with patch("common.daily_robot.mart_cli.load_settings") as load_settings:
             with self.assertRaises(SystemExit) as raised:
