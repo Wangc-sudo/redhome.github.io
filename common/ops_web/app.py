@@ -1575,8 +1575,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if sort not in _QUDAO_SORTS:
             sort = "channel"
         sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
-        # 目标月份导航（2026-10-09 月目标结转配套）：默认当月，可切下月
-        # 提前录入；渠道门店目标不带月份键，不受此切换影响。
+        # 目标月份导航（2026-10-09 月目标结转配套 + 运维反馈改日历选择器）：
+        # 快捷链接（本月/下月）+ <input type="month"> 任意月直达——历史月
+        # 核对、未来月提前录入都可；渠道门店目标不带月份键，不受此切换影响。
         next_month = _shift_year_month(current_month, 1)
         month_links = []
         for value, tag in ((current_month, "本月"), (next_month, "下月")):
@@ -1588,6 +1589,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         sections.append(
             "<p>区域个人月目标的目标月份：" + " ｜ ".join(month_links)
+            + "　<form method=\"get\" action=\"/roster\" "
+              "style=\"display:inline\">"
+            f"<input type=\"month\" name=\"month\" "
+            f"value=\"{_esc(selected_month)}\" required>"
+            "<button type=\"submit\">切换</button></form>"
             + "<span class=\"hint\">（每月 1 日 06:00 上月目标自动结转到当月，"
               "人工已录入的不覆盖；渠道门店目标不带月份，常年有效）</span></p>"
         )

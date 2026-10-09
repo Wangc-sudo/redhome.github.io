@@ -1388,6 +1388,9 @@ class RosterRegionTemplateTests(unittest.TestCase):
         # 保存按钮带目标月份（2026-10-09 月份切换：默认当月，可 ?month= 切下月）
         self.assertIn("saveRegionTargets('shaoxing', '", body)
         self.assertIn("区域个人月目标的目标月份：", body)
+        # 日历选择器（任意月直达）+ 本月/下月快捷链接
+        self.assertIn('<input type="month" name="month"', body)
+        self.assertRegex(body, r"/roster\?month=20\d{2}-\d{2}")
         # 停用链接：下拉当前值=停用
         self.assertIn('setRosterStatus(12, this.value)', body)
         self.assertIn('<option value="0" selected>停用</option>', body)
