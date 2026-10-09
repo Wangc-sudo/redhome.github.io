@@ -725,6 +725,101 @@ def fetch_intake_target(connection, scope, person_name, year_month):
     return float(value) if value is not None else None
 
 
+def fetch_target_month_summary(connection, year_month):
+    """指定年月的月目标概览：``{scope: {"people": int, "total": float}}``。
+
+    月末核对提醒（target-remind）与结转管道共用；NULL 目标行计人数
+    不计金额。无记录的 scope 不出现在结果里。
+    """
+    rows = _fetch_all(
+        connection,
+        "SELECT `scope`, COUNT(*) AS `n`, "
+        "COALESCE(SUM(`monthly_target`), 0) AS `t` "
+        "FROM `dim_report_target` WHERE `year_month` = %s GROUP BY `scope`",
+        (year_month,),
+    )
+    result = {}
+    for row in rows:
+        scope = row.get("scope") if isinstance(row, dict) else row[0]
+        people = row.get("n") if isinstance(row, dict) else row[1]
+        total = row.get("t") if isinstance(row, dict) else row[2]
+        if scope:
+            result[scope] = {"people": int(people), "total": float(total)}
+    return result
+
+
+def carry_forward_targets(connection, *, from_month, to_month, actor,
+                          apply=True):
+    """把 *from_month* 的全部月目标幂等结转到 *to_month*。
+
+    既有 ``(scope, person_name, to_month)`` 键一律跳过——人工已录入的
+    优先，绝不覆盖；每条实际插入同事务落一行审计（action='carry'）。
+    ``apply=False`` 为 dry-run：只读不写，返回同样的分类结果。
+    返回 ``{"inserted": [...], "skipped": [...]}``（元素为
+    ``(scope, person_name)``，按源表顺序；dry-run 下 inserted 为
+    「将会插入」）。
+    """
+    if not _YEAR_MONTH_RE.match(from_month or ""):
+        raise ReportRosterError("from_month must be YYYY-MM")
+    if not _YEAR_MONTH_RE.match(to_month or ""):
+        raise ReportRosterError("to_month must be YYYY-MM")
+    if from_month >= to_month:
+        raise ReportRosterError("from_month must be earlier than to_month")
+    rows = _fetch_all(
+        connection,
+        "SELECT `scope`, `person_name`, `monthly_target`, `note` "
+        "FROM `dim_report_target` WHERE `year_month` = %s "
+        "ORDER BY `scope`, `person_name`",
+        (from_month,),
+    )
+    inserted, skipped = [], []
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            for row in rows:
+                scope = row.get("scope") if isinstance(row, dict) else row[0]
+                name = row.get("person_name") if isinstance(row, dict) \
+                    else row[1]
+                target = row.get("monthly_target") if isinstance(row, dict) \
+                    else row[2]
+                note = row.get("note") if isinstance(row, dict) else row[3]
+                if not apply:
+                    cursor.execute(
+                        "SELECT 1 FROM `dim_report_target` "
+                        "WHERE `scope` = %s AND `person_name` = %s "
+                        "AND `year_month` = %s LIMIT 1",
+                        (scope, name, to_month),
+                    )
+                    (skipped if cursor.fetchone() else inserted).append(
+                        (scope, name))
+                    continue
+                cursor.execute(
+                    "INSERT IGNORE INTO `dim_report_target` "
+                    "(`scope`, `person_name`, `year_month`, `monthly_target`, "
+                    "`note`, `updated_by`, `updated_at`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (scope, name, to_month, target, note or None, actor,
+                     _utc_now_text()),
+                )
+                if cursor.rowcount != 1:
+                    skipped.append((scope, name))
+                    continue
+                inserted.append((scope, name))
+                _insert_audit(
+                    connection, actor, "carry",
+                    RosterEntry(scope, "person", to_month, name),
+                    detail=(
+                        f"结转 {from_month}→{to_month} "
+                        f"月目标={float(target):.0f}"
+                        if target is not None
+                        else f"结转 {from_month}→{to_month} 月目标=清除"
+                    ),
+                )
+    finally:
+        cursor.close()
+    return {"inserted": inserted, "skipped": skipped}
+
+
 def fetch_scope_person_names(connection, scope):
     """该 scope 启用在册人员名集合（``entity_type='person'``）；无记录 → ``None``。
 

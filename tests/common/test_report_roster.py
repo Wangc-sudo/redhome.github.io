@@ -546,5 +546,97 @@ class ReportTargetTests(unittest.TestCase):
         self.assertEqual(["target", "target", "target"], actions)
 
 
+# -- 月目标结转（carry_forward_targets，2026-10-09 裁决「结转+月度提醒」） ------
+
+class CarryForwardTargetTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def _put(self, scope, name, month, target):
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(scope, name, month, target),
+            actor="admin")
+
+    def test_carry_inserts_and_audits(self):
+        self._put("hangzhou", "余发兴", "2026-10", 822000)
+        self._put("hangzhou", "卢炳华", "2026-10", 1022000)
+        self._put("shaoxing", "潘良峰", "2026-10", None)  # 清除行也结转
+
+        result = report_roster.carry_forward_targets(
+            self.db, from_month="2026-10", to_month="2026-11",
+            actor="target-rollover")
+
+        self.assertEqual(3, len(result["inserted"]))
+        self.assertEqual([], result["skipped"])
+        self.assertEqual(
+            {"余发兴": 822000.0, "卢炳华": 1022000.0},
+            report_roster.fetch_person_targets(
+                self.db, "hangzhou", "2026-11"))
+        # 源月不被改动
+        self.assertEqual(
+            {"余发兴": 822000.0, "卢炳华": 1022000.0},
+            report_roster.fetch_person_targets(
+                self.db, "hangzhou", "2026-10"))
+        audits = [(r["actor"], r["action"])
+                  for r in report_roster.fetch_roster_audit(self.db)]
+        self.assertEqual(3, audits.count(("target-rollover", "carry")))
+        summary = report_roster.fetch_target_month_summary(self.db, "2026-11")
+        self.assertEqual(
+            {"hangzhou": {"people": 2, "total": 1844000.0},
+             "shaoxing": {"people": 1, "total": 0.0}},
+            summary)
+
+    def test_carry_is_idempotent_and_never_overwrites_manual(self):
+        self._put("hangzhou", "余发兴", "2026-10", 822000)
+        self._put("hangzhou", "卢炳华", "2026-10", 1022000)
+        # 人工已提前录入 11 月目标（与上月不同值）
+        self._put("hangzhou", "余发兴", "2026-11", 900000)
+
+        first = report_roster.carry_forward_targets(
+            self.db, from_month="2026-10", to_month="2026-11",
+            actor="target-rollover")
+        self.assertEqual([("hangzhou", "卢炳华")], first["inserted"])
+        self.assertEqual([("hangzhou", "余发兴")], first["skipped"])
+        # 人工值不被结转覆盖
+        self.assertEqual(900000.0, report_roster.fetch_intake_target(
+            self.db, "hangzhou", "余发兴", "2026-11"))
+
+        # 复跑全跳过、零新增审计
+        second = report_roster.carry_forward_targets(
+            self.db, from_month="2026-10", to_month="2026-11",
+            actor="target-rollover")
+        self.assertEqual([], second["inserted"])
+        self.assertEqual(2, len(second["skipped"]))
+        carries = [r for r in report_roster.fetch_roster_audit(self.db)
+                   if r["action"] == "carry"]
+        self.assertEqual(1, len(carries))
+
+    def test_carry_dry_run_writes_nothing(self):
+        self._put("hangzhou", "余发兴", "2026-10", 822000)
+        result = report_roster.carry_forward_targets(
+            self.db, from_month="2026-10", to_month="2026-11",
+            actor="target-rollover", apply=False)
+        self.assertEqual([("hangzhou", "余发兴")], result["inserted"])
+        self.assertEqual({}, report_roster.fetch_person_targets(
+            self.db, "hangzhou", "2026-11"))
+        self.assertEqual([], [
+            r for r in report_roster.fetch_roster_audit(self.db)
+            if r["action"] == "carry"
+        ])
+
+    def test_carry_rejects_bad_months(self):
+        for from_month, to_month in (
+            ("2026-13", "2026-11"), ("2026-10", "2026-1"),
+            ("2026-11", "2026-10"),  # 倒退
+            ("2026-10", "2026-10"),  # 同月
+        ):
+            with self.assertRaises(ReportRosterError,
+                                   msg=(from_month, to_month)):
+                report_roster.carry_forward_targets(
+                    self.db, from_month=from_month, to_month=to_month,
+                    actor="target-rollover")
+
+
 if __name__ == "__main__":
     unittest.main()

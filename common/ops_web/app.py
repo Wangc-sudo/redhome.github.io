@@ -20,6 +20,7 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -201,7 +202,7 @@ function addRoster(ev) {
 function setRosterStatus(id, value) {
   postJSON('/api/roster/toggle', {id: id, enabled: value === '1'});
 }
-async function saveRegionTargets(scope) {
+async function saveRegionTargets(scope, yearMonth) {
   const rows = [];
   document.querySelectorAll('input.person-target[data-scope="' + scope + '"]').forEach(function (el) {
     const raw = el.value.trim();
@@ -210,7 +211,7 @@ async function saveRegionTargets(scope) {
   const resp = await fetch('/api/roster/region-targets', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({scope: scope, rows: rows}),
+    body: JSON.stringify({scope: scope, year_month: yearMonth, rows: rows}),
   });
   if (resp.ok) { location.reload(); return; }
   alert('保存失败（' + resp.status + '）');
@@ -275,6 +276,13 @@ def _current_year_month():
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m")
 
 
+def _shift_year_month(year_month, months):
+    """``YYYY-MM`` 平移 *months* 个月（名册页「下月」导航）。"""
+    year, month = (int(part) for part in year_month.split("-"))
+    index = year * 12 + (month - 1) + months
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
 def _fmt_time(value):
     """UTC 存储时间 → 北京时间字符串；None/认不出的原样返回。
     入参兼容 pymysql 返回的 datetime 与字符串两种形态；naive 一律按 UTC
@@ -312,7 +320,7 @@ _TRIGGER_LABEL = {"cron": "定时", "run_once": "手动"}
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
-    "update": "修正",
+    "update": "修正", "carry": "结转",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -358,6 +366,8 @@ _SERVICE_LABELS = {
     "offline-daily-summary": "线下整体每日汇总（板块 + 日环比 + 月累计）",
     "offline-weekly-summary": "线下整体每周汇总（上周总量 + 周环比 + 排名）",
     "offline-monthly-summary": "线下整体每月汇总（上月总量 + 月环比 + 达成率排名）",
+    "target-remind": "月目标核对提醒（每月 28 日 → 有目标的区域群，附名册页入口）",
+    "target-rollover": "月目标自动结转（每月 1 日把上月目标幂等结转到当月，人工已录入不覆盖）",
     "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
     "sync-runner": "旧版合并同步（双源，遗留入口）",
     "bi-web": "BI 看板（L1/L2，只读 mart_ops，常驻）",
@@ -395,6 +405,8 @@ _SERVICE_NAMES = {
     "offline-daily-summary": "线下每日汇总",
     "offline-weekly-summary": "线下每周汇总",
     "offline-monthly-summary": "线下每月汇总",
+    "target-remind": "月目标核对提醒",
+    "target-rollover": "月目标自动结转",
     "dingtalk-gateway": "钉钉网关",
     "sync-runner": "合并同步（旧）",
     "bi-web": "BI 看板",
@@ -1536,11 +1548,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 qudao_targets = channel_target.fetch_store_targets(connection)
                 qudao_numbers = report_roster.fetch_store_numbers(connection)
                 # 区域个人月目标（dim_report_target，「所有数据入库」）：
-                # 当月（北京时间）各人目标，月目标列可编辑保存。
+                # 默认当月（北京时间），?month=YYYY-MM 可切到下月提前
+                # 录入（与 target-rollover 结转管道配合：人工已录入的键
+                # 结转时不覆盖）。
                 current_month = _current_year_month()
+                selected_month = (
+                    request.query_params.get("month") or current_month
+                )
+                if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])",
+                                    selected_month):
+                    selected_month = current_month
                 region_targets = {
                     scope: report_roster.fetch_person_targets(
-                        connection, scope, current_month)
+                        connection, scope, selected_month)
                     for scope in report_roster.SCOPES if scope != "qudao"
                 }
         except Exception as exc:
@@ -1555,6 +1575,22 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if sort not in _QUDAO_SORTS:
             sort = "channel"
         sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
+        # 目标月份导航（2026-10-09 月目标结转配套）：默认当月，可切下月
+        # 提前录入；渠道门店目标不带月份键，不受此切换影响。
+        next_month = _shift_year_month(current_month, 1)
+        month_links = []
+        for value, tag in ((current_month, "本月"), (next_month, "下月")):
+            label = f"{value}（{tag}）"
+            month_links.append(
+                f"<strong>{_esc(label)}</strong>"
+                if value == selected_month
+                else f"<a href=\"/roster?month={_esc(value)}\">{_esc(label)}</a>"
+            )
+        sections.append(
+            "<p>区域个人月目标的目标月份：" + " ｜ ".join(month_links)
+            + "<span class=\"hint\">（每月 1 日 06:00 上月目标自动结转到当月，"
+              "人工已录入的不覆盖；渠道门店目标不带月份，常年有效）</span></p>"
+        )
         for scope in report_roster.SCOPES:
             rows = by_scope.get(scope) or []
             if scope == "qudao":
@@ -1637,8 +1673,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "<th>月目标（元）</th><th>负责人</th><th>代填报人</th>"
                 "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
-                f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}')\">"
-                f"保存{_esc(scope_label)}{_esc(current_month)}月目标</button>"
+                f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}', "
+                f"'{_esc(selected_month)}')\">"
+                f"保存{_esc(scope_label)}{_esc(selected_month)}月目标</button>"
                 "<span class=\"hint\">（单位：元，空白 = 清除该人当月目标；"
                 "保存即生效——机器人报数快照同步读取，逐条落审计）</span></p>"
             )
@@ -1777,7 +1814,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if scope not in report_roster.SCOPES or scope == "qudao" \
                 or not isinstance(rows, list):
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
-        year_month = _current_year_month()
+        # 目标月份（2026-10-09 起可指定下月提前录入；缺省当月，非法回退当月）
+        year_month = payload.get("year_month") or _current_year_month()
+        if not isinstance(year_month, str) or not re.fullmatch(
+                r"20\d{2}-(0[1-9]|1[0-2])", year_month):
+            year_month = _current_year_month()
         try:
             entries = [
                 report_roster.validate_target_fields(

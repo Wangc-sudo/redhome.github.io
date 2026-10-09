@@ -81,6 +81,16 @@ def run_offline_daily_task(conn, outbox, **kwargs):
     return run_daily_summary(conn, outbox, **kwargs)
 
 
+def run_target_rollover_task(conn, **kwargs):
+    from common.daily_robot.target_rollover import run_rollover
+    return run_rollover(conn, **kwargs)
+
+
+def run_target_remind_task(conn, outbox, **kwargs):
+    from common.daily_robot.target_rollover import run_remind
+    return run_remind(conn, outbox, **kwargs)
+
+
 def run_offline_weekly_task(conn, outbox, **kwargs):
     from common.daily_robot.offline_summary import run_weekly_summary
     return run_weekly_summary(conn, outbox, **kwargs)
@@ -632,6 +642,104 @@ def _handle_channel_missing(args):
         sys.exit(1)
 
 
+def _handle_target_rollover(args):
+    """月目标结转（每月 1 日 06:00）：上月 dim_report_target 幂等结转到当月。
+
+    跨区域数据任务（不绑 region、不发消息）；``--dry`` 只打印将结转/
+    将跳过的名单，不写库（人工已录入的键永不覆盖）。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        now = datetime.now()
+        anchor = (
+            date.fromisoformat(args.date)
+            if getattr(args, "date", None) else now.date()
+        )
+
+        conn = connect_mart(settings)
+        result = run_target_rollover_task(conn, anchor_date=anchor,
+                                          apply=not args.dry)
+        print(
+            f"service={service_id} kind=target_rollover "
+            f"from={result['from_month']} to={result['to_month']} "
+            f"inserted={len(result['inserted'])} "
+            f"skipped={len(result['skipped'])} "
+            f"status={'dry' if args.dry else 'carried'}"
+        )
+        for scope, name in result["inserted"]:
+            print(f"  {'would-carry' if args.dry else 'carried'} "
+                  f"{scope} | {name}")
+        for scope, name in result["skipped"]:
+            print(f"  kept-manual {scope} | {name}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
+def _handle_target_remind(args):
+    """月目标核对提醒（每月 28 日 10:00）：当月有目标的区域群各一条。
+
+    跨区域播报（region 来自各 scope 自身，不需要 ROBOT_REGION）。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        seed_path = getattr(settings, "region_seed_path", None)
+        if seed_path is None:
+            _print_failure("region_seed_required")
+            sys.exit(1)
+        configs = load_region_configs(seed_path)
+
+        now = datetime.now()
+        anchor = (
+            date.fromisoformat(args.date)
+            if getattr(args, "date", None) else now.date()
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        results = run_target_remind_task(
+            conn, outbox, region_configs=configs, anchor_date=anchor, now=now,
+            dedupe_suffix=_force_suffix(args, now),
+        )
+        conn.commit()
+        sent = sum(1 for _, status in results if status == "enqueued")
+        print(
+            f"service={service_id} kind=target_remind "
+            f"scopes={len(results)} enqueued={sent}"
+        )
+        for scope, status in results:
+            print(f"  {status} {scope}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 def _handle_leaderboard_html(args):
     """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
     if not args.confirm_local_test_write:
@@ -796,6 +904,53 @@ def main(argv=None):
         help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
 
+    # -- target-rollover -------------------------------------------------------
+    rollover_sub = subparsers.add_parser(
+        "target-rollover",
+        help="Carry last month's dim_report_target into the current month "
+             "(1st 06:00, idempotent, manual entries win)",
+    )
+    rollover_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    rollover_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    rollover_sub.add_argument(
+        "--date", default=None,
+        help="anchor date override (YYYY-MM-DD, default: today); "
+             "its month is the carry target",
+    )
+    rollover_sub.add_argument(
+        "--dry", action="store_true", default=False,
+        help="print the would-be carry/skip lists only; nothing written",
+    )
+
+    # -- target-remind ---------------------------------------------------------
+    target_remind_sub = subparsers.add_parser(
+        "target-remind",
+        help="Month-end target verification reminder to region groups "
+             "(28th 10:00)",
+    )
+    target_remind_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    target_remind_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    target_remind_sub.add_argument(
+        "--date", default=None,
+        help="anchor date override (YYYY-MM-DD, default: today)",
+    )
+    target_remind_sub.add_argument(
+        "--force", action="store_true", default=False,
+        help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
+    )
+
     # -- leaderboard-html ------------------------------------------------------
     html_sub = subparsers.add_parser(
         "leaderboard-html", help="Render the leaderboard HTML page to a file"
@@ -834,6 +989,12 @@ def main(argv=None):
         return
     if args.command == "channel-missing":
         _handle_channel_missing(args)
+        return
+    if args.command == "target-rollover":
+        _handle_target_rollover(args)
+        return
+    if args.command == "target-remind":
+        _handle_target_remind(args)
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

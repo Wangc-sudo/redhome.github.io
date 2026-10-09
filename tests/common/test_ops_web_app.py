@@ -1385,7 +1385,9 @@ class RosterRegionTemplateTests(unittest.TestCase):
         # 个人月目标为可编辑输入（入库真源），含保存按钮
         self.assertIn('class="person-target"', body)
         self.assertIn('data-name="潘良峰" value="383000"', body)
-        self.assertIn("saveRegionTargets('shaoxing')", body)
+        # 保存按钮带目标月份（2026-10-09 月份切换：默认当月，可 ?month= 切下月）
+        self.assertIn("saveRegionTargets('shaoxing', '", body)
+        self.assertIn("区域个人月目标的目标月份：", body)
         # 停用链接：下拉当前值=停用
         self.assertIn('setRosterStatus(12, this.value)', body)
         self.assertIn('<option value="0" selected>停用</option>', body)
@@ -1441,6 +1443,23 @@ class RegionTargetsApiTests(unittest.TestCase):
                           entry.monthly_target))
         self.assertEqual(ADMIN_USERID, actor)
         self.assertIsNone(saved[1][0].monthly_target)  # 空白 = 清除
+
+    def test_save_accepts_explicit_year_month(self):
+        """2026-10-09 月份切换：可指定下月提前录入（结转管道不覆盖人工键）。"""
+        saved = []
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                report_roster, "upsert_report_target",
+                lambda conn, entry, *, actor: saved.append(entry)):
+            response = client.post("/api/roster/region-targets", json={
+                "scope": "hangzhou",
+                "year_month": "2099-11",
+                "rows": [{"person_name": "余发兴", "monthly_target": 822000}],
+            })
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("2099-11", saved[0].year_month)
 
     def test_save_rejects_invalid_payload_and_requires_manager(self):
         client = TestClient(_app(viewer=_admin_viewer()))

@@ -175,6 +175,10 @@ _COMMAND_TABLE = {
     "offline-daily-summary": _mart_cli_entry("offline-daily", region="offline_all"),
     "offline-weekly-summary": _mart_cli_entry("offline-weekly", region="offline_all"),
     "offline-monthly-summary": _mart_cli_entry("offline-monthly", region="offline_all"),
+    # 月目标双管道（2026-10-09 裁决「结转+月度提醒」）：跨区域任务，
+    # 不注入 ROBOT_REGION；remind 的投递 region 由各 scope 自身决定。
+    "target-rollover": _mart_cli_entry("target-rollover"),
+    "target-remind": _mart_cli_entry("target-remind"),
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable
@@ -281,7 +285,7 @@ def build_argv(service_id, settings):
 _FORCEABLE_MART_SUBCOMMANDS = frozenset({
     "remind", "check", "once",
     "offline-daily", "offline-weekly", "offline-monthly",
-    "channel-missing",
+    "channel-missing", "target-remind",
 })
 
 
