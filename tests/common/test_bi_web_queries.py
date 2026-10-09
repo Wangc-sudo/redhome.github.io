@@ -2485,6 +2485,156 @@ def _shaoxing_people_facts():
     ]
 
 
+class HzDashboardTests(unittest.TestCase):
+    """杭州线下销售BI看板（hz-offline-sales，2026-10-09 裁决）：
+
+    区域钉死 hangzhou（fact 表 region 列真值为英文 key，2026-10-09 云上
+    DISTINCT 实测）；全卡 date 锚定；达成率真源 = mart_collect。
+    """
+
+    def _calendar_rows(self):
+        return [
+            {"business_date": date(2026, 8, 3)},
+            {"business_date": date(2026, 8, 4)},
+            {"business_date": date(2026, 8, 5)},
+        ]
+
+    def _people_connection(self):
+        facts = [
+            {
+                "region": "hangzhou",
+                "responsible_person": "张三",
+                "department": "零售一组",
+                "business_date": date(2026, 8, 3),
+                "sales_amount": Decimal("30"),
+                "monthly_target": Decimal("100"),
+            },
+            {
+                "region": "hangzhou",
+                "responsible_person": "张三",
+                "department": "零售一组",
+                "business_date": date(2026, 8, 4),
+                "sales_amount": Decimal("40"),
+                "monthly_target": Decimal("100"),
+            },
+            {
+                "region": "hangzhou",
+                "responsible_person": "李四",
+                "department": None,
+                "business_date": date(2026, 8, 3),
+                "sales_amount": Decimal("10"),
+                "monthly_target": None,
+            },
+        ]
+        return _PeopleFakeConnection(
+            rowsets={
+                "dim_calendar": self._calendar_rows(),
+                "fact_daily_report_offline": facts,
+            }
+        )
+
+    def test_workday_options_maps_dates_to_iso_strings(self):
+        connection = FakeConnection(
+            rowsets={
+                "dim_calendar": [
+                    {"business_date": date(2026, 8, 3)},
+                    {"business_date": None},
+                    {"business_date": date(2026, 8, 4)},
+                ]
+            }
+        )
+        self.assertEqual(
+            ["2026-08-03", "2026-08-04"],
+            bi_web_queries.workday_options(connection),
+        )
+        sql = connection.executed[-1][0]
+        self.assertIn("is_workday", sql)
+        self.assertIn("CURDATE()", sql)  # 未来日截断
+
+    def test_kpi_hz_today_pins_region_and_excludes_summary(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": [{"s": Decimal("123")}]}
+        )
+        payload = bi_web_queries.run_kpi_hz_today(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(123.0, payload["value"])
+        self.assertEqual("2026-08-04", payload["date"])
+        sql, params = connection.executed[-1]
+        self.assertIn("'hangzhou'", sql)          # 区域钉死进 SQL（无注入面）
+        self.assertIn("%%合计%%", sql)
+        self.assertEqual((date(2026, 8, 4),), params)
+
+    def test_kpi_hz_progress_counts_elapsed_with_anchor_day(self):
+        connection = FakeConnection(
+            rowsets={"dim_calendar": self._calendar_rows()}
+        )
+        payload = bi_web_queries.run_kpi_hz_progress(
+            connection, {"date": "2026-08-04"})
+        # 含锚点当天（BI 实时口径）：elapsed={3,4}，total=3
+        self.assertEqual(2.0, payload["value"])
+        self.assertEqual(3.0, payload["target"])
+        self.assertAlmostEqual(2 / 3, payload["rate"])
+        self.assertEqual("个工作日", payload["unit"])
+
+    def test_kpi_hz_mtd_derives_month_from_date_anchor(self):
+        connection = _RegionFakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("80"),
+                "region_target": Decimal("100"),
+            }
+        )
+        payload = bi_web_queries.run_kpi_hz_mtd(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(80.0, payload["value"])
+        self.assertEqual(100.0, payload["target"])
+        self.assertEqual(0.8, payload["rate"])
+        # 区域钉 hangzhou、月窗口来自锚点日（8-01 起）
+        bound = [p for _, params in connection.executed for p in (params or ())]
+        self.assertIn("hangzhou", bound)
+        self.assertIn(date(2026, 8, 1), bound)
+
+    def test_table_hz_people_progress_full_columns(self):
+        payload = bi_web_queries.run_table_hz_people_progress(
+            self._people_connection(), {"date": "2026-08-04"})
+        self.assertEqual("2026-08-04", payload["date"])
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["rank", "name", "dept", "completed", "target", "rate",
+             "diff", "daily", "proj", "unfilled"],
+            keys,
+        )
+        first, second = payload["rows"]
+        # 张三：completed=70、rate=0.7、progress=2/3 → diff≈0.033、
+        # daily=35、proj=1.05、unfilled=0
+        self.assertEqual("张三", first["name"])
+        self.assertEqual(70.0, first["completed"])
+        self.assertEqual(0.7, first["rate"])
+        self.assertAlmostEqual(0.7 - 2 / 3, first["diff"])
+        self.assertEqual(35.0, first["daily"])
+        self.assertAlmostEqual(1.05, first["proj"])
+        self.assertEqual(0, first["unfilled"])
+        # 李四：无目标 → rate/diff/proj None，未填 1 天（8-04 缺行）
+        self.assertEqual("李四", second["name"])
+        self.assertIsNone(second["rate"])
+        self.assertIsNone(second["diff"])
+        self.assertIsNone(second["proj"])
+        self.assertEqual(1, second["unfilled"])
+
+    def test_table_hz_people_progress_degrades_without_calendar(self):
+        connection = _PeopleFakeConnection(
+            rowsets={"dim_calendar": [], "fact_daily_report_offline": []}
+        )
+        payload = bi_web_queries.run_table_hz_people_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual([], payload["rows"])
+
+    def test_anchor_falls_back_to_today_on_bad_date(self):
+        anchor = bi_web_queries._hz_anchor({"date": "not-a-date"})
+        self.assertEqual(datetime.now().date(), anchor)
+        anchor = bi_web_queries._hz_anchor({})
+        self.assertEqual(datetime.now().date(), anchor)
+
+
 class _PeopleFakeConnection(FakeConnection):
     """mart 路径 fake：事实行按最近一条语句的 region 参数过滤
     （模拟 fetch_month_facts 的 ``WHERE region = %s``）；日历行走 rowsets。"""

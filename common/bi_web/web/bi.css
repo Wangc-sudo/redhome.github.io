@@ -104,6 +104,24 @@ a{text-decoration:none;color:inherit}
 .filters .tail::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--primary);opacity:.75}
 .btn{height:34px;padding:0 14px;font:inherit;font-size:13px;background:var(--card-bg);color:var(--text-muted);
   border:1px solid var(--card-border);border-radius:var(--radius-pill);cursor:pointer;transition:all .16s}
+
+/* ---------- 工作日日历点选（dates 筛选源，杭州看板 2026-10-09） ---------- */
+.fcal-wrap{display:block;width:100%;height:auto;padding:10px 14px;border-radius:12px}
+.fcal-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.fcal-title{font-size:13px;font-weight:600;color:var(--ink)}
+.fcal-legend{font-size:11px;color:var(--text-subtle);margin-left:auto}
+.fcal-nav{width:26px;height:26px;border-radius:7px;border:1px solid var(--card-border);
+  background:#fff;cursor:pointer;color:var(--primary);font-size:14px;line-height:1;padding:0;
+  transition:background .15s,color .15s}
+.fcal-nav:hover{background:var(--primary);color:#fff}
+.fcal-grid{display:grid;grid-template-columns:repeat(7,30px);gap:2px}
+.fcal-wd-head{width:30px;text-align:center;font-size:11px;color:var(--text-subtle)}
+.fcal-cell{width:30px;height:30px;line-height:30px;text-align:center;border-radius:7px;
+  font-size:12.5px;border:0;background:transparent;padding:0}
+.fcal-work{color:var(--primary);font-weight:700;cursor:pointer;transition:background .15s,color .15s}
+.fcal-work:hover{background:var(--primary);color:#fff}
+.fcal-work.on{background:var(--primary);color:#fff}
+.fcal-off{color:#b8bdc7}
 .btn:hover{border-color:var(--primary);color:var(--primary);box-shadow:0 0 0 3px rgba(47,92,232,.1)}
 .seg{display:inline-flex;background:var(--track-bg);border-radius:var(--radius-pill);padding:3px}
 .seg button{height:28px;padding:0 14px;font:inherit;font-size:13px;border:0;background:transparent;

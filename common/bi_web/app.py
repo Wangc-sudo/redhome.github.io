@@ -231,6 +231,7 @@ _FILTER_SOURCE_QUERIES = {
     "sku_channels": queries.sku_channel_options,
     "entities": queries.entity_options,
     "granularity": queries.granularity_options,
+    "dates": queries.workday_options,
 }
 
 

@@ -47,7 +47,12 @@ function fetchJson(url){
   });
 }
 
+/* 旧静态页 URL → 看板别名（2026-10-09 裁决：8300/hangzhou.html 经 nginx
+ * 反代到本壳，URL 保留；别名命中时壳按对应看板渲染）。 */
+var PATH_ALIASES = {'/hangzhou.html': 'hz-offline-sales'};
+
 function dashboardId(){
+  if (PATH_ALIASES[location.pathname]) return PATH_ALIASES[location.pathname];
   var m = location.pathname.match(/^\/d\/([^/]+)/);
   return m ? decodeURIComponent(m[1]) : 'l1-cockpit';
 }
@@ -139,6 +144,92 @@ function resetLayout(){
   toast('已恢复默认布局');
 }
 
+/* 筛选变更 → 只重拉 params 声明过该 param 的卡（下拉与日历共用）。 */
+function reloadParam(param){
+  records.forEach(function(rec){
+    var ps = rec.placement.params || [];
+    if (ps.indexOf(param) >= 0) loadCard(currentDashId, rec);
+  });
+}
+
+/* 工作日日历点选（dates 筛选源；2026-10-09 运维裁决「日历可以选择工作
+ * 日，用点击日期，蓝为工作日」——语义与静态榜单页月历一致）。值域 =
+ * /api/v1/options/dates（已历工作日 ISO 全量，升序）；按月渲染：蓝=
+ * 工作日可点、灰=非工作日、选中反白；月份切换纯客户端（值域已在手）。
+ * 缺省选中 = 值域最后一个工作日（通常即今天或最近工作日）。 */
+function buildDateCalendar(spec, workdays){
+  var wdSet = {};
+  workdays.forEach(function(d){ wdSet[d] = true; });
+  function pad(n){ return (n < 10 ? '0' : '') + n; }
+  function iso(d){
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+  function parseIso(s){
+    var p = s.split('-');
+    return new Date(+p[0], (+p[1]) - 1, +p[2]);
+  }
+  var todayIso = iso(new Date());
+  var selected = currentFilters[spec.param] ||
+    (workdays.length ? workdays[workdays.length - 1] : todayIso);
+  currentFilters[spec.param] = selected;
+  var view = parseIso(selected.slice(0, 7) + '-01');
+
+  var wrap = el('div', 'filter fcal-wrap');
+  var head = el('div', 'fcal-head');
+  head.appendChild(el('span', 'filter-label', esc(spec.label || spec.param)));
+  var prev = el('button', 'fcal-nav', '‹');
+  var next = el('button', 'fcal-nav', '›');
+  prev.type = 'button'; next.type = 'button';
+  var title = el('span', 'fcal-title', '');
+  head.appendChild(prev); head.appendChild(title); head.appendChild(next);
+  head.appendChild(el('span', 'fcal-legend', '蓝=工作日'));
+  var grid = el('div', 'fcal-grid');
+  wrap.appendChild(head); wrap.appendChild(grid);
+
+  function render(){
+    title.textContent = view.getFullYear() + '年' + (view.getMonth() + 1) + '月';
+    clear(grid);
+    ['一', '二', '三', '四', '五', '六', '日'].forEach(function(w){
+      grid.appendChild(el('span', 'fcal-wd-head', w));
+    });
+    var first = new Date(view.getFullYear(), view.getMonth(), 1);
+    var lead = (first.getDay() + 6) % 7; /* 周一开头的前置空格 */
+    var i, d;
+    for (i = 0; i < lead; i++){
+      grid.appendChild(el('span', 'fcal-cell fcal-adj', ''));
+    }
+    var days = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+    for (d = 1; d <= days; d++){
+      var dayIso = iso(new Date(view.getFullYear(), view.getMonth(), d));
+      if (wdSet[dayIso]){
+        var cell = el('button', 'fcal-cell fcal-work', String(d));
+        cell.type = 'button';
+        cell.setAttribute('data-iso', dayIso);
+        if (dayIso === selected) cell.className += ' on';
+        cell.addEventListener('click', function(){
+          selected = this.getAttribute('data-iso');
+          currentFilters[spec.param] = selected;
+          render();
+          reloadParam(spec.param);
+        });
+        grid.appendChild(cell);
+      } else {
+        grid.appendChild(el('span', 'fcal-cell fcal-off', String(d)));
+      }
+    }
+  }
+  prev.addEventListener('click', function(){
+    view = new Date(view.getFullYear(), view.getMonth() - 1, 1);
+    render();
+  });
+  next.addEventListener('click', function(){
+    view = new Date(view.getFullYear(), view.getMonth() + 1, 1);
+    render();
+  });
+  render();
+  return wrap;
+}
+
 /* 一个筛选下拉：label + select（首项「全部」= 空值），选项来自
  * /api/v1/options/{source}；变更只重拉 params 声明过该 param 的卡。 */
 function buildFilters(def){
@@ -162,6 +253,10 @@ function buildFilters(def){
   var specs = def.filters || [];
   return Promise.all(specs.map(function(spec){
     return fetchJson('/api/v1/options/' + encodeURIComponent(spec.source)).then(function(payload){
+      if (spec.source === 'dates'){
+        bar.appendChild(buildDateCalendar(spec, payload.options || []));
+        return;
+      }
       var lab = el('label', 'filter');
       lab.appendChild(el('span', 'filter-label', esc(spec.label || spec.param)));
       var sel = document.createElement('select');
@@ -176,10 +271,7 @@ function buildFilters(def){
       });
       sel.addEventListener('change', function(){
         currentFilters[spec.param] = sel.value;
-        records.forEach(function(rec){
-          var ps = rec.placement.params || [];
-          if (ps.indexOf(spec.param) >= 0) loadCard(currentDashId, rec);
-        });
+        reloadParam(spec.param);
       });
       lab.appendChild(sel);
       bar.appendChild(lab);

@@ -45,6 +45,39 @@ l1-cockpit:
     - card: kpi_channel_dod
       title: "电商渠道日环比"
       span: 3
+# 杭州线下销售BI看板（2026-10-09 运维裁决：8300/hangzhou.html 静态榜单页
+# 切 BI，URL 保留走 nginx 反代方案 A——仅此看板经 8300 暴露，其余看板仍锁
+# 18080 办公网白名单）。区域钉死杭州；全卡锚定 date（工作日日历点选，蓝=
+# 工作日）；BI 实时口径含当天已报（与静态页 T-1 刻意不同）。300s 自动刷新
+# 满足常亮大屏；浅色管理台风（深色大屏主题裁决不做）。
+hz-offline-sales:
+  title: "杭州线下销售BI看板"
+  icon: "/static/icons/people.svg"
+  group: "经营驾驶舱"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 5
+  filters:
+    - {param: date, source: dates, label: "日期"}
+  cards:
+    - card: kpi_hz_mtd
+      title: "本月累计销售"
+      span: 4
+    - card: kpi_hz_today
+      title: "当日销售"
+      span: 4
+    - card: kpi_hz_progress
+      title: "时间进度"
+      span: 4
+    - card: trend_hz_daily
+      title: "杭州日销趋势"
+      span: 8
+    - card: bar_hz_dept
+      title: "部门本月排行"
+      span: 4
+    - card: table_hz_people_progress
+      title: "个人完成率榜"
+      span: 12
 l2-region:
   title: "区域下钻"
   icon: "/static/icons/region.svg"

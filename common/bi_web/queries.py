@@ -35,7 +35,7 @@ from common.bi_web import derived, fin_derived
 from common.calendar_utils import month_days
 from common.daily_robot.mart_leaderboard import mart_collect
 from common.daily_robot.mart_tasks import MartTaskError
-from common.metrics.daily_report import fetch_workdays
+from common.metrics.daily_report import elapsed_workdays, fetch_workdays
 
 #: Money unit for every chart payload (元; the front end formats 万).
 _UNIT = "元"
@@ -2852,3 +2852,175 @@ def run_table_contract_writeoff(connection, params) -> dict:
             {"key": "severity", "title": "预警", "format": "severity"},
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# 杭州线下销售BI看板（hz-offline-sales，2026-10-09 运维裁决）
+#
+# 8300/hangzhou.html 静态榜单页切 BI（URL 保留，nginx 反代方案 A：仅此
+# 看板经 8300 暴露，其余看板仍锁 18080 白名单）。全卡日期锚定 ``date``
+# 参数（工作日日历点选，值域 ``dates``），缺省=今天；BI 实时口径
+# ``include_today=True``（与静态页 T-1 不含当天刻意不同——看板价值即
+# 当天进展）。达成率/进度差真源 = mart_collect（与群播报/静态页同函数，
+# 杜绝三套口径漂移）。
+# ---------------------------------------------------------------------------
+
+#: 杭州看板区域钉（专属大屏，不给区域筛选）。
+_HZ_REGION = "hangzhou"
+
+#: 「日期」筛选值域：全部已历工作日（含今天；未来日不可选）。
+_WORKDAY_OPTIONS_SQL = (
+    "SELECT `business_date` FROM `dim_calendar` "
+    "WHERE `is_workday` = 1 AND `business_date` <= CURDATE() "
+    "ORDER BY `business_date`"
+)
+
+#: 杭州当日销售（排合计行；region 钉死无注入面）。
+_HZ_TODAY_SQL = (
+    "SELECT COALESCE(SUM(sales_amount), 0) AS `s` "
+    "FROM `fact_daily_report_offline` "
+    "WHERE `region` = 'hangzhou' AND `business_date` = %s "
+    "AND `responsible_person` NOT LIKE '%%合计%%'"
+)
+
+
+def workday_options(connection) -> list:
+    """筛选器「日期」日历点选值域：已历工作日 ISO 串升序。
+
+    前端月历按月渲染、蓝=工作日；未来日/非工作日不在值域（上游值闸
+    fail-open，非法值只会 400 不会注入）。
+    """
+    return [
+        str(row["business_date"])
+        for row in _fetch_rows(connection, _WORKDAY_OPTIONS_SQL)
+        if row["business_date"]
+    ]
+
+
+def _hz_anchor(params):
+    """杭州看板锚点日：``date`` 参数（YYYY-MM-DD），缺省/非法回退今天
+    （容器本地时钟；值域校验在 app 层，这里只兜底解析）。"""
+    raw = params.get("date")
+    if isinstance(raw, str) and raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return datetime.now().date()
+
+
+def run_kpi_hz_mtd(connection, params) -> dict:
+    """杭州本月累计 + 达成率（scalar）：kpi_region_mtd 的杭州锚定版
+    （月 = 锚点日所在月）。"""
+    anchor = _hz_anchor(params)
+    return run_kpi_region_mtd(
+        connection, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_kpi_hz_today(connection, params) -> dict:
+    """杭州当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。"""
+    anchor = _hz_anchor(params)
+    rows = _fetch_rows(connection, _HZ_TODAY_SQL, (anchor,))
+    value = rows[0]["s"] if rows else 0
+    return {
+        "chart": "scalar",
+        "value": float(value),
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_kpi_hz_progress(connection, params) -> dict:
+    """杭州时间进度（scalar）：已过工作日 ÷ 全月工作日（dim_calendar）。
+
+    value=已过、target=全月、rate=进度；含锚点当天（BI 实时口径）。
+    """
+    anchor = _hz_anchor(params)
+    workdays = fetch_workdays(connection, year=anchor.year, month=anchor.month)
+    elapsed = elapsed_workdays(workdays, today=anchor, include_today=True)
+    total = len(workdays)
+    return {
+        "chart": "scalar",
+        "value": float(len(elapsed)),
+        "target": float(total),
+        "rate": (len(elapsed) / total) if total else None,
+        "unit": "个工作日",
+        "date": anchor.isoformat(),
+    }
+
+
+def run_bar_hz_dept(connection, params) -> dict:
+    """杭州部门本月排行（bar）：bar_department_mtd 的杭州锚定版。"""
+    anchor = _hz_anchor(params)
+    return run_bar_department_mtd(
+        connection, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_trend_hz_daily(connection, params) -> dict:
+    """杭州日销趋势（line）：trend_region_daily 的杭州锚定版（月=锚点月，
+    gran 透传，缺省日）。"""
+    anchor = _hz_anchor(params)
+    return run_trend_region_daily(
+        connection,
+        {
+            "region": _HZ_REGION,
+            "month": anchor.strftime("%Y-%m"),
+            "gran": params.get("gran") or "day",
+        },
+    )
+
+
+def run_table_hz_people_progress(connection, params) -> dict:
+    """杭州个人完成率榜（table）：静态榜单页同口径全列。
+
+    排名/姓名/部门/完成/月目标/达成率/进度差/日均完成/预计月末/未填；
+    进度基准 = 已过工作日 ÷ 全月工作日（mart_collect 自带 elapsed，
+    含锚点当天）。dim_calendar 缺行（MartTaskError）降级空表。
+    """
+    anchor = _hz_anchor(params)
+    try:
+        data = mart_collect(
+            connection, region=_HZ_REGION, business_date=anchor,
+            include_today=True,
+        )
+    except MartTaskError:
+        data = None
+    rows = []
+    if data is not None and data.workdays:
+        n_elapsed = len(data.elapsed)
+        progress = n_elapsed / len(data.workdays)
+        for index, person in enumerate(data.people, start=1):
+            rate = person["rate"]
+            rows.append({
+                "rank": index,
+                "name": person["name"],
+                "dept": person["dept"],
+                "completed": float(person["completed"]),
+                "target": float(person["target"]),
+                "rate": rate,
+                "diff": (rate - progress) if rate is not None else None,
+                "daily": (float(person["completed"]) / n_elapsed
+                          if n_elapsed else 0.0),
+                "proj": (rate / progress
+                         if rate is not None and progress > 0 else None),
+                "unfilled": person["unfilled"],
+            })
+    return {
+        "chart": "table",
+        "columns": [
+            {"key": "rank", "title": "排名"},
+            {"key": "name", "title": "姓名"},
+            {"key": "dept", "title": "部门"},
+            {"key": "completed", "title": "完成额", "format": "wan"},
+            {"key": "target", "title": "月目标", "format": "wan"},
+            {"key": "rate", "title": "达成率", "format": "percent"},
+            {"key": "diff", "title": "进度差", "format": "percent"},
+            {"key": "daily", "title": "日均完成", "format": "wan"},
+            {"key": "proj", "title": "预计月末", "format": "percent"},
+            {"key": "unfilled", "title": "未填"},
+        ],
+        "rows": rows,
+        "date": anchor.isoformat(),
+    }
