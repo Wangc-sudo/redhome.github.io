@@ -7,14 +7,17 @@
 
 归并规则（纯逻辑 :func:`merge_channel_rows`，全部可单测）：
 
-* 同业务键 ``(business_date, channel, store_name)`` robot 优先：窗口内
-  raw 行就地改值；窗口外有 AI 行则**复用其 ``source_record_id``** 生成
-  覆盖行（fact 每业务键恒一行，报表/催办/页面零改动）；
-* 无对应 AI 行 → 新行 ``source_record_id = robot:{inbox_id}``；
+* **AI 表为真源**（2026-10-09 运维裁决：渠道恢复手工台账，反转 09-29
+  「robot 优先」语义）：同业务键 ``(business_date, channel, store_name)``
+  AI 行有值（``sales_amount`` 非 NULL）→ 一律取 AI 值，robot 不覆盖；
+* AI 行为 NULL（预置空行）或无 AI 行 → robot 值兜底：窗口内 raw 行就地
+  填值；窗口外 NULL 预置行**复用其 ``source_record_id``** 生成覆盖行；
+  完全无 AI 行 → 新行 ``source_record_id = robot:{inbox_id}``；
+  （fact 每业务键恒一行，报表/催办/页面零改动）；
 * robot 来源行打行级 ``_sync_run_id = ROBOT_RUN_ID``（全零），
   :func:`extract_mart` 的 ``upsert_fact`` 行级 override 落库，审计可辨；
-* AI 表事后补填同业务键 → raw 行变化进 extract 窗口 → AI 值覆盖回
-  fact（运维裁决「AI 表数据是权威的」，后写赢语义自洽）。
+* 手工台账补填/改值同业务键 → raw 行变化进 extract 窗口 → AI 值覆盖回
+  fact（真源自愈，历史 robot 值自动让位）。
 """
 
 import contextlib
@@ -98,15 +101,17 @@ def fetch_latest_inbox(conn):
 
 
 def fetch_raw_business_keys(raw_conn):
-    """raw ``channel_daily_sales`` 全量业务键 → ``source_record_id``。
+    """raw ``channel_daily_sales`` 全量业务键 →
+    ``{"source_record_id", "sales_amount"}``。
 
-    小表（数百行）全量读；同键多行（AI 表历史重复）取后出现者，归并只
-    需要一个可覆盖的 recordId。
+    小表（数百行）全量读；同键多行（AI 表历史重复）取后出现者。归并需
+    要 recordId（生成覆盖行）与现值（真源判定：非 NULL 则 robot 让位）。
     """
     with contextlib.closing(raw_conn.cursor()) as cursor:
         cursor.execute(
             f"SELECT `dingtalk_record_id` AS `source_record_id`, `channel`, "
-            f"`store_name`, `business_date` FROM `{_RAW_TABLE}`"
+            f"`store_name`, `business_date`, `sales_amount` "
+            f"FROM `{_RAW_TABLE}`"
         )
         rows = [dict(row) for row in cursor.fetchall()]
     index = {}
@@ -114,7 +119,10 @@ def fetch_raw_business_keys(raw_conn):
         key = business_key(
             row.get("business_date"), row.get("channel"), row.get("store_name")
         )
-        index[key] = row["source_record_id"]
+        index[key] = {
+            "source_record_id": row["source_record_id"],
+            "sales_amount": row.get("sales_amount"),
+        }
     return index
 
 
@@ -128,6 +136,9 @@ def merge_channel_rows(raw_rows, inbox_latest, raw_key_index):
     *raw_rows*：``read_dataset`` 的输出（键为目标列名，含
     ``source_record_id``）；*inbox_latest* / *raw_key_index* 见上方两个
     fetch。返回行里 robot 来源行带 ``_sync_run_id = ROBOT_RUN_ID``。
+
+    真源语义（2026-10-09 裁决）：AI 值非 NULL → AI 赢；AI 空/无行 →
+    robot 兜底。
     """
     if not inbox_latest:
         return raw_rows
@@ -139,15 +150,20 @@ def merge_channel_rows(raw_rows, inbox_latest, raw_key_index):
         )
         window_index.setdefault(key, pos)
     for key, entry in inbox_latest.items():
-        record_id = raw_key_index.get(key)
+        ai = raw_key_index.get(key)
         pos = window_index.get(key)
         if pos is not None:
             row = rows[pos]
-            row["sales_amount"] = entry["sales_amount"]
-            row["_sync_run_id"] = ROBOT_RUN_ID
+            if row.get("sales_amount") is None:
+                # AI 预置空行 → robot 兜底填值
+                row["sales_amount"] = entry["sales_amount"]
+                row["_sync_run_id"] = ROBOT_RUN_ID
             continue
+        if ai is not None and ai.get("sales_amount") is not None:
+            continue  # 窗口外 AI 行已有值 → 真源，robot 让位
         rows.append({
-            "source_record_id": record_id or f"robot:{entry['id']}",
+            "source_record_id": (ai or {}).get("source_record_id")
+            or f"robot:{entry['id']}",
             "channel": entry["channel"],
             "store_name": entry["store_name"],
             "business_date": key[0],

@@ -154,6 +154,40 @@ def channel_states(rows_daily):
     return states
 
 
+def month_unfilled(roster, target_meta, fill_days):
+    """月度检索（2026-10-09 运维裁决）：本月零填报门店 + 零填报员工。
+
+    *roster* = ``{store: channel}``；*target_meta* = ``{store: 目标表行}``；
+    *fill_days* = ``{store: 本月有值填报日数}``。返回
+    ``(zero_stores, zero_owners)``：
+
+    * ``zero_stores`` = ``[{store, channel, owner_names}]``（roster 序），
+      本月一个有值填报日都没有的门店；
+    * ``zero_owners`` = ``[{name, stores}]``（姓名序）——名下**所有**在册
+      店本月均零填报的负责人才算「本月未填报员工」；只认目标表 owners
+      （无名册信息的近活跃店进 zero_stores 但不参与员工聚合）。
+    """
+    zero_stores = []
+    owner_stores = {}
+    for store, channel in roster.items():
+        days = int(fill_days.get(store) or 0)
+        meta = target_meta.get(store) or {}
+        names = [e["name"] for e in parse_owner_entries(meta.get("owners_json"))]
+        for name in names:
+            owner_stores.setdefault(name, []).append((store, days))
+        if days == 0:
+            zero_stores.append(
+                {"store": store, "channel": channel, "owner_names": names}
+            )
+    zero_owners = [
+        {"name": name, "stores": sorted(s for s, d in pairs if d == 0)}
+        for name, pairs in owner_stores.items()
+        if pairs and all(d == 0 for _, d in pairs)
+    ]
+    zero_owners.sort(key=lambda owner: owner["name"])
+    return zero_stores, zero_owners
+
+
 def owners_for(store, channel, *, daily_rows, target_meta, channel_owners):
     """归属三级回退（与 ``build_fact_rows`` 优先级完全一致）→ entries。
 
@@ -208,12 +242,13 @@ def resolve_at_user_ids(entries, *, union_map, name_map):
 
 
 def build_missing_message(*, display, business_date, missing_rows, zero_rows,
-                          unmatched_names, url):
+                          unmatched_names, url, month_zero_owners=None):
     """群播报文案 → ``(title, body_md)``。
 
     第一段「未上报」表格（渠道｜门店｜负责人，@ 由 atUserIds 承载）；
-    第二段「上报为 0」只列表不 @；无法映射的姓名单列；尾部链接 +
-    「已填报请忽略」。
+    第二段「上报为 0」只列表不 @；第三段「本月零填报员工」（姓名级，
+    不 @，*month_zero_owners* 非空时出现）；无法映射的姓名单列；
+    尾部链接 + 「已填报请忽略」。
     """
     lines = [
         f"### 📊 渠道日销到齐检查（{display} "
@@ -243,6 +278,17 @@ def build_missing_message(*, display, business_date, missing_rows, zero_rows,
             lines.append(
                 f"| {row['channel'] or '—'} | {row['store']} | {owners} |"
             )
+        lines.append("")
+    if month_zero_owners:
+        lines.append(
+            f"以下 **{len(month_zero_owners)}** 位负责人本月至今零填报"
+            "（名下门店全月无数据，仅播报，不@）："
+        )
+        lines.append("")
+        lines.append("| 负责人 | 门店 |")
+        lines.append("|---|---|")
+        for owner in month_zero_owners:
+            lines.append(f"| {owner['name']} | {'、'.join(owner['stores'])} |")
         lines.append("")
     if unmatched_names:
         lines.append(
@@ -319,6 +365,21 @@ def fetch_daily_rows(conn, business_date):
     )
 
 
+def fetch_month_fill_days(conn, *, month_start, through):
+    """本月（month_start~through 含）各店有值填报日数 → ``{store: days}``。"""
+    rows = _fetch_all(
+        conn,
+        "SELECT `store_name`, COUNT(DISTINCT `business_date`) AS days "
+        "FROM `fact_channel_daily_sales` "
+        "WHERE `business_date` >= %s AND `business_date` <= %s "
+        "AND `sales_amount` IS NOT NULL "
+        "AND `store_name` IS NOT NULL AND `store_name` <> '' "
+        "GROUP BY `store_name`",
+        (month_start, through),
+    )
+    return {str(row["store_name"]).strip(): int(row["days"]) for row in rows}
+
+
 def fetch_union_map(conn):
     """``{union_id: user_id}``（dim_robot_member）。
 
@@ -383,6 +444,15 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
     target_meta = {
         str(r.get("store_name") or "").strip(): r for r in target_rows
     }
+    # 月度检索（2026-10-09 裁决）：本月零填报门店/员工，随日报检查一并输出
+    fill_days = fetch_month_fill_days(
+        conn,
+        month_start=business_date.replace(day=1),
+        through=business_date,
+    )
+    month_zero_stores, month_zero_owners = month_unfilled(
+        roster, target_meta, fill_days
+    )
     channel_owners = channel_fallback_owners([
         {"channel": r.get("channel"), "responsible_person": r.get("owners_json")}
         for r in target_rows
@@ -412,6 +482,8 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
             report.update({
                 "roster": sorted(roster), "missing": [], "zero": [],
                 "at_user_ids": [], "unmatched": [],
+                "month_zero_stores": month_zero_stores,
+                "month_zero_owners": month_zero_owners,
             })
         return TaskOutcome("all_filled", _KIND, business_date)
 
@@ -440,6 +512,7 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
         display=display, business_date=business_date,
         missing_rows=missing_rows, zero_rows=zero_rows,
         unmatched_names=unmatched, url=table_url,
+        month_zero_owners=month_zero_owners,
     )
 
     if report is not None:
@@ -450,6 +523,8 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
             "at_user_ids": at_ids,
             "cc_user_ids": list(cc),
             "unmatched": unmatched,
+            "month_zero_stores": month_zero_stores,
+            "month_zero_owners": month_zero_owners,
             "title": title,
             "body_md": body,
         })

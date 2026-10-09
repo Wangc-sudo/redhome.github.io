@@ -38,6 +38,7 @@ class MergeChannelRowsTest(unittest.TestCase):
         self.assertEqual(merge_channel_rows(rows, {}, {}), rows)
 
     def test_window_row_overwritten_in_place(self):
+        # AI 预置空行（sales_amount=None）在窗口内 → robot 兜底填值
         rows = [_raw_row("ai-1", "京东", "JD某店")]
         inbox = {business_key(_D1, "京东", "JD某店"):
                  _inbox(7, "京东", "JD某店", 15867)}
@@ -47,17 +48,39 @@ class MergeChannelRowsTest(unittest.TestCase):
         self.assertEqual(merged[0]["sales_amount"], 15867)
         self.assertEqual(merged[0]["_sync_run_id"], ROBOT_RUN_ID)
 
+    def test_window_row_with_ai_value_wins(self):
+        # 2026-10-09 裁决：AI 表为真源——窗口内 AI 行有值 → robot 不覆盖
+        rows = [_raw_row("ai-1", "京东", "JD某店", 500)]
+        inbox = {business_key(_D1, "京东", "JD某店"):
+                 _inbox(7, "京东", "JD某店", 15867)}
+        merged = merge_channel_rows(rows, inbox, {})
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["sales_amount"], 500)
+        self.assertNotIn("_sync_run_id", merged[0])
+
     def test_out_of_window_ai_row_reuses_record_id(self):
         # AI 预置 NULL 行不在 extract 窗口内：raw_key_index 提供 recordId
         inbox = {business_key(_D1, "猫超", None):
                  _inbox(8, "猫超", None, 731033)}
         merged = merge_channel_rows(
-            [], inbox, {business_key(_D1, "猫超", None): "ai-ms"})
+            [], inbox,
+            {business_key(_D1, "猫超", None):
+             {"source_record_id": "ai-ms", "sales_amount": None}})
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["source_record_id"], "ai-ms")
         self.assertIsNone(merged[0]["store_name"])
         self.assertEqual(merged[0]["sales_amount"], 731033)
         self.assertEqual(merged[0]["_sync_run_id"], ROBOT_RUN_ID)
+
+    def test_out_of_window_ai_value_wins_robot_skipped(self):
+        # 窗口外 AI 行已有值 → 真源，robot 整键跳过（不生成覆盖行）
+        inbox = {business_key(_D1, "京东", "JD某店"):
+                 _inbox(7, "京东", "JD某店", 15867)}
+        merged = merge_channel_rows(
+            [], inbox,
+            {business_key(_D1, "京东", "JD某店"):
+             {"source_record_id": "ai-1", "sales_amount": 500}})
+        self.assertEqual(merged, [])
 
     def test_brand_new_store_gets_robot_id(self):
         inbox = {business_key(_D1, "京东", "JD新店"):
@@ -161,13 +184,21 @@ class InboxIoTest(unittest.TestCase):
     def test_fetch_raw_business_keys(self):
         conn = _Conn(raw_rows=[
             {"source_record_id": "ai-1", "channel": "京东",
-             "store_name": "JD某店", "business_date": _D1},
+             "store_name": "JD某店", "business_date": _D1,
+             "sales_amount": 500},
             {"source_record_id": "ai-2", "channel": "猫超",
-             "store_name": None, "business_date": _D1},
+             "store_name": None, "business_date": _D1,
+             "sales_amount": None},
         ])
         index = fetch_raw_business_keys(conn)
-        self.assertEqual(index[business_key(_D1, "京东", "JD某店")], "ai-1")
-        self.assertEqual(index[business_key(_D1, "猫超", None)], "ai-2")
+        self.assertEqual(
+            index[business_key(_D1, "京东", "JD某店")],
+            {"source_record_id": "ai-1", "sales_amount": 500},
+        )
+        self.assertEqual(
+            index[business_key(_D1, "猫超", None)],
+            {"source_record_id": "ai-2", "sales_amount": None},
+        )
 
 
 if __name__ == "__main__":
