@@ -859,11 +859,11 @@ class MartExtractService:
             rows = self._repository.read_dataset(dataset, since=since)
             rows = _normalize_region_keys(dataset, rows)
             if dataset.dataset == "channel_daily_sales":
-                # 机器人填报归并（2026-09-29 方案）：inbox 最新行优先、
-                # 复用 AI recordId 覆盖，fact 每业务键恒一行；inbox id 进
-                # record_ids → digest 感知 robot 填报，触发写入。
-                # inbox 为空（无填报/迁移未应用 fail-open）时短路——不为
-                # 空归并白付一次 raw 全量业务键查询。
+                # 机器人填报归并（2026-10-09 裁决：AI 表为真源，robot 仅在
+                # AI 空/无行时兜底；复用 AI recordId 覆盖，fact 每业务键
+                # 恒一行；inbox id 进 record_ids → digest 感知 robot 填报，
+                # 触发写入）。inbox 为空（无填报/迁移未应用 fail-open）时
+                # 短路——不为空归并白付一次 raw 全量业务键查询。
                 from common.public_data.channel_robot_inbox import (
                     fetch_latest_inbox,
                     fetch_raw_business_keys,

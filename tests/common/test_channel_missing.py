@@ -11,6 +11,7 @@ from common.daily_robot.channel_missing import (
     build_missing_message,
     channel_states,
     expected_stores,
+    month_unfilled,
     owners_for,
     parse_owner_entries,
     resolve_at_user_ids,
@@ -175,6 +176,32 @@ class ResolveAtUserIdsTests(unittest.TestCase):
         self.assertEqual(resolved, [("staff-1", "张三")])
 
 
+class MonthUnfilledTests(unittest.TestCase):
+
+    def test_zero_stores_and_owner_aggregation(self):
+        roster = {"天猫旗舰": "天猫", "京东POP": "京东", "拼多多店": "拼多多"}
+        target_meta = {
+            "天猫旗舰": {"owners_json": '[{"name": "张三"}]'},
+            "京东POP": {"owners_json": '[{"name": "李四"}]'},
+            "拼多多店": {"owners_json": '[{"name": "李四"}]'},
+        }
+        # 李四名下两店一店有填报 → 不算零填报员工；张三全月零 → 算
+        zero_stores, zero_owners = month_unfilled(
+            roster, target_meta, {"京东POP": 3}
+        )
+        self.assertEqual(
+            [s["store"] for s in zero_stores], ["天猫旗舰", "拼多多店"]
+        )
+        self.assertEqual(
+            zero_owners, [{"name": "张三", "stores": ["天猫旗舰"]}]
+        )
+
+    def test_store_without_owners_not_aggregated(self):
+        zero_stores, zero_owners = month_unfilled({"新店": "直播"}, {}, {})
+        self.assertEqual([s["store"] for s in zero_stores], ["新店"])
+        self.assertEqual(zero_owners, [])
+
+
 class BuildMessageTests(unittest.TestCase):
 
     def test_two_sections_and_unmatched(self):
@@ -200,6 +227,32 @@ class BuildMessageTests(unittest.TestCase):
         self.assertIn("[点此填写](http://example/table)", body)
         self.assertIn("已填报请忽略", body)
 
+    def test_month_zero_owners_section(self):
+        _, body = build_missing_message(
+            display="渠道", business_date=_BD,
+            missing_rows=[{
+                "channel": "天猫", "store": "天猫旗舰",
+                "owner_names": ["张三"],
+            }],
+            zero_rows=[], unmatched_names=[], url="http://example/table",
+            month_zero_owners=[
+                {"name": "张三", "stores": ["天猫旗舰", "天猫专营"]},
+            ],
+        )
+        self.assertIn("本月至今零填报", body)
+        self.assertIn("| 张三 | 天猫旗舰、天猫专营 |", body)
+
+    def test_month_section_absent_by_default(self):
+        _, body = build_missing_message(
+            display="渠道", business_date=_BD,
+            missing_rows=[{
+                "channel": "天猫", "store": "天猫旗舰",
+                "owner_names": ["张三"],
+            }],
+            zero_rows=[], unmatched_names=[], url="http://example/table",
+        )
+        self.assertNotIn("本月至今零填报", body)
+
 
 # ---------------------------------------------------------------------------
 # run_channel_missing（fake conn 路由查询）
@@ -207,12 +260,14 @@ class BuildMessageTests(unittest.TestCase):
 
 def _make_conn(*, gate_hit=True, target_rows=(), recent_rows=(),
                daily_rows=(), union_rows=(), member_rows=(),
-               union_column_ok=True):
+               month_rows=(), union_column_ok=True):
     def router(sql, params):
         if "sync_dataset_summary" in sql:
             return [{"hit": 1}] if gate_hit else []
         if "fact_channel_store_target" in sql:
             return list(target_rows)
+        if "COUNT(DISTINCT" in sql:
+            return list(month_rows)
         if "DISTINCT" in sql:
             return list(recent_rows)
         if "fact_channel_daily_sales" in sql:
@@ -313,6 +368,31 @@ class RunChannelMissingTests(unittest.TestCase):
         outcome, report = self._run(conn)
         self.assertEqual(outcome.status, "all_filled")
         self.assertEqual(report["missing"], [])
+
+    def test_month_zero_in_report_and_message(self):
+        outbox = Mock()
+        outbox.enqueue.return_value = True
+        conn = _make_conn(
+            target_rows=self._TARGET,
+            daily_rows=[
+                # 天猫旗舰昨日缺 → 触发发消息；本月仅拼多多店有填报
+                {"channel": "京东", "store_name": "京东POP",
+                 "sales_amount": 2, "responsible_person": None},
+                {"channel": "拼多多", "store_name": "拼多多店",
+                 "sales_amount": 3, "responsible_person": None},
+            ],
+            month_rows=[{"store_name": "拼多多店", "days": 5}],
+            member_rows=[{"name": "张三", "user_id": "staff-1"}],
+        )
+        outcome, report = self._run(conn, outbox)
+        self.assertEqual(outcome.status, "enqueued")
+        # 拼多多店本月有填报 → 赵六不算；张三/李四名下店全月零填报
+        self.assertEqual(report["month_zero_owners"], [
+            {"name": "张三", "stores": ["天猫旗舰"]},
+            {"name": "李四", "stores": ["京东POP"]},
+        ])
+        self.assertIn("本月至今零填报", report["body_md"])
+        self.assertIn("| 李四 | 京东POP |", report["body_md"])
 
     def test_idempotent_second_enqueue_returns_false(self):
         outbox = Mock()
