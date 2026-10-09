@@ -16,6 +16,7 @@
 
 import argparse
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -121,11 +122,11 @@ def render_bc(region, calendar, now, elapsed, people, url=None,
 
 
 def build_html_page(view, now, elapsed, people, extra_panels=None,
-                    dept_overrides=None):
+                    dept_overrides=None, date_nav=None):
     from common.daily_robot.leaderboard import build_html
     return build_html(
         view, now, elapsed, people, extra_panels=extra_panels,
-        dept_overrides=dept_overrides,
+        dept_overrides=dept_overrides, date_nav=date_nav,
     )
 
 
@@ -158,6 +159,42 @@ def channel_monthly_targets(conn, region, cfg):
 def build_offline_all_page(conn, cfg, *, business_date, now):
     from common.daily_robot.offline_summary import build_offline_all_html
     return build_offline_all_html(conn, cfg, business_date=business_date, now=now)
+
+
+def build_date_nav_panel(**kwargs):
+    from common.daily_robot.page_calendar import build_date_nav_panel as _build
+    return _build(**kwargs)
+
+
+def archive_name(stem, day):
+    from common.daily_robot.page_calendar import archive_name as _name
+    return _name(stem, day)
+
+
+_ARCHIVE_NAME_RE = re.compile(
+    r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})\.html$")
+
+
+def scan_archive_dates(directory, stem):
+    """输出目录里 ``<stem>-YYYY-MM-DD.html`` 存档页的日期集合（只读扫描）。
+
+    目录不存在/不可读 → 空集（fail-open：月历只少几个可点日期，不影响
+    页面产出）。
+    """
+    dates = set()
+    try:
+        candidates = Path(directory).glob(f"{stem}-*.html")
+        for path in candidates:
+            match = _ARCHIVE_NAME_RE.match(path.name)
+            if not match or match.group("stem") != stem:
+                continue
+            try:
+                dates.add(date.fromisoformat(match.group("day")))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return dates
 
 
 def run_channel_missing_task(conn, outbox, **kwargs):
@@ -774,6 +811,14 @@ def _handle_leaderboard_html(args):
         business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
+        # 日期选择月历（2026-10-09 运维裁决「日历点日期，蓝为工作日」）：
+        # 存档页 <stem>-YYYY-MM-DD.html 与榜单同目录，可点日期 = 已存在
+        # 存档的工作日（含本页）；offline_all 走独立构建器，只写存档不
+        # 嵌月历（其页内已有日/周/月维度）。
+        output = Path(args.output)
+        archive_stem = output.stem
+        available_dates = scan_archive_dates(output.parent, archive_stem)
+        available_dates.add(business_date)
         if region == "offline_all":
             # 线下整体无 region=offline_all 的事实行：板块榜由
             # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
@@ -786,6 +831,12 @@ def _handle_leaderboard_html(args):
             view = build_view(
                 cfg, data.workdays,
                 year=business_date.year, month=business_date.month,
+            )
+            date_nav = build_date_nav_panel(
+                page_date=business_date,
+                workday_dates=data.workdays,
+                available_dates=available_dates,
+                archive_stem=archive_stem,
             )
 
             # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
@@ -804,17 +855,21 @@ def _handle_leaderboard_html(args):
                 view, now, list(data.elapsed), list(data.people),
                 extra_panels=extra_panels,
                 dept_overrides=channel_dept_overrides(conn, region, data),
+                date_nav=date_nav,
             )
             stats = f"people={len(data.people)}" + (
                 f" panels={len(extra_panels)}" if extra_panels is not None else ""
             )
 
-        output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(page, encoding="utf-8")
+        archive_path = output.with_name(archive_name(archive_stem,
+                                                     business_date))
+        if archive_path != output:
+            archive_path.write_text(page, encoding="utf-8")
         print(
             f"service={service_id} region={region} kind=leaderboard-html "
-            f"status=written {stats}"
+            f"status=written archive={archive_path.name} {stats}"
         )
     except SystemExit:
         raise
