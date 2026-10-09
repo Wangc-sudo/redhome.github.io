@@ -105,11 +105,17 @@ a{text-decoration:none;color:inherit}
 .btn{height:34px;padding:0 14px;font:inherit;font-size:13px;background:var(--card-bg);color:var(--text-muted);
   border:1px solid var(--card-border);border-radius:var(--radius-pill);cursor:pointer;transition:all .16s}
 
-/* ---------- 工作日日历点选（dates 筛选源，杭州看板 2026-10-09） ---------- */
-.fcal-wrap{display:block;width:100%;height:auto;padding:10px 14px;border-radius:12px}
+/* ---------- 工作日日历点选（dates 筛选源，下拉弹层形态 2026-10-10） ---------- */
+.fcal-pill{position:relative}
+.fcal-btn{font:inherit;font-size:13px;height:30px;padding:0 22px 0 2px;min-width:104px;text-align:left;
+  color:var(--ink);background:transparent;border:0;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' stroke='%23667085' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 2px center}
+.fcal-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:40;background:#fff;
+  border:1px solid var(--card-border);border-radius:12px;box-shadow:0 8px 24px rgba(15,23,42,.12);
+  padding:10px 12px}
 .fcal-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.fcal-title{font-size:13px;font-weight:600;color:var(--ink)}
-.fcal-legend{font-size:11px;color:var(--text-subtle);margin-left:auto}
+.fcal-title{font-size:13px;font-weight:600;color:var(--ink);min-width:76px;text-align:center}
 .fcal-nav{width:26px;height:26px;border-radius:7px;border:1px solid var(--card-border);
   background:#fff;cursor:pointer;color:var(--primary);font-size:14px;line-height:1;padding:0;
   transition:background .15s,color .15s}

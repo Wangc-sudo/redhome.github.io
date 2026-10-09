@@ -78,6 +78,10 @@ hz-offline-sales:
     - card: table_hz_people_progress
       title: "个人完成率榜"
       span: 12
+    # 当日未填报人（2026-10-10 运维反馈新增；与催办同真源）
+    - card: table_hz_unfilled_today
+      title: "当日未填报人"
+      span: 12
 l2-region:
   title: "区域下钻"
   icon: "/static/icons/region.svg"

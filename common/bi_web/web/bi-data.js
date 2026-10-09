@@ -153,10 +153,11 @@ function reloadParam(param){
 }
 
 /* 工作日日历点选（dates 筛选源；2026-10-09 运维裁决「日历可以选择工作
- * 日，用点击日期，蓝为工作日」——语义与静态榜单页月历一致）。值域 =
- * /api/v1/options/dates（已历工作日 ISO 全量，升序）；按月渲染：蓝=
- * 工作日可点、灰=非工作日、选中反白；月份切换纯客户端（值域已在手）。
- * 缺省选中 = 值域最后一个工作日（通常即今天或最近工作日）。 */
+ * 日，用点击日期，蓝为工作日」；2026-10-10 反馈改弹层形态：常驻整版月
+ * 历突兀——收成与其他筛选一致的下拉 pill，点击才展开小月历；「蓝=工作
+ * 日」文字提示取消）。值域 = /api/v1/options/dates（已历工作日 ISO 全
+ * 量，升序）；弹层内：蓝=工作日可点、灰=非工作日、选中反白、月份切换
+ * 纯客户端；点空白处自动收起。缺省选中 = 值域最后一个工作日。 */
 function buildDateCalendar(spec, workdays){
   var wdSet = {};
   workdays.forEach(function(d){ wdSet[d] = true; });
@@ -174,19 +175,38 @@ function buildDateCalendar(spec, workdays){
   currentFilters[spec.param] = selected;
   var view = parseIso(selected.slice(0, 7) + '-01');
 
-  var wrap = el('div', 'filter fcal-wrap');
+  var wrap = el('div', 'filter fcal-pill');
+  wrap.appendChild(el('span', 'filter-label', esc(spec.label || spec.param)));
+  var btn = el('button', 'fcal-btn', '');
+  btn.type = 'button';
+  wrap.appendChild(btn);
+
+  var pop = el('div', 'fcal-pop');
+  pop.style.display = 'none';
   var head = el('div', 'fcal-head');
-  head.appendChild(el('span', 'filter-label', esc(spec.label || spec.param)));
   var prev = el('button', 'fcal-nav', '‹');
   var next = el('button', 'fcal-nav', '›');
   prev.type = 'button'; next.type = 'button';
   var title = el('span', 'fcal-title', '');
   head.appendChild(prev); head.appendChild(title); head.appendChild(next);
-  head.appendChild(el('span', 'fcal-legend', '蓝=工作日'));
   var grid = el('div', 'fcal-grid');
-  wrap.appendChild(head); wrap.appendChild(grid);
+  pop.appendChild(head); pop.appendChild(grid);
+  wrap.appendChild(pop);
+
+  function onDocClick(ev){
+    if (!wrap.contains(ev.target)) closePop();
+  }
+  function closePop(){
+    pop.style.display = 'none';
+    document.removeEventListener('click', onDocClick, true);
+  }
+  function openPop(){
+    pop.style.display = '';
+    document.addEventListener('click', onDocClick, true);
+  }
 
   function render(){
+    btn.textContent = selected;
     title.textContent = view.getFullYear() + '年' + (view.getMonth() + 1) + '月';
     clear(grid);
     ['一', '二', '三', '四', '五', '六', '日'].forEach(function(w){
@@ -210,6 +230,7 @@ function buildDateCalendar(spec, workdays){
           selected = this.getAttribute('data-iso');
           currentFilters[spec.param] = selected;
           render();
+          closePop();
           reloadParam(spec.param);
         });
         grid.appendChild(cell);
@@ -218,6 +239,9 @@ function buildDateCalendar(spec, workdays){
       }
     }
   }
+  btn.addEventListener('click', function(){
+    if (pop.style.display === 'none') openPop(); else closePop();
+  });
   prev.addEventListener('click', function(){
     view = new Date(view.getFullYear(), view.getMonth() - 1, 1);
     render();
@@ -235,14 +259,24 @@ function buildDateCalendar(spec, workdays){
 function buildFilters(def){
   var bar = document.getElementById('pgFilters');
   clear(bar);
-  /* 页级粒度条：仅当本页存在多档卡（grans.length > 1）时渲染；
+  /* 页级粒度条：≥2 张多档卡（grans.length > 1）才渲染——只有一张
+   * 多档卡时粒度控制归该卡头部自带 Seg（2026-10-10 运维反馈「看不
+   * 到颗粒与数据的联动」：页级条点了只有一张卡动，联动关系看不
+   * 出来）。选项 = 各多档卡 grans 并集（按 日/周/月/年 序），无卡
+   * 支持的档位不出现（如仅日/周/月三档卡的页面不出「年」）。
    * 变更 → 重拉所有多档卡（卡级覆盖在 effectiveGran 里优先）。 */
-  var hasMultiGran = (def.cards || []).some(function(c){ return (c.grans || []).length > 1; });
-  if (hasMultiGran){
+  var multiGranCards = (def.cards || []).filter(function(c){ return (c.grans || []).length > 1; });
+  if (multiGranCards.length >= 2){
+    var unionGrans = [];
+    GRAN_OPTIONS.forEach(function(g){
+      if (multiGranCards.some(function(c){ return c.grans.indexOf(g.value) >= 0; })){
+        unionGrans.push(g);
+      }
+    });
     var granLab = el('label', 'filter');
     granLab.appendChild(el('span', 'filter-label', '粒度'));
     bar.appendChild(granLab);
-    Seg(granLab, {options: GRAN_OPTIONS, value: pageGran, onChange: function(v){
+    Seg(granLab, {options: unionGrans, value: pageGran, onChange: function(v){
       pageGran = v;
       pageFallback = {}; /* 用户显式改页级档 = 新一轮，清掉旧的回落记忆 */
       records.forEach(function(rec){

@@ -2635,6 +2635,94 @@ class HzDashboardTests(unittest.TestCase):
         self.assertEqual(datetime.now().date(), anchor)
 
 
+class _UnfilledFakeConnection(FakeConnection):
+    """当日未填报人卡的脚本化连接：按 SQL 内容分流三张表。
+
+    fetch_region_members（dim_robot_member，region+is_active 过滤、按
+    姓名排序）/ fetch_scope_person_names（dim_report_roster，scope+
+    enabled 过滤）/ fetch_filled_names（fact DISTINCT，region+当日过滤）。
+    """
+
+    def scripted_fetchall(self, sql):
+        params = self.executed[-1][1] or ()
+        if "dim_robot_member" in sql:
+            rows = [
+                dict(row)
+                for row in self._rowsets.get("dim_robot_member", [])
+                if row.get("region") == params[0] and row.get("is_active") == 1
+            ]
+            return sorted(rows, key=lambda row: row["name"])
+        if "dim_report_roster" in sql:
+            return [
+                {"person_name": row["person_name"]}
+                for row in self._rowsets.get("dim_report_roster", [])
+                if row.get("scope") == params[0]
+                and row.get("entity_type") == "person"
+                and row.get("enabled") == 1
+            ]
+        if "DISTINCT" in sql:
+            region, day = params
+            return [
+                {"responsible_person": row["responsible_person"]}
+                for row in self._rowsets.get("fact_daily_report_offline", [])
+                if row.get("region") == region
+                and row.get("business_date") == day
+            ]
+        return super().scripted_fetchall(sql)
+
+
+class HzUnfilledTodayTests(unittest.TestCase):
+    """当日未填报人卡（2026-10-10 运维反馈）：与催办同真源同语义。"""
+
+    def _connection(self, roster_rows):
+        return _UnfilledFakeConnection(
+            rowsets={
+                "dim_robot_member": [
+                    {"user_id": "u1", "name": "张三", "region": "hangzhou",
+                     "dept_id": "d1", "dept_name": "零售一组",
+                     "is_active": 1},
+                    {"user_id": "u2", "name": "李四", "region": "hangzhou",
+                     "dept_id": "d2", "dept_name": None,
+                     "is_active": 1},
+                    {"user_id": "u3", "name": "王五", "region": "hangzhou",
+                     "dept_id": "d3", "dept_name": "零售二组",
+                     "is_active": 0},  # 离职不计
+                ],
+                "dim_report_roster": roster_rows,
+                "fact_daily_report_offline": [
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "business_date": date(2026, 10, 9)},
+                ],
+            }
+        )
+
+    def test_roster_bound_unfilled(self):
+        connection = self._connection(
+            roster_rows=[
+                {"scope": "hangzhou", "entity_type": "person",
+                 "person_name": "张三", "enabled": 1},
+                {"scope": "hangzhou", "entity_type": "person",
+                 "person_name": "李四", "enabled": 1},
+            ]
+        )
+        payload = bi_web_queries.run_table_hz_unfilled_today(
+            connection, {"date": "2026-10-09"})
+
+        self.assertEqual("2026-10-09", payload["date"])
+        # 张三已填、王五离职 → 仅李四未填（名册绑定口径）
+        self.assertEqual(
+            [{"rank": 1, "name": "李四", "dept": "未分组"}],
+            payload["rows"],
+        )
+
+    def test_fail_open_when_roster_empty(self):
+        payload = bi_web_queries.run_table_hz_unfilled_today(
+            self._connection(roster_rows=[]), {"date": "2026-10-09"})
+
+        # 名册无记录 fail-open = 全体在册成员口径（同催办）
+        self.assertEqual(["李四"], [row["name"] for row in payload["rows"]])
+
+
 class _PeopleFakeConnection(FakeConnection):
     """mart 路径 fake：事实行按最近一条语句的 region 参数过滤
     （模拟 fetch_month_facts 的 ``WHERE region = %s``）；日历行走 rowsets。"""
