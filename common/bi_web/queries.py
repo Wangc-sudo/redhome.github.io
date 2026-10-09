@@ -2972,6 +2972,39 @@ def run_trend_hz_daily(connection, params) -> dict:
     )
 
 
+def run_table_hz_unfilled_today(connection, params) -> dict:
+    """杭州当日未填报人（table，2026-10-10 运维反馈新增）。
+
+    真源 = 催办同款 ``mart_tasks._unfilled``（dim_robot_member ∩
+    名册绑定 − 当日已填；名册无记录 fail-open）——看板名单与 18:00
+    提醒/20:00 催办逐字一致，不做第二套口径。aliases 传空：Nacos
+    aliases 是机器人通道的表内用名补丁（2026-10-08 已清零），BI 卡
+    不挂区域配置。
+    """
+    from common.daily_robot.mart_tasks import _unfilled
+
+    anchor = _hz_anchor(params)
+    members = _unfilled(connection, _HZ_REGION, anchor, {})
+    rows = [
+        {
+            "rank": index,
+            "name": member["name"],
+            "dept": member.get("dept_name") or "未分组",
+        }
+        for index, member in enumerate(members, start=1)
+    ]
+    return {
+        "chart": "table",
+        "columns": [
+            {"key": "rank", "title": "#"},
+            {"key": "name", "title": "姓名"},
+            {"key": "dept", "title": "部门"},
+        ],
+        "rows": rows,
+        "date": anchor.isoformat(),
+    }
+
+
 def run_table_hz_people_progress(connection, params) -> dict:
     """杭州个人完成率榜（table）：静态榜单页同口径全列。
 

@@ -75,14 +75,16 @@ STAGE_B_CARD_IDS = (
     "table_quarter_budget_actual",
     "table_yoy_monthly",
     "table_contract_writeoff",
-    # 杭州线下销售BI看板六卡（2026-10-09 裁决：静态榜单页切 BI，
-    # 日期锚定 date ← dates 工作日日历点选），共 43 张。
+    # 杭州线下销售BI看板七卡（2026-10-09 裁决：静态榜单页切 BI，
+    # 日期锚定 date ← dates 工作日日历点选；2026-10-10 +当日未填报人），
+    # 共 44 张。
     "kpi_hz_mtd",
     "kpi_hz_today",
     "kpi_hz_progress",
     "trend_hz_daily",
     "bar_hz_dept",
     "table_hz_people_progress",
+    "table_hz_unfilled_today",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -143,6 +145,7 @@ EXPECTED_CHARTS = {
     "trend_hz_daily": "line",
     "bar_hz_dept": "bar",
     "table_hz_people_progress": "table",
+    "table_hz_unfilled_today": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -190,6 +193,7 @@ EXPECTED_RUN_FUNCTIONS = {
     "trend_hz_daily": queries.run_trend_hz_daily,
     "bar_hz_dept": queries.run_bar_hz_dept,
     "table_hz_people_progress": queries.run_table_hz_people_progress,
+    "table_hz_unfilled_today": queries.run_table_hz_unfilled_today,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -252,6 +256,7 @@ EXPECTED_PARAMS_SCHEMA = {
     "trend_hz_daily": {"date": "dates", "gran": "granularity"},
     "bar_hz_dept": {"date": "dates"},
     "table_hz_people_progress": {"date": "dates"},
+    "table_hz_unfilled_today": {"date": "dates"},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -295,7 +300,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(43, len(REGISTRY))
+        self.assertEqual(44, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

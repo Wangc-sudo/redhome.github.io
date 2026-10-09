@@ -186,6 +186,10 @@ _CARDS = (
           {"date": "dates"}),
     _card("table_hz_people_progress", "table",
           queries.run_table_hz_people_progress, {"date": "dates"}),
+    # 当日未填报人（2026-10-10 运维反馈）：与 18:00 提醒/20:00 催办
+    # 同真源（mart_tasks._unfilled，名册绑定 fail-open）。
+    _card("table_hz_unfilled_today", "table",
+          queries.run_table_hz_unfilled_today, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
