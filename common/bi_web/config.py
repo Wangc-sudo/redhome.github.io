@@ -59,7 +59,7 @@ _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 #: ``entities``（fact_fin_store_funds 的公司主体）供资金安全页主体筛选。
 KNOWN_FILTER_SOURCES = frozenset(
     {"regions", "channels", "months", "brands", "sku_channels", "entities",
-     "granularity"}
+     "granularity", "dates"}
 )
 
 

@@ -525,7 +525,9 @@ class BiSeedFileTests(unittest.TestCase):
             {"l1-cockpit", "l2-region", "l2-channel", "l2-product",
              "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
              "l2-dining", "l2-hall", "l2-inventory", "l2-warehouse",
-             "l2-quarter", "l2-yoy", "l2-contract"},
+             "l2-quarter", "l2-yoy", "l2-contract",
+             # 杭州线下销售BI看板（2026-10-09：8300/hangzhou.html 切 BI）
+             "hz-offline-sales"},
             set(mapping),
         )
         configs = {
@@ -648,9 +650,12 @@ class BiSeedFileTests(unittest.TestCase):
 
         # 前后端拉齐 V1（2026-09-16）：全部 15 页 refresh_seconds 统一
         # 86400（T+1 口径，全站无自动刷新/轮询）。
+        # 例外（2026-10-09 运维裁决）：hz-offline-sales 是常亮大屏，
+        # 300s 自动刷新（config.py 下限 60 内）——全站唯一轮询页。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):
-                self.assertEqual(86400, config.refresh_seconds)
+                expected = 300 if dashboard_id == "hz-offline-sales" else 86400
+                self.assertEqual(expected, config.refresh_seconds)
 
         # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
         # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡

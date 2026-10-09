@@ -168,6 +168,24 @@ _CARDS = (
         queries.run_table_people_leaderboard,
         {"region": "regions", "month": "months"},
     ),
+    # 杭州线下销售BI看板（hz-offline-sales，2026-10-09 裁决）：区域钉死
+    # 杭州、日期锚定 date（工作日日历点选，值域 dates）；静态榜单页
+    # （8300/hangzhou.html）的 BI 替身，nginx 反代保留原 URL。
+    _card("kpi_hz_mtd", "scalar", queries.run_kpi_hz_mtd,
+          {"date": "dates"}),
+    _card("kpi_hz_today", "scalar", queries.run_kpi_hz_today,
+          {"date": "dates"}),
+    _card("kpi_hz_progress", "scalar", queries.run_kpi_hz_progress,
+          {"date": "dates"}),
+    _card(
+        "trend_hz_daily", "line", queries.run_trend_hz_daily,
+        {"date": "dates", "gran": "granularity"},
+        grans=("day", "week", "month"), default_gran="day",
+    ),
+    _card("bar_hz_dept", "bar", queries.run_bar_hz_dept,
+          {"date": "dates"}),
+    _card("table_hz_people_progress", "table",
+          queries.run_table_hz_people_progress, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
