@@ -2723,6 +2723,250 @@ class HzUnfilledTodayTests(unittest.TestCase):
         self.assertEqual(["李四"], [row["name"] for row in payload["rows"]])
 
 
+class _OaFakeConnection(FakeConnection):
+    """线下整体看板 fake：事实行按最近一条语句的首个绑定参数（region）
+    过滤；scope 查询按 SQL 形态分流——按日聚合 → ``{"d","s"}``、按人
+    月目标 → ``{"p","t"}``（两路均镜像 NOT LIKE 合计 的排除语义）；其余
+    （mart_collect 的 fetch_month_facts）回原始行。"""
+
+    def _region_rows(self):
+        region = self.executed[-1][1][0]
+        return [
+            row
+            for row in self._rowsets.get("fact_daily_report_offline", [])
+            if row.get("region") == region
+        ]
+
+    def scripted_fetchall(self, sql):
+        if "fact_daily_report_offline" not in sql:
+            return super().scripted_fetchall(sql)
+        rows = self._region_rows()
+        if "MAX(`monthly_target`)" in sql:
+            by_person = {}
+            for row in rows:
+                if "合计" in row["responsible_person"]:
+                    continue
+                if row.get("monthly_target") is not None:
+                    by_person[row["responsible_person"]] = row["monthly_target"]
+            return [{"p": p, "t": t} for p, t in by_person.items()]
+        if "GROUP BY `business_date`" in sql:
+            by_day = {}
+            for row in rows:
+                if "合计" in row["responsible_person"]:
+                    continue
+                if row.get("sales_amount") is None:
+                    continue
+                day = row["business_date"]
+                by_day[day] = by_day.get(day, Decimal("0")) + row["sales_amount"]
+            return [{"d": d, "s": s} for d, s in sorted(by_day.items())]
+        return [dict(row) for row in rows]
+
+
+class OfflineAllDashboardTests(unittest.TestCase):
+    """线下整体销售BI看板（offline-all-sales，2026-10-10 裁决）：
+
+    汇总卡 = 线下线全域（_OFFLINE_LINE_SQL）；人员/部门/板块卡真源 =
+    collect_offline_all_people / AGG_SCOPES（与播报/静态页同函数）；
+    全卡 date 锚定、BI 实时口径含当天。
+    """
+
+    def _calendar_rows(self):
+        return [
+            {"business_date": date(2026, 8, 3)},
+            {"business_date": date(2026, 8, 4)},
+            {"business_date": date(2026, 8, 5)},
+        ]
+
+    def _three_region_rows(self):
+        return [
+            # 杭州 张三（8-03=30、8-04=40，目标 100 → rate 0.7）
+            {"region": "hangzhou", "responsible_person": "张三",
+             "department": "杭中", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("30"), "monthly_target": Decimal("100")},
+            {"region": "hangzhou", "responsible_person": "张三",
+             "department": "杭中", "business_date": date(2026, 8, 4),
+             "sales_amount": Decimal("40"), "monthly_target": Decimal("100")},
+            # 绍兴 王五（8-03=90，目标 100 → rate 0.9）
+            {"region": "shaoxing", "responsible_person": "王五",
+             "department": "绍兴一组", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("90"), "monthly_target": Decimal("100")},
+            # 省外板块（offline_extra：person=板块、department=责任人）
+            {"region": "offline_extra", "responsible_person": "省外",
+             "department": "余云涛", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("150"), "monthly_target": Decimal("100")},
+            # 合计行（人员卡须排除）
+            {"region": "hangzhou", "responsible_person": "杭州合计",
+             "department": None, "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("999"), "monthly_target": None},
+        ]
+
+    def _people_connection(self):
+        return _OaFakeConnection(
+            rowsets={
+                "dim_calendar": self._calendar_rows(),
+                "fact_daily_report_offline": self._three_region_rows(),
+            }
+        )
+
+    def test_kpi_oa_mtd_offline_line_wide_without_region_param(self):
+        connection = _RegionFakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("80"),
+                "region_target": Decimal("100"),
+            }
+        )
+        payload = bi_web_queries.run_kpi_oa_mtd(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(80.0, payload["value"])
+        self.assertEqual(100.0, payload["target"])
+        self.assertEqual(0.8, payload["rate"])
+        # 线下线全域：无 region 绑定参数，月窗口来自锚点日
+        sql, params = connection.executed[0]
+        self.assertNotIn("region = %s", sql)
+        self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)), params)
+
+    def test_kpi_oa_today_excludes_online_and_summary(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": [{"s": Decimal("123")}]}
+        )
+        payload = bi_web_queries.run_kpi_oa_today(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(123.0, payload["value"])
+        self.assertEqual("2026-08-04", payload["date"])
+        sql, params = connection.executed[-1]
+        self.assertIn("%%合计%%", sql)
+        self.assertIn("qudao", sql)  # 线上排除名单（_OFFLINE_LINE_SQL）
+        self.assertIn("vanke", sql)  # vanke 按 2026-10-10 裁决不计入
+        self.assertEqual((date(2026, 8, 4),), params)
+
+    def test_kpi_oa_progress_company_calendar(self):
+        connection = FakeConnection(
+            rowsets={"dim_calendar": self._calendar_rows()}
+        )
+        payload = bi_web_queries.run_kpi_oa_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(2.0, payload["value"])
+        self.assertEqual(3.0, payload["target"])
+        self.assertAlmostEqual(2 / 3, payload["rate"])
+
+    def test_trend_oa_daily_delegates_offline_line_wide(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_trend_region_daily",
+            return_value={"chart": "line"},
+        ) as trend:
+            payload = bi_web_queries.run_trend_oa_daily(
+                connection, {"date": "2026-08-04"})
+        self.assertEqual({"chart": "line"}, payload)
+        # region=None（线下线全域分区域多系列）、月=锚点月、gran 缺省日
+        trend.assert_called_once_with(
+            connection, {"month": "2026-08", "gran": "day"}
+        )
+
+    def test_bar_oa_dept_groups_by_realigned_dept(self):
+        payload = bi_web_queries.run_bar_oa_dept(
+            self._people_connection(), {"date": "2026-08-04"})
+        # 部门已归位（省外=板块归位、杭/绍=表内值兜底），Σ完成额 降序；
+        # 合计行不进榜
+        self.assertEqual(["省外", "绍兴一组", "杭中"], payload["categories"])
+        self.assertEqual([150.0, 90.0, 70.0], payload["values"])
+        self.assertEqual("2026-08-04", payload["date"])
+
+    def test_table_oa_people_progress_merges_three_regions(self):
+        payload = bi_web_queries.run_table_oa_people_progress(
+            self._people_connection(), {"date": "2026-08-04"})
+        self.assertEqual("2026-08-04", payload["date"])
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["rank", "name", "dept", "completed", "target", "rate",
+             "diff", "daily", "proj", "unfilled"],
+            keys,
+        )
+        # 三区合并重排（rate 降序）：余云涛 1.5 > 王五 0.9 > 张三 0.7
+        self.assertEqual(
+            ["余云涛", "王五", "张三"],
+            [row["name"] for row in payload["rows"]],
+        )
+        first = payload["rows"][0]
+        # offline_extra 姓名↔部门互换：责任人余云涛为名、板块省外为部门
+        self.assertEqual("省外", first["dept"])
+        self.assertEqual(150.0, first["completed"])
+        self.assertEqual(1.5, first["rate"])
+        third = payload["rows"][2]
+        # 张三：progress=2/3 → diff≈0.033、daily=35、proj=1.05、未填 0
+        self.assertAlmostEqual(0.7 - 2 / 3, third["diff"])
+        self.assertEqual(35.0, third["daily"])
+        self.assertAlmostEqual(1.05, third["proj"])
+        self.assertEqual(0, third["unfilled"])
+
+    def test_table_oa_people_progress_degrades_without_calendar(self):
+        connection = _OaFakeConnection(
+            rowsets={"dim_calendar": [], "fact_daily_report_offline": []}
+        )
+        payload = bi_web_queries.run_table_oa_people_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual([], payload["rows"])
+
+    def test_table_oa_scopes_overview_rows(self):
+        connection = _OaFakeConnection(
+            rowsets={
+                "fact_daily_report_offline": [
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "department": "杭中", "business_date": date(2026, 8, 3),
+                     "sales_amount": Decimal("30"),
+                     "monthly_target": Decimal("100")},
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "department": "杭中", "business_date": date(2026, 8, 4),
+                     "sales_amount": Decimal("40"),
+                     "monthly_target": Decimal("100")},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_oa_scopes(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual("2026-08-04", payload["date"])
+        self.assertEqual("2026-08-04", payload["report_day"])
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["scope", "day", "dod", "week", "wow", "completed", "target",
+             "rate", "mom"],
+            keys,
+        )
+        # 5 板块 + 线下整体
+        self.assertEqual(
+            ["杭州", "绍兴", "省外", "线下总经办", "李树军", "线下整体"],
+            [row["scope"] for row in payload["rows"]],
+        )
+        hangzhou = payload["rows"][0]
+        self.assertEqual(40.0, hangzhou["day"])           # 报告日 8-04
+        self.assertAlmostEqual(40 / 30 - 1, hangzhou["dod"])
+        self.assertEqual(70.0, hangzhou["week"])          # 本周一 8-03 起
+        self.assertIsNone(hangzhou["wow"])                # 上周基期 0
+        self.assertEqual(70.0, hangzhou["completed"])
+        self.assertEqual(100.0, hangzhou["target"])
+        self.assertEqual(0.7, hangzhou["rate"])
+        self.assertIsNone(hangzhou["mom"])                # 上月基期 0
+        shaoxing = payload["rows"][1]
+        self.assertEqual(0.0, shaoxing["completed"])
+        self.assertIsNone(shaoxing["target"])
+        self.assertIsNone(shaoxing["rate"])
+        total = payload["rows"][-1]
+        # 其余板块全零 → 线下整体 = 杭州
+        self.assertEqual(70.0, total["completed"])
+        self.assertEqual(100.0, total["target"])
+        self.assertEqual(0.7, total["rate"])
+
+    def test_table_oa_scopes_empty_month_degrades(self):
+        connection = _OaFakeConnection(
+            rowsets={"fact_daily_report_offline": []}
+        )
+        payload = bi_web_queries.run_table_oa_scopes(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual([], payload["rows"])
+
+
 class _PeopleFakeConnection(FakeConnection):
     """mart 路径 fake：事实行按最近一条语句的 region 参数过滤
     （模拟 fetch_month_facts 的 ``WHERE region = %s``）；日历行走 rowsets。"""

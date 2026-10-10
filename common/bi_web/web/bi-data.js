@@ -48,8 +48,12 @@ function fetchJson(url){
 }
 
 /* 旧静态页 URL → 看板别名（2026-10-09 裁决：8300/hangzhou.html 经 nginx
- * 反代到本壳，URL 保留；别名命中时壳按对应看板渲染）。 */
-var PATH_ALIASES = {'/hangzhou.html': 'hz-offline-sales'};
+ * 反代到本壳，URL 保留；别名命中时壳按对应看板渲染。
+ * 2026-10-10 +offline_all.html 同方案）。 */
+var PATH_ALIASES = {
+  '/hangzhou.html': 'hz-offline-sales',
+  '/offline_all.html': 'offline-all-sales'
+};
 
 function dashboardId(){
   if (PATH_ALIASES[location.pathname]) return PATH_ALIASES[location.pathname];

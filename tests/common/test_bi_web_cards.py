@@ -85,6 +85,15 @@ STAGE_B_CARD_IDS = (
     "bar_hz_dept",
     "table_hz_people_progress",
     "table_hz_unfilled_today",
+    # 线下整体销售BI看板七卡（2026-10-10 裁决：8300/offline_all.html
+    # 静态页切 BI，同 hangzhou.html 反代方案 A），共 51 张。
+    "kpi_oa_mtd",
+    "kpi_oa_today",
+    "kpi_oa_progress",
+    "trend_oa_daily",
+    "bar_oa_dept",
+    "table_oa_scopes",
+    "table_oa_people_progress",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -146,6 +155,13 @@ EXPECTED_CHARTS = {
     "bar_hz_dept": "bar",
     "table_hz_people_progress": "table",
     "table_hz_unfilled_today": "table",
+    "kpi_oa_mtd": "scalar",
+    "kpi_oa_today": "scalar",
+    "kpi_oa_progress": "scalar",
+    "trend_oa_daily": "line",
+    "bar_oa_dept": "bar",
+    "table_oa_scopes": "table",
+    "table_oa_people_progress": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -194,6 +210,13 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_hz_dept": queries.run_bar_hz_dept,
     "table_hz_people_progress": queries.run_table_hz_people_progress,
     "table_hz_unfilled_today": queries.run_table_hz_unfilled_today,
+    "kpi_oa_mtd": queries.run_kpi_oa_mtd,
+    "kpi_oa_today": queries.run_kpi_oa_today,
+    "kpi_oa_progress": queries.run_kpi_oa_progress,
+    "trend_oa_daily": queries.run_trend_oa_daily,
+    "bar_oa_dept": queries.run_bar_oa_dept,
+    "table_oa_scopes": queries.run_table_oa_scopes,
+    "table_oa_people_progress": queries.run_table_oa_people_progress,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -257,6 +280,15 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_hz_dept": {"date": "dates"},
     "table_hz_people_progress": {"date": "dates"},
     "table_hz_unfilled_today": {"date": "dates"},
+    # 线下整体看板七卡（2026-10-10）：同杭州看板锚定 date；trend 卡
+    # 另开 gran 粒度白名单（三档默认日）。
+    "kpi_oa_mtd": {"date": "dates"},
+    "kpi_oa_today": {"date": "dates"},
+    "kpi_oa_progress": {"date": "dates"},
+    "trend_oa_daily": {"date": "dates", "gran": "granularity"},
+    "bar_oa_dept": {"date": "dates"},
+    "table_oa_scopes": {"date": "dates"},
+    "table_oa_people_progress": {"date": "dates"},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -270,6 +302,8 @@ EXPECTED_GRANS = {
     "trend_fin_store_funds_entity": (("month",), "month"),
     # 杭州看板趋势卡（2026-10-09）：三档默认日，同 trend_region_daily。
     "trend_hz_daily": (("day", "week", "month"), "day"),
+    # 线下整体看板趋势卡（2026-10-10）：三档默认日，同杭州看板。
+    "trend_oa_daily": (("day", "week", "month"), "day"),
 }
 
 
@@ -300,7 +334,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(44, len(REGISTRY))
+        self.assertEqual(51, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

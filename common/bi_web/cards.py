@@ -39,6 +39,15 @@ day/week/month with ``gran`` entering the whitelist: its source table is
 day-grained, so the month-only declaration was a fake control (the seg
 rendered with no ``on`` state and no request ever carried ``gran``);
 ``default_gran="month"`` keeps the default path byte-identical.
+The Hangzhou offline-sales board (2026-10-09, static leaderboard page to
+BI behind the same URL) adds seven date-anchored cards
+(``kpi_hz_mtd``/``kpi_hz_today``/``kpi_hz_progress``/``trend_hz_daily``/
+``bar_hz_dept``/``table_hz_people_progress``/
+``table_hz_unfilled_today``) for forty-four.  The offline-all board
+(2026-10-10, ``8300/offline_all.html`` follows the same nginx reverse
+proxy pattern) adds seven more (``kpi_oa_mtd``/``kpi_oa_today``/
+``kpi_oa_progress``/``trend_oa_daily``/``bar_oa_dept``/
+``table_oa_scopes``/``table_oa_people_progress``) for fifty-one.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -190,6 +199,26 @@ _CARDS = (
     # 同真源（mart_tasks._unfilled，名册绑定 fail-open）。
     _card("table_hz_unfilled_today", "table",
           queries.run_table_hz_unfilled_today, {"date": "dates"}),
+    # 线下整体销售BI看板（offline-all-sales，2026-10-10 裁决）：线下线
+    # 全域（汇总卡）+ 三区合并人员/部门/板块（真源同播报/静态页函数）；
+    # 静态榜单页（8300/offline_all.html）的 BI 替身，nginx 反代保留原 URL。
+    _card("kpi_oa_mtd", "scalar", queries.run_kpi_oa_mtd,
+          {"date": "dates"}),
+    _card("kpi_oa_today", "scalar", queries.run_kpi_oa_today,
+          {"date": "dates"}),
+    _card("kpi_oa_progress", "scalar", queries.run_kpi_oa_progress,
+          {"date": "dates"}),
+    _card(
+        "trend_oa_daily", "line", queries.run_trend_oa_daily,
+        {"date": "dates", "gran": "granularity"},
+        grans=("day", "week", "month"), default_gran="day",
+    ),
+    _card("bar_oa_dept", "bar", queries.run_bar_oa_dept,
+          {"date": "dates"}),
+    _card("table_oa_scopes", "table",
+          queries.run_table_oa_scopes, {"date": "dates"}),
+    _card("table_oa_people_progress", "table",
+          queries.run_table_oa_people_progress, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
