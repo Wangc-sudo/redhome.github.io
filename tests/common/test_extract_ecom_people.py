@@ -438,6 +438,31 @@ class FetchSourceRowsTests(unittest.TestCase):
         self.assertIn("`business_date` = %s", detail_sql)
         self.assertEqual(detail_params, ("2026-09-10",))
 
+    def test_fact_detail_table_uses_null_owner_column(self):
+        """2026-10-10 修复：管线明细源 = mart 事实表（归并产物），事实表
+        无负责人列 → NULL AS responsible_person（归属走 store_meta 回退）。"""
+        conn = _RawConnection(
+            [_detail_row("旗舰店", ["张三"], 100, "2026-10-07")],
+            [_target_row("旗舰店", 300000)],
+        )
+        detail_rows, _ = fetch_source_rows(
+            conn, month=None, day=None,
+            detail_table="fact_channel_daily_sales",
+        )
+        self.assertEqual(detail_rows, conn.detail_rows)
+        detail_sql, _ = conn.executed[0]
+        self.assertIn("fact_channel_daily_sales", detail_sql)
+        self.assertIn("NULL AS `responsible_person`", detail_sql)
+        # 月过滤缺省 = 全量（管线重放形态，无 MONTH 谓词）
+        self.assertNotIn("MONTH(`business_date`)", detail_sql)
+
+    def test_detail_table_rejects_non_whitelist(self):
+        with self.assertRaises(ValueError):
+            fetch_source_rows(
+                _RawConnection([], []), month=None, day=None,
+                detail_table="fact_daily_report_offline; DROP TABLE x",
+            )
+
 
 # ---------------------------------------------------------------------------
 # upsert（fake 内存表，验证业务键幂等）

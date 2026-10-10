@@ -292,14 +292,35 @@ def build_fact_rows(detail_rows, store_meta, channel_owners=None):
 # IO：raw 层读取
 # ---------------------------------------------------------------------------
 
-def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None):
-    """读取 raw 源行 → ``(detail_rows, target_rows)``。
+#: 明细源表白名单（``fetch_source_rows`` 的 ``detail_table`` 形参防注入）。
+_DETAIL_TABLES = ("channel_daily_sales", "fact_channel_daily_sales")
 
-    ``channel_daily_sales`` 按 ``--day``（精确日）或 ``--month``
-    （``business_date`` 所在月份）过滤；两者都缺省时取全量。
-    ``channel_monthly_target`` 是月维度全量表，不做日期过滤——目标属于
-    哪个月由调用方（sync-dingtalk 当月补采）保证。
+
+def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None, *,
+                      detail_table="channel_daily_sales"):
+    """读取源行 → ``(detail_rows, target_rows)``。
+
+    明细按 ``--day``（精确日）或 ``--month``（``business_date`` 所在
+    月份）过滤；两者都缺省时取全量。``channel_monthly_target`` 是月
+    维度全量表，不做日期过滤——目标属于哪个月由调用方
+    （sync-dingtalk 当月补采）保证。
+
+    ``detail_table``（2026-10-10 修复）：raw ``channel_daily_sales``
+    或 mart ``fact_channel_daily_sales`` 二选一（白名单，防注入）。
+    管线内必须取后者——渠道销售真源 = raw AI 表 ∪ 机器人 inbox 归并
+    （2026-10-09 PR #29），归并产物在 mart 事实表；读 raw 会让机器
+    人-only 的日期（2026-10 起全部）静默零产出，qudao 人员事实行断
+    供（渠道播报部门排名空表即此事故）。事实表无负责人列，补
+    ``NULL AS responsible_person``，归属全走 store_meta/渠道集合回退
+    （月目标表名册真源，:func:`build_fact_rows` 既有回退链）。
     """
+    if detail_table not in _DETAIL_TABLES:
+        raise ValueError("detail_table must be a whitelisted source table")
+    owner_col = (
+        "`responsible_person`"
+        if detail_table == "channel_daily_sales"
+        else "NULL AS `responsible_person`"
+    )
     where = ""
     params = ()
     if day:
@@ -311,7 +332,7 @@ def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None):
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(
             "SELECT `channel`, `store_name`, `business_date`, `sales_amount`, "
-            "`responsible_person` FROM `channel_daily_sales` "
+            f"{owner_col} FROM `{detail_table}` "
             f"{where} ORDER BY `business_date`, `channel`, `store_name`",
             params,
         )
