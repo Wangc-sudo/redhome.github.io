@@ -107,6 +107,17 @@ def mart_collect_data(conn, *, region, business_date):
     return mart_collect(conn, region=region, business_date=business_date)
 
 
+def collect_offline_all_data(conn, *, business_date):
+    """线下整体播报采集：多区合并（与榜单页同口径）。"""
+    from common.daily_robot.offline_summary import collect_offline_all_people
+    return collect_offline_all_people(conn, business_date=business_date)
+
+
+def elapsed_day_numbers(workdays, *, today):
+    from common.metrics.daily_report import elapsed_workdays
+    return sorted({d.day for d in elapsed_workdays(workdays, today=today)})
+
+
 def build_view(region_cfg, workdays, *, year, month):
     from common.daily_robot.mart_leaderboard import build_leaderboard_view
     return build_leaderboard_view(region_cfg, workdays, year=year, month=month)
@@ -374,17 +385,37 @@ def _handle_leaderboard(args):
         business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
-        data = mart_collect_data(conn, region=region, business_date=business_date)
-        view = build_view(
-            cfg, data.workdays,
-            year=business_date.year, month=business_date.month,
-        )
-        body = render_bc(
-            view["region"], view["calendar"], now,
-            list(data.elapsed), list(data.people),
-            url=cfg.leaderboard_url or None,
-            dept_overrides=channel_dept_overrides(conn, region, data),
-        )
+        if region == "offline_all":
+            # 线下整体无 region=offline_all 事实行：与榜单页同口径走
+            # OFFLINE_PEOPLE_REGIONS 多区合并（2026-10-10 修复播报恒 0.0%——
+            # 此前直接 mart_collect('offline_all') 恒为空表）。
+            people, workdays = collect_offline_all_data(
+                conn, business_date=business_date
+            )
+            view = build_view(
+                cfg, workdays,
+                year=business_date.year, month=business_date.month,
+            )
+            body = render_bc(
+                view["region"], view["calendar"], now,
+                elapsed_day_numbers(workdays, today=business_date), people,
+                url=cfg.leaderboard_url or None,
+            )
+        else:
+            data = mart_collect_data(
+                conn, region=region, business_date=business_date
+            )
+            view = build_view(
+                cfg, data.workdays,
+                year=business_date.year, month=business_date.month,
+            )
+            people = list(data.people)
+            body = render_bc(
+                view["region"], view["calendar"], now,
+                list(data.elapsed), people,
+                url=cfg.leaderboard_url or None,
+                dept_overrides=channel_dept_overrides(conn, region, data),
+            )
 
         outbox = build_outbox(conn)
         enqueued = outbox.enqueue(
@@ -400,7 +431,7 @@ def _handle_leaderboard(args):
         print(
             f"service={service_id} region={region} kind=leaderboard "
             f"status={'enqueued' if enqueued else 'already_sent'} "
-            f"people={len(data.people)}"
+            f"people={len(people)}"
         )
     except SystemExit:
         raise

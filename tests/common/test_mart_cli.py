@@ -287,6 +287,57 @@ class LeaderboardCliTests(unittest.TestCase):
             render.call_args.kwargs["url"], _CFG.leaderboard_url
         )
 
+    def test_leaderboard_offline_all_uses_merged_people(self):
+        """offline_all 无事实行：播报走 OFFLINE_PEOPLE_REGIONS 多区合并。"""
+        people = [
+            {"name": "余云涛", "dept": "省外", "target": 100.0,
+             "completed": 50.0, "unfilled": 0, "rate": 0.5},
+            {"name": "张三", "dept": "杭中", "target": 1000.0,
+             "completed": 500.0, "unfilled": 0, "rate": 0.5},
+        ]
+        workdays = frozenset({date(2026, 9, 10)})
+        output = io.StringIO()
+        with patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"offline_all": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart") as conn, \
+             patch("common.daily_robot.mart_cli.mart_collect_data") as collect, \
+             patch("common.daily_robot.mart_cli.collect_offline_all_data",
+                   return_value=(people, workdays)) as merged, \
+             patch("common.daily_robot.mart_cli.elapsed_day_numbers",
+                   return_value=[9, 10]), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.render_bc",
+                   return_value="MD") as render, \
+             patch("common.daily_robot.mart_cli.build_outbox") as build_outbox, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 11, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            build_outbox.return_value.enqueue.return_value = True
+            with redirect_stdout(output):
+                main([
+                    "leaderboard", "--confirm-local-test-write",
+                    "--region", "offline_all",
+                ])
+
+        # 不走单区采集（offline_all 无 region=offline_all 事实行）
+        collect.assert_not_called()
+        merged.assert_called_once()
+        self.assertEqual(render.call_args.args[3], [9, 10])
+        self.assertEqual(render.call_args.args[4], people)
+        self.assertEqual(render.call_args.kwargs["url"], _CFG.leaderboard_url)
+        self.assertNotIn("dept_overrides", render.call_args.kwargs)
+
+        kwargs = build_outbox.return_value.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "leaderboard")
+        self.assertEqual(kwargs["region"], "offline_all")
+        self.assertEqual(kwargs["body_md"], "MD")
+        conn.return_value.commit.assert_called_once()
+        self.assertIn("people=2", output.getvalue())
+
     def test_leaderboard_requires_confirmation(self):
         with patch("common.daily_robot.mart_cli.load_settings") as load_settings:
             with self.assertRaises(SystemExit) as raised:

@@ -758,10 +758,11 @@ def build_offline_panels(connection, *, business_date):
     return [f'<div class="panel">\n{body}\n</div>']
 
 
-def build_offline_all_html(connection, cfg, *, business_date, now):
-    """线下整体榜单页：人员总榜（杭/绍等全部线下人员，无人例外）+ 维度标签。
+def collect_offline_all_people(connection, *, business_date):
+    """线下整体人员总榜采集（页面与 08:30 群播报同口径，无人例外）。
 
-    人员：``OFFLINE_PEOPLE_REGIONS`` 各 region 的 ``mart_collect`` 结果合并
+    线下整体无 ``region='offline_all'`` 的事实行——人员为
+    ``OFFLINE_PEOPLE_REGIONS`` 各 region 的 ``mart_collect`` 结果合并
     （与各区域榜单页逐行同口径；「合计」行由 mart_collect 统一跳过），
     排序与 ``mart_collect`` 同键（-rate(None→-1), -completed, -target）。
     人/部门归位（运维口径 2026-09-23，人与部门不要混乱）：
@@ -769,16 +770,11 @@ def build_offline_all_html(connection, cfg, *, business_date, now):
       板块（省外/线下总经办）、department 才是责任人（余云涛/谢坚钰）；
     * 杭/绍人员部门以通讯录 ``dim_robot_member`` 为准（表内部门是手工
       叫法），无匹配保留表内值兜底。
-    板块：日/周/月三期总览表（``build_offline_panels``，extra_panels 插入）。
-    """
-    from common.daily_robot.leaderboard import build_html
-    from common.daily_robot.mart_leaderboard import (
-        build_leaderboard_view,
-        mart_collect,
-    )
-    from common.metrics.daily_report import elapsed_workdays
 
-    year, month = business_date.year, business_date.month
+    返回 ``(people, workdays)``。
+    """
+    from common.daily_robot.mart_leaderboard import mart_collect
+
     people = []
     by_region = {}
     workdays = frozenset()
@@ -806,7 +802,22 @@ def build_offline_all_html(connection, cfg, *, business_date, now):
             -p["target"],
         )
     )
+    return people, workdays
 
+
+def build_offline_all_html(connection, cfg, *, business_date, now):
+    """线下整体榜单页：人员总榜（``collect_offline_all_people``）+ 维度标签。
+
+    板块：日/周/月三期总览表（``build_offline_panels``，extra_panels 插入）。
+    """
+    from common.daily_robot.leaderboard import build_html
+    from common.daily_robot.mart_leaderboard import build_leaderboard_view
+    from common.metrics.daily_report import elapsed_workdays
+
+    year, month = business_date.year, business_date.month
+    people, workdays = collect_offline_all_people(
+        connection, business_date=business_date
+    )
     view = build_leaderboard_view(cfg, workdays, year=year, month=month)
     elapsed = sorted({d.day for d in elapsed_workdays(workdays, today=business_date)})
     panels = build_offline_panels(connection, business_date=business_date)
