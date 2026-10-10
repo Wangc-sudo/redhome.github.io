@@ -32,10 +32,30 @@ def _like_escape(text):
 
 
 def find_products(conn, keyword, *, limit=_MAX_ROWS):
-    """按关键词找商品，返回 DictCursor 行列表（可能为空）。"""
+    """按关键词找商品，返回 DictCursor 行列表（可能为空）。
+
+    整词 miss 后按分词回退（长词优先，最多试 3 个）：用户消息常带
+    无关后缀（「习酒窖藏1998 箱规」验收），整词 LIKE 必 miss，
+    分词「习酒窖藏1998」能中（2026-10-10 验收事故）。
+    """
     kw = (keyword or "").strip()
     if not kw:
         return []
+    rows = _search(conn, kw, limit)
+    if rows:
+        return rows
+    tokens = sorted(
+        (t for t in kw.split() if len(t) >= 2), key=len, reverse=True
+    )
+    for token in tokens[:3]:
+        rows = _search(conn, token, limit)
+        if rows:
+            return rows
+    return []
+
+
+def _search(conn, kw, limit):
+    """三级检索：编码/69码精确 → 品名精确 → 品名包含。"""
     cursor = conn.cursor()
     try:
         cursor.execute(

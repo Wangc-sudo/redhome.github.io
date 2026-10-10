@@ -49,6 +49,9 @@ _DOC_FALLBACK = (
 #: 媒体消息 msgKey 形态实证后替换（media.py 已备好下载/上传/缓存）。
 _ASSET_PENDING = "文件直发功能接入中，请先到 AI 表「产品资料」对应行下载："
 
+#: 群回复 markdown 卡片标题。
+_REPLY_TITLE = "产品资料助手"
+
 
 def parse_conversation_allowlist(raw):
     """env KB_QA_CONVERSATION_IDS：逗号分隔；空=不限制（应用只进客服群）。"""
@@ -72,15 +75,25 @@ def callback_message_id(callback):
 
 
 class KbStreamHandler(dingtalk_stream.ChatbotHandler):
-    """客服群问答 handler。所有依赖注入，测试无需 Stream 连接。"""
+    """客服群问答 handler。所有依赖注入，测试无需 Stream 连接。
+
+    回复通道（2026-10-10 二次事故教训）：**不用 SDK reply_text 走
+    sessionWebhook**——该路径对应用级 errcode 静默（SDK 只检查 HTTP
+    状态码，body 里的 errcode 不抛不记），曾出现「处理完成、群内零回复、
+    日志无痕」。改走 ``DingTalkClient.send_group_markdown``
+    （groupMessages/send，errcode 显式可查，已实测可达），*reply_client*
+    为空才回退 reply_text。群聊场景限定（客服群）；单聊回退 reply_text。
+    """
 
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
-                 log=print):
+                 log=print, reply_client=None, robot_code=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
         self._now = now or datetime.now
         self._log = log
+        self._reply_client = reply_client
+        self._robot_code = robot_code
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -196,9 +209,21 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         return HELP_TEXT, CHITCHAT, None
 
     def _safe_reply(self, incoming, text):
+        conversation_id = getattr(incoming, "conversation_id", "") or ""
+        sender_uid = incoming.sender_staff_id or ""
         try:
-            self.reply_text(text, incoming)
+            if self._reply_client is not None and conversation_id:
+                self._reply_client.send_group_markdown(
+                    self._robot_code, conversation_id,
+                    _REPLY_TITLE, text,
+                    at_user_ids=[sender_uid] if sender_uid else None,
+                )
+            else:
+                self.reply_text(text, incoming)
+            self._log("kb qa: reply sent")
         except Exception:
+            # 非泄露约定：不记异常原文；errcode 类失败由
+            # DingTalkClient 抛出走到这里（sessionWebhook 路径则无感）。
             self._log("kb qa: reply failed")
 
 
@@ -235,9 +260,16 @@ def main(argv=None):
     allowlist = parse_conversation_allowlist(
         os.environ.get("KB_QA_CONVERSATION_IDS")
     )
+    from common.dingtalk.client import DingTalkClient
+
+    reply_client = DingTalkClient(
+        app_key, app_secret, os.environ["KB_DINGTALK_OPERATOR_ID"]
+    )
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
+        reply_client=reply_client,
+        robot_code=app_key,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()

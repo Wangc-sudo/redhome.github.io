@@ -7,7 +7,11 @@ P2 接入 LLM 时本模块输出作为规则层，未命中再走 qwen/DeepSeek 
 2026-10-10 运维裁决「全数据非敏感」：无 BLOCKED 类别，无角色门禁。
 """
 
+import re
 from dataclasses import dataclass
+
+#: 关键词剥离的括号/引号字符（中英全套）。
+_STRIP_CHARS_RE = re.compile(r"[「」【】《》〈〉\"'“”‘’()（）\[\]{}]")
 
 PRODUCT_PARAM = "PRODUCT_PARAM"
 PRODUCT_FILTER = "PRODUCT_FILTER"
@@ -54,10 +58,16 @@ class Intent:
 
 
 def extract_keyword(text):
-    """剥离触发词与问句噪音，剩下的作为商品名/检索关键词。"""
+    """剥离触发词、问句噪音与括号引号，剩下的作为商品名/检索关键词。
+
+    括号字符一律剥（2026-10-10 验收事故：用户按指引发「习酒窖藏1998
+    箱规」带直角引号，残留括号导致精确/LIKE 全 miss）；品名里的括号
+    是表内值的事，查询关键词不需要。
+    """
     keyword = text.strip()
     for word in _NOISE_WORDS:
         keyword = keyword.replace(word, " ")
+    keyword = _STRIP_CHARS_RE.sub(" ", keyword)
     return " ".join(keyword.split())
 
 
