@@ -2929,10 +2929,19 @@ class OfflineAllDashboardTests(unittest.TestCase):
         self.assertEqual("2026-08-04", payload["date"])
         self.assertEqual("2026-08-04", payload["report_day"])
         keys = [column["key"] for column in payload["columns"]]
+        # 2026-10-10 排版裁决：期组内「累计 → 基期 → 环比」，组间分隔线
         self.assertEqual(
-            ["scope", "day", "dod", "day_base", "week", "wow", "week_base",
-             "completed", "target", "rate", "mom", "month_base"],
+            ["scope", "day", "day_base", "dod",
+             "week", "week_base", "wow",
+             "completed", "month_base", "mom",
+             "target", "rate", "prev_target", "prev_rate"],
             keys,
+        )
+        by_key = {column["key"]: column for column in payload["columns"]}
+        # 分隔线落在每组首列（本周累计/月累计/月目标）
+        self.assertEqual(
+            ["week", "completed", "target"],
+            [key for key in keys if by_key[key].get("cls") == "col-sep"],
         )
         # 5 板块 + 线下整体
         self.assertEqual(
@@ -2941,25 +2950,32 @@ class OfflineAllDashboardTests(unittest.TestCase):
         )
         hangzhou = payload["rows"][0]
         self.assertEqual(40.0, hangzhou["day"])           # 报告日 8-04
-        self.assertAlmostEqual(40 / 30 - 1, hangzhou["dod"])
         self.assertEqual(30.0, hangzhou["day_base"])      # 昨日基期可见
+        self.assertAlmostEqual(40 / 30 - 1, hangzhou["dod"])
         self.assertEqual(70.0, hangzhou["week"])          # 本周一 8-03 起
-        self.assertIsNone(hangzhou["wow"])                # 上周基期 0 → 比率 --
         self.assertEqual(0.0, hangzhou["week_base"])      # 基期仍可见
+        self.assertIsNone(hangzhou["wow"])                # 上周基期 0 → 比率 --
         self.assertEqual(70.0, hangzhou["completed"])
+        self.assertEqual(0.0, hangzhou["month_base"])
+        self.assertIsNone(hangzhou["mom"])                # 上月基期 0
         self.assertEqual(100.0, hangzhou["target"])
         self.assertEqual(0.7, hangzhou["rate"])
-        self.assertIsNone(hangzhou["mom"])                # 上月基期 0
-        self.assertEqual(0.0, hangzhou["month_base"])
+        # 上月目标/上月达成率 = 上月同期累计 ÷ 上月目标（同构口径）
+        self.assertEqual(100.0, hangzhou["prev_target"])
+        self.assertEqual(0.0, hangzhou["prev_rate"])
         shaoxing = payload["rows"][1]
         self.assertEqual(0.0, shaoxing["completed"])
         self.assertIsNone(shaoxing["target"])
         self.assertIsNone(shaoxing["rate"])
+        self.assertIsNone(shaoxing["prev_target"])
+        self.assertIsNone(shaoxing["prev_rate"])
         total = payload["rows"][-1]
         # 其余板块全零 → 线下整体 = 杭州
         self.assertEqual(70.0, total["completed"])
         self.assertEqual(100.0, total["target"])
         self.assertEqual(0.7, total["rate"])
+        self.assertEqual(100.0, total["prev_target"])
+        self.assertEqual(0.0, total["prev_rate"])
 
     def test_table_oa_scopes_empty_month_degrades(self):
         connection = _OaFakeConnection(

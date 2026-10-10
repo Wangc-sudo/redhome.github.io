@@ -395,7 +395,12 @@ function CardTable(o){
   var cols = o.cols, rows = o.rows;
   var scroll = el('div', 'table-scroll');
   var html = '<table class="data-table"><thead><tr>';
-  cols.forEach(function(c){ html += '<th>' + esc(c.label) + '</th>'; });
+  /* th 同步列级 cls（仅字符串形态；function 形态只作用于 td）——
+   * 组间分隔线 col-sep（2026-10-10 板块总览排版裁决）需要表头同宽对齐。 */
+  cols.forEach(function(c){
+    var thCls = typeof c.cls === 'string' ? ' class="' + esc(c.cls) + '"' : '';
+    html += '<th' + thCls + '>' + esc(c.label) + '</th>';
+  });
   html += '</tr></thead><tbody>';
   if (!rows.length){
     html += '<tr><td colspan="' + cols.length + '" style="text-align:center;padding:24px 0;color:#667085">暂无数据</td></tr>';

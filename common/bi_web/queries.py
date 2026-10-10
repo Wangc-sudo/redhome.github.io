@@ -3215,22 +3215,25 @@ def run_table_oa_people_progress(connection, params) -> dict:
     }
 
 
-#: 板块总览列（日/周/月三期）：环比列右侧紧跟对比基期列（昨日/上周
-#: 同期/上月同期）——静态页面板是「百分比+基期小字」复合格，BI 表格
-#: 无复合格，基期独立成列（2026-10-10 运维反馈「环比缺对比数据」）。
+#: 板块总览列（2026-10-10 运维排版裁决）：日/周/月三期各成一组
+#: 「累计 → 基期 → 环比」，组间分隔线（``cls=col-sep`` 列级左边框，
+#: 前端 bi.css）；月目标组补上月目标/上月达成率（上月同期累计 ÷
+#: 上月目标，与本月「月累计 ÷ 月目标 = 达成率」同构可比）。
 _OA_SCOPE_COLUMNS = [
     {"key": "scope", "title": "板块"},
     {"key": "day", "title": "当日", "format": "wan"},
-    {"key": "dod", "title": "日环比", "format": "percent"},
     {"key": "day_base", "title": "昨日", "format": "wan"},
-    {"key": "week", "title": "本周累计", "format": "wan"},
+    {"key": "dod", "title": "日环比", "format": "percent"},
+    {"key": "week", "title": "本周累计", "format": "wan", "cls": "col-sep"},
+    {"key": "week_base", "title": "上周累计", "format": "wan"},
     {"key": "wow", "title": "周环比", "format": "percent"},
-    {"key": "week_base", "title": "上周同期", "format": "wan"},
-    {"key": "completed", "title": "月累计", "format": "wan"},
-    {"key": "target", "title": "月目标", "format": "wan"},
-    {"key": "rate", "title": "达成率", "format": "percent"},
+    {"key": "completed", "title": "月累计", "format": "wan", "cls": "col-sep"},
+    {"key": "month_base", "title": "上月累计", "format": "wan"},
     {"key": "mom", "title": "月环比", "format": "percent"},
-    {"key": "month_base", "title": "上月同期", "format": "wan"},
+    {"key": "target", "title": "月目标", "format": "wan", "cls": "col-sep"},
+    {"key": "rate", "title": "达成率", "format": "percent"},
+    {"key": "prev_target", "title": "上月目标", "format": "wan"},
+    {"key": "prev_rate", "title": "上月达成率", "format": "percent"},
 ]
 
 
@@ -3254,11 +3257,13 @@ def run_table_oa_scopes(connection, params) -> dict:
         merge_targets,
         previous_month,
     )
+    from common.metrics.daily_report import achievement_rate
 
     anchor = _hz_anchor(params)
     prev_first, _ = previous_month(anchor)
     facts_by_scope = {}
     targets = {}
+    prev_targets = {}
     for scope, label, region, scope_anchor in AGG_SCOPES:
         facts_by_scope[scope] = fetch_scope_daily_facts(
             connection, region=region, anchor=scope_anchor,
@@ -3267,6 +3272,11 @@ def run_table_oa_scopes(connection, params) -> dict:
         targets[scope] = fetch_scope_month_target(
             connection, region=region, anchor=scope_anchor,
             year=anchor.year, month=anchor.month,
+        )
+        # 上月目标（运维 2026-10-10 排版裁决新增「上月目标/上月达成率」）
+        prev_targets[scope] = fetch_scope_month_target(
+            connection, region=region, anchor=scope_anchor,
+            year=prev_first.year, month=prev_first.month,
         )
 
     day_totals = {}
@@ -3299,20 +3309,29 @@ def run_table_oa_scopes(connection, params) -> dict:
         month_target=merge_targets(targets.values()),
     ))
 
+    scope_prev_target = {
+        **prev_targets,
+        TOTAL_SCOPE_KEY: merge_targets(prev_targets.values()),
+    }
     rows = [
         {
             "scope": m.label,
             "day": m.day_sales,
-            "dod": m.dod_rate,
             "day_base": m.day_base,
+            "dod": m.dod_rate,
             "week": m.week_sales,
-            "wow": m.wow_rate,
             "week_base": m.week_base,
+            "wow": m.wow_rate,
             "completed": m.month_completed,
+            "month_base": m.month_base,
+            "mom": m.mom_rate,
             "target": m.month_target,
             "rate": m.month_rate,
-            "mom": m.mom_rate,
-            "month_base": m.month_base,
+            "prev_target": scope_prev_target[m.scope],
+            # 上月达成率 = 上月同期累计 ÷ 上月目标（与本月达成率同构）
+            "prev_rate": achievement_rate(
+                m.month_base, scope_prev_target[m.scope]
+            ),
         }
         for m in metrics
     ]
