@@ -137,11 +137,16 @@ class ProductQueryTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         sql = conn.cursor_instance.executed[2][0]
         self.assertIn("LIKE", sql)
+        # 2026-10-10 盲区修复：包含检索覆盖品名/品牌/大类三字段
+        self.assertIn("`brand` LIKE", sql)
+        self.assertIn("`category` LIKE", sql)
+        params = conn.cursor_instance.executed[2][1]
+        self.assertEqual(3, params.count("%窖藏%"))
         # LIKE 特殊字符已转义
         conn2 = _FakeConn([[], [], []])
         find_products(conn2, "100%_")
-        params = conn2.cursor_instance.executed[2][1]
-        self.assertEqual("%100\\%\\_%", params[0])
+        params2 = conn2.cursor_instance.executed[2][1]
+        self.assertEqual("%100\\%\\_%", params2[0])
 
     def test_empty_keyword_no_query(self):
         conn = _FakeConn()
@@ -174,6 +179,11 @@ class ProductQueryTests(unittest.TestCase):
         self.assertIn("1. 习酒窖藏1998", clarify)
         self.assertIn("2. 习酒窖藏1988", clarify)
         self.assertIn("换个说法", render_not_found("不存在"))
+
+    def test_render_filter_truncation_hint(self):
+        rows = [_product_row(record_id=f"r{i}", name=f"商品{i}") for i in range(8)]
+        text = render_filter_answer(rows, "酱香酒")
+        self.assertIn("仅列前 8 款", text)
 
 
 class SyncNormalizeTests(unittest.TestCase):

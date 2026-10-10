@@ -55,7 +55,12 @@ def find_products(conn, keyword, *, limit=_MAX_ROWS):
 
 
 def _search(conn, kw, limit):
-    """三级检索：编码/69码精确 → 品名精确 → 品名包含。"""
+    """三级检索：编码/69码精确 → 品名精确 → 品名/品牌/大类包含。
+
+    第三段搜三个字段（2026-10-10「有哪些酱香酒」盲区修复）：category
+    实测是产品系列（窖藏1988/知交系列）而非香型，「酱香酒」只在 brand
+    「茅台酱香酒」上能中——只搜品名会系统性漏掉品牌/系列维度。
+    """
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -74,10 +79,14 @@ def _search(conn, kw, limit):
         rows = list(cursor.fetchall())
         if rows:
             return rows
+        like = f"%{_like_escape(kw)}%"
         cursor.execute(
             "SELECT * FROM `kb_products`"
-            " WHERE `name` LIKE %s ESCAPE '\\\\' ORDER BY `name` LIMIT %s",
-            (f"%{_like_escape(kw)}%", limit),
+            " WHERE `name` LIKE %s ESCAPE '\\\\'"
+            " OR `brand` LIKE %s ESCAPE '\\\\'"
+            " OR `category` LIKE %s ESCAPE '\\\\'"
+            " ORDER BY `name` LIMIT %s",
+            (like, like, like, limit),
         )
         return list(cursor.fetchall())
     finally:
@@ -97,7 +106,7 @@ def render_param_answer(row):
 
 
 def render_filter_answer(rows, keyword):
-    """筛选结果列表：一名一行，附品牌/大类便于区分。"""
+    """筛选结果列表：一名一行，附品牌/大类便于区分；满上限给截断提示。"""
     lines = [f"「{keyword}」匹配到 {len(rows)} 款："]
     for index, row in enumerate(rows, 1):
         parts = [row["name"]]
@@ -106,6 +115,8 @@ def render_filter_answer(rows, keyword):
         if row.get("category"):
             parts.append(row["category"])
         lines.append(f"{index}. {' / '.join(str(p) for p in parts)}")
+    if len(rows) >= _MAX_ROWS:
+        lines.append(f"（仅列前 {_MAX_ROWS} 款，发品牌名或品名可精确查）")
     lines.append("发具体品名可查参数 " + _SOURCE_TAG)
     return "\n".join(lines)
 
