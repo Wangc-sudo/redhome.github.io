@@ -2,6 +2,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
+from common.kb_qa.schema import kb_ddl_statements
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
@@ -491,6 +492,13 @@ _MIGRATIONS = (
         "mart-ops-run-history-v1",
         "mart",
         _build_mart_run_history_ddl(),
+    ),
+    (
+        # 知识库问答机器人（2026-10-10）：kb_products/kb_media_cache/
+        # kb_doc_chunks/kb_qa_audit。随任意 mart 热路径迁移自动建表。
+        "mart-ops-kb-qa-v1",
+        "mart",
+        kb_ddl_statements(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

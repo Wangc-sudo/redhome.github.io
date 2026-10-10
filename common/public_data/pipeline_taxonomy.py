@@ -35,6 +35,8 @@ SERVICE_CATEGORIES = {
     "sync-wdt": "同步",
     "sync-runner": "同步",
     "sync-channel-sales": "同步",
+    "kb-sync-products": "同步",
+    "kb-gateway": "钉钉",
     "project-mart": "加工",
     "extract-mart": "加工",
     "extract-channel": "加工",

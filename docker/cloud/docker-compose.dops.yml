@@ -35,6 +35,33 @@ services:
       - /opt/dops/live/gateway-credentials.json:/run/live-input/source-credentials.json:ro
       - /opt/dops/live:/opt/dops/live:ro
 
+  # 知识库问答机器人（2026-10-10，客服部门）：独立钉钉应用（复用原「提现
+  # 事项」小机器人凭据，AppKey dingnbp9wl6mt54n89hj）独立 Stream 连接，
+  # 与 gateway 报数面进程隔离、互不争抢事件。KB_* 凭据与 AI 表定位
+  # （KB_PRODUCTS_BASE_ID/SHEET_ID）走 app.env——scheduler 侧
+  # kb-sync-products 子进程同源读取，一处注入两处生效；改 app.env 必须
+  # up -d 重建（restart 不应用 env_file 变更）。
+  kb-gateway:
+    image: dops-app:latest
+    container_name: kb-gateway
+    network_mode: host
+    restart: unless-stopped
+    env_file: /opt/dops/app.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      PUBLIC_DATA_SERVICE_ID: kb-gateway
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.kb_qa.app
+      - --live-send
+      - --confirm-local-test-write
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      - /opt/dops/live:/opt/dops/live:ro
+
   scheduler:
     image: dops-app:latest
     container_name: dops-scheduler

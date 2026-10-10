@@ -323,3 +323,17 @@ scheduler:
   enabled: true
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "fires registered pipelines on their registry cron schedules (no own schedule)"
+# --- 知识库问答机器人（2026-10-10，客服部门；独立应用独立 Stream 连接） ---
+kb-sync-products:
+  kind: apps
+  category: 同步
+  enabled: true
+  schedule: "7 * * * *"
+  reads: [mart_ops]
+  description: "product knowledge-base sync (DingTalk aitable -> mart_ops kb_products)"
+kb-gateway:
+  kind: apps
+  category: 钉钉
+  enabled: true
+  reads: [mart_ops]
+  description: "knowledge-base QA robot (dedicated Stream app, customer-service group)"
