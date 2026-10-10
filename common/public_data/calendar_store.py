@@ -278,7 +278,9 @@ def rewrite_month(connection, seed_path, year, month, *, today=None,
     ]
     rows = merge_overrides(connection, rows)
 
-    run_id = f"ops-calendar-{uuid.uuid4()}"
+    # dim_calendar.sync_run_id 是 CHAR(36)：ops- 前缀 + 32 位 hex 恰好 36
+    # （与 extract 的 UUID 形态可区分，ops 写入可辨识）。
+    run_id = f"ops-{uuid.uuid4().hex[:32]}"
     synced_at = _utc_now_text()
     with transaction(connection):
         with contextlib.closing(connection.cursor()) as cursor:

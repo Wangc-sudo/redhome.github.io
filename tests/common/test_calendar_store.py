@@ -240,9 +240,9 @@ class RewriteMonthTests(unittest.TestCase):
         self.assertEqual((1, "local", None), conn.dim[date(2026, 10, 10)])
         # 10-06 法定休（基线）
         self.assertEqual((0, "local", None), conn.dim[date(2026, 10, 6)])
-        # run id 前缀区分 ops 写与 extract 写
+        # run id 前缀区分 ops 写与 extract 写（CHAR(36) 约束：恰好 36 位）
         sql, seq = conn.executed[-1]
-        self.assertTrue(all(str(run).startswith("ops-calendar-")
+        self.assertTrue(all(str(run).startswith("ops-") and len(str(run)) == 36
                             for *_, run in seq))
 
     def test_strict_rejects_out_of_baseline_lenient_skips(self):
