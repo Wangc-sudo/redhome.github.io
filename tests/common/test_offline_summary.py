@@ -15,6 +15,7 @@ from common.daily_robot.offline_summary import (
     build_monthly_markdown,
     build_offline_all_html,
     build_weekly_markdown,
+    collect_offline_all_people,
     compute_daily_metrics,
     compute_monthly_metrics,
     compute_weekly_metrics,
@@ -520,6 +521,32 @@ class OfflineAllHtmlTest(unittest.TestCase):
             people=rows[region],
             workdays=frozenset({date(2026, 9, 22)}),
         )
+
+    def test_collect_offline_all_people_merge_and_realign(self):
+        """播报/页面共享采集：三区合并 + 姓名↔部门互换 + 通讯录部门优先。"""
+        conn = _task_conn()
+        conn.members[("hangzhou", "张三")] = "杭中（通讯录）"
+        with mock.patch(
+            "common.daily_robot.mart_leaderboard.mart_collect",
+            side_effect=lambda connection, *, region, business_date: (
+                self._fake_people(region)
+            ),
+        ):
+            people, workdays = collect_offline_all_people(
+                conn, business_date=date(2026, 9, 23)
+            )
+
+        self.assertEqual(workdays, frozenset({date(2026, 9, 22)}))
+        # 排序同 mart_collect 键（rate 降序、None 垫底）
+        self.assertEqual(
+            [p["name"] for p in people], ["余云涛", "张三", "李树军"]
+        )
+        by_name = {p["name"]: p for p in people}
+        # offline_extra 行「姓名↔部门」归位：责任人余云涛为名、板块省外为部门
+        self.assertEqual(by_name["余云涛"]["dept"], "省外")
+        # 杭/绍部门以通讯录为准，无匹配保留表内值
+        self.assertEqual(by_name["张三"]["dept"], "杭中（通讯录）")
+        self.assertEqual(by_name["李树军"]["dept"], "线下运营中心")
 
     def test_people_merged_no_exception_and_overview_panel(self):
         captured = {}
