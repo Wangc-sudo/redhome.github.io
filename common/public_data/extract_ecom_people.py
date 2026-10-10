@@ -63,8 +63,10 @@ logger = logging.getLogger(__name__)
 # 配置常量
 # ---------------------------------------------------------------------------
 
-#: 默认月份（跨月时用 --month 覆盖；按 ``business_date`` 所在月份过滤）。
-DEFAULT_MONTH = 9
+#: 明细月份过滤缺省 ``None`` = 全量（2026-10-10 清理：原 ``DEFAULT_MONTH
+#: = 9`` 是 9 月初次接入时的手工默认值，跨月后手工忘传 ``--month`` 会
+#: 静默只抽 9 月——缺省全量与管线 ``month=None`` 行为一致，需要过滤时
+#: 显式传 ``--month``）。
 
 #: 写入事实表与固定列值。region 列统一为 region 键（同 extract_mart 的
 #: `_REGION_KEY_BY_DISPLAY` 口径：fact 表只存键，显示名止于 raw 层）。
@@ -296,7 +298,7 @@ def build_fact_rows(detail_rows, store_meta, channel_owners=None):
 _DETAIL_TABLES = ("channel_daily_sales", "fact_channel_daily_sales")
 
 
-def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None, *,
+def fetch_source_rows(connection, month=None, day=None, *,
                       detail_table="channel_daily_sales",
                       target_connection=None):
     """读取源行 → ``(detail_rows, target_rows)``。
@@ -473,8 +475,8 @@ def main(argv=None):
         prog="extract-ecom-people",
         description="电商人员业绩 extract：raw 钉钉表 -> fact_daily_report_offline",
     )
-    parser.add_argument("--month", type=int, default=DEFAULT_MONTH,
-                        help=f"按 business_date 所在月份过滤明细（默认 {DEFAULT_MONTH}）")
+    parser.add_argument("--month", type=int, default=None,
+                        help="按 business_date 所在月份过滤明细（缺省全量）")
     parser.add_argument("--day", default=None,
                         help="只取这一天（YYYY-MM-DD），优先于 --month")
     parser.add_argument("--dry", action="store_true",

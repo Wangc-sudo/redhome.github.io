@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import html as html_mod
 import sys
-from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -9,17 +8,7 @@ REPO_ROOT = BASE_DIR.parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.dingtalk import DingTalkClient
 from common.daily_robot.page_calendar import DATE_NAV_CSS as _DATE_NAV_CSS
-
-
-def _parse_num(v):
-    if v is None:
-        return None
-    try:
-        return float(str(v).replace(",", ""))
-    except ValueError:
-        return None
 
 
 def _fmt_wan(v):
@@ -33,58 +22,6 @@ def _fmt_wan(v):
 
 def _fmt_pct(v, digits=1):
     return f"{v*100:.{digits}f}%"
-
-
-def collect(config, include_today=False, projects=None):
-    """采集榜单数据。projects 给定时仅统计「项目部 ∈ projects」的责任人。"""
-    now = datetime.now()
-    calendar = config["calendar"]
-    month = calendar["month"]
-    if now.month != month:
-        raise SystemExit(f"当前月份{now.month}与配置月份{month}不符")
-    workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
-    today = now.day
-    elapsed = [d for d in workdays if d < today or (include_today and d == today)]
-
-    client = DingTalkClient.from_config(config["dingtalk"])
-    base = config["base"]
-    records = client.list_records(base["baseId"], base["tableId"])
-    target_col = f"{month}月销量目标（万）"
-
-    people = []
-    for rec in records:
-        f = rec.get("fields") or {}
-        name = str(f.get("责任人") or "").strip()
-        if not name or "合计" in name:
-            continue
-        dept = str(f.get("项目部") or "").strip() or "未分组"
-        if projects is not None and dept not in projects:
-            continue
-        target = _parse_num(f.get(target_col)) or 0
-        completed = 0.0
-        unfilled = 0
-        for d in elapsed:
-            v = f.get(f"{d}日")
-            if v is None or str(v).strip() == "":
-                unfilled += 1
-            else:
-                parsed = _parse_num(v)
-                if parsed is None:
-                    unfilled += 1
-                else:
-                    completed += parsed
-        people.append({
-            "name": name, "dept": dept, "target": target, "completed": completed,
-            "unfilled": unfilled,
-            "rate": completed / target if target > 0 else None,
-        })
-
-    people.sort(key=lambda p: (
-        -(p["rate"] if p["rate"] is not None else -1),
-        -p["completed"],
-        -p["target"],
-    ))
-    return now, elapsed, people
 
 
 def _dept_figures(members, dept_overrides, dname):
@@ -126,7 +63,12 @@ def render_bc_markdown(region, calendar, now, elapsed, people, url=None,
     真值覆盖（qudao 专用；不传即原 Σ 成员口径，输出与历史逐字一致）。
     """
     n_elapsed = len(elapsed)
-    workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
+    # 月天数（2026-10-10 修复 range(1,31) quirk：31 天月漏第 31 日、
+    # 2 月虚增 29/30 幻影工作日）：mart 侧 build_leaderboard_view 注入
+    # daysInMonth；缺省 30 保持旧 config.json 形态逐字一致。
+    month_len = calendar.get("daysInMonth") or 30
+    workdays = [d for d in range(1, month_len + 1)
+                if d not in calendar.get("restDays", [])]
     n_total = len(workdays)
     progress = n_elapsed / n_total if n_total else 0
 
@@ -173,17 +115,6 @@ def render_bc_markdown(region, calendar, now, elapsed, people, url=None,
     return "\n".join(lines)
 
 
-def build_bc_markdown(config, url=None, projects=None):
-    """现行入口（签名不变）：钉钉表采集 + :func:`render_bc_markdown`。
-
-    projects 给定时仅播报「项目部 ∈ projects」的部门（多群分别播报）。
-    """
-    now, elapsed, people = collect(config, include_today=False, projects=projects)
-    return render_bc_markdown(
-        config["region"], config["calendar"], now, elapsed, people, url=url
-    )
-
-
 def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
                dept_overrides=None, date_nav=None):
     """榜单页 HTML。
@@ -205,7 +136,10 @@ def build_html(config, now, elapsed, people, projects=None, extra_panels=None,
     calendar = config["calendar"]
     region = config["region"]
     month = calendar["month"]
-    workdays = [d for d in range(1, 31) if d not in calendar.get("restDays", [])]
+    # 月天数同 render_bc_markdown（daysInMonth 驱动，缺省 30 旧形态）。
+    month_len = calendar.get("daysInMonth") or 30
+    workdays = [d for d in range(1, month_len + 1)
+                if d not in calendar.get("restDays", [])]
     dept_order = region.get("deptOrder", [])
     dept_label = region.get("deptLabel", {})
     bc_exclude = region.get("broadcastExclude", [])

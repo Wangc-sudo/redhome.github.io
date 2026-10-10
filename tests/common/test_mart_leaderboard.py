@@ -2,10 +2,8 @@
 
 import unittest
 from datetime import date, datetime
-from unittest.mock import patch
 
 from common.daily_robot.leaderboard import (
-    build_bc_markdown,
     build_html,
     render_bc_markdown,
 )
@@ -139,8 +137,16 @@ class LeaderboardViewTests(unittest.TestCase):
     def test_rest_days_are_derived_from_dim_calendar(self):
         view = build_leaderboard_view(_cfg(), _WORKDAYS, year=2026, month=9)
         self.assertEqual(view["calendar"], {
-            "month": 9, "restDays": [6, 13, 19, 25, 26, 27],
+            "month": 9, "restDays": [6, 13, 19, 25, 26, 27], "daysInMonth": 30,
         })
+
+    def test_days_in_month_follows_the_real_month_length(self):
+        # 2026-10-10 修复 range(1,31) quirk：31 天月补回第 31 日，
+        # 2 月不再虚增 29/30 幻影日。
+        view = build_leaderboard_view(_cfg(), set(), year=2026, month=12)
+        self.assertEqual(view["calendar"]["daysInMonth"], 31)
+        view = build_leaderboard_view(_cfg(), set(), year=2027, month=2)
+        self.assertEqual(view["calendar"]["daysInMonth"], 28)
 
     def test_region_dict_mirrors_the_legacy_config_shape(self):
         view = build_leaderboard_view(_cfg(), _WORKDAYS, year=2026, month=9)
@@ -158,25 +164,6 @@ class RenderParityTests(unittest.TestCase):
     def _data(self):
         conn = _RouterConn(workdays=_WORKDAYS, facts=_fixture_facts())
         return mart_collect(conn, region="hangzhou", business_date=_DAY)
-
-    def test_wrapper_delegates_to_render_byte_for_byte(self):
-        """重构无行为变化：build_bc_markdown == collect + render。"""
-        now = datetime(2026, 9, 11, 8, 30)
-        data = self._data()
-        view = build_leaderboard_view(_cfg(), data.workdays, year=2026, month=9)
-        config = {**view, "dingtalk": {}, "base": {}}
-
-        with patch(
-            "common.daily_robot.leaderboard.collect",
-            return_value=(now, list(data.elapsed), list(data.people)),
-        ):
-            via_wrapper = build_bc_markdown(config, url="https://pages.example/lb")
-        direct = render_bc_markdown(
-            view["region"], view["calendar"], now,
-            list(data.elapsed), list(data.people),
-            url="https://pages.example/lb",
-        )
-        self.assertEqual(via_wrapper, direct)
 
     def test_broadcast_markdown_content_off_mart_data(self):
         now = datetime(2026, 9, 11, 8, 30)  # 周五
@@ -204,6 +191,26 @@ class RenderParityTests(unittest.TestCase):
             lines[-1],
             "📊 [点击查看完整榜单（个人明细）](<https://pages.example/lb>)",
         )
+
+    def test_progress_denominator_follows_days_in_month(self):
+        """2026-10-10 修复：31 天月分母含第 31 日；旧形态缺省 30 不变。"""
+        now = datetime(2026, 9, 11, 8, 30)
+        data = self._data()
+        view = build_leaderboard_view(_cfg(), data.workdays, year=2026, month=9)
+        calendar = {
+            **view["calendar"], "month": 12, "restDays": [], "daysInMonth": 31,
+        }
+        md = render_bc_markdown(
+            view["region"], calendar, now,
+            list(data.elapsed), list(data.people),
+        )
+        self.assertIn("（9/31 工作日）", md)
+        legacy = {"month": 12, "restDays": []}  # 无 daysInMonth 回退 30
+        md = render_bc_markdown(
+            view["region"], legacy, now,
+            list(data.elapsed), list(data.people),
+        )
+        self.assertIn("（9/30 工作日）", md)
 
     def test_broadcast_markdown_omits_link_without_url(self):
         now = datetime(2026, 9, 11, 8, 30)
