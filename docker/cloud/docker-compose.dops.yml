@@ -51,6 +51,9 @@ services:
     environment:
       TZ: Asia/Shanghai
       PYTHONDONTWRITEBYTECODE: "1"
+      # print() 结果日志走 stdout 块缓冲，不设 UNBUFFERED 时 docker logs
+      # 看不到 handler 的 reply sent/failed 行（2026-10-10 排障教训）。
+      PYTHONUNBUFFERED: "1"
       PUBLIC_DATA_SERVICE_ID: kb-gateway
     entrypoint: ["python3"]
     command:
