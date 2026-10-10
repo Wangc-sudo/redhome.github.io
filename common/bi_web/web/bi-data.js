@@ -650,6 +650,8 @@ function mapColumn(c){
   } else {
     col.render = function(v){ return v == null ? PLACEHOLDER : esc(v); };
   }
+  /* 列级 cls 透传（组间分隔线 col-sep，2026-10-10 板块总览排版裁决）。 */
+  if (c.cls) col.cls = c.cls;
   return col;
 }
 

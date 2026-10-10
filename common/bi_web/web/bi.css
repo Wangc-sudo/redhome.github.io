@@ -206,6 +206,8 @@ a{text-decoration:none;color:inherit}
 .data-table tbody tr.clk{cursor:pointer}
 .data-table tbody tr.clk:hover td{background:var(--primary-soft)}
 .data-table td.warn{color:var(--severity-p0);font-weight:600}
+/* 组间分隔线：列级左边框（板块总览日/周/月三期分组，2026-10-10 排版裁决） */
+.data-table th.col-sep,.data-table td.col-sep{border-left:2px solid #e2e6ee}
 .data-table td.num-ok{color:var(--severity-ok)}
 .data-table td.muted{color:var(--text-subtle)}
 .bar-cell{position:relative}
