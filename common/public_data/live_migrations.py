@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from common.kb_qa.schema import kb_ddl_statements
 from common.public_data.bi_authz import bi_authz_ddl_statements
+from common.public_data.calendar_store import calendar_override_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
     table_definition,
@@ -499,6 +500,14 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-v1",
         "mart",
         kb_ddl_statements(),
+    ),
+    (
+        # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：
+        # dim_calendar_override（法定导入+人工裁决，ops-web 页面管理）+
+        # 审计表；随迁移落 2026-10 裁决行（10-07 改上班/10-31 改大休）。
+        "mart-ops-calendar-override-v1",
+        "mart",
+        calendar_override_ddl_statements(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

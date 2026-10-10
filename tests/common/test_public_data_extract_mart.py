@@ -399,6 +399,32 @@ class MartExtractServiceTests(unittest.TestCase):
 
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_calendar_merges_db_override_layer(self, _lock, _txn):
+        """DB 裁决层（2026-10-10）：extract 重建时 dim_calendar_override
+        逐日赢（合并点在写库前、digest 覆盖裁决行）。"""
+        def _merge(connection, rows):
+            return [
+                (day, 0 if day.day == 5 else is_workday, source, note)
+                for day, is_workday, source, note in rows
+            ]
+
+        with patch(
+            "common.public_data.calendar_store.merge_overrides",
+            side_effect=_merge,
+        ) as merge:
+            service = self._service(
+                datasets=(),
+                calendar_months=[(2026, 9, [], "local")],
+            )
+            service.extract()
+
+        merge.assert_called_once()
+        rows = self.repository.upsert_dim_calendar.call_args.args[0]
+        by_day = {day.day: is_workday for day, is_workday, _, _ in rows}
+        self.assertEqual(by_day[5], 0)
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_summary_failure_marks_projection_pending(self, _lock, _txn):
         service = self._service(datasets=[dataset_by_name("daily_report_offline")])
         self.mart_repository.save_dataset_summary.side_effect = RuntimeError("db")

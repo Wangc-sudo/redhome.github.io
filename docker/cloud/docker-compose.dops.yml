@@ -164,6 +164,9 @@ services:
       # 注册表读（管道列表/舰队源）与写（开关/新增）的 seed 路径；Nacos
       # 不可达时回退 seed。scheduler 同款，Nacos 配置随 app.env 注入。
       PUBLIC_DATA_PIPELINE_SEED: /opt/dops/repo/docker/integration/pipelines.seed.yaml
+      # 工作日历页（2026-10-10）：rewrite_month 的基线种子路径（与
+      # scheduler/extract 同款；法定导入与人工裁决写 DB，不回写本文件）。
+      PUBLIC_DATA_CALENDAR_SEED: /opt/dops/repo/docker/integration/calendar.seed.json
     entrypoint: ["python3"]
     command:
       - -m

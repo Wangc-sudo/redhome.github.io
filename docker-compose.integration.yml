@@ -584,6 +584,9 @@ services:
       PUBLIC_DATA_MART_DATABASE: mart_ops_test
       PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
       PUBLIC_DATA_SERVICE_ID: ops-web
+      # 工作日历页（2026-10-10）：rewrite_month 的基线种子路径
+      # （与 scheduler/extract 同款，见本文件 extract-mart 段）。
+      PUBLIC_DATA_CALENDAR_SEED: /app/docker/integration/calendar.seed.json
       BI_WEB_SESSION_SECRET: ${BI_WEB_SESSION_SECRET:-}
       BI_DINGTALK_APPKEY: ${BI_DINGTALK_APPKEY:-}
       BI_DINGTALK_APPSECRET: ${BI_DINGTALK_APPSECRET:-}
