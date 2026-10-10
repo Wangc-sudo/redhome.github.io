@@ -413,6 +413,65 @@ class TestRuleFallbackMonths(unittest.TestCase):
                                   today=date(2026, 10, 10))
         self.assertEqual([(2026, 9)], [(y, m) for y, m, _, _ in rows])
 
+
+class TestBroadcastAdjust(unittest.TestCase):
+    """播报口径裁决修正层（2026-10-10 运维裁决：法定口径 + 人工修正分层）。"""
+
+    def _seed(self, item):
+        return _SeedFile(self, {"version": 1, "months": [item]}).path
+
+    def test_adjust_applies_workdays_and_rest_days(self):
+        path = self._seed({
+            "year": 2026, "month": 10,
+            "bigRestSaturdays": [17],
+            "holidays": [1, 2, 3, 4, 5, 6, 7],
+            "makeupWorkdays": [10],
+            "broadcastAdjust": {"workdays": [7], "restDays": [31],
+                                 "note": "裁决"},
+        })
+        rows = load_calendar_seed(path, fallback=False)
+        # 法定推导 [1,2,3,4,5,6,7,11,17,18,25] − 7（改上班）+ 31（改休息）
+        self.assertEqual([1, 2, 3, 4, 5, 6, 11, 17, 18, 25, 31], rows[0][2])
+
+    def test_shipped_october_2026_uses_adjust_layer(self):
+        """发版种子 2026-10：法定字段 + 修正层 = 运维裁决口径（rest 不变）。"""
+        rows = load_calendar_seed(SEED_PATH, fallback=False)
+        by_month = {(y, m): rest for y, m, rest, _ in rows}
+        self.assertEqual(
+            [1, 2, 3, 4, 5, 6, 11, 17, 18, 25, 31], by_month[(2026, 10)])
+
+    def test_rejects_unknown_adjust_key(self):
+        path = self._seed({
+            "year": 2026, "month": 10,
+            "broadcastAdjust": {"workday": [7]},
+        })
+        with self.assertRaisesRegex(CalendarError, "未知键"):
+            load_calendar_seed(path, fallback=False)
+
+    def test_rejects_workdays_rest_days_overlap(self):
+        path = self._seed({
+            "year": 2026, "month": 10,
+            "broadcastAdjust": {"workdays": [7], "restDays": [7]},
+        })
+        with self.assertRaisesRegex(CalendarError, "交集"):
+            load_calendar_seed(path, fallback=False)
+
+    def test_rejects_out_of_range_adjust_day(self):
+        path = self._seed({
+            "year": 2026, "month": 2,
+            "broadcastAdjust": {"restDays": [30]},
+        })
+        with self.assertRaisesRegex(CalendarError, "超出"):
+            load_calendar_seed(path, fallback=False)
+
+    def test_rejects_non_dict_adjust(self):
+        path = self._seed({
+            "year": 2026, "month": 10,
+            "broadcastAdjust": [7],
+        })
+        with self.assertRaisesRegex(CalendarError, "必须是对象"):
+            load_calendar_seed(path, fallback=False)
+
     def test_rejects_missing_year_or_month(self):
         path = _SeedFile(self, {"version": 1, "months": [{"month": 9}]}).path
         with self.assertRaises(CalendarError):

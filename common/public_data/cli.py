@@ -632,10 +632,17 @@ def _handle_publish_bi(args):
 def _handle_calendar_import(args):
     """法定节假日导入（holiday-cn → calendar.seed.json，dry-run 缺省）。"""
     try:
-        from common.public_data.calendar_import import import_year
+        from common.public_data.calendar_import import (
+            CalendarImportError,
+            import_year,
+        )
         result = import_year(args.seed, args.year, apply=args.apply)
     except SystemExit:
         raise
+    except CalendarImportError as exc:
+        # 拉取/自证失败要能看到原因（GitHub 间歇 reset 可重试），不吞细节
+        print(f"status=failed code=calendar_import reason={exc}")
+        sys.exit(1)
     except Exception:
         _print_failure(code="config_error")
         sys.exit(1)
@@ -647,18 +654,27 @@ def _handle_calendar_import(args):
         f"added={stats['added']}"
     )
     for item in result["months"]:
-        if item["holidays"] or item["makeupWorkdays"]:
+        adjust = item.get("broadcastAdjust")
+        if item["holidays"] or item["makeupWorkdays"] or adjust:
             rest = generate_rest_days(
                 item["year"], item["month"],
                 big_rest_saturdays=item["bigRestSaturdays"],
                 holidays=item["holidays"],
                 makeup_workdays=item["makeupWorkdays"],
             )
-            print(
+            line = (
                 f"  {item['year']}-{item['month']:02d} "
                 f"holidays={item['holidays']} "
                 f"makeup={item['makeupWorkdays']} rest={rest}"
             )
+            if adjust:
+                # 修正层保留：另报播报口径最终 rest（评审面一眼可见差异）
+                final = sorted(
+                    (set(rest) - set(adjust.get("workdays", [])))
+                    | set(adjust.get("restDays", []))
+                )
+                line += f"  → broadcastAdjust 最终={final}"
+            print(line)
 
 
 def _handle_migrate(args):

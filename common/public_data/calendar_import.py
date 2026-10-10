@@ -140,7 +140,37 @@ def map_year_to_seed_months(year, days):
 
 def merge_seed_document(document, new_months, *, year):
     """把 *new_months*（整年）合并进种子文档：同年替换、其余保留、按年月
-    升序。返回 ``(document, {"replaced": n, "added": n})``。"""
+    升序。返回 ``(document, {"replaced": n, "added": n})``。
+
+    口径分层（2026-10-10 运维裁决）：法定三字段整年替换；被替换年的
+    ``broadcastAdjust``（播报口径裁决修正层，人工维护）逐月**保留**——
+    导入永不覆盖人工裁决，修正后最终休息日重算进 ``_说明``。
+    """
+    old_adjust = {
+        int(item["month"]): item["broadcastAdjust"]
+        for item in document.get("months", [])
+        if isinstance(item, dict)
+        and int(item.get("year", 0)) == int(year)
+        and isinstance(item.get("broadcastAdjust"), dict)
+    }
+    for item in new_months:
+        adjust = old_adjust.get(int(item["month"]))
+        if adjust is None:
+            continue
+        item["broadcastAdjust"] = adjust
+        final = sorted(
+            (set(generate_rest_days(
+                item["year"], item["month"],
+                big_rest_saturdays=item["bigRestSaturdays"],
+                holidays=item["holidays"],
+                makeup_workdays=item["makeupWorkdays"],
+            )) - set(adjust.get("workdays", [])))
+            | set(adjust.get("restDays", []))
+        )
+        item["_说明"] += (
+            f"；broadcastAdjust 保留（{adjust.get('note') or '人工裁决'}），"
+            f"修正后最终 ⇒ {final}"
+        )
     existing = [
         item for item in document.get("months", [])
         if not (isinstance(item, dict) and int(item.get("year", 0)) == int(year))

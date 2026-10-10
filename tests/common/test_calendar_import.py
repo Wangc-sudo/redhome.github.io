@@ -102,6 +102,55 @@ class MergeSeedDocumentTests(unittest.TestCase):
         self.assertNotIn(99, document["months"][1]["holidays"])
 
 
+class MergeBroadcastAdjustTests(unittest.TestCase):
+    """合并保留播报口径裁决修正层（法定字段整年替换，人工裁决永不覆盖）。"""
+
+    def test_merge_preserves_broadcast_adjust(self):
+        document = {
+            "version": 1, "source": "local",
+            "months": [{
+                "year": 2026, "month": 10,
+                "bigRestSaturdays": [17, 31], "holidays": [1],
+                "makeupWorkdays": [],
+                "broadcastAdjust": {"workdays": [7], "restDays": [31],
+                                     "note": "裁决"},
+            }],
+        }
+        new_months = map_year_to_seed_months(2026, _FIXTURE_2026)
+        merge_seed_document(document, new_months, year=2026)
+        october = next(m for m in document["months"] if m["month"] == 10)
+        # 法定字段被导入值替换（大休周六回到第 3 周六锚点、法定假照官方）
+        self.assertEqual([17], october["bigRestSaturdays"])
+        # 修正层原样保留并写入自证
+        self.assertEqual(
+            {"workdays": [7], "restDays": [31], "note": "裁决"},
+            october["broadcastAdjust"],
+        )
+        self.assertIn("broadcastAdjust 保留", october["_说明"])
+        self.assertIn("裁决", october["_说明"])
+        # 无修正层的月份不添加该键
+        january = next(m for m in document["months"] if m["month"] == 1)
+        self.assertNotIn("broadcastAdjust", january)
+
+    def test_apply_then_load_derives_adjusted_rest(self):
+        document = {
+            "version": 1, "source": "local",
+            "months": [{
+                "year": 2026, "month": 1,
+                "bigRestSaturdays": [17], "holidays": [1, 2, 3],
+                "makeupWorkdays": [4],
+                "broadcastAdjust": {"restDays": [10], "note": "测试裁决"},
+            }],
+        }
+        path = _seed_file(document)
+        import_year(path, 2026, apply=True, fetcher=lambda year: _FIXTURE_2026)
+        rows = load_calendar_seed(path, fallback=False)
+        by_month = {(y, m): rest for y, m, rest, _ in rows}
+        # 1 月法定 rest [1,2,3,11,17,18,25] + 修正 restDays 10
+        self.assertEqual(
+            [1, 2, 3, 10, 11, 17, 18, 25], by_month[(2026, 1)])
+
+
 class ImportYearTests(unittest.TestCase):
     def _document(self):
         return {
