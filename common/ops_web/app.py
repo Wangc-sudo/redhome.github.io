@@ -26,13 +26,20 @@ import time
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth, authz
-from common.public_data import bi_authz, channel_target, ops_control, report_roster
+from common.public_data import (
+    bi_authz,
+    calendar_store,
+    channel_target,
+    ops_control,
+    report_roster,
+)
+from common.public_data.calendar_import import CalendarImportError
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.pipeline_taxonomy import (
@@ -103,6 +110,22 @@ _PAGE_STYLE = (
     "min-width:280px;max-width:420px}"
     ".modal-btns{margin-top:16px;text-align:right}"
     ".modal-btns button{margin-left:8px}"
+    # 工作日历页（2026-10-10）：月历网格 + 三源徽标
+    ".cal-nav{display:flex;gap:12px;align-items:center;margin:14px 0 6px}"
+    ".cal-nav a{color:#1f3a5f;text-decoration:none;font-size:13px}"
+    ".cal-table{table-layout:fixed;background:#fff}"
+    ".cal-table th{text-align:center;padding:4px}"
+    ".cal-table td{height:56px;vertical-align:top;padding:4px 6px;font-size:13px}"
+    ".cal-day{cursor:pointer}"
+    ".cal-day:hover{outline:1px solid #1f3a5f;outline-offset:-1px}"
+    ".cal-rest{background:#e8f0fd;color:#1f3a5f}"
+    ".cal-work{background:#fff}"
+    ".cal-today{outline:2px solid #1f3a5f;outline-offset:-2px}"
+    ".cal-empty{background:#fafafa;color:#c8cdd4}"
+    ".cal-src{font-size:10px;padding:0 4px;border-radius:3px;margin-left:4px}"
+    ".cal-src-holiday_cn{background:#d8e8ff;color:#1f3a5f}"
+    ".cal-src-manual{background:#ffe9c7;color:#8a5a00}"
+    ".cal-src-rule_fallback{background:#ececf0;color:#777}"
 )
 
 _PAGE_JS = """
@@ -220,6 +243,40 @@ function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
   postJSON('/api/roster/delete', {id: id});
 }
+/* ---- 工作日历页（2026-10-10，非技术同学操作面）-------------------------- */
+async function calendarToggle(day, isWork) {
+  const action = isWork ? '改为休息' : '改为上班';
+  if (!confirm('确认将 ' + day + ' ' + action + '？（当月日历立即重写）')) return;
+  const note = prompt('备注（可空，写入审计与单元格提示）', '') || '';
+  const resp = await fetch('/api/calendar/toggle', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({date: day, is_workday: !isWork, note: note}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('操作失败（' + resp.status + '）');
+}
+async function calendarImportYear(ev) {
+  ev.preventDefault();
+  const year = ev.target.year.value.trim();
+  if (!confirm('确认导入 ' + year + ' 年法定节假日？（该年法定导入行整年替换，人工裁决不动；随后按当前口径重写全年日历）')) return;
+  const resp = await fetch('/api/calendar/import-year', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({year: Number(year)}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  let reason = '';
+  try { reason = (await resp.json()).reason || ''; } catch (e) {}
+  alert('导入失败（' + resp.status + '）' + reason);
+}
+async function calendarResetMonth(ym) {
+  if (!confirm('确认清除 ' + ym + ' 的人工裁决（法定假日导入保留），恢复规则口径？')) return;
+  const resp = await fetch('/api/calendar/reset-month', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({month: ym}),
+  });
+  if (resp.ok) { location.reload(); return; }
+  alert('操作失败（' + resp.status + '）');
+}
 async function publishSnapshot() {
   if (!confirm('确认发布月度快照？（目标按当前输入覆盖 raw 快照，负责人按名册投影，随后自动触发提取重建榜单）')) return;
   const rows = [];
@@ -256,6 +313,7 @@ def _page(title, *sections, viewer_name=""):
         "<a href=\"/pipelines/audit\">任务审计</a>"
         "<a href=\"/pipelines/history\">执行流水</a>"
         "<a href=\"/roster\">填报名册</a>"
+        "<a href=\"/calendar\">工作日历</a>"
         "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
         + "".join(sections)
@@ -321,6 +379,8 @@ _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
     "update": "修正", "carry": "结转",
+    "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
+    "reset_month": "月度恢复",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -1900,6 +1960,232 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "status": "ok", "deleted": deleted, "inserted": inserted,
             "missing_owners": missing, "extract_request_id": request_id,
         })
+
+    # -- 工作日历（dim_calendar_override DB 裁决层，2026-10-10「给非技术
+    # 同学用」：一键导入法定假日 + 点日期改上班/休息，不碰 git/CLI）------
+
+    #: 日历源徽标（单元格角标；local=种子/规则基线不标）。
+    _CAL_SOURCE_BADGE = {
+        "holiday_cn": '<span class="cal-src cal-src-holiday_cn">法</span>',
+        "manual": '<span class="cal-src cal-src-manual">裁</span>',
+        "rule_fallback": '<span class="cal-src cal-src-rule_fallback">兜</span>',
+    }
+
+    def _calendar_seed_path():
+        seed_path = getattr(settings, "calendar_seed_path", None)
+        if seed_path is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return seed_path
+
+    @app.get("/calendar")
+    def calendar_page(request: Request, month: str = ""):
+        viewer = require_admin(request)
+        month = (month or "").strip()
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
+            month = _current_year_month()
+        year, mon = (int(part) for part in month.split("-"))
+        try:
+            with db_connector() as connection:
+                days = calendar_store.fetch_month_days(connection, year, mon)
+                audits = calendar_store.fetch_recent_audits(connection, limit=20)
+        except Exception as exc:
+            _LOGGER.warning("ops-web calendar load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+
+        cells = {day.day: (day, is_workday, source, note)
+                 for day, is_workday, source, note in days}
+        today = datetime.now(_BJT).date()
+        first_weekday = date(year, mon, 1).weekday()  # 周一=0
+        row = ['<td class="cal-empty"></td>'] * first_weekday
+        grid_rows = []
+        import calendar as _pycal
+        for day_no in range(1, _pycal.monthrange(year, mon)[1] + 1):
+            info = cells.get(day_no)
+            if info is None:
+                row.append(f'<td class="cal-empty">{day_no}</td>')
+            else:
+                day, is_workday, source, note = info
+                cls = "cal-day " + ("cal-rest" if not is_workday else "cal-work")
+                if day == today:
+                    cls += " cal-today"
+                badge = _CAL_SOURCE_BADGE.get(source, "")
+                title = html.escape(note or "", quote=True)
+                row.append(
+                    f'<td class="{cls}" title="{title}" '
+                    f"onclick=\"calendarToggle('{day.isoformat()}', "
+                    f"{'true' if is_workday else 'false'})\">"
+                    f"{day_no}{badge}</td>"
+                )
+            if len(row) == 7:
+                grid_rows.append("<tr>" + "".join(row) + "</tr>")
+                row = []
+        if row:
+            row += ['<td class="cal-empty"></td>'] * (7 - len(row))
+            grid_rows.append("<tr>" + "".join(row) + "</tr>")
+
+        prev_month = _shift_year_month(month, -1)
+        next_month = _shift_year_month(month, 1)
+        nav = (
+            '<div class="cal-nav">'
+            f'<a href="/calendar?month={prev_month}">← 上一月</a>'
+            f"<strong>{year} 年 {mon} 月</strong>"
+            f'<a href="/calendar?month={next_month}">下一月 →</a>'
+            f'<a href="/calendar">本月</a>'
+            '<input type="month" '
+            f'value="{month}" '
+            'onchange="if(this.value)location.href=\'/calendar?month=\'+this.value">'
+            "</div>"
+        )
+        legend = (
+            '<p class="hint">蓝底=休息 · 白底=上班 · 徽标：法=法定节假日导入 / '
+            "裁=人工裁决 / 兜=规则兜底（种子未覆盖月，法定假未知按工作日计）"
+            " · 点任意日期可切换 上班/休息（立即重写当月日历，全部操作留审计）"
+            "</p>"
+        )
+        grid = (
+            '<table class="cal-table"><tr><th>一</th><th>二</th><th>三</th>'
+            "<th>四</th><th>五</th><th>六</th><th>日</th></tr>"
+            + "".join(grid_rows) + "</table>"
+        )
+        import_form = (
+            "<h2>导入法定节假日（holiday-cn 官方转录）</h2>"
+            '<form class="inline" onsubmit="calendarImportYear(event)">'
+            f'<input name="year" type="number" min="2020" max="2100" '
+            f'value="{year + 1 if mon >= 10 else year}" required>'
+            "<button type=\"submit\">一键导入该年法定假日</button>"
+            '<span class="hint">该年法定导入行整年替换，人工裁决（裁）不动；'
+            "随后按当前口径重写全年日历。国务院一般 10-11 月发布次年安排。"
+            "</span></form>"
+            "<h2>恢复规则</h2>"
+            '<form class="inline" onsubmit="calendarResetMonth('
+            f"'{month}');return false"
+            '">'
+            f"<button type=\"submit\">清除 {month} 人工裁决</button>"
+            '<span class="hint">只清「裁」行（法定导入「法」保留），'
+            "当月回到规则基线口径。</span></form>"
+        )
+        audit_rows = []
+        for entry in audits:
+            get = entry.get if isinstance(entry, dict) else None
+            if get is not None:
+                actor = get("actor")
+                action = get("action")
+                biz_date = get("business_date")
+                yr = get("year")
+                mon2 = get("month")
+                detail = get("detail")
+                created = get("created_at")
+            else:
+                actor, action, biz_date, yr, mon2, detail, created = entry
+            when = biz_date.isoformat() if isinstance(biz_date, date) else (
+                f"{yr}-{int(mon2):02d}" if yr and mon2 else "—"
+            )
+            audit_rows.append(
+                f"<tr><td>{_esc(_fmt_time(created))}</td><td>{_esc(actor)}</td>"
+                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
+                f"<td>{_esc(when)}</td><td>{_esc(detail)}</td></tr>"
+            )
+        audit_table = (
+            "<h2>最近修正记录</h2>"
+            "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
+            "<th>日期</th><th>详情</th></tr>"
+            + "".join(audit_rows) + "</table>"
+        )
+        return HTMLResponse(_page(
+            "工作日历",
+            f"<h1>工作日历（{year} 年 {mon} 月）</h1>",
+            nav, legend, grid, import_form, audit_table,
+            viewer_name=viewer.name or viewer.userid,
+        ))
+
+    @app.post("/api/calendar/toggle")
+    async def calendar_toggle(request: Request):
+        """点日期改 上班/休息：写 manual 覆盖 + 即时重写当月 + 审计。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        note = payload.get("note") or ""
+        is_workday = payload.get("is_workday")
+        try:
+            day = date.fromisoformat(str(payload.get("date")))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(is_workday, bool) \
+                or not isinstance(note, str) or len(note) > 255:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                calendar_store.upsert_override(
+                    connection, day, is_workday,
+                    actor=viewer.userid, note=note,
+                )
+                calendar_store.rewrite_month(
+                    connection, _calendar_seed_path(), day.year, day.month,
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web calendar toggle failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/calendar/import-year")
+    async def calendar_import_year(request: Request):
+        """一键导入法定节假日（该年 holiday_cn 行整年替换 + 全年重写）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        year = payload.get("year")
+        if isinstance(year, bool) or not isinstance(year, int) \
+                or not 2020 <= year <= 2100:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                stats = calendar_store.import_year_overrides(
+                    connection, year, actor=viewer.userid
+                )
+                rewritten = 0
+                for month_no in range(1, 13):
+                    rewritten += calendar_store.rewrite_month(
+                        connection, _calendar_seed_path(), year, month_no,
+                        strict=False,
+                    )
+        except CalendarImportError as exc:
+            # holiday-cn 未发布/网络失败：原因透传给前端（不含敏感信息）
+            return JSONResponse(
+                {"status": "failed", "reason": str(exc)}, status_code=502
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web calendar import failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "rewritten": rewritten, **stats})
+
+    @app.post("/api/calendar/reset-month")
+    async def calendar_reset_month(request: Request):
+        """本月恢复规则：清除 manual 覆盖（法定导入保留）+ 即时重写。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        month = str(payload.get("month") or "")
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        year, mon = (int(part) for part in month.split("-"))
+        try:
+            with db_connector() as connection:
+                deleted = calendar_store.reset_month_overrides(
+                    connection, year, mon, actor=viewer.userid
+                )
+                calendar_store.rewrite_month(
+                    connection, _calendar_seed_path(), year, mon
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web calendar reset failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "deleted": deleted})
 
     return app
 

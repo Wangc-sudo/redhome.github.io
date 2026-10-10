@@ -14,6 +14,8 @@ import re
 import unittest
 import warnings
 from contextlib import contextmanager
+from datetime import date
+from types import SimpleNamespace
 from unittest import mock
 
 warnings.filterwarnings(
@@ -27,6 +29,7 @@ from common.ops_web.app import create_app
 from common.public_data import (
     bi_authz, channel_target, ops_control, report_roster,
 )
+from common.public_data.calendar_import import CalendarImportError
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -1697,6 +1700,151 @@ class GrantsAndAuditPageTests(unittest.TestCase):
 
         self.assertIn("grant", body)
         self.assertIn("u-zhang", body)
+
+
+class CalendarPageTests(unittest.TestCase):
+    """工作日历页（2026-10-10 DB 裁决层操作面：非技术同学用）。"""
+
+    def _calendar_app(self, connection=None):
+        settings = SimpleNamespace(
+            **vars(_fake_settings()), calendar_seed_path="seed.json")
+        return create_app(
+            settings=settings, session_secret=SECRET,
+            db_connector=_connector(connection),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+        )
+
+    def test_page_renders_grid_with_source_badges(self):
+        connection = _Connection(rows_by_keyword={
+            # 审计查询的表名包含 dim_calendar，必须先于月份查询命中
+            "dim_calendar_override_audit": [
+                {"actor": "admin", "action": "import", "business_date": None,
+                 "year": 2027, "month": None, "detail": "d",
+                 "created_at": "2026-10-10 08:00:00"},
+            ],
+            "dim_calendar": [
+                {"business_date": date(2026, 10, 6), "is_workday": 0,
+                 "source": "holiday_cn", "note": "国庆"},
+                {"business_date": date(2026, 10, 7), "is_workday": 1,
+                 "source": "manual", "note": "改上班"},
+            ],
+        })
+        client = TestClient(self._calendar_app(connection))
+        _login(client)
+
+        page = client.get("/calendar?month=2026-10")
+
+        self.assertEqual(200, page.status_code)
+        self.assertIn("工作日历", page.text)
+        self.assertIn("cal-src-holiday_cn", page.text)   # 法 徽标
+        self.assertIn("cal-src-manual", page.text)       # 裁 徽标
+        self.assertIn("calendarToggle('2026-10-07', true)", page.text)
+        self.assertIn("法定导入", page.text)             # 审计动作中文标签
+        self.assertIn("一键导入该年法定假日", page.text)
+
+    def test_page_falls_back_to_current_month_on_bad_param(self):
+        client = TestClient(self._calendar_app(_Connection()))
+        _login(client)
+        self.assertEqual(200, client.get("/calendar?month=not-a-month").status_code)
+
+    def test_toggle_writes_override_and_rewrites_month(self):
+        with mock.patch(
+            "common.ops_web.app.calendar_store.upsert_override"
+        ) as upsert, mock.patch(
+            "common.ops_web.app.calendar_store.rewrite_month", return_value=31
+        ) as rewrite:
+            client = TestClient(self._calendar_app(_Connection()))
+            _login(client)
+            resp = client.post("/api/calendar/toggle", json={
+                "date": "2026-10-07", "is_workday": True, "note": "改上班",
+            })
+
+        self.assertEqual(200, resp.status_code)
+        _, day, is_workday = upsert.call_args.args
+        self.assertEqual(date(2026, 10, 7), day)
+        self.assertIs(is_workday, True)
+        self.assertEqual(ADMIN_USERID, upsert.call_args.kwargs["actor"])
+        self.assertEqual("改上班", upsert.call_args.kwargs["note"])
+        _, seed_path, year, month = rewrite.call_args.args
+        self.assertEqual("seed.json", seed_path)
+        self.assertEqual((2026, 10), (year, month))
+
+    def test_toggle_rejects_bad_payload(self):
+        client = TestClient(self._calendar_app(_Connection()))
+        _login(client)
+        for payload in (
+            {"date": "not-a-date", "is_workday": True},
+            {"date": "2026-10-07", "is_workday": "yes"},
+            {"date": "2026-10-07"},
+        ):
+            self.assertEqual(
+                400,
+                client.post("/api/calendar/toggle", json=payload).status_code,
+                msg=repr(payload),
+            )
+
+    def test_import_year_applies_and_rewrites_twelve_months(self):
+        with mock.patch(
+            "common.ops_web.app.calendar_store.import_year_overrides",
+            return_value={"deleted": 1, "inserted": 3, "holidays": 2,
+                          "makeup": 1},
+        ) as imp, mock.patch(
+            "common.ops_web.app.calendar_store.rewrite_month", return_value=31
+        ) as rewrite:
+            client = TestClient(self._calendar_app(_Connection()))
+            _login(client)
+            resp = client.post("/api/calendar/import-year", json={"year": 2027})
+
+        self.assertEqual(200, resp.status_code)
+        body = resp.json()
+        self.assertEqual(3, body["inserted"])
+        self.assertEqual(31 * 12, body["rewritten"])
+        self.assertEqual(ADMIN_USERID, imp.call_args.kwargs["actor"])
+        self.assertEqual(12, rewrite.call_count)
+        self.assertTrue(
+            all(call.kwargs.get("strict") is False
+                for call in rewrite.call_args_list)
+        )
+
+    def test_import_year_holiday_cn_failure_returns_502_with_reason(self):
+        with mock.patch(
+            "common.ops_web.app.calendar_store.import_year_overrides",
+            side_effect=CalendarImportError("holiday-cn 2099 尚未发布"),
+        ):
+            client = TestClient(self._calendar_app(_Connection()))
+            _login(client)
+            resp = client.post("/api/calendar/import-year", json={"year": 2099})
+
+        self.assertEqual(502, resp.status_code)
+        self.assertIn("尚未发布", resp.json()["reason"])
+
+    def test_reset_month_clears_manual_and_rewrites(self):
+        with mock.patch(
+            "common.ops_web.app.calendar_store.reset_month_overrides",
+            return_value=2,
+        ) as reset, mock.patch(
+            "common.ops_web.app.calendar_store.rewrite_month", return_value=30
+        ):
+            client = TestClient(self._calendar_app(_Connection()))
+            _login(client)
+            resp = client.post(
+                "/api/calendar/reset-month", json={"month": "2026-10"})
+
+        self.assertEqual(200, resp.status_code)
+        self.assertEqual(2, resp.json()["deleted"])
+        _, year, month = reset.call_args.args
+        self.assertEqual((2026, 10), (year, month))
+        self.assertEqual(ADMIN_USERID, reset.call_args.kwargs["actor"])
+
+    def test_reset_month_rejects_bad_month(self):
+        client = TestClient(self._calendar_app(_Connection()))
+        _login(client)
+        self.assertEqual(
+            400,
+            client.post(
+                "/api/calendar/reset-month", json={"month": "2026-13"}
+            ).status_code,
+        )
 
 
 if __name__ == "__main__":

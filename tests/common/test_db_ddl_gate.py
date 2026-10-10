@@ -42,6 +42,10 @@ _DDL_WHITELIST = frozenset(
         # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/kb_qa/schema.py",
+        # 工作日历裁决层 schema 定义模块（mart-ops-calendar-override-v1
+        # 的 DDL 源：dim_calendar_override / dim_calendar_override_audit；
+        # 被 live_migrations 引用，同上引用关系）
+        "common/public_data/calendar_store.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关

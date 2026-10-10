@@ -972,6 +972,8 @@ class MartExtractService:
         return {**summary, **result, "target_table": dataset.target_table}
 
     def _extract_calendar(self, run_id, synced_at):
+        from common.public_data import calendar_store
+
         rows = []
         for year, month, rest_days, source in self._calendar_months:
             rest = set(rest_days)
@@ -979,6 +981,9 @@ class MartExtractService:
                 (day, 0 if day.day in rest else 1, source, None)
                 for day in month_days(year, month)
             )
+        # DB 裁决层（2026-10-10）：dim_calendar_override 逐日赢（法定导入
+        # holiday_cn + 页面人工裁决 manual），派生表全量替换永不冲掉裁决。
+        rows = calendar_store.merge_overrides(self._mart_connection, rows)
 
         # 跳过判定的 digest 覆盖整行内容（含 is_workday/source），而非只
         # 覆盖日期——休息日规则调整也必须触发重写。

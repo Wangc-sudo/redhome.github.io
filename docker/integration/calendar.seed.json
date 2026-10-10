@@ -1,5 +1,5 @@
 {
-  "_说明": "版本受控的工作日历种子。只记录规则（rule），restDays 一律由 common.calendar_utils.generate_rest_days 推导，故渲染结果不可能与规则漂移。两层口径（2026-10-10 运维裁决）：bigRestSaturdays/holidays/makeupWorkdays 是法定工作口径（holiday-cn 经 calendar-import 自动刷新；holidays/makeupWorkdays 转录自国务院办公厅《关于2025年部分节假日安排的通知》（2024-11 发布）与《关于2026年部分节假日安排的通知》（2025-11-04 发布））；可选 broadcastAdjust 是播报口径裁决修正层（人工维护、导入永不覆盖，workdays=法定假日改判上班、restDays=法定工作日改判休息）。HR 在国务院公布次年节假日安排后运行 calendar-import 更新 months；跨年未更新由 calendar-watch 管道告警。2025 年口径（main 2026-09-18 裁定）：HR 书面大小休数据缺席，宁漏报不误报红——各月周六一律按休息落（bigRestSaturdays 列全当月周六），待 HR 确认后回补；调休上班周六（2/8、10/11）已显式写入 makeupWorkdays 恢复为工作日。",
+  "_说明": "版本受控的工作日历种子。只记录规则（rule），restDays 一律由 common.calendar_utils.generate_rest_days 推导，故渲染结果不可能与规则漂移。口径分层（2026-10-10 运维裁决「后端给非技术同学用」）：本文件冻结为 2025-2026 历史基线（法定假 + 大小休锚点；holidays/makeupWorkdays 转录自国务院办公厅《关于2025年部分节假日安排的通知》（2024-11 发布）与《关于2026年部分节假日安排的通知》（2025-11-04 发布））；逐日裁决（法定节假日 + 公司改判）一律进 DB dim_calendar_override——ops-web「工作日历」页一键导入 holiday-cn、点日期改上班/休息，非技术同学不碰本文件；种子未覆盖月份由规则兜底（周日休+第3周六大休）保不断档，覆盖缺口由 calendar-watch 管道告警。2025 年口径（main 2026-09-18 裁定）：HR 书面大小休数据缺席，宁漏报不误报红——各月周六一律按休息落（bigRestSaturdays 列全当月周六），待 HR 确认后回补；调休上班周六（2/8、10/11）已显式写入 makeupWorkdays 恢复为工作日。",
   "version": 1,
   "source": "local",
   "months": [
@@ -177,12 +177,7 @@
       "bigRestSaturdays": [17],
       "holidays": [1, 2, 3, 4, 5, 6, 7],
       "makeupWorkdays": [10],
-      "broadcastAdjust": {
-        "workdays": [7],
-        "restDays": [31],
-        "note": "2026-10-07 运维裁决：以本月线下填报工作日清单（7,8,9,10,12,13,14,15,16,19,20,21,22,23,24,26,27,28,29,30 共 20 天）为准——10-07 由国务院口径的休息日改为工作日、10-31 由小休周六改为大休"
-      },
-      "_说明": "自证：法定口径（基准周日休[4,11,18,25] + 大休周六17 + 法定假1-7（国庆）− 调休10）经 broadcastAdjust 修正（10-07 改上班、10-31 改休息）⇒ [1,2,3,4,5,6,11,17,18,25,31]。法定三字段可由 calendar-import 自动刷新，broadcastAdjust 人工维护、导入永不覆盖。"
+      "_说明": "自证：法定口径（基准周日休[4,11,18,25] + 大休周六17 + 法定假1-7（国庆）− 调休10）⇒ [1,2,3,4,5,6,7,11,17,18,25]。播报口径裁决（10-07 国庆假改上班、10-31 改大休，2026-10-07 运维裁决以线下填报工作日清单为准）已迁入 DB dim_calendar_override（dim_calendar_override_audit 有审计），不在本文件承载——本文件自 2026-10-10 起只作 2025-2026 历史基线，未来年份由 DB 裁决层 + 规则兜底承载。"
     },
     {
       "year": 2026,

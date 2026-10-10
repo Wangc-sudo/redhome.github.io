@@ -32,6 +32,14 @@ def require_live_run(settings, *, live_read, confirm_local_test_write):
     )
 
 
+def require_business_run(settings, *, confirm_local_test_write):
+    """Raise ``LiveRunRejected`` unless the business-run safety gates pass."""
+    from common.public_data.live_safety import require_business_run as _require
+    return _require(
+        settings, confirm_local_test_write=confirm_local_test_write
+    )
+
+
 def require_extract_run(settings, *, confirm_local_test_write):
     """Raise ``LiveRunRejected`` unless the extract-run safety gates pass."""
     from common.public_data.live_safety import require_extract_run as _require
@@ -630,13 +638,55 @@ def _handle_publish_bi(args):
 
 
 def _handle_calendar_import(args):
-    """法定节假日导入（holiday-cn → calendar.seed.json，dry-run 缺省）。"""
+    """法定节假日导入（holiday-cn → DB 裁决层 dim_calendar_override）。
+
+    dry-run（缺省）只拉取映射打印；``--apply`` 写 DB 裁决层（该年
+    holiday_cn 行整年替换，manual 人工裁决不动）并按当前基线重写
+    ``dim_calendar`` 全年月份（即时生效，下轮 extract 同口径）。
+    """
     try:
         from common.public_data.calendar_import import (
             CalendarImportError,
-            import_year,
+            fetch_holiday_cn,
+            map_days_to_overrides,
         )
-        result = import_year(args.seed, args.year, apply=args.apply)
+        from common.public_data.calendar_store import (
+            import_year_overrides,
+            rewrite_month,
+        )
+
+        if not args.apply:
+            days = fetch_holiday_cn(args.year)
+            overrides = map_days_to_overrides(args.year, days)
+            holidays = sum(1 for _, is_workday, _ in overrides if not is_workday)
+            print(
+                f"year={args.year} dry-run overrides={len(overrides)} "
+                f"（休 {holidays} / 调休上班 {len(overrides) - holidays}）"
+            )
+            for day, is_workday, name in overrides:
+                print(f"  {day.isoformat()} {'休' if not is_workday else '上班'} {name}")
+            return
+
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        from common.public_data.db import connect
+
+        stats = None
+        with connect(settings.mart_database) as connection:
+            stats = import_year_overrides(
+                connection, args.year, actor="calendar-import"
+            )
+            for month in range(1, 13):
+                rewrite_month(
+                    connection, settings.calendar_seed_path, args.year, month
+                )
+        print(
+            f"year={args.year} applied +{stats['inserted']}"
+            f"（休 {stats['holidays']} / 调休上班 {stats['makeup']}）"
+            f" -{stats['deleted']}，dim_calendar 12 个月已重写"
+        )
     except SystemExit:
         raise
     except CalendarImportError as exc:
@@ -646,35 +696,6 @@ def _handle_calendar_import(args):
     except Exception:
         _print_failure(code="config_error")
         sys.exit(1)
-    from common.calendar_utils import generate_rest_days
-    stats = result["stats"]
-    mode = "applied" if result["applied"] else "dry-run"
-    print(
-        f"year={args.year} {mode} replaced={stats['replaced']} "
-        f"added={stats['added']}"
-    )
-    for item in result["months"]:
-        adjust = item.get("broadcastAdjust")
-        if item["holidays"] or item["makeupWorkdays"] or adjust:
-            rest = generate_rest_days(
-                item["year"], item["month"],
-                big_rest_saturdays=item["bigRestSaturdays"],
-                holidays=item["holidays"],
-                makeup_workdays=item["makeupWorkdays"],
-            )
-            line = (
-                f"  {item['year']}-{item['month']:02d} "
-                f"holidays={item['holidays']} "
-                f"makeup={item['makeupWorkdays']} rest={rest}"
-            )
-            if adjust:
-                # 修正层保留：另报播报口径最终 rest（评审面一眼可见差异）
-                final = sorted(
-                    (set(rest) - set(adjust.get("workdays", [])))
-                    | set(adjust.get("restDays", []))
-                )
-                line += f"  → broadcastAdjust 最终={final}"
-            print(line)
 
 
 def _handle_migrate(args):
@@ -1063,7 +1084,12 @@ def main(argv=None):
     )
     calendar_import.add_argument(
         "--apply", action="store_true", default=False,
-        help="write back to the seed file (default: dry-run print only)",
+        help="write to dim_calendar_override and rewrite dim_calendar "
+             "(default: dry-run print only)",
+    )
+    calendar_import.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False,
+        help="confirm DB writes (required with --apply)",
     )
 
     # -- load-target ----------------------------------------------------------

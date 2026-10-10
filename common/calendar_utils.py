@@ -122,54 +122,6 @@ def generate_rest_days(year, month, big_rest_saturdays=(), holidays=(), makeup_w
     return sorted(rest)
 
 
-#: broadcastAdjust 允许的键（严格解析：笔误不静默吞掉）。
-_BROADCAST_ADJUST_KEYS = frozenset({"workdays", "restDays", "note", "_说明"})
-
-
-def _apply_broadcast_adjust(rest_days, adjust, *, year, month, label):
-    """应用播报口径裁决修正层：``(rest − workdays) ∪ restDays``。
-
-    *adjust* 缺省/None 原样返回。workdays 与 restDays 须为当月合法日号
-    且互斥（同一日既改上班又改休息是笔误，必须报错）。
-    """
-    if adjust is None:
-        return rest_days
-    if not isinstance(adjust, dict):
-        raise CalendarError(f"日历种子 {label}.broadcastAdjust 必须是对象")
-    unknown = set(adjust) - _BROADCAST_ADJUST_KEYS
-    if unknown:
-        raise CalendarError(
-            f"日历种子 {label}.broadcastAdjust 含未知键 {sorted(unknown)}")
-    last_day = _pycal.monthrange(year, month)[1]
-
-    def _days(key):
-        raw = adjust.get(key, [])
-        if not isinstance(raw, list):
-            raise CalendarError(
-                f"日历种子 {label}.broadcastAdjust.{key} 必须是数组")
-        out = []
-        for value in raw:
-            try:
-                d = int(value)
-            except (TypeError, ValueError):
-                raise CalendarError(
-                    f"日历种子 {label}.broadcastAdjust.{key} 须为日号整数") from None
-            if not 1 <= d <= last_day:
-                raise CalendarError(
-                    f"日历种子 {label}.broadcastAdjust.{key} 含 {d}，"
-                    f"超出 {year}-{month:02d} 当月范围(1~{last_day})")
-            out.append(d)
-        return out
-
-    workdays = set(_days("workdays"))
-    extra_rest = set(_days("restDays"))
-    if workdays & extra_rest:
-        raise CalendarError(
-            f"日历种子 {label}.broadcastAdjust 的 workdays 与 restDays "
-            f"存在交集 {sorted(workdays & extra_rest)}")
-    return sorted((set(rest_days) - workdays) | extra_rest)
-
-
 def check_rule_matches_rest_days(cal_cfg, year=None):
     """校验 ``calendar.rule`` 推导的休息日与 ``restDays`` 一致。
 
@@ -271,19 +223,11 @@ def load_calendar_seed(path, *, fallback=True, today=None):
     :class:`CalendarSourceUnavailable`——**明确失败，不静默降级**；未知来源
     抛 :class:`CalendarError`，避免静默走错口径。
 
-    两层口径（2026-10-10 运维裁决）：法定三字段
-    （``bigRestSaturdays``/``holidays``/``makeupWorkdays``）是**法定工作
-    口径**（可由 ``calendar-import`` 从 holiday-cn 自动刷新）；可选的
-    ``broadcastAdjust`` 是**播报口径裁决修正层**（人工维护，导入永不
-    覆盖）::
-
-        "broadcastAdjust": {
-          "workdays": [7],    // 法定假日中改判上班的日号（从休息日剔除）
-          "restDays": [31],   // 法定工作日中改判休息的日号（并入休息日）
-          "note": "2026-10-07 运维裁决：10-07 上班、10-31 大休"
-        }
-
-    最终 ``rest_days = (规则推导 − adjust.workdays) ∪ adjust.restDays``。
+    口径分层（2026-10-10 运维裁决）：本种子只承载**规则基线**（历史月
+    法定假 + 大小休锚点）；**播报口径裁决层**已迁入 DB
+    ``dim_calendar_override``（``calendar_store``，法定导入 + ops-web
+    页面人工裁决）——JSON 不再承载逐日裁决，导入与页面操作都不碰本
+    文件（2026-10-10 起，原 broadcastAdjust JSON 层随裁决行迁库废弃）。
     """
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -328,18 +272,18 @@ def load_calendar_seed(path, *, fallback=True, today=None):
             raise CalendarError(f"日历种子 {label} 重复声明 {year}-{month:02d}")
         seen.add((year, month))
 
-        rest_days = generate_rest_days(
+        result.append((
             year,
             month,
-            item.get("bigRestSaturdays", []),
-            item.get("holidays", []),
-            item.get("makeupWorkdays", []),
-        )
-        rest_days = _apply_broadcast_adjust(
-            rest_days, item.get("broadcastAdjust"), year=year, month=month,
-            label=label,
-        )
-        result.append((year, month, rest_days, source))
+            generate_rest_days(
+                year,
+                month,
+                item.get("bigRestSaturdays", []),
+                item.get("holidays", []),
+                item.get("makeupWorkdays", []),
+            ),
+            source,
+        ))
     if fallback:
         result.extend(synthesize_fallback_months(seen, today=today))
     return result
