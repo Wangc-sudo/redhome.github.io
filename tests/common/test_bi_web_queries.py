@@ -2930,8 +2930,8 @@ class OfflineAllDashboardTests(unittest.TestCase):
         self.assertEqual("2026-08-04", payload["report_day"])
         keys = [column["key"] for column in payload["columns"]]
         self.assertEqual(
-            ["scope", "day", "dod", "week", "wow", "completed", "target",
-             "rate", "mom"],
+            ["scope", "day", "dod", "day_base", "week", "wow", "week_base",
+             "completed", "target", "rate", "mom", "month_base"],
             keys,
         )
         # 5 板块 + 线下整体
@@ -2942,12 +2942,15 @@ class OfflineAllDashboardTests(unittest.TestCase):
         hangzhou = payload["rows"][0]
         self.assertEqual(40.0, hangzhou["day"])           # 报告日 8-04
         self.assertAlmostEqual(40 / 30 - 1, hangzhou["dod"])
+        self.assertEqual(30.0, hangzhou["day_base"])      # 昨日基期可见
         self.assertEqual(70.0, hangzhou["week"])          # 本周一 8-03 起
-        self.assertIsNone(hangzhou["wow"])                # 上周基期 0
+        self.assertIsNone(hangzhou["wow"])                # 上周基期 0 → 比率 --
+        self.assertEqual(0.0, hangzhou["week_base"])      # 基期仍可见
         self.assertEqual(70.0, hangzhou["completed"])
         self.assertEqual(100.0, hangzhou["target"])
         self.assertEqual(0.7, hangzhou["rate"])
         self.assertIsNone(hangzhou["mom"])                # 上月基期 0
+        self.assertEqual(0.0, hangzhou["month_base"])
         shaoxing = payload["rows"][1]
         self.assertEqual(0.0, shaoxing["completed"])
         self.assertIsNone(shaoxing["target"])
