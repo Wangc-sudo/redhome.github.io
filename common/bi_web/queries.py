@@ -3215,17 +3215,22 @@ def run_table_oa_people_progress(connection, params) -> dict:
     }
 
 
-#: 板块总览列（日/周/月三期，与静态页面板同列序）。
+#: 板块总览列（日/周/月三期）：环比列右侧紧跟对比基期列（昨日/上周
+#: 同期/上月同期）——静态页面板是「百分比+基期小字」复合格，BI 表格
+#: 无复合格，基期独立成列（2026-10-10 运维反馈「环比缺对比数据」）。
 _OA_SCOPE_COLUMNS = [
     {"key": "scope", "title": "板块"},
     {"key": "day", "title": "当日", "format": "wan"},
     {"key": "dod", "title": "日环比", "format": "percent"},
+    {"key": "day_base", "title": "昨日", "format": "wan"},
     {"key": "week", "title": "本周累计", "format": "wan"},
     {"key": "wow", "title": "周环比", "format": "percent"},
+    {"key": "week_base", "title": "上周同期", "format": "wan"},
     {"key": "completed", "title": "月累计", "format": "wan"},
     {"key": "target", "title": "月目标", "format": "wan"},
     {"key": "rate", "title": "达成率", "format": "percent"},
     {"key": "mom", "title": "月环比", "format": "percent"},
+    {"key": "month_base", "title": "上月同期", "format": "wan"},
 ]
 
 
@@ -3299,12 +3304,15 @@ def run_table_oa_scopes(connection, params) -> dict:
             "scope": m.label,
             "day": m.day_sales,
             "dod": m.dod_rate,
+            "day_base": m.day_base,
             "week": m.week_sales,
             "wow": m.wow_rate,
+            "week_base": m.week_base,
             "completed": m.month_completed,
             "target": m.month_target,
             "rate": m.month_rate,
             "mom": m.mom_rate,
+            "month_base": m.month_base,
         }
         for m in metrics
     ]
