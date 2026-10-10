@@ -3,8 +3,14 @@
 
 import unittest
 
+from dingtalk_stream import AckMessage
+
 from common.kb_qa import media
-from common.kb_qa.app import KbStreamHandler, parse_conversation_allowlist
+from common.kb_qa.app import (
+    KbStreamHandler,
+    callback_message_id,
+    parse_conversation_allowlist,
+)
 from common.kb_qa.products import (
     find_products,
     render_clarify,
@@ -53,9 +59,17 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self, script=()):
         self.cursor_instance = _FakeCursor(script)
+        self.committed = False
+        self.rolled_back = False
 
     def cursor(self):
         return self.cursor_instance
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
 
 
 def _product_row(**overrides):
@@ -276,6 +290,76 @@ class HandlerAnswerTests(unittest.TestCase):
     def test_conversation_allowlist_parsing(self):
         self.assertEqual((), parse_conversation_allowlist(None))
         self.assertEqual(("a", "b"), parse_conversation_allowlist(" a ,,b "))
+
+
+class _FakeHeaders:
+    """模拟 dingtalk_stream.frames.Headers（对象形态，非 dict）。"""
+
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+
+class _FakeCallback:
+    def __init__(self, message_id, text, conversation_id="cid1"):
+        self.headers = _FakeHeaders(message_id)
+        self.data = {
+            "conversationId": conversation_id,
+            "msgtype": "text",
+            "text": {"content": text},
+            "senderStaffId": "u1",
+            "senderNick": "测试",
+            "isAdmin": False,
+        }
+
+
+class MessageIdExtractionTests(unittest.TestCase):
+    """2026-10-10 首跑事故回归：headers 是 Headers 对象不是 dict。"""
+
+    def test_object_headers(self):
+        callback = _FakeCallback("msg-1", "hi")
+        self.assertEqual("msg-1", callback_message_id(callback))
+
+    def test_dict_headers_and_missing(self):
+        self.assertEqual(
+            "m2", callback_message_id(
+                type("C", (), {"headers": {"messageId": "m2"}})()
+            )
+        )
+        self.assertIsNone(callback_message_id(type("C", (), {})()))
+        self.assertIsNone(callback_message_id(type("C", (), {"headers": {}})()))
+
+
+class ProcessEndToEndTests(unittest.TestCase):
+    def test_process_answers_and_audits(self):
+        import asyncio
+
+        conn = _FakeConn([1, [_product_row()], 1])
+        logs = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=logs.append
+        )
+        callback = _FakeCallback("msg-42", "习酒窖藏1998 箱规")
+        status, _ = asyncio.run(handler.process(callback))
+        self.assertEqual(AckMessage.STATUS_OK, status)
+        self.assertTrue(conn.committed)
+        executed_sql = "\n".join(sql for sql, _ in conn.cursor_instance.executed)
+        # 审计占位（去重）→ 商品查询 → 审计回填，三步都发生
+        self.assertIn("INSERT IGNORE INTO `kb_qa_audit`", executed_sql)
+        self.assertIn("SELECT * FROM `kb_products`", executed_sql)
+        self.assertIn("UPDATE `kb_qa_audit`", executed_sql)
+        self.assertNotIn("answer failed", " ".join(logs))
+
+    def test_duplicate_delivery_skipped(self):
+        import asyncio
+
+        conn = _FakeConn([0])  # INSERT IGNORE rowcount=0 = 重复投递
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None
+        )
+        callback = _FakeCallback("msg-dup", "习酒窖藏1998 箱规")
+        asyncio.run(handler.process(callback))
+        # 只有占位插入，无后续查询
+        self.assertEqual(1, len(conn.cursor_instance.executed))
 
 
 if __name__ == "__main__":
