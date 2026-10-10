@@ -13,8 +13,10 @@
 * 排序键 ``(-rate(None→-1), -completed, -target)``；
 * ``elapsed`` 为已过工作日的日号升序。
 
-注意：展示层的 ``n_total`` 沿用历史 ``range(1, 31)`` 口径（31 天月份
-的旧 quirk，与现行生产输出一致，不在本次改动范围）。
+月天数（2026-10-10 修复）：展示层 ``n_total`` 由
+``build_leaderboard_view`` 注入的 ``daysInMonth``（``month_days`` 真实
+天数）驱动——旧 ``range(1, 31)`` quirk（31 天月漏第 31 日、2 月虚增
+幻影工作日）已消除；无 ``daysInMonth`` 的旧 config 形态回退 30。
 """
 
 from dataclasses import dataclass, field
@@ -104,9 +106,10 @@ def build_leaderboard_view(region_cfg, workdays, *, year, month):
     """``RegionConfig`` + ``dim_calendar`` → 展示层的 config 同形字典。
 
     ``calendar.restDays`` 由 ``dim_calendar`` 反推（全月日期 − 工作日），
-    复刻现行 config.json 的 ``{month, restDays}`` 形态；``region`` 复刻
-    现行 ``region`` 段（deptOrder / deptLabel / broadcastExclude /
-    displayName）。
+    ``calendar.daysInMonth`` 为 ``month_days`` 真实月天数（2026-10-10
+    修复展示层 ``range(1, 31)`` quirk——31 天月漏算第 31 日、2 月虚增
+    幻影工作日）；``region`` 复刻现行 ``region`` 段（deptOrder /
+    deptLabel / broadcastExclude / displayName）。
     """
     rest_days = sorted(
         d.day for d in set(month_days(year, month)) - set(workdays)
@@ -119,5 +122,9 @@ def build_leaderboard_view(region_cfg, workdays, *, year, month):
             "deptLabel": dict(region_cfg.dept_label),
             "broadcastExclude": list(region_cfg.broadcast_exclude),
         },
-        "calendar": {"month": month, "restDays": rest_days},
+        "calendar": {
+            "month": month,
+            "restDays": rest_days,
+            "daysInMonth": len(month_days(year, month)),
+        },
     }
