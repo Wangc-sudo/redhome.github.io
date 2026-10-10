@@ -463,6 +463,23 @@ class FetchSourceRowsTests(unittest.TestCase):
                 detail_table="fact_daily_report_offline; DROP TABLE x",
             )
 
+    def test_target_connection_split_from_detail(self):
+        """明细/目标分库（管线形态）：明细 SQL 走 mart 连接、月目标 SQL
+        走 raw 连接——channel_monthly_target 只存在于 raw_dingtalk。"""
+        mart_conn = _RawConnection(
+            [_detail_row("旗舰店", ["张三"], 100, "2026-10-07")], []
+        )
+        raw_conn = _RawConnection([], [_target_row("旗舰店", 300000)])
+        detail_rows, target_rows = fetch_source_rows(
+            mart_conn, month=None, day=None,
+            detail_table="fact_channel_daily_sales",
+            target_connection=raw_conn,
+        )
+        self.assertEqual(detail_rows, mart_conn.detail_rows)
+        self.assertEqual(target_rows, raw_conn.target_rows)
+        self.assertIn("fact_channel_daily_sales", mart_conn.executed[0][0])
+        self.assertIn("channel_monthly_target", raw_conn.executed[0][0])
+
 
 # ---------------------------------------------------------------------------
 # upsert（fake 内存表，验证业务键幂等）
