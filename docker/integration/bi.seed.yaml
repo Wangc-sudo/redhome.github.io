@@ -82,6 +82,44 @@ hz-offline-sales:
     - card: table_hz_unfilled_today
       title: "当日未填报人"
       span: 12
+# 线下整体销售BI看板（2026-10-10 运维裁决：8300/offline_all.html 静态榜
+# 单页切 BI，URL 保留走 nginx 反代方案 A——同 hangzhou.html 先例，仅此
+# 看板与杭州看板经 8300 暴露，其余看板仍锁 18080 办公网白名单）。汇总卡
+# = 线下线全域（与 L1 驾驶舱同源，vanke 按裁决不计入）；人员/部门/板块
+# 卡真源 = 群播报/静态页同函数（collect_offline_all_people / AGG_SCOPES）。
+# 全卡锚定 date（工作日日历点选）；BI 实时口径含当天已报（与静态页 T-1
+# 刻意不同）。300s 自动刷新（常亮大屏，同杭州看板）。
+offline-all-sales:
+  title: "线下整体销售BI看板"
+  icon: "/static/icons/people.svg"
+  group: "经营驾驶舱"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 6
+  filters:
+    - {param: date, source: dates, label: "日期"}
+  cards:
+    - card: kpi_oa_mtd
+      title: "本月累计销售"
+      span: 4
+    - card: kpi_oa_today
+      title: "当日销售"
+      span: 4
+    - card: kpi_oa_progress
+      title: "时间进度"
+      span: 4
+    - card: trend_oa_daily
+      title: "区域日销趋势"
+      span: 8
+    - card: bar_oa_dept
+      title: "部门本月排行"
+      span: 4
+    - card: table_oa_scopes
+      title: "板块日/周/月总览"
+      span: 12
+    - card: table_oa_people_progress
+      title: "个人完成率榜"
+      span: 12
 l2-region:
   title: "区域下钻"
   icon: "/static/icons/region.svg"

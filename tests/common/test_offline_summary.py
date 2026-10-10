@@ -528,7 +528,8 @@ class OfflineAllHtmlTest(unittest.TestCase):
         conn.members[("hangzhou", "张三")] = "杭中（通讯录）"
         with mock.patch(
             "common.daily_robot.mart_leaderboard.mart_collect",
-            side_effect=lambda connection, *, region, business_date: (
+            side_effect=lambda connection, *, region, business_date,
+            include_today=False: (
                 self._fake_people(region)
             ),
         ):
@@ -561,7 +562,8 @@ class OfflineAllHtmlTest(unittest.TestCase):
         conn.members[("hangzhou", "张三")] = "杭中（通讯录）"
         with mock.patch(
             "common.daily_robot.mart_leaderboard.mart_collect",
-            side_effect=lambda connection, *, region, business_date: (
+            side_effect=lambda connection, *, region, business_date,
+            include_today=False: (
                 self._fake_people(region)
             ),
         ), mock.patch(

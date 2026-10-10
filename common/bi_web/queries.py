@@ -3057,3 +3057,261 @@ def run_table_hz_people_progress(connection, params) -> dict:
         "rows": rows,
         "date": anchor.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 线下整体销售BI看板（offline-all-sales，2026-10-10 运维裁决）
+#
+# 8300/offline_all.html 静态榜单页切 BI（URL 保留，nginx 反代方案 A，同
+# 2026-10-09 hangzhou.html 先例）。口径两条真源，杜绝第三套漂移：
+# * 汇总卡（mtd/today/trend）= 线下线全域 ``_OFFLINE_LINE_SQL``（排除
+#   电商/qudao/vanke，与 L1 驾驶舱 kpi_offline_mtd 同源；vanke 按
+#   2026-10-10 运维裁决不计入）；
+# * 人员/部门卡 = ``collect_offline_all_people``（三区合并 + 姓名部门
+#   归位，与 08:30 群播报/静态页同函数）；板块总览 =
+#   ``offline_summary.AGG_SCOPES`` + ``compute_overview_row``（与 20:30
+#   汇总播报/静态页面板同函数）。
+# 全卡锚定 ``date``（工作日日历点选，值域 dates），BI 实时口径含锚点
+# 当天（与静态页 T-1 刻意不同——看板价值即当天进展）。
+# ---------------------------------------------------------------------------
+
+#: 线下整体当日销售（线下线全域 + 排合计行；无注入面）。
+_OA_TODAY_SQL = (
+    "SELECT COALESCE(SUM(sales_amount), 0) AS `s` "
+    "FROM `fact_daily_report_offline` "
+    "WHERE `business_date` = %s "
+    "AND `responsible_person` NOT LIKE '%%合计%%' "
+    + _OFFLINE_LINE_SQL
+)
+
+
+def run_kpi_oa_mtd(connection, params) -> dict:
+    """线下整体本月累计 + 达成率（scalar）：kpi_region_mtd 全域锚定版
+    （月 = 锚点日所在月，region=None = 线下线全域）。"""
+    anchor = _hz_anchor(params)
+    return run_kpi_region_mtd(
+        connection, {"month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_kpi_oa_today(connection, params) -> dict:
+    """线下整体当日销售（scalar）：锚点日 Σ sales_amount（线下线全域 +
+    排合计行）。"""
+    anchor = _hz_anchor(params)
+    rows = _fetch_rows(connection, _OA_TODAY_SQL, (anchor,))
+    value = rows[0]["s"] if rows else 0
+    return {
+        "chart": "scalar",
+        "value": float(value),
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_kpi_oa_progress(connection, params) -> dict:
+    """线下整体时间进度（scalar）：与杭州卡同函数——工作日日历公司统一
+    （dim_calendar 不分区域），已过工作日 ÷ 全月工作日，含锚点当天。"""
+    return run_kpi_hz_progress(connection, params)
+
+
+def run_trend_oa_daily(connection, params) -> dict:
+    """线下整体区域日销趋势（line）：trend_region_daily 全域锚定版
+    （分区域多系列；月 = 锚点月，gran 透传缺省日）。"""
+    anchor = _hz_anchor(params)
+    return run_trend_region_daily(
+        connection,
+        {
+            "month": anchor.strftime("%Y-%m"),
+            "gran": params.get("gran") or "day",
+        },
+    )
+
+
+def _oa_people(connection, anchor):
+    """线下整体人员榜采集（BI 实时口径 include_today=True）。
+
+    fail-soft：dim_calendar 缺行（MartTaskError）→ 空人空日历，卡片
+    降级空态而非 5xx（同 hz 人员卡纪律）。
+    """
+    from common.daily_robot.offline_summary import collect_offline_all_people
+    try:
+        return collect_offline_all_people(
+            connection, business_date=anchor, include_today=True
+        )
+    except MartTaskError:
+        return [], frozenset()
+
+
+def run_bar_oa_dept(connection, params) -> dict:
+    """线下整体部门本月排行（bar）：按部门 Σ完成额 降序。
+
+    真源 = ``collect_offline_all_people``（杭/绍部门经通讯录归位、
+    offline_extra 板块归位，与 08:30 播报部门排名同口径）——不用裸
+    ``department`` 列：省外板块事实行的部门列是责任人名，直读会人/
+    部门混杂（运维 2026-09-23「人与部门不要混乱」裁决）。
+    """
+    anchor = _hz_anchor(params)
+    people, _workdays = _oa_people(connection, anchor)
+    totals = {}
+    for person in people:
+        dept = person["dept"] or "未分组"
+        totals[dept] = totals.get(dept, 0.0) + float(person["completed"])
+    ranking = sorted(totals.items(), key=lambda item: -item[1])
+    return {
+        "chart": "bar",
+        "categories": [dept for dept, _ in ranking],
+        "values": [value for _, value in ranking],
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_table_oa_people_progress(connection, params) -> dict:
+    """线下整体个人完成率榜（table）：静态榜单页人员总榜同口径全列。
+
+    排名/姓名/部门/完成/月目标/达成率/进度差/日均完成/预计月末/未填；
+    进度基准 = 已过工作日 ÷ 全月工作日（含锚点当天，BI 实时口径）。
+    dim_calendar 缺行降级空表。
+    """
+    anchor = _hz_anchor(params)
+    people, workdays = _oa_people(connection, anchor)
+    rows = []
+    if workdays:
+        elapsed = elapsed_workdays(workdays, today=anchor, include_today=True)
+        n_elapsed = len(elapsed)
+        progress = n_elapsed / len(workdays)
+        for index, person in enumerate(people, start=1):
+            rate = person["rate"]
+            rows.append({
+                "rank": index,
+                "name": person["name"],
+                "dept": person["dept"],
+                "completed": float(person["completed"]),
+                "target": float(person["target"]),
+                "rate": rate,
+                "diff": (rate - progress) if rate is not None else None,
+                "daily": (float(person["completed"]) / n_elapsed
+                          if n_elapsed else 0.0),
+                "proj": (rate / progress
+                         if rate is not None and progress > 0 else None),
+                "unfilled": person["unfilled"],
+            })
+    return {
+        "chart": "table",
+        "columns": [
+            {"key": "rank", "title": "排名"},
+            {"key": "name", "title": "姓名"},
+            {"key": "dept", "title": "部门"},
+            {"key": "completed", "title": "完成额", "format": "wan"},
+            {"key": "target", "title": "月目标", "format": "wan"},
+            {"key": "rate", "title": "达成率", "format": "percent"},
+            {"key": "diff", "title": "进度差", "format": "percent"},
+            {"key": "daily", "title": "日均完成", "format": "wan"},
+            {"key": "proj", "title": "预计月末", "format": "percent"},
+            {"key": "unfilled", "title": "未填"},
+        ],
+        "rows": rows,
+        "date": anchor.isoformat(),
+    }
+
+
+#: 板块总览列（日/周/月三期，与静态页面板同列序）。
+_OA_SCOPE_COLUMNS = [
+    {"key": "scope", "title": "板块"},
+    {"key": "day", "title": "当日", "format": "wan"},
+    {"key": "dod", "title": "日环比", "format": "percent"},
+    {"key": "week", "title": "本周累计", "format": "wan"},
+    {"key": "wow", "title": "周环比", "format": "percent"},
+    {"key": "completed", "title": "月累计", "format": "wan"},
+    {"key": "target", "title": "月目标", "format": "wan"},
+    {"key": "rate", "title": "达成率", "format": "percent"},
+    {"key": "mom", "title": "月环比", "format": "percent"},
+]
+
+
+def run_table_oa_scopes(connection, params) -> dict:
+    """线下整体板块日/周/月总览（table）：静态页面板同口径。
+
+    真源 = ``offline_summary.AGG_SCOPES`` + ``compute_overview_row``
+    （杭州/绍兴/省外/线下总经办/李树军 + 线下整体，与 20:30 汇总播报、
+    静态页面板同函数）。报告日 = 锚点前（含）最近一个全板块合计非零
+    自然日；周/月列锚定锚点日（BI 实时口径含当天，静态页 T-1 刻意
+    不同）。本月全板块零填报 → 空行降级。
+    """
+    from common.daily_robot.offline_summary import (
+        AGG_SCOPES,
+        TOTAL_LABEL,
+        TOTAL_SCOPE_KEY,
+        compute_overview_row,
+        fetch_scope_daily_facts,
+        fetch_scope_month_target,
+        merge_facts,
+        merge_targets,
+        previous_month,
+    )
+
+    anchor = _hz_anchor(params)
+    prev_first, _ = previous_month(anchor)
+    facts_by_scope = {}
+    targets = {}
+    for scope, label, region, scope_anchor in AGG_SCOPES:
+        facts_by_scope[scope] = fetch_scope_daily_facts(
+            connection, region=region, anchor=scope_anchor,
+            start=prev_first, end=anchor,
+        )
+        targets[scope] = fetch_scope_month_target(
+            connection, region=region, anchor=scope_anchor,
+            year=anchor.year, month=anchor.month,
+        )
+
+    day_totals = {}
+    for facts in facts_by_scope.values():
+        for day, amount in facts.items():
+            if day <= anchor:
+                day_totals[day] = day_totals.get(day, 0.0) + amount
+    filled = sorted(d for d, total in day_totals.items() if total != 0)
+    if not filled:
+        return {
+            "chart": "table",
+            "columns": _OA_SCOPE_COLUMNS,
+            "rows": [],
+            "date": anchor.isoformat(),
+        }
+    report_day = filled[-1]
+
+    metrics = [
+        compute_overview_row(
+            scope, label, facts=facts_by_scope[scope],
+            report_day=report_day, data_date=anchor,
+            month_target=targets[scope],
+        )
+        for scope, label, _, _ in AGG_SCOPES
+    ]
+    metrics.append(compute_overview_row(
+        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
+        report_day=report_day, data_date=anchor,
+        month_target=merge_targets(targets.values()),
+    ))
+
+    rows = [
+        {
+            "scope": m.label,
+            "day": m.day_sales,
+            "dod": m.dod_rate,
+            "week": m.week_sales,
+            "wow": m.wow_rate,
+            "completed": m.month_completed,
+            "target": m.month_target,
+            "rate": m.month_rate,
+            "mom": m.mom_rate,
+        }
+        for m in metrics
+    ]
+    return {
+        "chart": "table",
+        "columns": _OA_SCOPE_COLUMNS,
+        "rows": rows,
+        "date": anchor.isoformat(),
+        "report_day": report_day.isoformat(),
+    }

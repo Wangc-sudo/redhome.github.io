@@ -527,7 +527,9 @@ class BiSeedFileTests(unittest.TestCase):
              "l2-dining", "l2-hall", "l2-inventory", "l2-warehouse",
              "l2-quarter", "l2-yoy", "l2-contract",
              # 杭州线下销售BI看板（2026-10-09：8300/hangzhou.html 切 BI）
-             "hz-offline-sales"},
+             "hz-offline-sales",
+             # 线下整体销售BI看板（2026-10-10：8300/offline_all.html 切 BI）
+             "offline-all-sales"},
             set(mapping),
         )
         configs = {
@@ -650,12 +652,39 @@ class BiSeedFileTests(unittest.TestCase):
 
         # 前后端拉齐 V1（2026-09-16）：全部 15 页 refresh_seconds 统一
         # 86400（T+1 口径，全站无自动刷新/轮询）。
-        # 例外（2026-10-09 运维裁决）：hz-offline-sales 是常亮大屏，
-        # 300s 自动刷新（config.py 下限 60 内）——全站唯一轮询页。
+        # 例外（常亮大屏 300s 自动刷新，config.py 下限 60 内）：
+        # hz-offline-sales（2026-10-09 运维裁决）、offline-all-sales
+        # （2026-10-10 同方案）——全站唯二轮询页。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):
-                expected = 300 if dashboard_id == "hz-offline-sales" else 86400
+                expected = (
+                    300
+                    if dashboard_id in ("hz-offline-sales", "offline-all-sales")
+                    else 86400
+                )
                 self.assertEqual(expected, config.refresh_seconds)
+
+        # 线下整体销售BI看板（2026-10-10 运维裁决：8300/offline_all.html
+        # 静态页切 BI，同 hangzhou.html 反代方案 A）：经营驾驶舱组、
+        # nav_order 6（hz 5 之后）、date 筛选、七卡布局。
+        oa = configs["offline-all-sales"]
+        self.assertEqual(6, oa.nav_order)
+        self.assertEqual("经营驾驶舱", oa.group)
+        self.assertEqual("/static/icons/people.svg", oa.icon)
+        self.assertEqual(
+            (("date", "dates", "日期"),),
+            tuple((spec.param, spec.source, spec.label) for spec in oa.filters),
+        )
+        self.assertEqual(
+            ("kpi_oa_mtd", "kpi_oa_today", "kpi_oa_progress",
+             "trend_oa_daily", "bar_oa_dept",
+             "table_oa_scopes", "table_oa_people_progress"),
+            tuple(placement.card for placement in oa.cards),
+        )
+        self.assertEqual(
+            (4, 4, 4, 8, 4, 12, 12),
+            tuple(placement.span for placement in oa.cards),
+        )
 
         # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
         # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡

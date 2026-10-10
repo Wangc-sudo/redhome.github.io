@@ -573,8 +573,11 @@
 
   /* 解析 /d/{dashboard_id}；服务端已把本壳限定在该路径下提供。
    * 旧静态页 URL 别名（2026-10-09：8300/hangzhou.html 经 nginx 反代
-   * 保留 URL，与 bi-data.js 现役壳同一映射）。 */
-  const PATH_ALIASES = {"/hangzhou.html": "hz-offline-sales"};
+   * 保留 URL，与 bi-data.js 现役壳同一映射；2026-10-10 +offline_all）。 */
+  const PATH_ALIASES = {
+    "/hangzhou.html": "hz-offline-sales",
+    "/offline_all.html": "offline-all-sales",
+  };
   const dashboardId = () => {
     if (PATH_ALIASES[window.location.pathname]) {
       return PATH_ALIASES[window.location.pathname];

@@ -758,7 +758,7 @@ def build_offline_panels(connection, *, business_date):
     return [f'<div class="panel">\n{body}\n</div>']
 
 
-def collect_offline_all_people(connection, *, business_date):
+def collect_offline_all_people(connection, *, business_date, include_today=False):
     """线下整体人员总榜采集（页面与 08:30 群播报同口径，无人例外）。
 
     线下整体无 ``region='offline_all'`` 的事实行——人员为
@@ -771,7 +771,8 @@ def collect_offline_all_people(connection, *, business_date):
     * 杭/绍人员部门以通讯录 ``dim_robot_member`` 为准（表内部门是手工
       叫法），无匹配保留表内值兜底。
 
-    返回 ``(people, workdays)``。
+    ``include_today`` 透传 mart_collect（BI 看板实时口径含当天已报；
+    页面/播报缺省 False 维持 T-1）。返回 ``(people, workdays)``。
     """
     from common.daily_robot.mart_leaderboard import mart_collect
 
@@ -779,7 +780,10 @@ def collect_offline_all_people(connection, *, business_date):
     by_region = {}
     workdays = frozenset()
     for region in OFFLINE_PEOPLE_REGIONS:
-        data = mart_collect(connection, region=region, business_date=business_date)
+        data = mart_collect(
+            connection, region=region, business_date=business_date,
+            include_today=include_today,
+        )
         rows = [dict(p) for p in data.people]
         if region == "offline_extra":
             for p in rows:

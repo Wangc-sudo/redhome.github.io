@@ -2154,9 +2154,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
 
         nav = self.client.get("/api/v1/dashboards").json()["dashboards"]
         self.assertEqual(
-            # hz-offline-sales（nav_order 5，2026-10-09 杭州大屏）插在
-            # l1(0) 与 l2-region(10) 之间。
-            ["l1-cockpit", "hz-offline-sales",
+            # hz-offline-sales（nav_order 5，2026-10-09 杭州大屏）与
+            # offline-all-sales（nav_order 6，2026-10-10 线下整体大屏）
+            # 插在 l1(0) 与 l2-region(10) 之间。
+            ["l1-cockpit", "hz-offline-sales", "offline-all-sales",
              "l2-region", "l2-channel", "l2-product",
              "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
              "l2-dining", "l2-hall",
