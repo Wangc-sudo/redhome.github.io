@@ -53,6 +53,12 @@ function fmtAxis(v){
   if (Math.abs(v) >= 1e4) return nf(v / 1e4, v >= 1e6 ? 0 : 1) + '万';
   return nf(v, 0);
 }
+/* 估算 axis-txt(11px) 文本像素宽：CJK≈11、ASCII≈6.2——类目斜排/截断判定用。 */
+function estTextW(s){
+  var w = 0;
+  for (var i = 0; i < s.length; i++) w += s.charCodeAt(i) > 255 ? 11 : 6.2;
+  return w;
+}
 function legendHtml(series, pal){
   return '<div class="legend">' + series.map(function(s, i){
     return '<span class="lg"><i style="background:' + pal[i % pal.length] + '"></i>' + esc(s.name) + '</span>';
@@ -163,6 +169,14 @@ function ChartBar(host, opt){
   var cats = opt.cats, series = opt.series, pal = opt.pal || PAL, stacked = !!opt.stacked;
   var W = host.clientWidth || 720, H = opt.height || host.clientHeight || 280;
   var L = 56, R = 14, T = 8, B = 26;
+  var iw = Math.max(10, W - L - R);
+  var slot = iw / cats.length;
+  /* 类目标签横排超槽宽（窄卡 × 长部门名）时改斜排并截断——相邻标签横排
+   * 必然字叠字（2026-10-10 offline_all 部门本月排行 span 4 运维反馈）。 */
+  var maxLabW = 0;
+  cats.forEach(function(c){ var lw = estTextW(String(c)); if (lw > maxLabW) maxLabW = lw; });
+  var rotate = cats.length > 1 && maxLabW > slot - 10;
+  if (rotate) B = 48;
   var maxV = 0;
   if (stacked){
     for (var k = 0; k < cats.length; k++){
@@ -172,7 +186,7 @@ function ChartBar(host, opt){
     series.forEach(function(s){ s.data.forEach(function(v){ if (v > maxV) maxV = v; }); });
   }
   var max = niceMax(maxV * 1.15) || 10;
-  var iw = Math.max(10, W - L - R), ih = Math.max(10, H - T - B);
+  var ih = Math.max(10, H - T - B);
   var svg = svgNode('svg', {viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none'});
   yTicks(max, 4).forEach(function(v){
     var y = T + ih - (v / max) * ih;
@@ -180,7 +194,7 @@ function ChartBar(host, opt){
     var tx = svgNode('text', {x: L - 8, y: y + 4, class: 'axis-txt', 'text-anchor': 'end'});
     tx.textContent = fmtAxis(v); svg.appendChild(tx);
   });
-  var slot = iw / cats.length, pad = Math.min(18, slot * 0.28);
+  var pad = Math.min(18, slot * 0.28);
   var bw = (slot - pad * 2) / (stacked ? 1 : series.length);
   var Y = function(v){ return T + ih - (Math.max(0, v) / max) * ih; };
   for (var ci = 0; ci < cats.length; ci++){
@@ -203,8 +217,18 @@ function ChartBar(host, opt){
     }
   }
   cats.forEach(function(c, i){
-    var tx = svgNode('text', {x: L + i * slot + slot / 2, y: T + ih + 16, class: 'axis-txt', 'text-anchor': 'middle'});
-    tx.textContent = c; svg.appendChild(tx);
+    if (rotate){
+      var cx = L + i * slot + slot / 2, ly = T + ih + 10;
+      var label = String(c), fitW = slot / 0.78; /* cos(38°) 水平投影 */
+      while (label.length > 1 && estTextW(label + '…') > fitW) label = label.slice(0, -1);
+      if (label !== String(c)) label += '…';
+      var tx = svgNode('text', {x: cx, y: ly, class: 'axis-txt', 'text-anchor': 'end',
+        transform: 'rotate(-38 ' + cx + ' ' + ly + ')'});
+      tx.textContent = label; svg.appendChild(tx);
+    } else {
+      var tx2 = svgNode('text', {x: L + i * slot + slot / 2, y: T + ih + 16, class: 'axis-txt', 'text-anchor': 'middle'});
+      tx2.textContent = c; svg.appendChild(tx2);
+    }
   });
   host.appendChild(svg);
   host.onmousemove = function(ev){
