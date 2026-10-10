@@ -126,13 +126,23 @@ class MartExtractRepository:
         return self._raw
 
     def read_ecom_source(self):
-        """电商人员业绩投影的 raw 源行 ``(detail_rows, target_rows)``。
+        """电商人员业绩投影的源行 ``(detail_rows, target_rows)``。
 
         全量重放（写入侧按业务键幂等 upsert），月度过滤由独立 CLI 的
         ``--month``/``--day`` 承担，管线内不做窗口。
+
+        明细读 mart ``fact_channel_daily_sales``（2026-10-10 修复）：
+        渠道销售真源 = raw AI 表 ∪ 机器人 inbox 归并，归并产物在事实
+        表；同一 run 内 channel_daily_sales 投影先于本步骤（归并先行，
+        本步骤读到的是当批新鲜数据）。旧读 raw 让机器人-only 的日期
+        （2026-10 起全部）静默零产出——qudao 人员事实行断供、渠道播
+        报部门排名空表即此事故。
         """
         from common.public_data.extract_ecom_people import fetch_source_rows
-        return fetch_source_rows(self._raw, month=None, day=None)
+        return fetch_source_rows(
+            self._mart, month=None, day=None,
+            detail_table="fact_channel_daily_sales",
+        )
 
     def read_table(self, table):
         if table not in {d.source_table for d in EXTRACT_DATASETS if d.source == "dingtalk"}:
