@@ -55,6 +55,22 @@ def parse_conversation_allowlist(raw):
     return tuple(item.strip() for item in (raw or "").split(",") if item.strip())
 
 
+def callback_message_id(callback):
+    """从回调提取 messageId（去重键）。
+
+    dingtalk_stream 的 ``callback.headers`` 是 ``frames.Headers`` **对象**
+    （蛇形属性 ``message_id``），不是 dict——2026-10-10 首跑事故：
+    按 dict ``.get()`` 访问抛 AttributeError，消息到达但零回复。
+    防御性兼容 dict 形态（测试桩/未来 SDK 变更）。
+    """
+    headers = getattr(callback, "headers", None)
+    if headers is None:
+        return None
+    if isinstance(headers, dict):
+        return headers.get("messageId") or headers.get("message_id")
+    return getattr(headers, "message_id", None)
+
+
 class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     """客服群问答 handler。所有依赖注入，测试无需 Stream 连接。"""
 
@@ -78,8 +94,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             self._log("kb qa: unrouted conversation")
             return AckMessage.STATUS_OK, "OK"
 
-        headers = getattr(callback, "headers", None) or {}
-        msg_id = headers.get("messageId") or None
+        msg_id = callback_message_id(callback)
 
         conn = self._connection_factory()
         try:
