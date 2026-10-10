@@ -181,7 +181,11 @@ def validate_roster_fields(scope, entity_type, entity_key, person_name,
 
     任何字段非法抛 :class:`ReportRosterError`（消息只含字段名，不含值）。
     aliases 逐条按姓名形态校验、去重保序、不得与 person_name 重复。
-    role 仅 owner/deputy（v3；非 store 类型一律按 owner 归一）。
+    role 仅 owner/deputy（v3；dept 无角色语义归一 owner；store/person
+    允许 deputy——2026-10-10 修复：person 此前被静默归一 owner，名册页
+    加「代填报人」无效，诸暨代填人 2026-10-08 靠直改 DB 绕过。权限面
+    （person_allowed/fetch_scope_person_names）与催办绑定本就
+    role-agnostic，语义不变）。
     """
     if scope not in SCOPES:
         raise ReportRosterError("scope must be a registered business scope")
@@ -189,7 +193,7 @@ def validate_roster_fields(scope, entity_type, entity_key, person_name,
         raise ReportRosterError("entity_type must be one of store/person/dept")
     if role not in ROLES:
         raise ReportRosterError("role must be one of owner/deputy")
-    if entity_type != "store":
+    if entity_type == "dept":
         role = "owner"
     entity_key = entity_key.strip() if isinstance(entity_key, str) else entity_key
     if not entity_key or not isinstance(entity_key, str) or len(entity_key) > 128:

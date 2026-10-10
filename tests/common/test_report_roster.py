@@ -448,10 +448,14 @@ class RoleTests(unittest.TestCase):
         self.assertEqual("owner", _entry().role)
         with self.assertRaises(ReportRosterError):
             _entry(role="boss")
-        # 非 store 类型一律归一 owner
+        # person 允许 deputy（2026-10-10 修复：名册页加代填报人不再被
+        # 静默归一 owner）；dept 无角色语义仍归一 owner
         person = _entry(scope="hangzhou", entity_type="person",
                         entity_key="杭州", role="deputy")
-        self.assertEqual("owner", person.role)
+        self.assertEqual("deputy", person.role)
+        dept = _entry(scope="hangzhou", entity_type="dept",
+                      entity_key="杭中", role="deputy")
+        self.assertEqual("owner", dept.role)
 
     def test_upsert_writes_and_flips_role(self):
         report_roster.upsert_roster_entry(
