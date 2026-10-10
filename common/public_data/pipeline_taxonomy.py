@@ -47,6 +47,7 @@ SERVICE_CATEGORIES = {
     "offline-monthly-summary": "播报",
     "target-rollover": "加工",
     "target-remind": "播报",
+    "calendar-watch": "播报",
     "dingtalk-gateway": "钉钉",
     "bi-web": "平台",
     "scheduler": "平台",

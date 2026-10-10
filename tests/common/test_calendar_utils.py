@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.calendar_utils import (  # noqa: E402
+    RULE_FALLBACK_SOURCE,
     SOURCE_LOCAL,
     SOURCE_YONYOU_TP,
     Calendar,
@@ -23,6 +24,7 @@ from common.calendar_utils import (  # noqa: E402
     generate_rest_days,
     load_calendar_seed,
     month_days,
+    synthesize_fallback_months,
 )
 
 EXAMPLE_CFG = REPO_ROOT / "数字化" / "钉钉" / "杭州日报机器人" / "config.example.json"
@@ -231,7 +233,7 @@ class TestShippedCalendarSeed(unittest.TestCase):
         self.assertEqual(source, SOURCE_LOCAL)
 
     def test_shipped_seed_covers_2025_01_through_2026_12(self):
-        months = load_calendar_seed(SEED_PATH)
+        months = load_calendar_seed(SEED_PATH, fallback=False)
         self.assertEqual(len(months), 24)
         self.assertEqual(
             [(year, month) for year, month, _, _ in months],
@@ -274,7 +276,7 @@ class TestShippedCalendarSeed(unittest.TestCase):
             (2026, 11): [1, 8, 15, 21, 22, 29],
             (2026, 12): [6, 13, 19, 20, 27],
         }
-        months = load_calendar_seed(SEED_PATH)
+        months = load_calendar_seed(SEED_PATH, fallback=False)
         self.assertEqual(
             {(year, month): rest_days for year, month, rest_days, _ in months},
             expected,
@@ -312,7 +314,8 @@ class TestLoadCalendarSeed(unittest.TestCase):
             ],
         }).path
         self.assertEqual(
-            [(year, month) for year, month, _, _ in load_calendar_seed(path)],
+            [(year, month) for year, month, _, _
+             in load_calendar_seed(path, fallback=False)],
             [(2026, 10), (2026, 9)],
         )
 
@@ -366,6 +369,49 @@ class TestLoadCalendarSeed(unittest.TestCase):
         path = _SeedFile(self, {"version": 1, "months": ["2026-09"]}).path
         with self.assertRaises(CalendarError):
             load_calendar_seed(path)
+
+
+class TestRuleFallbackMonths(unittest.TestCase):
+    """规则兜底月（2026-10-10 三层防线 A 层）：近端月份 dim_calendar 永不空。"""
+
+    def test_synthesize_window_skips_covered(self):
+        rows = synthesize_fallback_months(
+            {(2026, 10)}, today=date(2026, 10, 10))
+        self.assertEqual(
+            [(2026, 8), (2026, 9), (2026, 11), (2026, 12), (2027, 1)],
+            [(year, month) for year, month, _, _ in rows],
+        )
+        self.assertTrue(
+            all(source == RULE_FALLBACK_SOURCE for _, _, _, source in rows))
+
+    def test_fallback_rest_uses_third_saturday_rule(self):
+        rows = synthesize_fallback_months(set(), today=date(2026, 10, 10))
+        jan = next(r for r in rows if (r[0], r[1]) == (2027, 1))
+        # 2027-01 周六 = 2/9/16/23/30，第 3 个 = 16；休息日 = 周日 + 16
+        self.assertEqual(
+            generate_rest_days(2027, 1, big_rest_saturdays=[16]), jan[2])
+
+    def test_load_seed_appends_fallback_by_default(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 10}],
+        }).path
+        rows = load_calendar_seed(path, today=date(2026, 10, 10))
+        seeds = [r for r in rows if r[3] == SOURCE_LOCAL]
+        fallback = [r for r in rows if r[3] == RULE_FALLBACK_SOURCE]
+        self.assertEqual([(2026, 10)], [(y, m) for y, m, _, _ in seeds])
+        self.assertIn((2027, 1), [(y, m) for y, m, _, _ in fallback])
+        # 种子覆盖月不重复出兜底行
+        self.assertNotIn((2026, 10), [(y, m) for y, m, _, _ in fallback])
+
+    def test_load_seed_fallback_disabled(self):
+        path = _SeedFile(self, {
+            "version": 1,
+            "months": [{"year": 2026, "month": 9}],
+        }).path
+        rows = load_calendar_seed(path, fallback=False,
+                                  today=date(2026, 10, 10))
+        self.assertEqual([(2026, 9)], [(y, m) for y, m, _, _ in rows])
 
     def test_rejects_missing_year_or_month(self):
         path = _SeedFile(self, {"version": 1, "months": [{"month": 9}]}).path

@@ -399,6 +399,19 @@ def test_build_argv_pages_qudao_t1_uses_default_date():
     assert "--date" not in argv
 
 
+def test_build_argv_calendar_watch():
+    """calendar-watch（2026-10-10 B 层）：跨区域告警，不注入 ROBOT_REGION。"""
+    from common.public_data.scheduler import with_run_force
+
+    argv = build_argv("calendar-watch", SETTINGS)
+    assert argv[1:4] == ["-m", "common.daily_robot.mart_cli", "calendar-watch"]
+    env = build_child_env("calendar-watch", {})
+    assert "ROBOT_REGION" not in env
+    assert env["PUBLIC_DATA_SERVICE_ID"] == "calendar-watch"
+    # outbox 去重线：run-once 手动触发附 --force
+    assert with_run_force(argv)[-1] == "--force"
+
+
 # -- 摘要型依赖探针 ------------------------------------------------------------
 
 class _ProbeCursor:

@@ -92,6 +92,11 @@ def run_target_remind_task(conn, outbox, **kwargs):
     return run_remind(conn, outbox, **kwargs)
 
 
+def run_calendar_watch_task(conn, outbox, **kwargs):
+    from common.daily_robot.calendar_watch import run_watch
+    return run_watch(conn, outbox, **kwargs)
+
+
 def run_offline_weekly_task(conn, outbox, **kwargs):
     from common.daily_robot.offline_summary import run_weekly_summary
     return run_weekly_summary(conn, outbox, **kwargs)
@@ -808,6 +813,45 @@ def _handle_target_remind(args):
         sys.exit(1)
 
 
+def _handle_calendar_watch(args):
+    """工作日历覆盖看门（每月 25 日 10:00）：当月/下月覆盖异常发线下整体群。
+
+    跨区域告警（投递 region 固定 offline_all，不需要 ROBOT_REGION）。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        now = datetime.now()
+        anchor = (
+            date.fromisoformat(args.date)
+            if getattr(args, "date", None) else now.date()
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        result = run_calendar_watch_task(
+            conn, outbox, anchor_date=anchor, now=now,
+            dedupe_suffix=_force_suffix(args, now),
+        )
+        conn.commit()
+        print(f"service={service_id} kind=calendar_watch result={result}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 def _handle_leaderboard_html(args):
     """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
     if not args.confirm_local_test_write:
@@ -1037,6 +1081,28 @@ def main(argv=None):
         help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
 
+    # -- calendar-watch --------------------------------------------------------
+    calendar_watch_sub = subparsers.add_parser(
+        "calendar-watch",
+        help="Workday-calendar coverage watch (25th 10:00, alert to offline_all)",
+    )
+    calendar_watch_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    calendar_watch_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    calendar_watch_sub.add_argument(
+        "--date", default=None,
+        help="anchor date override (YYYY-MM-DD, default: today)",
+    )
+    calendar_watch_sub.add_argument(
+        "--force", action="store_true", default=False,
+        help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
+    )
+
     # -- leaderboard-html ------------------------------------------------------
     html_sub = subparsers.add_parser(
         "leaderboard-html", help="Render the leaderboard HTML page to a file"
@@ -1081,6 +1147,9 @@ def main(argv=None):
         return
     if args.command == "target-remind":
         _handle_target_remind(args)
+        return
+    if args.command == "calendar-watch":
+        _handle_calendar_watch(args)
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

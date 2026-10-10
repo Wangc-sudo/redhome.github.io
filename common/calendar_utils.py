@@ -52,6 +52,17 @@ _WEEKDAY_SUN = 6
 SOURCE_LOCAL = "local"
 SOURCE_YONYOU_TP = "yonyou_tplus"
 
+#: 规则兜底行的 source 标记（2026-10-10 三层防线 A 层）：种子未覆盖的
+#: 近端月份按「周日休 + 每月第 3 个周六大休」纯规则合成（沿用 2026 种子
+#: 锚点约定）——翻年/翻月不再 MartTaskError 硬死（法定节假日口径失真由
+#: B 层 calendar-watch 管道告警补救）。
+RULE_FALLBACK_SOURCE = "rule_fallback"
+
+#: 兜底窗口：以今天为锚的 [前 2 个月, 后 3 个月]（上月环比/当月/下月
+#: 页面导航都在覆盖内；每日 extract 滚动刷新，窗口随时间自走）。
+_FALLBACK_LOOKBACK = 2
+_FALLBACK_LOOKAHEAD = 3
+
 _CALENDAR_SEED_VERSION = 1
 
 
@@ -147,8 +158,50 @@ def month_days(year, month):
     return [date(year, month, day) for day in range(1, last_day + 1)]
 
 
-def load_calendar_seed(path):
+def _shift_month(year, month, delta):
+    """``(year, month)`` 平移 *delta* 个月（可负）。"""
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
+def synthesize_fallback_months(covered, *, today=None):
+    """规则兜底月（A 层）：窗口内种子未覆盖的月份按「周日休 + 每月第 3
+    个周六大休」纯规则合成（沿用 2026 种子锚点约定）。
+
+    *covered* 为已被种子覆盖的 ``(year, month)`` 集合；返回
+    ``[(year, month, rest_days, RULE_FALLBACK_SOURCE)]``（按年月升序）。
+    法定节假日未知一律按工作日计——宁可口径失真不可静默死；失真月份由
+    :data:`RULE_FALLBACK_SOURCE` 落进 ``dim_calendar.source``，
+    calendar-watch 管道据此告警。
+    """
+    today = today or date.today()
+    covered = set(covered)
+    rows = []
+    for delta in range(-_FALLBACK_LOOKBACK, _FALLBACK_LOOKAHEAD + 1):
+        year, month = _shift_month(today.year, today.month, delta)
+        if (year, month) in covered:
+            continue
+        saturdays = [
+            d.day for d in month_days(year, month) if d.weekday() == _WEEKDAY_SAT
+        ]
+        rows.append((
+            year,
+            month,
+            generate_rest_days(
+                year, month, big_rest_saturdays=[saturdays[2]]
+            ),
+            RULE_FALLBACK_SOURCE,
+        ))
+    return rows
+
+
+def load_calendar_seed(path, *, fallback=True, today=None):
     """解析版本受控的日历种子，返回 ``[(year, month, rest_days, source)]``。
+
+    *fallback*（2026-10-10 A 层，缺省 True）：在种子月份之后追加
+    :func:`synthesize_fallback_months` 的规则兜底月（窗口以 *today* 为锚，
+    缺省当天）——``dim_calendar`` 近端月份自此永不空表；读原始种子内容
+    （如 calendar-import 自证）传 ``fallback=False``。
 
     种子形态::
 
@@ -225,6 +278,8 @@ def load_calendar_seed(path):
             ),
             source,
         ))
+    if fallback:
+        result.extend(synthesize_fallback_months(seen, today=today))
     return result
 
 
