@@ -577,6 +577,7 @@
   const PATH_ALIASES = {
     "/hangzhou.html": "hz-offline-sales",
     "/offline_all.html": "offline-all-sales",
+    "/shaoxing.html": "sx-offline-sales",
   };
   const dashboardId = () => {
     if (PATH_ALIASES[window.location.pathname]) {

@@ -120,6 +120,41 @@ offline-all-sales:
     - card: table_oa_people_progress
       title: "个人完成率榜"
       span: 12
+# 绍兴线下销售BI看板（2026-10-10 运维裁决：8300/shaoxing.html 静态榜
+# 单页切 BI，URL 保留走 nginx 反代方案 A——与杭州看板同构，区域钉绍
+# 兴）。全卡锚定 date（工作日日历点选）；BI 实时口径含当天已报（与静
+# 态页 T-1 刻意不同）。300s 自动刷新（常亮大屏，同杭州/线下整体）。
+sx-offline-sales:
+  title: "绍兴线下销售BI看板"
+  icon: "/static/icons/people.svg"
+  group: "经营驾驶舱"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 7
+  filters:
+    - {param: date, source: dates, label: "日期"}
+  cards:
+    - card: kpi_sx_mtd
+      title: "本月累计销售"
+      span: 4
+    - card: kpi_sx_today
+      title: "当日销售"
+      span: 4
+    - card: kpi_sx_progress
+      title: "时间进度"
+      span: 4
+    - card: trend_sx_daily
+      title: "绍兴日销趋势"
+      span: 8
+    - card: bar_sx_dept
+      title: "部门本月排行"
+      span: 4
+    - card: table_sx_people_progress
+      title: "个人完成率榜"
+      span: 12
+    - card: table_sx_unfilled_today
+      title: "当日未填报人"
+      span: 12
 l2-region:
   title: "区域下钻"
   icon: "/static/icons/region.svg"

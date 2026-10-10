@@ -94,6 +94,15 @@ STAGE_B_CARD_IDS = (
     "bar_oa_dept",
     "table_oa_scopes",
     "table_oa_people_progress",
+    # 绍兴线下销售BI看板七卡（2026-10-10 裁决：8300/shaoxing.html 切
+    # BI，与杭州看板同构），共 58 张。
+    "kpi_sx_mtd",
+    "kpi_sx_today",
+    "kpi_sx_progress",
+    "trend_sx_daily",
+    "bar_sx_dept",
+    "table_sx_people_progress",
+    "table_sx_unfilled_today",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -162,6 +171,13 @@ EXPECTED_CHARTS = {
     "bar_oa_dept": "bar",
     "table_oa_scopes": "table",
     "table_oa_people_progress": "table",
+    "kpi_sx_mtd": "scalar",
+    "kpi_sx_today": "scalar",
+    "kpi_sx_progress": "scalar",
+    "trend_sx_daily": "line",
+    "bar_sx_dept": "bar",
+    "table_sx_people_progress": "table",
+    "table_sx_unfilled_today": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -217,6 +233,13 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_oa_dept": queries.run_bar_oa_dept,
     "table_oa_scopes": queries.run_table_oa_scopes,
     "table_oa_people_progress": queries.run_table_oa_people_progress,
+    "kpi_sx_mtd": queries.run_kpi_sx_mtd,
+    "kpi_sx_today": queries.run_kpi_sx_today,
+    "kpi_sx_progress": queries.run_kpi_sx_progress,
+    "trend_sx_daily": queries.run_trend_sx_daily,
+    "bar_sx_dept": queries.run_bar_sx_dept,
+    "table_sx_people_progress": queries.run_table_sx_people_progress,
+    "table_sx_unfilled_today": queries.run_table_sx_unfilled_today,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -289,6 +312,15 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_oa_dept": {"date": "dates"},
     "table_oa_scopes": {"date": "dates"},
     "table_oa_people_progress": {"date": "dates"},
+    # 绍兴看板七卡（2026-10-10）：同杭州看板锚定 date；trend 卡另开
+    # gran 粒度白名单（三档默认日）。
+    "kpi_sx_mtd": {"date": "dates"},
+    "kpi_sx_today": {"date": "dates"},
+    "kpi_sx_progress": {"date": "dates"},
+    "trend_sx_daily": {"date": "dates", "gran": "granularity"},
+    "bar_sx_dept": {"date": "dates"},
+    "table_sx_people_progress": {"date": "dates"},
+    "table_sx_unfilled_today": {"date": "dates"},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -304,6 +336,8 @@ EXPECTED_GRANS = {
     "trend_hz_daily": (("day", "week", "month"), "day"),
     # 线下整体看板趋势卡（2026-10-10）：三档默认日，同杭州看板。
     "trend_oa_daily": (("day", "week", "month"), "day"),
+    # 绍兴看板趋势卡（2026-10-10）：三档默认日，同杭州看板。
+    "trend_sx_daily": (("day", "week", "month"), "day"),
 }
 
 
@@ -334,7 +368,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(51, len(REGISTRY))
+        self.assertEqual(58, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

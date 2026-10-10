@@ -529,7 +529,9 @@ class BiSeedFileTests(unittest.TestCase):
              # 杭州线下销售BI看板（2026-10-09：8300/hangzhou.html 切 BI）
              "hz-offline-sales",
              # 线下整体销售BI看板（2026-10-10：8300/offline_all.html 切 BI）
-             "offline-all-sales"},
+             "offline-all-sales",
+             # 绍兴线下销售BI看板（2026-10-10：8300/shaoxing.html 切 BI）
+             "sx-offline-sales"},
             set(mapping),
         )
         configs = {
@@ -653,16 +655,41 @@ class BiSeedFileTests(unittest.TestCase):
         # 前后端拉齐 V1（2026-09-16）：全部 15 页 refresh_seconds 统一
         # 86400（T+1 口径，全站无自动刷新/轮询）。
         # 例外（常亮大屏 300s 自动刷新，config.py 下限 60 内）：
-        # hz-offline-sales（2026-10-09 运维裁决）、offline-all-sales
-        # （2026-10-10 同方案）——全站唯二轮询页。
+        # hz-offline-sales（2026-10-09 运维裁决）、offline-all-sales 与
+        # sx-offline-sales（2026-10-10 同方案）——全站唯三轮询页。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):
                 expected = (
                     300
-                    if dashboard_id in ("hz-offline-sales", "offline-all-sales")
+                    if dashboard_id in (
+                        "hz-offline-sales", "offline-all-sales",
+                        "sx-offline-sales",
+                    )
                     else 86400
                 )
                 self.assertEqual(expected, config.refresh_seconds)
+
+        # 绍兴线下销售BI看板（2026-10-10 运维裁决：8300/shaoxing.html
+        # 静态页切 BI，与杭州看板同构）：经营驾驶舱组、nav_order 7
+        # （offline-all 6 之后）、date 筛选、七卡布局同杭州。
+        sx = configs["sx-offline-sales"]
+        self.assertEqual(7, sx.nav_order)
+        self.assertEqual("经营驾驶舱", sx.group)
+        self.assertEqual("/static/icons/people.svg", sx.icon)
+        self.assertEqual(
+            (("date", "dates", "日期"),),
+            tuple((spec.param, spec.source, spec.label) for spec in sx.filters),
+        )
+        self.assertEqual(
+            ("kpi_sx_mtd", "kpi_sx_today", "kpi_sx_progress",
+             "trend_sx_daily", "bar_sx_dept",
+             "table_sx_people_progress", "table_sx_unfilled_today"),
+            tuple(placement.card for placement in sx.cards),
+        )
+        self.assertEqual(
+            (4, 4, 4, 8, 4, 12, 12),
+            tuple(placement.span for placement in sx.cards),
+        )
 
         # 线下整体销售BI看板（2026-10-10 运维裁决：8300/offline_all.html
         # 静态页切 BI，同 hangzhou.html 反代方案 A）：经营驾驶舱组、
