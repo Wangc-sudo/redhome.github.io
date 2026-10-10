@@ -116,6 +116,12 @@ class RouterTests(unittest.TestCase):
     def test_keyword_strips_noise(self):
         self.assertEqual("摘要酒", extract_keyword("请问摘要酒的重量是多少呢？"))
 
+    def test_keyword_strips_brackets(self):
+        # 2026-10-10 验收事故：用户按指引带直角引号发送，残留括号全 miss
+        self.assertEqual(
+            "习酒窖藏1998 验收", extract_keyword("「习酒窖藏1998 箱规」验收")
+        )
+
 
 class ProductQueryTests(unittest.TestCase):
     def test_exact_barcode_short_circuits(self):
@@ -141,6 +147,18 @@ class ProductQueryTests(unittest.TestCase):
         conn = _FakeConn()
         self.assertEqual([], find_products(conn, "  "))
         self.assertEqual(0, len(conn.cursor_instance.executed))
+
+    def test_token_fallback_after_full_miss(self):
+        # 整词三段全 miss → 分词「习酒窖藏1998」第一段即中
+        conn = _FakeConn([[], [], [], [_product_row()]])
+        rows = find_products(conn, "习酒窖藏1998 验收")
+        self.assertEqual(1, len(rows))
+        self.assertEqual(4, len(conn.cursor_instance.executed))
+
+    def test_all_tokens_miss_returns_empty(self):
+        # 整词 3 次 + 分词两个各 3 次全 miss
+        conn = _FakeConn([[], [], [], [], [], [], [], [], []])
+        self.assertEqual([], find_products(conn, "不存在 的词"))
 
     def test_render_param_answer_skips_null_fields(self):
         text = render_param_answer(_product_row(gift_bag_spec=None))
@@ -360,6 +378,59 @@ class ProcessEndToEndTests(unittest.TestCase):
         asyncio.run(handler.process(callback))
         # 只有占位插入，无后续查询
         self.assertEqual(1, len(conn.cursor_instance.executed))
+
+
+class _FakeReplyClient:
+    def __init__(self, fail=False):
+        self.calls = []
+        self._fail = fail
+
+    def send_group_markdown(self, robot_code, conv_id, title, text,
+                            at_user_ids=None):
+        if self._fail:
+            raise RuntimeError("errcode visible")
+        self.calls.append((robot_code, conv_id, title, text, at_user_ids))
+
+
+class _FakeIncoming:
+    conversation_id = "cidX=="
+    sender_staff_id = "u1"
+
+
+class ReplyChannelTests(unittest.TestCase):
+    """2026-10-10 二次事故：回复改走 groupMessages（errcode 可见）。"""
+
+    def test_reply_via_group_messages(self):
+        client = _FakeReplyClient()
+        logs = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=logs.append,
+            reply_client=client, robot_code="robot1",
+        )
+        handler._safe_reply(_FakeIncoming(), "答案")
+        self.assertEqual(
+            [("robot1", "cidX==", "产品资料助手", "答案", ["u1"])],
+            client.calls,
+        )
+        self.assertIn("reply sent", " ".join(logs))
+
+    def test_reply_failure_logged_not_raised(self):
+        client = _FakeReplyClient(fail=True)
+        logs = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=logs.append,
+            reply_client=client, robot_code="robot1",
+        )
+        handler._safe_reply(_FakeIncoming(), "答案")  # 不抛
+        self.assertIn("reply failed", " ".join(logs))
+
+    def test_fallback_to_session_webhook_without_client(self):
+        handler = KbStreamHandler(connection_factory=lambda: _FakeConn(),
+                                  log=lambda _: None)
+        sent = []
+        handler.reply_text = lambda text, incoming: sent.append(text)
+        handler._safe_reply(_FakeIncoming(), "答案")
+        self.assertEqual(["答案"], sent)
 
 
 if __name__ == "__main__":
