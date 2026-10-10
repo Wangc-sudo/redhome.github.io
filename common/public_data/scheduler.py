@@ -137,6 +137,15 @@ _COMMAND_TABLE = {
     "sync-runner": _sync_entry(),
     "sync-dingtalk": _sync_entry("--source", "dingtalk"),
     "sync-wdt": _sync_entry("--source", "wdt"),
+    # 知识库商品同步（2026-10-10 客服问答机器人 P1）：AI 表「产品资料」→
+    # mart_ops.kb_products；数据层幂等（recordId upsert），手动触发无需 --force。
+    "kb-sync-products": {
+        "argv": [
+            "common.kb_qa.sync_products",
+            "--live-read",
+            "--confirm-local-test-write",
+        ],
+    },
     "roll-manifest": {
         "argv": [
             "common.public_data.cli", "roll-manifest",

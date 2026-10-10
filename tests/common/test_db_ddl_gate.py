@@ -38,6 +38,10 @@ _DDL_WHITELIST = frozenset(
         # 填报人名册 schema 定义模块（mart-ops-report-roster-v1 的 DDL 源：
         # dim_report_roster / dim_report_roster_audit；同上引用关系）
         "common/public_data/report_roster.py",
+        # 知识库问答机器人 schema 定义模块（mart-ops-kb-qa-v1 的 DDL 源：
+        # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
+        # 被 live_migrations 引用，同上引用关系）
+        "common/kb_qa/schema.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关
