@@ -297,7 +297,8 @@ _DETAIL_TABLES = ("channel_daily_sales", "fact_channel_daily_sales")
 
 
 def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None, *,
-                      detail_table="channel_daily_sales"):
+                      detail_table="channel_daily_sales",
+                      target_connection=None):
     """读取源行 → ``(detail_rows, target_rows)``。
 
     明细按 ``--day``（精确日）或 ``--month``（``business_date`` 所在
@@ -313,6 +314,10 @@ def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None, *,
     供（渠道播报部门排名空表即此事故）。事实表无负责人列，补
     ``NULL AS responsible_person``，归属全走 store_meta/渠道集合回退
     （月目标表名册真源，:func:`build_fact_rows` 既有回退链）。
+
+    ``target_connection``：月目标表连接（raw 库），缺省与 *connection*
+    同——明细切 mart 事实表时两表分库，必须显式传 raw 连接
+    （``channel_monthly_target`` 只存在于 raw_dingtalk）。
     """
     if detail_table not in _DETAIL_TABLES:
         raise ValueError("detail_table must be a whitelisted source table")
@@ -337,7 +342,9 @@ def fetch_source_rows(connection, month=DEFAULT_MONTH, day=None, *,
             params,
         )
         detail_rows = [dict(row) for row in cursor.fetchall()]
-    with contextlib.closing(connection.cursor()) as cursor:
+    target_conn = target_connection if target_connection is not None \
+        else connection
+    with contextlib.closing(target_conn.cursor()) as cursor:
         cursor.execute(
             "SELECT `store_name`, `channel`, `monthly_target`, "
             "`responsible_person` FROM `channel_monthly_target`"

@@ -142,6 +142,7 @@ class MartExtractRepository:
         return fetch_source_rows(
             self._mart, month=None, day=None,
             detail_table="fact_channel_daily_sales",
+            target_connection=self._raw,
         )
 
     def read_table(self, table):
