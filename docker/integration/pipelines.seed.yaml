@@ -235,6 +235,16 @@ target-remind:
   schedule: "0 10 28 * *"
   reads: [mart_ops]
   description: "month-end target verification reminder to region groups (next-month carry-over notice)"
+# 工作日历覆盖看门（2026-10-10 三层防线 B 层）：种子只登记到 2026-12，
+# 翻年旧行为是 dim_calendar 空 → 全线静默失败；A 层规则兜底（周六日全休）
+# 保不死后，本管道把「兜底在用/覆盖缺口」显式告警到线下整体群。
+calendar-watch:
+  kind: business
+  category: 播报
+  enabled: true
+  schedule: "0 10 25 * *"
+  reads: [mart_ops]
+  description: "workday-calendar coverage watch (current+next month gap / rule_fallback alert)"
 target-rollover:
   kind: business
   category: 加工

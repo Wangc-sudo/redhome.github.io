@@ -368,6 +368,7 @@ _SERVICE_LABELS = {
     "offline-monthly-summary": "线下整体每月汇总（上月总量 + 月环比 + 达成率排名）",
     "target-remind": "月目标核对提醒（每月 28 日 → 有目标的区域群，附名册页入口）",
     "target-rollover": "月目标自动结转（每月 1 日把上月目标幂等结转到当月，人工已录入不覆盖）",
+    "calendar-watch": "工作日历覆盖看门（每月 25 日查当月/下月日历，缺失或规则兜底 → 线下整体群告警）",
     "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
     "kb-sync-products": "知识库商品同步（AI 表「产品资料」→ kb_products，小时级）",
     "kb-gateway": "知识库问答机器人（客服群，独立 Stream 应用，常驻）",

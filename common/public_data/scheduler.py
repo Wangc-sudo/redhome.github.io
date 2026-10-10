@@ -188,6 +188,9 @@ _COMMAND_TABLE = {
     # 不注入 ROBOT_REGION；remind 的投递 region 由各 scope 自身决定。
     "target-rollover": _mart_cli_entry("target-rollover"),
     "target-remind": _mart_cli_entry("target-remind"),
+    # 工作日历覆盖看门（2026-10-10 三层防线 B 层）：跨区域告警，
+    # 不注入 ROBOT_REGION（投递 region 固定 offline_all）。
+    "calendar-watch": _mart_cli_entry("calendar-watch"),
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable
@@ -294,7 +297,7 @@ def build_argv(service_id, settings):
 _FORCEABLE_MART_SUBCOMMANDS = frozenset({
     "remind", "check", "once",
     "offline-daily", "offline-weekly", "offline-monthly",
-    "channel-missing", "target-remind",
+    "channel-missing", "target-remind", "calendar-watch",
 })
 
 

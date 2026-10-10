@@ -629,6 +629,38 @@ def _handle_publish_bi(args):
         sys.exit(1)
 
 
+def _handle_calendar_import(args):
+    """法定节假日导入（holiday-cn → calendar.seed.json，dry-run 缺省）。"""
+    try:
+        from common.public_data.calendar_import import import_year
+        result = import_year(args.seed, args.year, apply=args.apply)
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="config_error")
+        sys.exit(1)
+    from common.calendar_utils import generate_rest_days
+    stats = result["stats"]
+    mode = "applied" if result["applied"] else "dry-run"
+    print(
+        f"year={args.year} {mode} replaced={stats['replaced']} "
+        f"added={stats['added']}"
+    )
+    for item in result["months"]:
+        if item["holidays"] or item["makeupWorkdays"]:
+            rest = generate_rest_days(
+                item["year"], item["month"],
+                big_rest_saturdays=item["bigRestSaturdays"],
+                holidays=item["holidays"],
+                makeup_workdays=item["makeupWorkdays"],
+            )
+            print(
+                f"  {item['year']}-{item['month']:02d} "
+                f"holidays={item['holidays']} "
+                f"makeup={item['makeupWorkdays']} rest={rest}"
+            )
+
+
 def _handle_migrate(args):
     try:
         settings = load_settings()
@@ -1000,6 +1032,24 @@ def main(argv=None):
     )
     publish_bi.add_argument("--if-missing", action="store_true", default=False)
 
+    # -- calendar-import ------------------------------------------------------
+    calendar_import = subparsers.add_parser(
+        "calendar-import",
+        help="Import statutory holidays from holiday-cn into calendar.seed.json",
+    )
+    calendar_import.add_argument(
+        "--year", type=int, required=True,
+        help="holiday year to import (e.g. 2027)",
+    )
+    calendar_import.add_argument(
+        "--seed", default="docker/integration/calendar.seed.json",
+        help="version-controlled workday-calendar seed file",
+    )
+    calendar_import.add_argument(
+        "--apply", action="store_true", default=False,
+        help="write back to the seed file (default: dry-run print only)",
+    )
+
     # -- load-target ----------------------------------------------------------
     load_target = subparsers.add_parser(
         "load-target", help="Replay the annual-target seed into dim_target"
@@ -1067,6 +1117,7 @@ def main(argv=None):
         "split-robot-check": _handle_split_robot_check,
         "roll-manifest": _handle_roll_manifest,
         "publish-bi": _handle_publish_bi,
+        "calendar-import": _handle_calendar_import,
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
         "load-ops-seed": _handle_load_ops_seed,
