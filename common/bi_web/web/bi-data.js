@@ -52,7 +52,8 @@ function fetchJson(url){
  * 2026-10-10 +offline_all.html 同方案）。 */
 var PATH_ALIASES = {
   '/hangzhou.html': 'hz-offline-sales',
-  '/offline_all.html': 'offline-all-sales'
+  '/offline_all.html': 'offline-all-sales',
+  '/shaoxing.html': 'sx-offline-sales'
 };
 
 function dashboardId(){

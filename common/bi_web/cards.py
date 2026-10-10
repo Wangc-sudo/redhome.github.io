@@ -47,7 +47,12 @@ BI behind the same URL) adds seven date-anchored cards
 (2026-10-10, ``8300/offline_all.html`` follows the same nginx reverse
 proxy pattern) adds seven more (``kpi_oa_mtd``/``kpi_oa_today``/
 ``kpi_oa_progress``/``trend_oa_daily``/``bar_oa_dept``/
-``table_oa_scopes``/``table_oa_people_progress``) for fifty-one.
+``table_oa_scopes``/``table_oa_people_progress``) for fifty-one.  The
+Shaoxing offline-sales board (2026-10-10, ``8300/shaoxing.html`` same
+pattern, mirroring the Hangzhou seven) adds
+``kpi_sx_mtd``/``kpi_sx_today``/``kpi_sx_progress``/``trend_sx_daily``/
+``bar_sx_dept``/``table_sx_people_progress``/
+``table_sx_unfilled_today`` for fifty-eight.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -219,6 +224,26 @@ _CARDS = (
           queries.run_table_oa_scopes, {"date": "dates"}),
     _card("table_oa_people_progress", "table",
           queries.run_table_oa_people_progress, {"date": "dates"}),
+    # 绍兴线下销售BI看板（sx-offline-sales，2026-10-10 裁决）：与杭州
+    # 看板同构（区域钉绍兴）；8300/shaoxing.html 的 BI 替身，nginx
+    # 反代保留原 URL。
+    _card("kpi_sx_mtd", "scalar", queries.run_kpi_sx_mtd,
+          {"date": "dates"}),
+    _card("kpi_sx_today", "scalar", queries.run_kpi_sx_today,
+          {"date": "dates"}),
+    _card("kpi_sx_progress", "scalar", queries.run_kpi_sx_progress,
+          {"date": "dates"}),
+    _card(
+        "trend_sx_daily", "line", queries.run_trend_sx_daily,
+        {"date": "dates", "gran": "granularity"},
+        grans=("day", "week", "month"), default_gran="day",
+    ),
+    _card("bar_sx_dept", "bar", queries.run_bar_sx_dept,
+          {"date": "dates"}),
+    _card("table_sx_people_progress", "table",
+          queries.run_table_sx_people_progress, {"date": "dates"}),
+    _card("table_sx_unfilled_today", "table",
+          queries.run_table_sx_unfilled_today, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,

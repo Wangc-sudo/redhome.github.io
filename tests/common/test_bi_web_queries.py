@@ -2986,6 +2986,157 @@ class OfflineAllDashboardTests(unittest.TestCase):
         self.assertEqual([], payload["rows"])
 
 
+class SxDashboardTests(unittest.TestCase):
+    """绍兴线下销售BI看板（sx-offline-sales，2026-10-10 裁决）：
+
+    与杭州看板同构（区域钉死 shaoxing）；全卡 date 锚定；表格载荷与
+    杭州共用 ``_people_progress_payload`` / ``_unfilled_payload``。
+    """
+
+    def _calendar_rows(self):
+        return [
+            {"business_date": date(2026, 8, 3)},
+            {"business_date": date(2026, 8, 4)},
+            {"business_date": date(2026, 8, 5)},
+        ]
+
+    def _people_connection(self):
+        facts = [
+            {"region": "shaoxing", "responsible_person": "王五",
+             "department": "绍兴一组", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("90"), "monthly_target": Decimal("100")},
+            {"region": "shaoxing", "responsible_person": "王五",
+             "department": "绍兴一组", "business_date": date(2026, 8, 4),
+             "sales_amount": Decimal("10"), "monthly_target": Decimal("100")},
+            {"region": "shaoxing", "responsible_person": "合计",
+             "department": None, "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("999"), "monthly_target": None},
+        ]
+        return _PeopleFakeConnection(
+            rowsets={
+                "dim_calendar": self._calendar_rows(),
+                "fact_daily_report_offline": facts,
+            }
+        )
+
+    def test_kpi_sx_mtd_pins_shaoxing(self):
+        connection = _RegionFakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("80"),
+                "region_target": Decimal("100"),
+            }
+        )
+        payload = bi_web_queries.run_kpi_sx_mtd(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(80.0, payload["value"])
+        self.assertEqual(100.0, payload["target"])
+        self.assertEqual(0.8, payload["rate"])
+        bound = [p for _, params in connection.executed for p in (params or ())]
+        self.assertIn("shaoxing", bound)
+        self.assertIn(date(2026, 8, 1), bound)
+
+    def test_kpi_sx_today_pins_region_and_excludes_summary(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": [{"s": Decimal("123")}]}
+        )
+        payload = bi_web_queries.run_kpi_sx_today(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(123.0, payload["value"])
+        self.assertEqual("2026-08-04", payload["date"])
+        sql, params = connection.executed[-1]
+        self.assertIn("'shaoxing'", sql)
+        self.assertIn("%%合计%%", sql)
+        self.assertEqual((date(2026, 8, 4),), params)
+
+    def test_kpi_sx_progress_company_calendar(self):
+        connection = FakeConnection(
+            rowsets={"dim_calendar": self._calendar_rows()}
+        )
+        payload = bi_web_queries.run_kpi_sx_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(2.0, payload["value"])
+        self.assertEqual(3.0, payload["target"])
+        self.assertAlmostEqual(2 / 3, payload["rate"])
+
+    def test_trend_sx_daily_pins_shaoxing(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_trend_region_daily",
+            return_value={"chart": "line"},
+        ) as trend:
+            payload = bi_web_queries.run_trend_sx_daily(
+                connection, {"date": "2026-08-04"})
+        self.assertEqual({"chart": "line"}, payload)
+        trend.assert_called_once_with(
+            connection,
+            {"region": "shaoxing", "month": "2026-08", "gran": "day"},
+        )
+
+    def test_table_sx_people_progress_full_columns(self):
+        payload = bi_web_queries.run_table_sx_people_progress(
+            self._people_connection(), {"date": "2026-08-04"})
+        self.assertEqual("2026-08-04", payload["date"])
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["rank", "name", "dept", "completed", "target", "rate",
+             "diff", "daily", "proj", "unfilled"],
+            keys,
+        )
+        # 合计行排除，仅王五：completed=100、rate=1.0、progress=2/3
+        self.assertEqual(1, len(payload["rows"]))
+        row = payload["rows"][0]
+        self.assertEqual("王五", row["name"])
+        self.assertEqual("绍兴一组", row["dept"])
+        self.assertEqual(100.0, row["completed"])
+        self.assertEqual(1.0, row["rate"])
+        self.assertAlmostEqual(1.0 - 2 / 3, row["diff"])
+        self.assertEqual(50.0, row["daily"])
+        self.assertAlmostEqual(1.5, row["proj"])
+        self.assertEqual(0, row["unfilled"])
+
+    def test_table_sx_people_progress_degrades_without_calendar(self):
+        connection = _PeopleFakeConnection(
+            rowsets={"dim_calendar": [], "fact_daily_report_offline": []}
+        )
+        payload = bi_web_queries.run_table_sx_people_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual([], payload["rows"])
+
+    def test_table_sx_unfilled_today_roster_bound(self):
+        connection = _UnfilledFakeConnection(
+            rowsets={
+                "dim_robot_member": [
+                    {"user_id": "u1", "name": "王五", "region": "shaoxing",
+                     "dept_id": "d1", "dept_name": "绍兴一组",
+                     "is_active": 1},
+                    {"user_id": "u2", "name": "赵六", "region": "shaoxing",
+                     "dept_id": "d2", "dept_name": None,
+                     "is_active": 1},
+                ],
+                "dim_report_roster": [
+                    {"scope": "shaoxing", "entity_type": "person",
+                     "person_name": "王五", "enabled": 1},
+                    {"scope": "shaoxing", "entity_type": "person",
+                     "person_name": "赵六", "enabled": 1},
+                ],
+                "fact_daily_report_offline": [
+                    {"region": "shaoxing", "responsible_person": "王五",
+                     "business_date": date(2026, 10, 9)},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_sx_unfilled_today(
+            connection, {"date": "2026-10-09"})
+        self.assertEqual("2026-10-09", payload["date"])
+        # 王五已填 → 仅赵六未填（名册绑定口径，与催办逐字一致）
+        self.assertEqual(
+            [{"rank": 1, "name": "赵六", "dept": "未分组"}],
+            payload["rows"],
+        )
+
+
 class _PeopleFakeConnection(FakeConnection):
     """mart 路径 fake：事实行按最近一条语句的 region 参数过滤
     （模拟 fetch_month_facts 的 ``WHERE region = %s``）；日历行走 rowsets。"""

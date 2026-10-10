@@ -2972,8 +2972,8 @@ def run_trend_hz_daily(connection, params) -> dict:
     )
 
 
-def run_table_hz_unfilled_today(connection, params) -> dict:
-    """杭州当日未填报人（table，2026-10-10 运维反馈新增）。
+def _unfilled_payload(connection, region, anchor):
+    """区域当日未填报人载荷（hz/sx 共用，2026-10-10 运维反馈新增）。
 
     真源 = 催办同款 ``mart_tasks._unfilled``（dim_robot_member ∩
     名册绑定 − 当日已填；名册无记录 fail-open）——看板名单与 18:00
@@ -2983,8 +2983,7 @@ def run_table_hz_unfilled_today(connection, params) -> dict:
     """
     from common.daily_robot.mart_tasks import _unfilled
 
-    anchor = _hz_anchor(params)
-    members = _unfilled(connection, _HZ_REGION, anchor, {})
+    members = _unfilled(connection, region, anchor, {})
     rows = [
         {
             "rank": index,
@@ -3005,17 +3004,21 @@ def run_table_hz_unfilled_today(connection, params) -> dict:
     }
 
 
-def run_table_hz_people_progress(connection, params) -> dict:
-    """杭州个人完成率榜（table）：静态榜单页同口径全列。
+def run_table_hz_unfilled_today(connection, params) -> dict:
+    """杭州当日未填报人（table）：``_unfilled_payload`` 杭州锚定版。"""
+    return _unfilled_payload(connection, _HZ_REGION, _hz_anchor(params))
+
+
+def _people_progress_payload(connection, region, anchor):
+    """区域个人完成率榜载荷（hz/sx 共用）：静态榜单页同口径全列。
 
     排名/姓名/部门/完成/月目标/达成率/进度差/日均完成/预计月末/未填；
     进度基准 = 已过工作日 ÷ 全月工作日（mart_collect 自带 elapsed，
     含锚点当天）。dim_calendar 缺行（MartTaskError）降级空表。
     """
-    anchor = _hz_anchor(params)
     try:
         data = mart_collect(
-            connection, region=_HZ_REGION, business_date=anchor,
+            connection, region=region, business_date=anchor,
             include_today=True,
         )
     except MartTaskError:
@@ -3057,6 +3060,89 @@ def run_table_hz_people_progress(connection, params) -> dict:
         "rows": rows,
         "date": anchor.isoformat(),
     }
+
+
+def run_table_hz_people_progress(connection, params) -> dict:
+    """杭州个人完成率榜（table）：``_people_progress_payload`` 杭州锚定版。"""
+    return _people_progress_payload(connection, _HZ_REGION, _hz_anchor(params))
+
+
+# ---------------------------------------------------------------------------
+# 绍兴线下销售BI看板（sx-offline-sales，2026-10-10 运维裁决）
+#
+# 8300/shaoxing.html 静态榜单页切 BI（URL 保留，nginx 反代方案 A，与
+# hz-offline-sales 同构：区域钉绍兴、七卡一一对应、全卡 date 锚定、
+# BI 实时口径含当天）。两张表与杭州共用载荷函数（单一口径，勿分叉）。
+# ---------------------------------------------------------------------------
+
+#: 绍兴看板区域钉（专属大屏，不给区域筛选）。
+_SX_REGION = "shaoxing"
+
+#: 绍兴当日销售（排合计行；region 钉死无注入面）。
+_SX_TODAY_SQL = (
+    "SELECT COALESCE(SUM(sales_amount), 0) AS `s` "
+    "FROM `fact_daily_report_offline` "
+    "WHERE `region` = 'shaoxing' AND `business_date` = %s "
+    "AND `responsible_person` NOT LIKE '%%合计%%'"
+)
+
+
+def run_kpi_sx_mtd(connection, params) -> dict:
+    """绍兴本月累计 + 达成率（scalar）：kpi_region_mtd 的绍兴锚定版。"""
+    anchor = _hz_anchor(params)
+    return run_kpi_region_mtd(
+        connection, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_kpi_sx_today(connection, params) -> dict:
+    """绍兴当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。"""
+    anchor = _hz_anchor(params)
+    rows = _fetch_rows(connection, _SX_TODAY_SQL, (anchor,))
+    value = rows[0]["s"] if rows else 0
+    return {
+        "chart": "scalar",
+        "value": float(value),
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_kpi_sx_progress(connection, params) -> dict:
+    """绍兴时间进度（scalar）：与杭州卡同函数——工作日日历公司统一。"""
+    return run_kpi_hz_progress(connection, params)
+
+
+def run_trend_sx_daily(connection, params) -> dict:
+    """绍兴日销趋势（line）：trend_region_daily 的绍兴锚定版（月=锚点月，
+    gran 透传缺省日）。"""
+    anchor = _hz_anchor(params)
+    return run_trend_region_daily(
+        connection,
+        {
+            "region": _SX_REGION,
+            "month": anchor.strftime("%Y-%m"),
+            "gran": params.get("gran") or "day",
+        },
+    )
+
+
+def run_bar_sx_dept(connection, params) -> dict:
+    """绍兴部门本月排行（bar）：bar_department_mtd 的绍兴锚定版。"""
+    anchor = _hz_anchor(params)
+    return run_bar_department_mtd(
+        connection, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_table_sx_people_progress(connection, params) -> dict:
+    """绍兴个人完成率榜（table）：``_people_progress_payload`` 绍兴锚定版。"""
+    return _people_progress_payload(connection, _SX_REGION, _hz_anchor(params))
+
+
+def run_table_sx_unfilled_today(connection, params) -> dict:
+    """绍兴当日未填报人（table）：``_unfilled_payload`` 绍兴锚定版。"""
+    return _unfilled_payload(connection, _SX_REGION, _hz_anchor(params))
 
 
 # ---------------------------------------------------------------------------
