@@ -97,6 +97,15 @@ apply() {
   fi
   # 应用 compose/env 变更（nginx/ntp 等不强制重建）
   docker compose -f "$COMPOSE_FILE" up -d
+  # 先补迁移、再重启服务（2026-10-12 补齐）：代码经 bind-mount 即时可见，
+  # 而「注册了迁移」的功能（如 #62 收件人覆盖的 dim_recipient_override）
+  # 若只等下一次 pipeline 运行才建表，就会留下「代码已上线、表还没建」的
+  # 空窗期——这段时间 /records 等页面不可用（2026-10-12 实测踩到）。
+  # 失败只告警、不触发回滚：DB 抖一下不该让整次部署翻车，health_gate 仍是门。
+  if ! docker compose -f "$COMPOSE_FILE" exec -T scheduler \
+      python3 -m common.public_data.cli migrate; then
+    log "WARN: live migrations failed (deploy continues; new tables may be missing)"
+  fi
   # 代码经 bind-mount：强制重建长驻 python 服务以重载代码
   # shellcheck disable=SC2086
   docker compose -f "$COMPOSE_FILE" up -d --force-recreate $CODE_SERVICES

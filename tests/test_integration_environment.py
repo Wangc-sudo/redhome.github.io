@@ -98,6 +98,21 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # 健康门须覆盖同一批长驻容器：force-recreate 后起不来要能触发回滚。
         self.assertIn("--filter name=dops-ops-web", text)
 
+    def test_deploy_script_applies_migrations_before_recreating_services(self):
+        deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
+        text = deploy_script.read_text(encoding="utf-8")
+
+        # 部署须先补迁移、再 force-recreate 长驻服务（2026-10-12 补齐）：
+        # 代码经 bind-mount 即时可见，而「注册了迁移」的功能若只等下一次
+        # pipeline 运行才建表，就会出现「代码已上线、表还没建」的空窗期
+        # （#62 收件人覆盖实测踩到，/records 整页 503）。
+        self.assertIn("common.public_data.cli migrate", text)
+        self.assertLess(
+            text.index("common.public_data.cli migrate"),
+            text.index("up -d --force-recreate"),
+        )
+        self.assertIn("exec -T scheduler", text)
+
     def test_sync_runner_is_opt_in_and_leak_free(self):
         completed = subprocess.run(
             [

@@ -537,5 +537,58 @@ class ExtractMartCliTests(unittest.TestCase):
         build_service.assert_not_called()
 
 
+class MigrateCliTests(unittest.TestCase):
+    """`migrate`：manual（raw_manual）连接为可选（生产 1044 实测）。"""
+
+    def _settings(self, manual="raw_manual"):
+        return Mock(
+            dingtalk_database="raw_dingtalk",
+            wdt_database="raw_wdt",
+            mart_database="mart_ops",
+            manual_database=manual,
+        )
+
+    def test_continues_without_manual_when_that_database_is_denied(self):
+        output = io.StringIO()
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        with patch("common.public_data.cli.load_settings",
+                   return_value=self._settings()), \
+             patch("common.public_data.db.connect") as connect, \
+             patch("common.public_data.live_migrations.apply_live_migrations") as migrate:
+            # 生产账号对 raw_manual 无权限：第 4 次连接抛 1044 类异常
+            connect.side_effect = [raw, wdt, mart, RuntimeError("Access denied")]
+            with redirect_stdout(output):
+                main(["migrate"])
+
+        migrate.assert_called_once_with(
+            raw, wdt, mart, manual_connection=None)
+        self.assertIn("migrations applied", output.getvalue())
+
+    def test_passes_manual_connection_through_when_reachable(self):
+        raw, wdt, mart, manual = Mock(), Mock(), Mock(), Mock()
+        with patch("common.public_data.cli.load_settings",
+                   return_value=self._settings()), \
+             patch("common.public_data.db.connect") as connect, \
+             patch("common.public_data.live_migrations.apply_live_migrations") as migrate:
+            connect.side_effect = [raw, wdt, mart, manual]
+            main(["migrate"])
+
+        migrate.assert_called_once_with(
+            raw, wdt, mart, manual_connection=manual)
+
+    def test_skips_manual_connect_when_not_configured(self):
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        with patch("common.public_data.cli.load_settings",
+                   return_value=self._settings(manual=None)), \
+             patch("common.public_data.db.connect") as connect, \
+             patch("common.public_data.live_migrations.apply_live_migrations") as migrate:
+            connect.side_effect = [raw, wdt, mart]
+            main(["migrate"])
+
+        self.assertEqual(3, connect.call_count)
+        migrate.assert_called_once_with(
+            raw, wdt, mart, manual_connection=None)
+
+
 if __name__ == "__main__":
     unittest.main()

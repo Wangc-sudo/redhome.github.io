@@ -2023,6 +2023,24 @@ class RecordsPageTests(unittest.TestCase):
         self.assertIn("账号", body)     # target_type=user_id 中文化
         self.assertIn("u9", body)
 
+    def test_records_fails_soft_when_override_audit_read_fails(self):
+        """缺表（迁移未跑）或读异常：只跳过该来源，不整页 503。
+
+        #62 上线后曾实测踩到：deploy 不跑迁移，dim_recipient_override_audit
+        缺失时 /records 整页 503。此用例钉住 fail-soft 口径——其余来源照常
+        展示，来源筛选项不因该来源读失败而出现「读取失败」。
+        """
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("table missing")
+
+        with self._patched(), mock.patch.object(
+                recipient_override, "fetch_recent_audits", _boom):
+            body = self._client().get("/records").text
+        self.assertIn("授权", body)       # 其余来源仍正常展示
+        self.assertIn("定时运行", body)
+        self.assertNotIn("读取失败", body)
+        self.assertNotIn("Traceback", body)
+
 
 class CalendarPageTests(unittest.TestCase):
     """工作日历页（2026-10-10 DB 裁决层操作面：非技术同学用）。"""

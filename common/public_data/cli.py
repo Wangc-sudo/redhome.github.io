@@ -707,11 +707,20 @@ def _handle_migrate(args):
         dingtalk_conn = connect(settings.dingtalk_database)
         wdt_conn = connect(settings.wdt_database)
         mart_conn = connect(settings.mart_database)
-        manual_conn = (
-            connect(settings.manual_database)
-            if settings.manual_database is not None
-            else None
-        )
+        # manual（raw_manual）是**可选**连接：生产账号对该库无权限
+        # （1044 Access denied，2026-10-12 补迁移时实测），而 manual 迁移
+        # 只服务人工报表导入，与 sync/extract/mart 无关。连不上就降级为
+        # None 继续——与 pipeline 路径同签名，否则一条无关库的权限问题会
+        # 让整次 migrate 失败、业务库的待建表永远补不上。
+        manual_conn = None
+        if settings.manual_database is not None:
+            try:
+                manual_conn = connect(settings.manual_database)
+            except Exception as exc:
+                print(
+                    "warn: manual database unavailable "
+                    f"({type(exc).__name__}); applying without it"
+                )
         apply_live_migrations(
             dingtalk_conn, wdt_conn, mart_conn, manual_connection=manual_conn
         )
