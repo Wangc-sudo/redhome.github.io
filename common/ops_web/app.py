@@ -131,6 +131,12 @@ _PAGE_STYLE = (
     ".flash{margin:12px 0;padding:10px 14px;border-radius:6px;font-size:14px}"
     ".flash.ok{background:#e6f4ea;color:#1e6b3a;border:1px solid #b7e0c4}"
     ".flash.err{background:#fdecea;color:#a12622;border:1px solid #f3c1bd}"
+    # 定时任务页双视角 tab（2026-10-12）：按管理群（默认）/ 按功能类别
+    ".tabs{display:flex;gap:8px;margin:16px 0 0}"
+    ".tabs a{padding:6px 14px;border:1px solid #d0d5dd;border-bottom:none;"
+    "border-radius:6px 6px 0 0;background:#f0f2f5;color:#1f3a5f;"
+    "text-decoration:none;font-size:13px}"
+    ".tabs a.active{background:#fff;font-weight:600}"
 )
 
 _PAGE_JS = """
@@ -746,6 +752,19 @@ def _group_cell(service_id):
     if region is None:
         return "<span class=\"hint\">—</span>"
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
+
+
+#: 定时任务页「按管理群」视角的分组顺序（2026-10-12 运维裁决）：城市区域
+#: 在前、跨区域线（渠道/线下整体）居中，无区域（平台/无群）恒置末位；
+#: 未登记区域排在已知区域之后。分组键为区域 key（非中文 label）。
+_GROUP_ORDER = tuple(_REGION_LABELS)
+
+
+def _pipeline_group_title(region):
+    """群视角分组头文案：区域 → 「<区域中文名>」群；None → 平台 / 无群。"""
+    if region is None:
+        return "平台 / 无群"
+    return f"「{_REGION_LABELS.get(region, region)}」群"
 
 
 def _category_bucket(config):
@@ -1501,6 +1520,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.get("/pipelines")
     def pipelines_page(request: Request):
         viewer = require_admin(request)
+        # 双视角（2026-10-12 运维裁决）：默认「按管理群」（同群任务聚合，
+        # 一眼看清这个群会收到哪些任务）；?view=class 走原「按功能类别」。
+        view = (request.query_params.get("view") or "group").strip()
+        if view not in ("group", "class"):
+            view = "group"
         service_ids = _fleet()
         configs = []
         for service_id in service_ids:
@@ -1565,7 +1589,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for sid in reminder_ids:
                     reminder_cells[sid] = (
                         "<span class=\"hint\">读取失败</span>")
-        buckets = {title: [] for title in _CATEGORY_TABLE_ORDER}
+        # 桶：群视角按区域 key（None=平台/无群）；功能视角按功能分类。
+        buckets = ({}
+                   if view == "group"
+                   else {title: [] for title in _CATEGORY_TABLE_ORDER})
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -1600,10 +1627,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<option value=\"toggle\">{toggle_label}</option>"
                 f"{run_option}</select>"
             )
-            buckets[_category_bucket(config)].append(
-                f"<tr><td>{_service_name_cell(config.service_id)}</td>"
-                f"<td>{_group_cell(config.service_id)}</td>"
-                f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
+            # 视角差异仅在「管理群」列：群视角该维度已升为分组头，行内不再重复。
+            head = f"<tr><td>{_service_name_cell(config.service_id)}</td>"
+            if view != "group":
+                head += f"<td>{_group_cell(config.service_id)}</td>"
+            row = (
+                head
+                + f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
                 f"<td>{_esc(', '.join(config.depends_on))}</td>"
@@ -1612,26 +1642,33 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{request_cell}</td>"
                 f"<td>{action_cell}</td></tr>"
             )
+            if view == "group":
+                buckets.setdefault(
+                    _service_region(config.service_id), []).append(row)
+            else:
+                buckets[_category_bucket(config)].append(row)
         header = (
             "<tr><th>服务标识</th><th>管理群</th>"
             "<th>收受影响人</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
         )
-        table = ["<h1>定时任务（管道注册表）</h1>"]
-        for title in _CATEGORY_TABLE_ORDER:
-            table.append(
-                f"<h2>{title}</h2><table>{header}"
-                + "".join(buckets[title]) + "</table>"
-            )
-        table.append(
-            "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
-            "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-            "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射）；"
-            "分表=按功能（注册表 category 真源，未配置按服务标识推导兜底；"
-            "2026-10-10 裁决按功能分表——群名是投递目标，管理群列已承载）；"
-            "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
-            "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
+        group_header = (
+            "<tr><th>服务标识</th>"
+            "<th>收受影响人</th><th>启用</th>"
+            "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
+            "<th>最近运行</th><th>操作</th></tr>"
+        )
+        # 视角切换 tab（服务端渲染两链接；无 SPA，维持零依赖）。
+        tabs = (
+            "<div class=\"tabs\">"
+            f"<a class=\"{'active' if view == 'group' else ''}\" "
+            "href=\"/pipelines?view=group\">按管理群</a>"
+            f"<a class=\"{'active' if view == 'class' else ''}\" "
+            "href=\"/pipelines?view=class\">按功能类别</a>"
+            "</div>"
+        )
+        confirm_mask = (
             "<div id=\"confirm-mask\" class=\"modal-mask\">"
             "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
             "<div class=\"modal-btns\">"
@@ -1639,6 +1676,51 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<button onclick=\"closeConfirm()\">取消</button>"
             "</div></div></div>"
         )
+        table = ["<h1>定时任务（管道注册表）</h1>" + tabs]
+        if view == "group":
+            # 分组顺序：城市区域 → 跨区域线（渠道/线下整体）→ 未登记区域
+            # → 平台/无群（恒置末位）；不得丢行。
+            ordered = [r for r in _GROUP_ORDER if buckets.get(r)]
+            ordered += sorted(
+                r for r in buckets
+                if r is not None and r not in _GROUP_ORDER and buckets[r])
+            if buckets.get(None):
+                ordered.append(None)
+            for region in ordered:
+                rows = buckets[region]
+                table.append(
+                    f"<h2>{_esc(_pipeline_group_title(region))}"
+                    f"（{len(rows)} 项）</h2>"
+                    f"<table>{group_header}" + "".join(rows) + "</table>"
+                )
+            table.append(
+                "<p class=\"hint\">按管理群视角：同一区域的服务归为一组，"
+                "一眼看清「这个群会收到哪些任务」；「渠道」「线下整体」为"
+                "跨区域线，单独成组；无绑定区域的应用线/平台服务归入"
+                "「平台 / 无群」。点「按功能类别」可按功能与定时规则查看。"
+                "配置存 Nacos 注册表（PIPELINES 组），开关与新增在下一个"
+                "调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
+                "翻译成可执行命令；「收受影响人」= 催办覆盖面（日报机器人="
+                "名册在册人员，名册未登记则该区域在册填报人全员兜底；"
+                "渠道到齐=名册店铺负责人），非催办行无。</p>"
+                + confirm_mask
+            )
+        else:
+            for title in _CATEGORY_TABLE_ORDER:
+                table.append(
+                    f"<h2>{title}</h2><table>{header}"
+                    + "".join(buckets[title]) + "</table>"
+                )
+            table.append(
+                "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
+                "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
+                "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射）；"
+                "分表=按功能（注册表 category 真源，未配置按服务标识推导兜底；"
+                "2026-10-10 裁决按功能分表——群名是投递目标，管理群列已承载）；"
+                "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
+                "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
+                + confirm_mask
+            )
         table = "".join(table)
         add_form = (
             "<h2>新增定时任务</h2>"
