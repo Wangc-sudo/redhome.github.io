@@ -43,9 +43,7 @@ from common.public_data.calendar_import import CalendarImportError
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.pipeline_taxonomy import (
-    CATEGORY_CLASS,
     CATEGORY_FAMILY,
-    CLASS_ORDER,
     SUPPORTED_CATEGORIES,
     resolve_category,
 )
@@ -199,15 +197,90 @@ function pipelineAction(sel) {
 function addPipeline(ev) {
   ev.preventDefault();
   const f = ev.target;
+  const schedule = cronFromForm(f);
+  if (!schedule) { alert('请填写自定义 cron 表达式（或改用预设）'); return; }
   postJSON('/api/pipelines/add', {
     service_id: f.service_id.value.trim(),
     kind: f.kind.value,
     category: f.category.value,
-    schedule: f.schedule.value.trim(),
+    schedule: schedule,
     enabled: f.enabled.checked,
     depends_on: f.depends_on.value.split(/[\\s,]+/).filter(Boolean),
     description: f.description.value.trim(),
   });
+}
+/* ---- 定时构建器（2026-10-10：预设+时点合成 cron，实时中文预览）--------- */
+function cronFromForm(f) {
+  const p = f.schedule_preset.value;
+  const t = (f.schedule_time.value || '18:00').split(':');
+  const hh = String(parseInt(t[0] || '0', 10));
+  const mm = String(parseInt(t[1] || '0', 10));
+  if (p === 'daily') return mm + ' ' + hh + ' * * *';
+  if (p === 'weekday') return mm + ' ' + hh + ' * * 1-5';
+  if (p === 'weekly') return mm + ' ' + hh + ' * * ' + f.schedule_dow.value;
+  if (p === 'monthly') return mm + ' ' + hh + ' ' +
+    (parseInt(f.schedule_dom.value, 10) || 1) + ' * *';
+  if (p === 'hourly') return '0 * * * *';
+  return f.schedule.value.trim();
+}
+const _CRON_DOW_JS = {'0':'日','1':'一','2':'二','3':'三','4':'四','5':'五','6':'六','7':'日'};
+/* 与服务端 _cron_zh 同形的预览子集（仅展示，不认识回退原文）。 */
+function cronZh(cron) {
+  const parts = (cron || '').trim().split(/\\s+/);
+  if (parts.length !== 5) return null;
+  const minute = parts[0], hour = parts[1], dom = parts[2],
+        month = parts[3], dow = parts[4];
+  if (month !== '*') return null;
+  function times() {
+    if (!/^\\d+$/.test(minute)) return null;
+    const hours = hour.split(',');
+    if (!hours.every(function (h) { return /^\\d+$/.test(h); })) return null;
+    return hours.map(function (h) {
+      return String(parseInt(h, 10)).padStart(2, '0') + ':' +
+             String(parseInt(minute, 10)).padStart(2, '0');
+    }).join('、');
+  }
+  if (dom === '*' && dow === '*') {
+    if (minute.startsWith('*/') && hour === '*' && /^\\d+$/.test(minute.slice(2))) {
+      return '每 ' + parseInt(minute.slice(2), 10) + ' 分钟';
+    }
+    if (hour === '*' && /^\\d+$/.test(minute)) {
+      return '每小时第 ' + parseInt(minute, 10) + ' 分';
+    }
+    const t = times();
+    return t ? '每天 ' + t : null;
+  }
+  if (dom === '*' && dow !== '*') {
+    const t = times();
+    if (dow === '1-5' && t) return '工作日（周一至周五）' + t;
+    const days = dow.split(',');
+    if (t && days.every(function (d) { return d in _CRON_DOW_JS; })) {
+      return '每周' + days.map(function (d) { return _CRON_DOW_JS[d]; }).join('、周') + ' ' + t;
+    }
+    return null;
+  }
+  if (dom !== '*' && dow === '*' && /^\\d+$/.test(dom)) {
+    const t = times();
+    return t ? '每月 ' + parseInt(dom, 10) + ' 日 ' + t : null;
+  }
+  return null;
+}
+function updateSchedulePreview(f) {
+  const cron = cronFromForm(f);
+  const zh = cronZh(cron);
+  const el = document.getElementById('schedule-preview');
+  if (!el) return;
+  el.textContent = zh ? ('将按：' + zh + '（' + cron + '）')
+                      : (cron ? '将按 cron：' + cron : '');
+}
+function schedulePresetChange(f) {
+  const p = f.schedule_preset.value;
+  const isCustom = p === 'custom';
+  f.schedule.style.display = isCustom ? '' : 'none';
+  f.schedule_time.style.display = (!isCustom && p !== 'hourly') ? '' : 'none';
+  f.schedule_dow.style.display = p === 'weekly' ? '' : 'none';
+  f.schedule_dom.style.display = p === 'monthly' ? '' : 'none';
+  updateSchedulePreview(f);
 }
 function addRoster(ev) {
   ev.preventDefault();
@@ -296,6 +369,11 @@ async function publishSnapshot() {
   if (resp.ok) { location.reload(); return; }
   alert('发布失败（' + resp.status + '）');
 }
+/* 定时构建器初始化（仅管道页存在该表单时生效）。 */
+(function () {
+  const f = document.getElementById('pipeline-add-form');
+  if (f) schedulePresetChange(f);
+})();
 """
 
 
@@ -364,8 +442,13 @@ def _fmt_time(value):
     return dt.astimezone(_BJT).strftime("%Y-%m-%d %H:%M:%S")
 
 
+#: 定时任务页分表顺序（2026-10-10 运维裁决「按功能分表」：先业务动作
+#: 后数据与平台；群名不分表——群是投递目标，管理群列已承载该视角）。
+_CATEGORY_TABLE_ORDER = (
+    "催办", "播报", "页面", "同步", "加工", "钉钉", "平台", "未归类",
+)
+
 # -- 展示层中文标签（底层值不动：审计/状态存量英文值仅在渲染时映射） --------
-_KIND_LABEL = {"apps": "应用线", "business": "业务线"}
 _RUN_STATUS_LABEL = {
     "finished": "成功",
     "failed": "失败",
@@ -561,12 +644,9 @@ def _group_cell(service_id):
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
-def _service_class(config):
-    """三表分类：category（真源/推导）→ 归类映射；未归类按注册表 kind 兜底。"""
-    category = resolve_category(config.service_id, config.category)
-    if category is not None:
-        return CATEGORY_CLASS[category]
-    return "业务线" if config.kind == "business" else "应用类"
+def _category_bucket(config):
+    """功能分表桶：注册表 category 真源优先、按标识推导兜底；None=未归类。"""
+    return resolve_category(config.service_id, config.category) or "未归类"
 
 
 def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
@@ -644,8 +724,11 @@ def _cron_zh(schedule):
         times = _times()
         return f"每天 {times}" if times else None
     if dom == "*" and dow != "*":
-        days = dow.split(",")
         times = _times()
+        # 工作日区间（定时构建器「工作日」预设与存量注册表常见形态）
+        if dow == "1-5" and times:
+            return f"工作日（周一至周五）{times}"
+        days = dow.split(",")
         if times and all(d in _CRON_DOW for d in days):
             return "每周" + "、周".join(_CRON_DOW[d] for d in days) + f" {times}"
         return None
@@ -1302,7 +1385,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for sid in reminder_ids:
                     reminder_cells[sid] = (
                         "<span class=\"hint\">读取失败</span>")
-        buckets = {title: [] for title in CLASS_ORDER}
+        buckets = {title: [] for title in _CATEGORY_TABLE_ORDER}
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -1337,11 +1420,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<option value=\"toggle\">{toggle_label}</option>"
                 f"{run_option}</select>"
             )
-            buckets[_service_class(config)].append(
+            buckets[_category_bucket(config)].append(
                 f"<tr><td>{_service_name_cell(config.service_id)}</td>"
-                f"<td>{_esc(_label(_KIND_LABEL, config.kind))}</td>"
                 f"<td>{_group_cell(config.service_id)}</td>"
-                f"<td>{_esc(_category_label(config))}</td>"
                 f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
                 f"<td>{'✓' if config.enabled else '—'}</td>"
                 f"<td>{_schedule_cell(config.schedule)}</td>"
@@ -1352,13 +1433,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{action_cell}</td></tr>"
             )
         header = (
-            "<tr><th>服务标识</th><th>类型</th><th>管理群</th>"
-            "<th>功能</th><th>收受影响人</th><th>启用</th>"
+            "<tr><th>服务标识</th><th>管理群</th>"
+            "<th>收受影响人</th><th>启用</th>"
             "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
         )
         table = ["<h1>定时任务（管道注册表）</h1>"]
-        for title in CLASS_ORDER:
+        for title in _CATEGORY_TABLE_ORDER:
             table.append(
                 f"<h2>{title}</h2><table>{header}"
                 + "".join(buckets[title]) + "</table>"
@@ -1366,10 +1447,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         table.append(
             "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
             "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-            "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射），"
-            "「功能」= 注册表 category 真源（未配置按服务标识推导兜底）；"
-            "分表=按功能归类（应用类/业务线/数据线），与注册表「类型」"
-            "（kind）无关；"
+            "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射）；"
+            "分表=按功能（注册表 category 真源，未配置按服务标识推导兜底；"
+            "2026-10-10 裁决按功能分表——群名是投递目标，管理群列已承载）；"
             "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
             "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
             "<div id=\"confirm-mask\" class=\"modal-mask\">"
@@ -1382,7 +1462,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         table = "".join(table)
         add_form = (
             "<h2>新增定时任务</h2>"
-            "<form class=\"inline\" onsubmit=\"addPipeline(event)\">"
+            "<form class=\"inline\" id=\"pipeline-add-form\" "
+            "onsubmit=\"addPipeline(event)\">"
             "<input name=\"service_id\" placeholder=\"服务标识（小写字母/数字/-/_）\" required>"
             "<select name=\"kind\">"
             "<option value=\"business\">业务线</option>"
@@ -1395,7 +1476,34 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for c in SUPPORTED_CATEGORIES
             )
             + "</select>"
-            "<input name=\"schedule\" placeholder=\"定时规则（分 时 日 月 周，如 0 18 * * * = 每天 18:00）\" required>"
+            # 定时构建器（2026-10-10 裁决：预设+时点选择，不手写 cron；
+            # 提交时由 JS 合成 cron，服务端 croniter 校验兜底；「自定义」
+            # 仍开 cron 原文输入并实时中文预览——展示安全、改错即见）。
+            "<select name=\"schedule_preset\" "
+            "onchange=\"schedulePresetChange(this.form)\">"
+            "<option value=\"daily\">每天</option>"
+            "<option value=\"weekday\">工作日（周一至周五）</option>"
+            "<option value=\"weekly\">每周</option>"
+            "<option value=\"monthly\">每月</option>"
+            "<option value=\"hourly\">每小时整点</option>"
+            "<option value=\"custom\">自定义 cron</option>"
+            "</select>"
+            "<input name=\"schedule_time\" type=\"time\" value=\"18:00\" "
+            "onchange=\"updateSchedulePreview(this.form)\">"
+            "<select name=\"schedule_dow\" style=\"display:none\" "
+            "onchange=\"updateSchedulePreview(this.form)\">"
+            "<option value=\"1\">周一</option><option value=\"2\">周二</option>"
+            "<option value=\"3\">周三</option><option value=\"4\">周四</option>"
+            "<option value=\"5\">周五</option><option value=\"6\">周六</option>"
+            "<option value=\"0\">周日</option>"
+            "</select>"
+            "<input name=\"schedule_dom\" type=\"number\" min=\"1\" max=\"31\" "
+            "value=\"1\" style=\"display:none;width:64px\" "
+            "onchange=\"updateSchedulePreview(this.form)\">"
+            "<input name=\"schedule\" placeholder=\"cron（分 时 日 月 周）\" "
+            "style=\"display:none\" "
+            "oninput=\"updateSchedulePreview(this.form)\">"
+            "<span class=\"hint\" id=\"schedule-preview\"></span>"
             "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
             "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
             "<input name=\"description\" placeholder=\"描述\">"

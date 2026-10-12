@@ -430,36 +430,46 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
 
-    def test_pipelines_page_splits_three_class_tables(self):
-        """分表：应用类/业务线/数据线三段标题与归类落位。"""
+    def test_pipelines_page_splits_category_tables(self):
+        """分表：按功能（2026-10-10 裁决）——先业务动作后数据与平台。"""
         fleet = (
-            "scheduler",            # 平台 → 应用类
-            "dingtalk-gateway",     # 钉钉 → 应用类
-            "robot-hangzhou",       # 催办 → 业务线
-            "leaderboard-qudao",    # 播报 → 业务线
-            "sync-wdt",             # 同步 → 数据线
-            "extract-mart",         # 加工 → 数据线
+            "scheduler",            # 平台
+            "dingtalk-gateway",     # 钉钉
+            "robot-hangzhou",       # 催办
+            "leaderboard-qudao",    # 播报
+            "pages-qudao-t1",       # 页面
+            "sync-wdt",             # 同步
+            "extract-mart",         # 加工
         )
         client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
         _login(client)
         body = client.get("/pipelines").text
 
-        for title in ("<h2>应用类</h2>", "<h2>业务线</h2>", "<h2>数据线</h2>"):
-            self.assertIn(title, body)
-        app_i = body.index("<h2>应用类</h2>")
-        biz_i = body.index("<h2>业务线</h2>")
-        data_i = body.index("<h2>数据线</h2>")
-        self.assertLess(app_i, biz_i)
-        self.assertLess(biz_i, data_i)
-        # 平台/钉钉线落在应用类段
-        self.assertLess(app_i, body.index("scheduler"))
-        self.assertLess(body.index("dingtalk-gateway"), biz_i)
-        # 机器人/榜单播报落在业务线段
-        self.assertLess(biz_i, body.index("robot-hangzhou"))
-        self.assertLess(body.index("leaderboard-qudao"), data_i)
-        # 同步/提取落在数据线段（表末无更多段）
-        self.assertLess(data_i, body.index("sync-wdt"))
-        self.assertLess(data_i, body.index("extract-mart"))
+        order = ("<h2>催办</h2>", "<h2>播报</h2>", "<h2>页面</h2>",
+                 "<h2>同步</h2>", "<h2>加工</h2>", "<h2>钉钉</h2>",
+                 "<h2>平台</h2>", "<h2>未归类</h2>")
+        positions = [body.index(title) for title in order]
+        self.assertEqual(positions, sorted(positions))
+        # 落位：各行在自己功能段与下一段之间
+        self.assertLess(positions[0], body.index("robot-hangzhou"))
+        self.assertLess(body.index("robot-hangzhou"), positions[1])
+        self.assertLess(positions[1], body.index("leaderboard-qudao"))
+        self.assertLess(body.index("leaderboard-qudao"), positions[2])
+        self.assertLess(positions[2], body.index("pages-qudao-t1"))
+        self.assertLess(body.index("pages-qudao-t1"), positions[3])
+        self.assertLess(positions[3], body.index("sync-wdt"))
+        self.assertLess(body.index("sync-wdt"), positions[4])
+        self.assertLess(positions[4], body.index("extract-mart"))
+        self.assertLess(body.index("extract-mart"), positions[5])
+        self.assertLess(positions[5], body.index("dingtalk-gateway"))
+        self.assertLess(body.index("dingtalk-gateway"), positions[6])
+        self.assertLess(positions[6], body.index("scheduler"))
+        # 旧分表与冗余列不再出现
+        self.assertNotIn("<h2>应用类</h2>", body)
+        self.assertNotIn("<h2>业务线</h2>", body)
+        self.assertNotIn("<h2>数据线</h2>", body)
+        self.assertNotIn("<th>类型</th>", body)
+        self.assertNotIn("<th>功能</th>", body)
 
     def test_pipelines_page_group_and_function_classification(self):
         """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""
@@ -554,10 +564,10 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("robot-hangzhou", response.text)
 
     def test_pipelines_page_category_truth_overrides_derivation(self):
-        """category 真源优先：注册表配置覆盖 service_id 推导（功能列+分表）。
+        """category 真源优先：注册表配置覆盖 service_id 推导（分表落位）。
 
-        sync-wdt 推导=同步（数据线）；注册表配 category=催办 后，
-        功能列显示催办、整行落在业务线段。
+        sync-wdt 推导=同步；注册表配 category=催办 后，整行落在催办段
+        （功能分表后无独立功能列，落位即真源表达）。
         """
         configs = {"sync-wdt": {"schedule": "0 2 * * *", "category": "催办"}}
         app = create_app(
@@ -573,15 +583,11 @@ class PipelinePageTests(unittest.TestCase):
         _login(client)
         body = client.get("/pipelines").text
 
-        biz_i = body.index("<h2>业务线</h2>")
-        data_i = body.index("<h2>数据线</h2>")
+        urge_i = body.index("<h2>催办</h2>")
+        bcast_i = body.index("<h2>播报</h2>")
         row_i = body.index("sync-wdt")
-        self.assertLess(biz_i, row_i)          # 落业务线段（真源胜出）
-        self.assertLess(row_i, data_i)
-        row_html = body[row_i:data_i]
-        # 功能单元格（管理群列之后）显示真源「催办」，推导值「同步」不占位
-        self.assertIn("</td><td>催办</td>", row_html)
-        self.assertNotIn("</td><td>同步</td>", row_html)
+        self.assertLess(urge_i, row_i)          # 落催办段（真源胜出）
+        self.assertLess(row_i, bcast_i)
 
     def test_pipelines_page_add_form_offers_category_select(self):
         """新增表单带 category 下拉：空值=按标识推导，七值可选。"""
@@ -593,6 +599,48 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("功能（留空按标识推导）", body)
         for category in ("同步", "加工", "播报", "催办", "页面", "钉钉", "平台"):
             self.assertIn(f'<option value="{category}">{category}</option>', body)
+
+    def test_pipelines_page_schedule_builder_form(self):
+        """定时构建器（2026-10-10 裁决）：预设+时点选择+自定义 cron+预览，
+        非技术同学不手写 cron。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn('id="pipeline-add-form"', body)
+        self.assertIn('name="schedule_preset"', body)
+        for preset in ('value="daily"', 'value="weekday"', 'value="weekly"',
+                       'value="monthly"', 'value="hourly"', 'value="custom"'):
+            self.assertIn(preset, body)
+        self.assertIn('name="schedule_time" type="time"', body)
+        self.assertIn('name="schedule_dow"', body)     # 每周（默认隐藏）
+        self.assertIn('name="schedule_dom"', body)     # 每月（默认隐藏）
+        self.assertIn('name="schedule"', body)         # 自定义 cron（默认隐藏）
+        self.assertIn('id="schedule-preview"', body)
+        # cron 输入不再 required（隐藏态不参与提交校验，由 JS 合成）
+        self.assertNotIn(
+            'name="schedule" placeholder="cron（分 时 日 月 周）" required',
+            body,
+        )
+
+    def test_pipelines_page_weekday_cron_is_humanized(self):
+        """工作日区间 cron（1-5）人性化：与构建器「工作日」预设同形。"""
+        configs = {"sync-wdt": {"schedule": "0 18 * * 1-5"}}
+        app = create_app(
+            settings=_fake_settings(),
+            session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            fleet_source=lambda: ("sync-wdt",),
+            config_source=StaticConfigSource(configs),
+            config_publisher=None,
+        )
+        client = TestClient(app)
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("工作日（周一至周五）18:00", body)
+        self.assertIn("0 18 * * 1-5", body)   # 原表达式小字备查
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
