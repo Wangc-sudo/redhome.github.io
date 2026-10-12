@@ -38,6 +38,9 @@ from common.public_data.ops_control import (
     pipeline_ops_ddl_statements,
     run_history_ddl_statements,
 )
+from common.public_data.recipient_override import (
+    recipient_override_ddl_statements,
+)
 from common.public_data.report_roster import (
     report_roster_ddl_statements,
     report_roster_v2_ddl_statements,
@@ -508,6 +511,14 @@ _MIGRATIONS = (
         "mart-ops-calendar-override-v1",
         "mart",
         calendar_override_ddl_statements(),
+    ),
+    (
+        # 定时任务收件人覆盖（2026-10-12 方案 B）：dim_recipient_override
+        # （任务级 include/exclude，只作用于 @ 名单）+ 审计表。灰度=表驱动
+        # （只给目标 service_id 建行），回退=停用/删除行。
+        "mart-ops-recipient-override-v1",
+        "mart",
+        recipient_override_ddl_statements(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

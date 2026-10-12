@@ -27,7 +27,8 @@ from fastapi.testclient import TestClient
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
 from common.public_data import (
-    bi_authz, calendar_store, channel_target, ops_control, report_roster,
+    bi_authz, calendar_store, channel_target, ops_control,
+    recipient_override, report_roster,
 )
 from common.public_data.calendar_import import CalendarImportError
 from common.public_data.pipeline_config import StaticConfigSource
@@ -592,6 +593,53 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("赵六、钱七", body)      # 渠道名册负责人（去重排序）
         self.assertIn("（2 人 · 2 店）", body)
         self.assertNotIn("王五", body)         # 无 robot-shaoxing 行不展示
+        self.assertNotIn("读取失败", body)
+
+    def test_pipelines_page_reminder_targets_with_overrides(self):
+        """任务级覆盖（方案 B）：有效名单 = 名册 ± include/exclude，带徽标。"""
+        connection = _Connection({
+            "dim_robot_member": [
+                ("u1", "张三", "hangzhou", "门店一部"),
+                ("u2", "李四", "hangzhou", "门店二部"),
+            ],
+            "entity_type` = 'person'": [("张三",), ("李四",)],
+            "dim_recipient_override": [
+                {"id": 1, "service_id": "robot-hangzhou", "mode": "exclude",
+                 "target_type": "name", "target_value": "李四",
+                 "resolved_user_id": None, "enabled": 1, "note": None,
+                 "updated_by": "ops", "updated_at": None},
+                {"id": 2, "service_id": "robot-hangzhou", "mode": "include",
+                 "target_type": "user_id", "target_value": "u9",
+                 "resolved_user_id": "u9", "enabled": 1, "note": None,
+                 "updated_by": "ops", "updated_at": None},
+            ],
+        })
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("robot-hangzhou",),
+            connection=connection))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("张三", body)
+        self.assertNotIn("李四", body)      # exclude 按姓名移除
+        self.assertIn("u9", body)           # include 追加（未知 id 回显）
+        self.assertIn("（2 人 · 名册）", body)
+        self.assertIn("+1 覆盖", body)
+        self.assertIn("−1 移除", body)
+
+    def test_pipelines_page_reminder_override_read_fail_soft(self):
+        """覆盖表未迁移/读失败 → 回退名册口径，本列不整体「读取失败」。"""
+        connection = _Connection({
+            "dim_robot_member": [("u1", "张三", "hangzhou", "门店一部")],
+        })
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("robot-hangzhou",),
+            connection=connection))
+        _login(client)
+        with mock.patch.object(recipient_override, "fetch_overrides",
+                               side_effect=RuntimeError("no table")):
+            body = client.get("/pipelines").text
+        self.assertIn("张三", body)
         self.assertNotIn("读取失败", body)
 
     def test_pipelines_page_reminder_targets_fail_open_all_members(self):
@@ -2069,6 +2117,11 @@ class RecordsPageTests(unittest.TestCase):
         "started_at": "2026-09-21 14:00:00.000000",
         "finished_at": "2026-09-21 14:05:00.000000",
     }]
+    _RECIPIENT = [{
+        "actor": ADMIN_USERID, "action": "add", "service_id": "robot-hangzhou",
+        "mode": "include", "target_type": "user_id", "target_value": "u9",
+        "detail": "", "created_at": "2026-09-21 15:00:00.000000",
+    }]
 
     @contextmanager
     def _patched(self):
@@ -2114,6 +2167,18 @@ class RecordsPageTests(unittest.TestCase):
         self.assertIn('id="flash"', body)
         self.assertIn("showFlash", body)
         self.assertIn("操作成功", body)
+
+    def test_records_includes_recipient_override_source(self):
+        """方案 B：收件人覆盖审计并入操作记录（来源/动作/对象中文化）。"""
+        with self._patched(), mock.patch.object(
+                recipient_override, "fetch_recent_audits",
+                lambda conn, limit=200: list(self._RECIPIENT)):
+            body = self._client().get("/records").text
+        self.assertIn("收件人覆盖", body)
+        self.assertIn("robot-hangzhou", body)
+        self.assertIn("追加", body)     # mode=include 中文化
+        self.assertIn("账号", body)     # target_type=user_id 中文化
+        self.assertIn("u9", body)
 
 
 class CalendarPageTests(unittest.TestCase):
@@ -2259,6 +2324,121 @@ class CalendarPageTests(unittest.TestCase):
                 "/api/calendar/reset-month", json={"month": "2026-13"}
             ).status_code,
         )
+
+
+class RecipientOverrideApiTests(unittest.TestCase):
+    """任务级收件人覆盖写 API（方案 B，2026-10-12）。"""
+
+    def _client(self):
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        return client
+
+    def test_get_returns_overrides_and_rejects_bad_service(self):
+        rows = [{
+            "id": 1, "service_id": "robot-hangzhou", "mode": "include",
+            "target_type": "user_id", "target_value": "u9",
+            "resolved_user_id": "u9", "enabled": 1, "note": None,
+            "updated_by": "ops", "updated_at": None,
+        }]
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: list(rows)):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(rows, response.json()["overrides"])
+        self.assertEqual(400, self._client().get(
+            "/api/pipelines/recipient-override").status_code)
+
+    def test_add_resolves_snapshot_and_reports_unresolved(self):
+        seen = {}
+
+        def fake_upsert(conn, service_id, mode, target_type, target_value,
+                        *, actor, note="", resolved_user_id=None):
+            seen.update(service_id=service_id, mode=mode,
+                        target_type=target_type, target_value=target_value,
+                        actor=actor, note=note, resolved=resolved_user_id)
+
+        with mock.patch.object(
+                recipient_override, "resolve_targets",
+                lambda conn, rows: (
+                    [{"target_type": "name", "target_value": "张三",
+                      "resolved_user_id": "u-zhang"}], ["李四"])), \
+                mock.patch.object(recipient_override, "upsert_override",
+                                  fake_upsert):
+            response = self._client().post(
+                "/api/pipelines/recipient-override/add",
+                json={"service_id": "robot-hangzhou", "mode": "include",
+                      "target_type": "name", "target_value": "张三",
+                      "note": "补人"})
+
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual("u-zhang", data["resolved_user_id"])
+        self.assertEqual(["李四"], data["unresolved"])
+        self.assertEqual(ADMIN_USERID, seen["actor"])
+        self.assertEqual("u-zhang", seen["resolved"])
+        self.assertEqual("补人", seen["note"])
+
+    def test_add_rejects_invalid_payload(self):
+        client = self._client()
+        for payload in (
+            {"service_id": "robot-hangzhou", "mode": "nope",
+             "target_type": "name", "target_value": "张三"},
+            {"service_id": "robot-hangzhou", "mode": "include",
+             "target_type": "alien", "target_value": "张三"},
+            {"service_id": "robot-hangzhou", "mode": "include",
+             "target_type": "name", "target_value": "  "},
+            {"service_id": "bad id!", "mode": "include",
+             "target_type": "name", "target_value": "张三"},
+        ):
+            self.assertEqual(400, client.post(
+                "/api/pipelines/recipient-override/add",
+                json=payload).status_code, payload)
+
+    def test_toggle_delete_reset(self):
+        client = self._client()
+        with mock.patch.object(recipient_override, "set_override_enabled",
+                               lambda conn, oid, enabled, *, actor: True):
+            self.assertEqual(200, client.post(
+                "/api/pipelines/recipient-override/toggle",
+                json={"id": 3, "enabled": False}).status_code)
+        with mock.patch.object(recipient_override, "set_override_enabled",
+                               lambda conn, oid, enabled, *, actor: False):
+            self.assertEqual(400, client.post(
+                "/api/pipelines/recipient-override/toggle",
+                json={"id": 3, "enabled": True}).status_code)
+        with mock.patch.object(recipient_override, "delete_override",
+                               lambda conn, oid, *, actor: True):
+            self.assertEqual(200, client.post(
+                "/api/pipelines/recipient-override/delete",
+                json={"id": 4}).status_code)
+        with mock.patch.object(recipient_override, "reset_service_overrides",
+                               lambda conn, sid, *, actor: 5):
+            response = client.post(
+                "/api/pipelines/recipient-override/reset",
+                json={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(5, response.json()["deleted"])
+        # 非法载荷 → 400（bool 不算 int；service_id 非法）
+        self.assertEqual(400, client.post(
+            "/api/pipelines/recipient-override/toggle",
+            json={"id": True, "enabled": True}).status_code)
+        self.assertEqual(400, client.post(
+            "/api/pipelines/recipient-override/reset",
+            json={"service_id": "bad id!"}).status_code)
+
+    def test_add_db_error_returns_503(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("db down")
+
+        with mock.patch.object(recipient_override, "resolve_targets", boom):
+            response = self._client().post(
+                "/api/pipelines/recipient-override/add",
+                json={"service_id": "robot-hangzhou", "mode": "include",
+                      "target_type": "user_id", "target_value": "u9"})
+        self.assertEqual(503, response.status_code)
 
 
 if __name__ == "__main__":

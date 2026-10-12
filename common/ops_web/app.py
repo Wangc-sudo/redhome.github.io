@@ -37,6 +37,7 @@ from common.public_data import (
     calendar_store,
     channel_target,
     ops_control,
+    recipient_override,
     report_roster,
 )
 from common.public_data.calendar_import import CalendarImportError
@@ -420,6 +421,147 @@ function publishSnapshot() {
   postJSON('/api/roster/publish-snapshot', {rows: rows},
     '月度快照已发布，提取重建已触发');
 }
+/* ---- 收件人覆盖抽屉（方案 B，2026-10-12：只改 @ 名单，不改正文）-------- */
+let _recipientService = '';
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function recipientClearMsg() {
+  const el = document.getElementById('recipient-msg');
+  if (el) { el.style.display = 'none'; el.textContent = ''; }
+}
+function recipientMsg(text) {
+  const el = document.getElementById('recipient-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = 'block';
+}
+async function openRecipientOverride(serviceId) {
+  _recipientService = serviceId;
+  recipientClearMsg();
+  document.getElementById('recipient-mask').style.display = 'flex';
+  await loadRecipientOverride();
+}
+function closeRecipientOverride() {
+  document.getElementById('recipient-mask').style.display = 'none';
+}
+async function loadRecipientOverride() {
+  const el = document.getElementById('recipient-body');
+  el.innerHTML = '<p class="hint">加载中…</p>';
+  let data;
+  try {
+    const resp = await fetch('/api/pipelines/recipient-override?service_id=' +
+      encodeURIComponent(_recipientService));
+    if (!resp.ok) throw new Error(String(resp.status));
+    data = await resp.json();
+  } catch (err) {
+    el.innerHTML = '<p class="flash err">读取异常，请稍后重试</p>';
+    return;
+  }
+  renderRecipientOverride(data.overrides || []);
+}
+function renderRecipientOverride(rows) {
+  const modeLabel = {include: '追加', exclude: '移除'};
+  const typeLabel = {user_id: '账号', name: '姓名'};
+  let trs = '';
+  rows.forEach(function (o) {
+    const disabled = o.enabled ? '' : ' <span class="hint">（已停用）</span>';
+    trs += '<tr><td>' + (modeLabel[o.mode] || o.mode) + '</td><td>' +
+      (typeLabel[o.target_type] || o.target_type) + '</td><td>' +
+      esc(o.target_value) + '</td><td>' + esc(o.resolved_user_id || '—') +
+      disabled + '</td><td>' + esc(o.note || '') + '</td><td>' +
+      '<button type="button" onclick="recipientToggle(' + o.id + ',' +
+      (o.enabled ? 'false' : 'true') + ')">' +
+      (o.enabled ? '停用' : '启用') + '</button> ' +
+      '<button type="button" onclick="recipientDelete(' + o.id +
+      ')">删除</button></td></tr>';
+  });
+  const table = rows.length
+    ? ('<table><tr><th>方向</th><th>目标类型</th><th>值</th><th>解析账号</th>' +
+       '<th>备注</th><th>操作</th></tr>' + trs + '</table>')
+    : '<p class="hint">暂无覆盖（当前按名册口径发送）</p>';
+  document.getElementById('recipient-body').innerHTML =
+    '<h2>收件人覆盖 · ' + esc(_recipientService) + '</h2>' +
+    '<p class="hint">只改 @ 名单，不改消息正文；机器人在触发时套用。' +
+    '「追加」加入、「移除」剔除；停用或删除即回退名册口径。姓名型需在' +
+    '通讯录唯一命中才会 @（未命中会提示、不会 @ 错人）。</p>' + table +
+    '<form class="inline" onsubmit="recipientAdd(event);return false">' +
+    '<select name="mode"><option value="include">追加（加人）</option>' +
+    '<option value="exclude">移除（去人）</option></select>' +
+    '<select name="target_type"><option value="user_id">账号</option>' +
+    '<option value="name">姓名</option></select>' +
+    '<input name="target_value" placeholder="账号或姓名" required>' +
+    '<input name="note" placeholder="备注（可空）">' +
+    '<button type="submit">添加</button></form>' +
+    '<div class="modal-btns"><button type="button" onclick="recipientReset()">' +
+    '清空该线覆盖</button></div>';
+}
+async function recipientPost(url, body) {
+  recipientClearMsg();
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+  } catch (err) {
+    recipientMsg('操作失败：网络异常，请重试');
+    return;
+  }
+  if (!resp.ok) {
+    recipientMsg('操作失败（' + resp.status + '）：' +
+      (_ERR_MSG[resp.status] || '请稍后重试'));
+    return;
+  }
+  await loadRecipientOverride();
+}
+async function recipientAdd(ev) {
+  ev.preventDefault();
+  recipientClearMsg();
+  const f = ev.target;
+  const value = f.target_value.value.trim();
+  if (!value) return;
+  let resp;
+  try {
+    resp = await fetch('/api/pipelines/recipient-override/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        service_id: _recipientService, mode: f.mode.value,
+        target_type: f.target_type.value, target_value: value,
+        note: f.note.value.trim(),
+      })});
+  } catch (err) {
+    recipientMsg('操作失败：网络异常，请重试');
+    return;
+  }
+  if (!resp.ok) {
+    recipientMsg('操作失败（' + resp.status + '）：' +
+      (_ERR_MSG[resp.status] || '请稍后重试'));
+    return;
+  }
+  const data = await resp.json();
+  const unresolved = data.unresolved || [];
+  if (unresolved.length) {
+    recipientMsg('已保存，但 ' + unresolved.join('、') +
+      ' 未在通讯录唯一命中，发送时会跳过（不会 @ 错人）');
+  }
+  await loadRecipientOverride();
+}
+function recipientToggle(id, enabled) {
+  recipientPost('/api/pipelines/recipient-override/toggle',
+    {id: id, enabled: enabled});
+}
+function recipientDelete(id) {
+  if (!confirm('确认删除该条覆盖？（审计留存被删内容）')) return;
+  recipientPost('/api/pipelines/recipient-override/delete', {id: id});
+}
+function recipientReset() {
+  if (!confirm('确认清空 ' + _recipientService +
+      ' 的全部覆盖，回退名册口径？')) return;
+  recipientPost('/api/pipelines/recipient-override/reset',
+    {service_id: _recipientService});
+}
 /* 定时构建器初始化（仅管道页存在该表单时生效）。 */
 (function () {
   const f = document.getElementById('pipeline-add-form');
@@ -556,7 +698,12 @@ def _label(mapping, value):
 
 
 #: 「操作记录」页的来源枚举（顺序即下拉顺序）。
-_RECORD_SOURCES = ("授权", "定时任务", "填报名册", "工作日历", "定时运行")
+_RECORD_SOURCES = ("授权", "定时任务", "填报名册", "工作日历", "收件人覆盖",
+                   "定时运行")
+
+#: 收件人覆盖 mode / target_type 中文标签（展示层）。
+_MODE_LABEL = {"include": "追加", "exclude": "移除"}
+_TARGET_TYPE_LABEL = {"user_id": "账号", "name": "姓名"}
 
 
 def _audit_get(row, keys):
@@ -567,7 +714,7 @@ def _audit_get(row, keys):
 
 
 def _collect_records(connection):
-    """4 处审计（授权/任务/名册/日历）+ 定时运行流水 → 统一行。
+    """5 处审计（授权/任务/名册/日历/收件人覆盖）+ 定时运行流水 → 统一行。
 
     每行形状 (时间, 来源, 操作人, 动作, 对象, 详情)，供「操作记录」页
     归一展示（任务3 2026-10-12：运维改完一处即可查到全部变更）。
@@ -614,6 +761,21 @@ def _collect_records(connection):
         records.append((
             get("created_at"), "工作日历", get("actor") or "",
             _label(_ACTION_LABEL, get("action")), when, get("detail") or "",
+        ))
+
+    for row in recipient_override.fetch_recent_audits(connection, limit=200):
+        get = _audit_get(row, ("actor", "action", "service_id", "mode",
+                               "target_type", "target_value", "detail",
+                               "created_at"))
+        target = " ".join(x for x in (
+            _label(_MODE_LABEL, get("mode")),
+            _label(_TARGET_TYPE_LABEL, get("target_type")),
+            get("target_value")) if x)
+        records.append((
+            get("created_at"), "收件人覆盖", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")),
+            " ".join(x for x in (get("service_id"), target) if x),
+            get("detail") or "",
         ))
 
     for row in ops_control.fetch_run_history(connection):
@@ -804,8 +966,59 @@ def _category_bucket(config):
     return resolve_category(config.service_id, config.category) or "未归类"
 
 
+def _targets_html(base, overrides, uid_to_name, scope_label=None,
+                  store_count=None):
+    """有效名单 + 口径徽标（2026-10-12 方案 B）。
+
+    *base* 为基名单 ``[(user_id, name)]``，*overrides* 为该线启用覆盖行；
+    有效名单 = ``base ∪ include − exclude``（与机器人侧同一
+    :func:`recipient_override.apply_recipient_overrides`）。有覆盖时补
+    ``（+N 覆盖／−M 移除）`` 徽标；口径徽标计数按有效名单。
+    """
+    effective = recipient_override.apply_recipient_overrides(base, overrides)
+    display = dict(uid_to_name or {})
+    for row in overrides:   # include 姓名型：写入快照即展示名
+        if (str(row.get("mode") or "") == "include"
+                and str(row.get("target_type") or "") == "name"
+                and row.get("resolved_user_id")):
+            display.setdefault(row["resolved_user_id"], row["target_value"])
+    names = [
+        display.get(uid) or (uid[1:] if uid.startswith("?") else uid)
+        for uid in effective
+    ]
+    if not names:
+        return "<span class=\"hint\">覆盖后无可@人</span>"
+    base_ids = [uid for uid, _ in base]
+    base_set, eff_set = set(base_ids), set(effective)
+    added = [uid for uid in effective if uid not in base_set]
+    removed = [uid for uid in base_ids if uid not in eff_set]
+    meta = f"{len(names)} 人"
+    meta += f" · {store_count} 店" if store_count is not None \
+        else f" · {scope_label}"
+    badge = ""
+    if added or removed:
+        bits = []
+        if added:
+            bits.append(f"+{len(added)} 覆盖")
+        if removed:
+            bits.append(f"−{len(removed)} 移除")
+        badge = f"<span class=\"hint\">（{'／'.join(bits)}）</span>"
+    return (f"{_esc('、'.join(names))}"
+            f"<span class=\"hint\">（{meta}）</span>{badge}")
+
+
+def _recipient_entry_html(service_id):
+    """「收件人」入口：点开该线的任务级覆盖抽屉（方案 B，2026-10-12）。
+
+    service_id 受注册表约束（字母数字/._:-）；此处再 ``_esc`` 兜底防注入。
+    """
+    return (f' <a href="#" class="recipient-entry" title="任务级收件人覆盖" '
+            f"onclick=\"openRecipientOverride('{_esc(service_id)}');"
+            f'return false">收件人…</a>')
+
+
 def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
-                           qudao_owners):
+                           qudao_owners, overrides=(), uid_to_name=None):
     """收受影响人列（仅催办行调用；其余行由调用方给 —）。
 
     口径与实际催办名单同源（2026-10-07 裁决「催办绑定名册」）：
@@ -816,37 +1029,42 @@ def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
     * 渠道线催办（channel-missing-check）= 名册店铺负责人
       （``dim_report_roster`` qudao/store/启用/role=owner 去重）；名册
       未登记时机器人回退月目标表 owners_json，此处如实标注不复制回退链。
+
+    2026-10-12 方案 B：叠加任务级收件人覆盖（include/exclude），只改
+    @ 名单；展示与机器人在触发时按同一 merge 口径，不承诺与某次运行逐位
+    一致（页面只能给口径）。
     """
+    entry = _recipient_entry_html(service_id)
     if service_id.startswith("robot-"):
         # _service_region 兼容 robot-check- 长者前缀（2026-10-07 拆分）。
         region = _service_region(service_id)
-        names = members_by_region.get(region) or []
+        pairs = members_by_region.get(region) or []
         roster = roster_by_region.get(region)
         if roster is not None:
-            names = [name for name in names if name in roster]
-            if not names:
+            base = [(uid, name) for uid, name in pairs if name in roster]
+            if not base:
                 return ("<span class=\"hint\">名册在册但通讯录"
-                        "无匹配成员</span>")
-            return (
-                f"{_esc('、'.join(names))}"
-                f"<span class=\"hint\">（{len(names)} 人 · 名册）</span>"
-            )
-        if not names:
-            return "<span class=\"hint\">该区域无在册填报人</span>"
-        return (
-            f"{_esc('、'.join(names))}"
-            f"<span class=\"hint\">（{len(names)} 人 · 全员兜底）</span>"
-        )
+                        "无匹配成员</span>" + entry)
+            return _targets_html(base, overrides, uid_to_name,
+                                 scope_label="名册") + entry
+        base = list(pairs)
+        if not base:
+            return "<span class=\"hint\">该区域无在册填报人</span>" + entry
+        return _targets_html(base, overrides, uid_to_name,
+                             scope_label="全员兜底") + entry
     if _service_region(service_id) == "qudao":
         owners = qudao_owners or {}
         names = sorted({name for bucket in owners.values() for name in bucket})
         if not names:
             return ("<span class=\"hint\">名册未登记店铺负责人"
-                    "（机器人自动回退读门店月目标表）</span>")
-        return (
-            f"{_esc('、'.join(names))}"
-            f"<span class=\"hint\">（{len(names)} 人 · {len(owners)} 店）</span>"
-        )
+                    "（机器人自动回退读门店月目标表）</span>" + entry)
+        name_to_uid = {}
+        for uid, name in (uid_to_name or {}).items():
+            name_to_uid.setdefault(name, uid)
+        base = [(name_to_uid.get(name) or ("?" + name), name)
+                for name in names]
+        return _targets_html(base, overrides, uid_to_name,
+                             store_count=len(owners)) + entry
     return "<span class=\"hint\">—</span>"
 
 
@@ -1399,8 +1617,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/records")
     def records_page(request: Request):
-        """统一「操作记录」：4 处分散审计（授权/任务/名册/日历）+ 定时运行
-        流水归一到一页，按来源/操作人/动作/起始日期筛选（任务3 2026-10-12）。"""
+        """统一「操作记录」：5 处分散审计（授权/任务/名册/日历/收件人覆盖）
+        + 定时运行流水归一到一页，按来源/操作人/动作/起始日期筛选
+        （任务3 2026-10-12）。"""
         viewer = require_admin(request)
         source_q = (request.query_params.get("source") or "").strip()
         actor_q = (request.query_params.get("actor") or "").strip()
@@ -1458,7 +1677,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
             + "</table>"
             "<p class=\"hint\">汇总授权 / 定时任务变更 / 填报名册 / 工作日历"
-            "四类人工操作，加定时运行流水；按时间倒序，最多 200 条。"
+            "/ 收件人覆盖五类人工操作，加定时运行流水；按时间倒序，最多 200 条。"
             "时间为北京时间。</p>"
         )
         return HTMLResponse(_page("操作记录", table,
@@ -1589,6 +1808,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         if reminder_ids:
             members_by_region = {}
             roster_by_region = {}
+            uid_to_name = {}
+            overrides_by_service = {}
             qudao_owners = None
             try:
                 with db_connector() as connection:
@@ -1597,9 +1818,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                         if sid.startswith("robot-")
                     }
                     if robot_regions:
-                        for _uid, name, region, _dept in \
+                        for uid, name, region, _dept in \
                                 bi_authz.fetch_active_members(connection):
-                            members_by_region.setdefault(region, []).append(name)
+                            members_by_region.setdefault(region, []).append(
+                                (uid, name))
+                            uid_to_name.setdefault(uid, name)
                         for region in robot_regions:
                             roster_by_region[region] = \
                                 report_roster.fetch_scope_person_names(
@@ -1609,11 +1832,25 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                            for sid in reminder_ids):
                         qudao_owners = report_roster.fetch_store_owner_map(
                             connection, "qudao", roles=("owner",))
+                    for sid in reminder_ids:
+                        # 覆盖表是本期新表：未迁移/读失败只回退名册口径，
+                        # 不让整列「读取失败」。
+                        try:
+                            overrides_by_service[sid] = \
+                                recipient_override.fetch_overrides(
+                                    connection, sid)
+                        except Exception as exc:
+                            _LOGGER.warning(
+                                "ops-web recipient override load failed: %s",
+                                type(exc).__name__)
+                            overrides_by_service[sid] = ()
                 for sid in reminder_ids:
                     reminder_cells[sid] = _reminder_targets_cell(
                         sid, members_by_region=members_by_region,
                         roster_by_region=roster_by_region,
-                        qudao_owners=qudao_owners)
+                        qudao_owners=qudao_owners,
+                        overrides=overrides_by_service.get(sid, ()),
+                        uid_to_name=uid_to_name)
             except Exception as exc:
                 _LOGGER.warning(
                     "ops-web reminder targets load failed: %s",
@@ -1708,6 +1945,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<div class=\"modal-btns\">"
             "<button onclick=\"confirmOk()\">确定</button>"
             "<button onclick=\"closeConfirm()\">取消</button>"
+            "</div></div></div>"
+            # 收件人覆盖抽屉（方案 B，2026-10-12）：只改 @ 名单
+            "<div id=\"recipient-mask\" class=\"modal-mask\">"
+            "<div class=\"modal-box\" style=\"max-width:600px\">"
+            "<div id=\"recipient-msg\" class=\"flash err\" "
+            "style=\"display:none\"></div>"
+            "<div id=\"recipient-body\"></div>"
+            "<div class=\"modal-btns\">"
+            "<button onclick=\"closeRecipientOverride()\">关闭</button>"
             "</div></div></div>"
         )
         # 改定时时间弹窗（2026-10-12）：时 0-23 + 分 00/30，两维下拉选取。
@@ -2685,6 +2931,143 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning(
                 "ops-web calendar reset failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "deleted": deleted})
+
+    # ------------------------------------------------------------------
+    # 任务级收件人覆盖（方案 B，2026-10-12）：只改 @ 名单，不改消息正文
+    # ------------------------------------------------------------------
+    _service_id_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+
+    @app.get("/api/pipelines/recipient-override")
+    async def recipient_override_get(request: Request):
+        """某条服务线的全部覆盖行（含停用），供抽屉列表展示。"""
+        require_admin(request)
+        service_id = (request.query_params.get("service_id") or "").strip()
+        if not _service_id_re.match(service_id):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                rows = recipient_override.fetch_service_overrides(
+                    connection, service_id)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient override read failed: %s",
+                type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse(
+            {"status": "ok", "service_id": service_id, "overrides": rows})
+
+    @app.post("/api/pipelines/recipient-override/add")
+    async def recipient_override_add(request: Request):
+        """新增/重启用一条覆盖：先解析姓名快照，再落库（同事务审计）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        mode = payload.get("mode")
+        target_type = payload.get("target_type")
+        target_value = payload.get("target_value")
+        note = payload.get("note") or ""
+        if (not isinstance(service_id, str)
+                or not _service_id_re.match(service_id.strip())
+                or mode not in recipient_override.MODES
+                or target_type not in recipient_override.TARGET_TYPES
+                or not isinstance(target_value, str) or not target_value.strip()
+                or not isinstance(note, str)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        unresolved = []
+        resolved = None
+        try:
+            with db_connector() as connection:
+                resolved_rows, unresolved = recipient_override.resolve_targets(
+                    connection,
+                    [{"target_type": target_type,
+                      "target_value": target_value}],
+                )
+                resolved = resolved_rows[0].get("resolved_user_id")
+                recipient_override.upsert_override(
+                    connection, service_id.strip(), mode, target_type,
+                    target_value, actor=viewer.userid, note=note,
+                    resolved_user_id=resolved,
+                )
+        except recipient_override.RecipientOverrideError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient override add failed: %s",
+                type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse(
+            {"status": "ok", "resolved_user_id": resolved,
+             "unresolved": unresolved})
+
+    @app.post("/api/pipelines/recipient-override/toggle")
+    async def recipient_override_toggle(request: Request):
+        """停用/启用一条覆盖（按主键 id）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        override_id = payload.get("id")
+        enabled = payload.get("enabled")
+        if (isinstance(override_id, bool) or not isinstance(override_id, int)
+                or not isinstance(enabled, bool)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = recipient_override.set_override_enabled(
+                    connection, override_id, enabled, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient override toggle failed: %s",
+                type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/pipelines/recipient-override/delete")
+    async def recipient_override_delete(request: Request):
+        """删除一条覆盖（审计留存被删行内容）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        override_id = payload.get("id")
+        if isinstance(override_id, bool) or not isinstance(override_id, int):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = recipient_override.delete_override(
+                    connection, override_id, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient override delete failed: %s",
+                type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/pipelines/recipient-override/reset")
+    async def recipient_override_reset(request: Request):
+        """回退总开关：清空某条服务线全部覆盖（回名册口径）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        if not isinstance(service_id, str) \
+                or not _service_id_re.match(service_id.strip()):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                deleted = recipient_override.reset_service_overrides(
+                    connection, service_id.strip(), actor=viewer.userid)
+        except recipient_override.RecipientOverrideError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient override reset failed: %s",
+                type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "deleted": deleted})
 
