@@ -91,6 +91,10 @@ _PAGE_STYLE = (
     "header{background:#1f3a5f;color:#fff;padding:12px 24px;display:flex;"
     "align-items:center;gap:24px}"
     "header a{color:#cfe0f5;text-decoration:none;font-size:14px}"
+    "header nav{display:flex;gap:20px;align-items:center;flex-wrap:wrap}"
+    "header .nav-group{display:flex;align-items:center;gap:10px}"
+    "header .nav-label{font-size:12px;color:#7f9bc4;padding-right:8px;"
+    "border-right:1px solid #35547d}"
     "header .who{margin-left:auto;font-size:13px;color:#9fb8d8}"
     "main{padding:24px;max-width:1080px;margin:0 auto}"
     "h1{font-size:18px}h2{font-size:15px;margin-top:32px}"
@@ -124,18 +128,49 @@ _PAGE_STYLE = (
     ".cal-src-holiday_cn{background:#d8e8ff;color:#1f3a5f}"
     ".cal-src-manual{background:#ffe9c7;color:#8a5a00}"
     ".cal-src-rule_fallback{background:#ececf0;color:#777}"
+    ".flash{margin:12px 0;padding:10px 14px;border-radius:6px;font-size:14px}"
+    ".flash.ok{background:#e6f4ea;color:#1e6b3a;border:1px solid #b7e0c4}"
+    ".flash.err{background:#fdecea;color:#a12622;border:1px solid #f3c1bd}"
 )
 
 _PAGE_JS = """
-async function postJSON(url, body) {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  });
-  if (resp.ok) { location.reload(); return; }
-  alert('操作失败（' + resp.status + '）');
+const _ERR_MSG = {400:'请求不合法，请检查填写内容', 401:'登录已过期，请重新登录',
+  403:'没有操作权限', 404:'接口不存在', 409:'与现有数据冲突',
+  503:'服务暂时不可用，请稍后重试'};
+function showFlash(kind, msg) {
+  const el = document.getElementById('flash');
+  if (!el) return;
+  el.className = 'flash ' + kind;
+  el.textContent = msg;
+  el.style.display = 'block';
 }
+async function postJSON(url, body, okMsg) {
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    showFlash('err', '操作失败：网络异常，请重试');
+    return;
+  }
+  if (resp.ok) {
+    sessionStorage.setItem('ops_flash', okMsg || '操作成功，已保存');
+    location.reload();
+    return;
+  }
+  showFlash('err', '操作失败（' + resp.status + '）：'
+    + (_ERR_MSG[resp.status] || '请稍后重试'));
+}
+document.addEventListener('DOMContentLoaded', function () {
+  const msg = sessionStorage.getItem('ops_flash');
+  if (msg) {
+    sessionStorage.removeItem('ops_flash');
+    showFlash('ok', msg);
+  }
+});
 function submitGrant(ev) {
   ev.preventDefault();
   const f = ev.target;
@@ -144,19 +179,19 @@ function submitGrant(ev) {
     grant_type: f.grant_type.value,
     grant_key: f.grant_key.value.trim(),
     note: f.note.value.trim(),
-  });
+  }, '授权已提交');
 }
 function revokeGrant(userId, grantType, grantKey) {
   if (!confirm('确认收回该授权？')) return;
   postJSON('/api/grants/delete', {
     user_id: userId, grant_type: grantType, grant_key: grantKey,
-  });
+  }, '授权已收回');
 }
 function grantRegion(ev) {
   ev.preventDefault();
   const region = ev.target.region.value;
   if (!confirm('确认为 ' + region + ' 区域全部在职成员开通该区域授权？')) return;
-  postJSON('/api/grants/region', {region: region});
+  postJSON('/api/grants/region', {region: region}, '该区域已批量授权');
 }
 let _pendingAction = null;
 function showConfirm(msg) {
@@ -170,7 +205,7 @@ function closeConfirm() {
 function confirmOk() {
   const action = _pendingAction;
   closeConfirm();
-  if (action) postJSON(action.url, action.body);
+  if (action) postJSON(action.url, action.body, action.okMsg);
 }
 function pipelineAction(sel) {
   const value = sel.value;
@@ -182,6 +217,7 @@ function pipelineAction(sel) {
     _pendingAction = {
       url: '/api/pipelines/toggle',
       body: {service_id: sid, enabled: enable},
+      okMsg: (enable ? '已启用 ' : '已停用 ') + sid + '（≤30s 生效）',
     };
     showConfirm('确认' + (enable ? '启用' : '停用') + ' ' + sid +
                 '？（下一个调度 tick 生效，≤30s）');
@@ -189,6 +225,7 @@ function pipelineAction(sel) {
     _pendingAction = {
       url: '/api/pipelines/run-once',
       body: {service_id: sid},
+      okMsg: '已提交立即运行 ' + sid,
     };
     showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发；' +
                 '提醒/催办/汇总类当日已发的会绕开去重重发）');
@@ -207,7 +244,7 @@ function addPipeline(ev) {
     enabled: f.enabled.checked,
     depends_on: f.depends_on.value.split(/[\\s,]+/).filter(Boolean),
     description: f.description.value.trim(),
-  });
+  }, '定时任务已新增');
 }
 /* ---- 定时构建器（2026-10-10：预设+时点合成 cron，实时中文预览）--------- */
 function cronFromForm(f) {
@@ -293,64 +330,45 @@ function addRoster(ev) {
     aliases: f.aliases.value.split(/[\\s,，、]+/).filter(Boolean),
     note: f.note.value.trim(),
     role: f.role.value,
-  });
+  }, '名册已新增');
 }
 function setRosterStatus(id, value) {
-  postJSON('/api/roster/toggle', {id: id, enabled: value === '1'});
+  postJSON('/api/roster/toggle', {id: id, enabled: value === '1'},
+           value === '1' ? '已启用' : '已停用');
 }
-async function saveRegionTargets(scope, yearMonth) {
+function saveRegionTargets(scope, yearMonth) {
   const rows = [];
   document.querySelectorAll('input.person-target[data-scope="' + scope + '"]').forEach(function (el) {
     const raw = el.value.trim();
     rows.push({person_name: el.dataset.name, monthly_target: raw === '' ? null : Number(raw)});
   });
-  const resp = await fetch('/api/roster/region-targets', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({scope: scope, year_month: yearMonth, rows: rows}),
-  });
-  if (resp.ok) { location.reload(); return; }
-  alert('保存失败（' + resp.status + '）');
+  postJSON('/api/roster/region-targets',
+    {scope: scope, year_month: yearMonth, rows: rows}, '月目标已保存');
 }
 function deleteRoster(id) {
   if (!confirm('确认删除该名册记录？（审计会留存，日常建议用「停用」）')) return;
-  postJSON('/api/roster/delete', {id: id});
+  postJSON('/api/roster/delete', {id: id}, '已删除（审计留存）');
 }
 /* ---- 工作日历页（2026-10-10，非技术同学操作面）-------------------------- */
-async function calendarToggle(day, isWork) {
+function calendarToggle(day, isWork) {
   const action = isWork ? '改为休息' : '改为上班';
   if (!confirm('确认将 ' + day + ' ' + action + '？（当月日历立即重写）')) return;
   const note = prompt('备注（可空，写入审计与单元格提示）', '') || '';
-  const resp = await fetch('/api/calendar/toggle', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({date: day, is_workday: !isWork, note: note}),
-  });
-  if (resp.ok) { location.reload(); return; }
-  alert('操作失败（' + resp.status + '）');
+  postJSON('/api/calendar/toggle',
+    {date: day, is_workday: !isWork, note: note}, day + ' 已' + action);
 }
-async function calendarImportYear(ev) {
+function calendarImportYear(ev) {
   ev.preventDefault();
   const year = ev.target.year.value.trim();
   if (!confirm('确认导入 ' + year + ' 年法定节假日？（该年法定导入行整年替换，人工裁决不动；随后按当前口径重写全年日历）')) return;
-  const resp = await fetch('/api/calendar/import-year', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({year: Number(year)}),
-  });
-  if (resp.ok) { location.reload(); return; }
-  let reason = '';
-  try { reason = (await resp.json()).reason || ''; } catch (e) {}
-  alert('导入失败（' + resp.status + '）' + reason);
+  postJSON('/api/calendar/import-year', {year: Number(year)},
+    year + ' 年法定假日已导入');
 }
-async function calendarResetMonth(ym) {
+function calendarResetMonth(ym) {
   if (!confirm('确认清除 ' + ym + ' 的人工裁决（法定假日导入保留），恢复规则口径？')) return;
-  const resp = await fetch('/api/calendar/reset-month', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({month: ym}),
-  });
-  if (resp.ok) { location.reload(); return; }
-  alert('操作失败（' + resp.status + '）');
+  postJSON('/api/calendar/reset-month', {month: ym}, ym + ' 已恢复规则口径');
 }
-async function publishSnapshot() {
+function publishSnapshot() {
   if (!confirm('确认发布月度快照？（目标按当前输入覆盖 raw 快照，负责人按名册投影，随后自动触发提取重建榜单）')) return;
   const rows = [];
   document.querySelectorAll('input.roster-target').forEach(function (el) {
@@ -361,13 +379,8 @@ async function publishSnapshot() {
       monthly_target: raw === '' ? null : Number(raw),
     });
   });
-  const resp = await fetch('/api/roster/publish-snapshot', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({rows: rows}),
-  });
-  if (resp.ok) { location.reload(); return; }
-  alert('发布失败（' + resp.status + '）');
+  postJSON('/api/roster/publish-snapshot', {rows: rows},
+    '月度快照已发布，提取重建已触发');
 }
 /* 定时构建器初始化（仅管道页存在该表单时生效）。 */
 (function () {
@@ -385,15 +398,21 @@ def _page(title, *sections, viewer_name=""):
         f"<title>{html.escape(title)} · ops-web</title>"
         f"<style>{_PAGE_STYLE}</style></head><body>"
         "<header><strong>ops-web</strong>"
-        "<a href=\"/\">成员与授权</a><a href=\"/grants\">授权现状</a>"
-        "<a href=\"/audit\">审计流水</a>"
-        "<a href=\"/pipelines\">定时任务</a>"
-        "<a href=\"/pipelines/audit\">任务审计</a>"
-        "<a href=\"/pipelines/history\">执行流水</a>"
+        "<nav>"
+        "<span class=\"nav-group\"><span class=\"nav-label\">日常</span>"
         "<a href=\"/roster\">填报名册</a>"
-        "<a href=\"/calendar\">工作日历</a>"
+        "<a href=\"/calendar\">工作日历</a></span>"
+        "<span class=\"nav-group\"><span class=\"nav-label\">权限</span>"
+        "<a href=\"/\">成员与授权</a>"
+        "<a href=\"/grants\">授权现状</a></span>"
+        "<span class=\"nav-group\"><span class=\"nav-label\">系统</span>"
+        "<a href=\"/pipelines\">定时任务</a></span>"
+        "<span class=\"nav-group\"><span class=\"nav-label\">记录</span>"
+        "<a href=\"/records\">操作记录</a></span>"
+        "</nav>"
         "<a href=\"/auth/logout\">退出</a>"
         f"<span class=\"who\">{who}</span></header><main>"
+        "<div id=\"flash\" class=\"flash\" style=\"display:none\"></div>"
         + "".join(sections)
         + f"</main><script>{_PAGE_JS}</script></body></html>"
     )
@@ -465,7 +484,11 @@ _ACTION_LABEL = {
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
     "target": "月目标",
+    "grant": "授权", "revoke": "收回",
 }
+
+#: 授权类型中文标签（成员与授权 / 授权现状 / 审计流水 三页共用）。
+_GRANT_TYPE_LABEL = {"scope": "看板页面", "region": "区域数据"}
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
 _SCOPE_LABEL = {
@@ -492,6 +515,86 @@ def _label(mapping, value):
     if value is None:
         return value
     return mapping.get(value, value)
+
+
+#: 「操作记录」页的来源枚举（顺序即下拉顺序）。
+_RECORD_SOURCES = ("授权", "定时任务", "填报名册", "工作日历", "定时运行")
+
+
+def _audit_get(row, keys):
+    """审计行取值：dict 按 key，序列按位置（与各页 unpack 顺序一致）。"""
+    if isinstance(row, dict):
+        return row.get
+    return lambda key, r=row, ks=keys: r[ks.index(key)]
+
+
+def _collect_records(connection):
+    """4 处审计（授权/任务/名册/日历）+ 定时运行流水 → 统一行。
+
+    每行形状 (时间, 来源, 操作人, 动作, 对象, 详情)，供「操作记录」页
+    归一展示（任务3 2026-10-12：运维改完一处即可查到全部变更）。
+    """
+    records = []
+
+    for row in bi_authz.fetch_audit_rows(connection):
+        get = _audit_get(row, ("actor", "action", "user_id", "grant_type",
+                               "grant_key", "note", "created_at"))
+        records.append((
+            get("created_at"), "授权", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")),
+            get("grant_key") or "",
+            " ".join(x for x in (_label(_GRANT_TYPE_LABEL, get("grant_type")),
+                                 get("note")) if x),
+        ))
+
+    for row in ops_control.fetch_pipeline_audit(connection):
+        get = _audit_get(row, ("actor", "action", "service_id", "detail",
+                               "created_at"))
+        records.append((
+            get("created_at"), "定时任务", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")),
+            get("service_id") or "", get("detail") or "",
+        ))
+
+    for row in report_roster.fetch_roster_audit(connection, limit=200):
+        get = _audit_get(row, ("actor", "action", "scope", "entity_key",
+                               "person_name", "detail", "created_at"))
+        records.append((
+            get("created_at"), "填报名册", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")),
+            " ".join(x for x in (_label(_SCOPE_LABEL, get("scope")),
+                                 get("entity_key")) if x),
+            " ".join(x for x in (get("person_name"), get("detail")) if x),
+        ))
+
+    for row in calendar_store.fetch_recent_audits(connection, limit=200):
+        get = _audit_get(row, ("actor", "action", "business_date", "year",
+                               "month", "detail", "created_at"))
+        biz, yr, mon = get("business_date"), get("year"), get("month")
+        when = (biz.isoformat() if isinstance(biz, date)
+                else (f"{yr}-{int(mon):02d}" if yr and mon else "—"))
+        records.append((
+            get("created_at"), "工作日历", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")), when, get("detail") or "",
+        ))
+
+    for row in ops_control.fetch_run_history(connection):
+        get = _audit_get(row, ("id", "service_id", "trigger_type", "status",
+                               "exit_code", "note", "started_at",
+                               "finished_at"))
+        exit_code = get("exit_code")
+        records.append((
+            get("started_at"), "定时运行", "系统",
+            _label(_RUN_STATUS_LABEL, get("status")),
+            get("service_id") or "",
+            " ".join(x for x in (
+                _label(_TRIGGER_LABEL, get("trigger_type")),
+                f"退出码 {exit_code}" if exit_code is not None else "",
+                get("note")) if x),
+        ))
+
+    records.sort(key=lambda r: _fmt_time(r[0]), reverse=True)
+    return records
 
 
 #: 服务标识 → 中文说明（策展映射，展示层；注册表 description 真源不动）。
@@ -688,7 +791,7 @@ def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
         names = sorted({name for bucket in owners.values() for name in bucket})
         if not names:
             return ("<span class=\"hint\">名册未登记店铺负责人"
-                    "（机器人回退月目标表 owners_json）</span>")
+                    "（机器人自动回退读门店月目标表）</span>")
         return (
             f"{_esc('、'.join(names))}"
             f"<span class=\"hint\">（{len(names)} 人 · {len(owners)} 店）</span>"
@@ -1143,30 +1246,30 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         grant_form = (
             "<h2>单人授权</h2>"
             "<form class=\"inline\" onsubmit=\"submitGrant(event)\">"
-            "<input name=\"user_id\" placeholder=\"userid\" required>"
+            "<input name=\"user_id\" placeholder=\"账号\" required>"
             "<select name=\"grant_type\">"
-            "<option value=\"scope\">scope（页面）</option>"
-            "<option value=\"region\">region（行级）</option>"
+            "<option value=\"scope\">看板页面</option>"
+            "<option value=\"region\">区域数据</option>"
             "</select>"
-            "<input name=\"grant_key\" placeholder=\"如 fin / hangzhou\" required>"
+            "<input name=\"grant_key\" placeholder=\"对象：看板名或区域名\" required>"
             "<input name=\"note\" placeholder=\"备注\">"
             "<button type=\"submit\">授权</button></form>"
             # G3/G6/G4（2026-10-12 断点报告）：两套体系显性化 + scope=roster
             # 引导（原说明只写在需授权才能看到的名册页，引导死锁）+ 生效延迟。
             "<p class=\"hint\">本页授权管 BI 看板与本中心的访问权、以及名册"
-            "管理权（类型选 scope、对象填 roster）；「谁能填报/被催办」由"
+            "管理权（类型选「看板页面」、对象填 roster（名册管理））；「谁能填报/被催办」由"
             "「填报名册」页维护，与这里互不影响——机器人门禁实时读名册，"
             "名册改完即时生效。本页授权约 1 分钟内生效。</p>"
             "<h2>按区域一键开通</h2>"
             "<form class=\"inline\" onsubmit=\"grantRegion(event)\">"
             f"<select name=\"region\">{region_options}</select>"
-            "<button type=\"submit\">该区域全员开通 region 授权</button>"
+            "<button type=\"submit\">该区域全员开通区域权限</button>"
             "<span class=\"hint\">候选名单即下表在职成员；逐行落审计。</span>"
             "</form>"
         )
         table = (
             "<h1>在职成员</h1>"
-            "<table><tr><th>userid</th><th>姓名</th><th>区域</th><th>部门</th></tr>"
+            "<table><tr><th>账号</th><th>姓名</th><th>区域</th><th>部门</th></tr>"
             f"{rows}</table>"
         )
         return HTMLResponse(_page("成员与授权", table, grant_form,
@@ -1192,7 +1295,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 (user_id, grant_type, grant_key, note,
                  updated_by, updated_at) = row
             rows.append(
-                f"<tr><td>{_esc(user_id)}</td><td>{_esc(grant_type)}</td>"
+                f"<tr><td>{_esc(user_id)}</td>"
+                f"<td>{_esc(_label(_GRANT_TYPE_LABEL, grant_type))}</td>"
                 f"<td>{_esc(grant_key)}</td><td>{_esc(note)}</td>"
                 f"<td>{_esc(updated_by)}</td><td>{_esc(updated_at)}</td>"
                 f"<td><button onclick=\"revokeGrant('{_esc(user_id)}',"
@@ -1200,7 +1304,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         table = (
             "<h1>授权现状</h1>"
-            "<table><tr><th>userid</th><th>类型</th><th>对象</th><th>备注</th>"
+            "<table><tr><th>账号</th><th>类型</th><th>对象</th><th>备注</th>"
             "<th>最后操作人</th><th>更新时间</th><th></th></tr>"
             + "".join(rows) + "</table>"
         )
@@ -1227,17 +1331,86 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             actor, action, user_id, grant_type, grant_key, note, created_at = values
             rows.append(
                 f"<tr><td>{_esc(created_at)}</td><td>{_esc(actor)}</td>"
-                f"<td>{_esc(action)}</td><td>{_esc(user_id)}</td>"
-                f"<td>{_esc(grant_type)}</td><td>{_esc(grant_key)}</td>"
+                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
+                f"<td>{_esc(user_id)}</td>"
+                f"<td>{_esc(_label(_GRANT_TYPE_LABEL, grant_type))}</td>"
+                f"<td>{_esc(grant_key)}</td>"
                 f"<td>{_esc(note)}</td></tr>"
             )
         table = (
             "<h1>审计流水</h1>"
-            "<table><tr><th>时间</th><th>操作人</th><th>动作</th><th>userid</th>"
+            "<table><tr><th>时间</th><th>操作人</th><th>动作</th><th>账号</th>"
             "<th>类型</th><th>对象</th><th>备注</th></tr>"
             + "".join(rows) + "</table>"
         )
         return HTMLResponse(_page("审计流水", table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    @app.get("/records")
+    def records_page(request: Request):
+        """统一「操作记录」：4 处分散审计（授权/任务/名册/日历）+ 定时运行
+        流水归一到一页，按来源/操作人/动作/起始日期筛选（任务3 2026-10-12）。"""
+        viewer = require_admin(request)
+        source_q = (request.query_params.get("source") or "").strip()
+        actor_q = (request.query_params.get("actor") or "").strip()
+        action_q = (request.query_params.get("action") or "").strip()
+        since_q = (request.query_params.get("since") or "").strip()
+        if source_q not in _RECORD_SOURCES:
+            source_q = ""
+        try:
+            with db_connector() as connection:
+                rows = _collect_records(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web records load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+
+        if source_q:
+            rows = [r for r in rows if r[1] == source_q]
+        if actor_q:
+            rows = [r for r in rows if actor_q in (r[2] or "")]
+        if action_q:
+            rows = [r for r in rows if action_q in (r[3] or "")]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", since_q):
+            rows = [r for r in rows if _fmt_time(r[0])[:10] >= since_q]
+        rows = rows[:200]
+
+        options = "".join(
+            f"<option value=\"{_esc(s)}\""
+            f"{' selected' if s == source_q else ''}>{_esc(s)}</option>"
+            for s in _RECORD_SOURCES
+        )
+        form = (
+            "<form class=\"inline\" method=\"get\" action=\"/records\">"
+            "<select name=\"source\"><option value=\"\">全部来源</option>"
+            + options + "</select>"
+            f"<input name=\"actor\" placeholder=\"操作人（可空）\" "
+            f"value=\"{_esc(actor_q)}\">"
+            f"<input name=\"action\" placeholder=\"动作（可空）\" "
+            f"value=\"{_esc(action_q)}\">"
+            f"<input name=\"since\" type=\"date\" value=\"{_esc(since_q)}\">"
+            "<button type=\"submit\">筛选</button>"
+            "<a href=\"/records\" style=\"margin-left:8px\">重置</a></form>"
+        )
+        body_rows = "".join(
+            f"<tr><td>{_esc(_fmt_time(r[0]))}</td><td>{_esc(r[1])}</td>"
+            f"<td>{_esc(r[2])}</td><td>{_esc(r[3])}</td>"
+            f"<td>{_esc(r[4])}</td><td>{_esc(r[5])}</td></tr>"
+            for r in rows
+        )
+        table = (
+            "<h1>操作记录</h1>"
+            + form
+            + "<table><tr><th>时间</th><th>来源</th><th>操作人</th><th>动作</th>"
+            "<th>对象</th><th>详情</th></tr>"
+            + (body_rows
+               or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
+            + "</table>"
+            "<p class=\"hint\">汇总授权 / 定时任务变更 / 填报名册 / 工作日历"
+            "四类人工操作，加定时运行流水；按时间倒序，最多 200 条。"
+            "时间为北京时间。</p>"
+        )
+        return HTMLResponse(_page("操作记录", table,
                                   viewer_name=viewer.name or viewer.userid))
 
     # -- 写 API（事务内两写：grant + audit；actor 来自 session）--------------
@@ -1790,12 +1963,12 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 continue
             scope_label = _label(_SCOPE_LABEL, scope)
             sections.append(f"<h2>{_esc(scope_label)}"
-                            f"<span class=\"hint\">（{_esc(scope)}，{len(rows)} 条）</span></h2>")
+                            f"<span class=\"hint\">（{len(rows)} 条）</span></h2>")
             if not rows:
                 sections.append("<p class=\"hint\">暂无记录"
-                                + ("——该范围当前不拦截（fail-open，维持现状）。"
+                                + ("——该范围当前不拦截（没登记就不限制填报，维持现状）。"
                                    if scope != "qudao" else
-                                   "——渠道机器人回退读月目标表 owners_json。")
+                                   "——渠道机器人自动回退读门店月目标表。")
                                 + "</p>")
                 continue
             # 统一链接行模板（2026-10-07 运维裁决，与渠道门店同构）：

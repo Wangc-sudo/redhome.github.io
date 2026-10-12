@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from common.bi_web import auth, authz
 from common.ops_web.app import create_app
 from common.public_data import (
-    bi_authz, channel_target, ops_control, report_roster,
+    bi_authz, calendar_store, channel_target, ops_control, report_roster,
 )
 from common.public_data.calendar_import import CalendarImportError
 from common.public_data.pipeline_config import StaticConfigSource
@@ -543,12 +543,12 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("（2 人 · 全员兜底）", body)
 
     def test_pipelines_page_reminder_targets_empty_roster_hint(self):
-        """渠道名册未登记 → 如实标注机器人回退月目标表 owners_json。"""
+        """渠道名册未登记 → 如实标注机器人自动回退读门店月目标表。"""
         client = TestClient(_pipeline_app(
             viewer=_admin_viewer(), fleet=("channel-missing-check",)))
         _login(client)
         body = client.get("/pipelines").text
-        self.assertIn("回退月目标表 owners_json", body)
+        self.assertIn("自动回退读门店月目标表", body)
 
     def test_pipelines_page_reminder_targets_fail_soft(self):
         """收受影响人读取故障 → 本列「读取失败」，整页不拖垮。"""
@@ -1036,7 +1036,7 @@ class RosterPageTests(unittest.TestCase):
         self.assertIn("停用", body)              # 操作按钮
         self.assertIn("新增名册记录", body)
         self.assertIn("暂无记录", body)          # 空 scope 分组提示
-        self.assertIn("fail-open", body)
+        self.assertIn("不拦截", body)            # 名册空范围提示（原 fail-open 术语）
         self.assertIn("2026-10-06 19:00:00", body)  # 审计时间转北京时
 
     def test_roster_page_requires_admin(self):
@@ -1648,6 +1648,46 @@ class MembersPageTests(unittest.TestCase):
         self.assertIn("对象填 roster", body)     # 名册管理权引导（G6）
         self.assertIn("约 1 分钟内生效", body)   # ViewerResolver 60s TTL（G4）
 
+    def test_nav_flat_links_are_grouped_by_purpose(self):
+        """任务1（2026-10-12）：顶栏 8 项平铺 → 4 组（日常/权限/系统/记录），
+        治「入口太多、运维不知道点哪」。链接文案与路由保持不变。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/").text
+
+        self.assertEqual(4, body.count('class="nav-group"'))
+        for label in ("日常", "权限", "系统", "记录"):
+            self.assertIn(f'nav-label">{label}<', body)
+
+        def group(label):
+            tail = body.split(f'nav-label">{label}<', 1)[1]
+            return tail.split("</span>", 1)[0]
+
+        # 每组含各自链接（路由不变，仅归位）
+        self.assertIn('href="/roster"', group("日常"))
+        self.assertIn('href="/calendar"', group("日常"))
+        self.assertIn('href="/"', group("权限"))
+        self.assertIn('href="/grants"', group("权限"))
+        self.assertIn('href="/pipelines"', group("系统"))
+        self.assertIn('href="/records"', group("记录"))
+        self.assertIn("操作记录", group("记录"))
+        # 结构判据：nav 包裹 + 恰好 4 组（旧平铺无这两者）
+        self.assertIn("<nav>", body)
+
+    def test_member_pages_use_plain_chinese_labels(self):
+        """任务2（2026-10-12）：术语清洗——页面不出现 userid/scope/region 黑话。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/").text
+
+        self.assertIn(">账号<", body)             # 表头 userid → 账号
+        self.assertNotIn(">userid<", body)
+        self.assertIn(">看板页面<", body)          # scope（页面）→ 看板页面
+        self.assertIn(">区域数据<", body)          # region（行级）→ 区域数据
+        self.assertNotIn("scope（页面）", body)
+        self.assertNotIn("region（行级）", body)
+        self.assertIn("该区域全员开通区域权限", body)
+
 
 class GrantWriteApiTests(unittest.TestCase):
     def test_grant_writes_record_and_audit_with_session_actor(self):
@@ -1774,8 +1814,85 @@ class GrantsAndAuditPageTests(unittest.TestCase):
 
         body = client.get("/audit").text
 
-        self.assertIn("grant", body)
+        self.assertIn("授权", body)       # 动作中文化（原 "grant"）
+        self.assertIn("看板页面", body)   # 类型中文化（原 "scope"）
         self.assertIn("u-zhang", body)
+
+
+class RecordsPageTests(unittest.TestCase):
+    """统一「操作记录」页（任务3 2026-10-12：4 处审计收口 + 运行流水）。"""
+
+    _GRANT = [{
+        "actor": ADMIN_USERID, "action": "grant", "user_id": "u-zhang",
+        "grant_type": "scope", "grant_key": "fin", "note": "",
+        "created_at": "2026-09-21 10:00:00.000000",
+    }]
+    _PIPELINE = [{
+        "actor": ADMIN_USERID, "action": "toggle",
+        "service_id": "robot-hangzhou", "detail": "停用",
+        "created_at": "2026-09-21 11:00:00.000000",
+    }]
+    _ROSTER = [{
+        "actor": ADMIN_USERID, "action": "add", "scope": "hangzhou",
+        "entity_key": "A店", "person_name": "张三", "detail": "",
+        "created_at": "2026-09-21 12:00:00.000000",
+    }]
+    _CALENDAR = [{
+        "actor": ADMIN_USERID, "action": "upsert",
+        "business_date": date(2026, 9, 21), "year": 2026, "month": 9,
+        "detail": "改上班", "created_at": "2026-09-21 13:00:00.000000",
+    }]
+    _HISTORY = [{
+        "id": 1, "service_id": "robot-hangzhou", "trigger_type": "cron",
+        "status": "success", "exit_code": 0, "note": "",
+        "started_at": "2026-09-21 14:00:00.000000",
+        "finished_at": "2026-09-21 14:05:00.000000",
+    }]
+
+    @contextmanager
+    def _patched(self):
+        with mock.patch.object(bi_authz, "fetch_audit_rows",
+                               lambda conn: list(self._GRANT)), \
+             mock.patch.object(ops_control, "fetch_pipeline_audit",
+                               lambda conn, limit=200: list(self._PIPELINE)), \
+             mock.patch.object(report_roster, "fetch_roster_audit",
+                               lambda conn, limit=200: list(self._ROSTER)), \
+             mock.patch.object(calendar_store, "fetch_recent_audits",
+                               lambda conn, limit=200: list(self._CALENDAR)), \
+             mock.patch.object(ops_control, "fetch_run_history",
+                               lambda conn, limit=200, service_id=None:
+                               list(self._HISTORY)):
+            yield
+
+    def _client(self):
+        client = TestClient(_app(viewer=_admin_viewer(),
+                                 connection=_Connection({})))
+        _login(client)
+        return client
+
+    def test_records_merges_all_five_sources(self):
+        with self._patched():
+            body = self._client().get("/records").text
+        for source in ("授权", "定时任务", "填报名册", "工作日历", "定时运行"):
+            self.assertIn(source, body)
+        self.assertIn("fin", body)       # 授权对象
+        self.assertIn("张三", body)      # 名册对象
+        self.assertIn("系统", body)      # 运行流水操作人
+
+    def test_records_filters_by_source(self):
+        with self._patched():
+            body = self._client().get(
+                "/records", params={"source": "填报名册"}).text
+        self.assertIn("张三", body)
+        self.assertNotIn("fin", body)    # 授权行已被来源过滤
+
+    def test_write_feedback_banner_present(self):
+        """任务3：写入后有成功/失败中文提示（替换静默 reload）。"""
+        with self._patched():
+            body = self._client().get("/records").text
+        self.assertIn('id="flash"', body)
+        self.assertIn("showFlash", body)
+        self.assertIn("操作成功", body)
 
 
 class CalendarPageTests(unittest.TestCase):
