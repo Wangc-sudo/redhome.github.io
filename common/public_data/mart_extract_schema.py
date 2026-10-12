@@ -26,6 +26,7 @@ FACT_FIN_PREPAYMENT_INVOICE = "fact_fin_prepayment_invoice"
 FACT_FIN_OFFLINE_DEPOSIT = "fact_fin_offline_deposit"
 FACT_FIN_PLATFORM_DEPOSIT = "fact_fin_platform_deposit"
 FACT_FIN_STORE_FUNDS = "fact_fin_store_funds"
+FACT_FIN_STORE_EXPENSE = "fact_fin_store_expense"
 DIM_CALENDAR = "dim_calendar"
 DIM_ROBOT_MEMBER = "dim_robot_member"
 
@@ -152,6 +153,18 @@ EXTRACT_DATASETS = (
         columns=(),
         kind="melt_store_funds",
     ),
+    # 渠道BI费用面板（2026-10-12 签认预填版）：店铺佣金/扣点宽表 +
+    # 推广费充值宽表 → 窄表（一行 = 店铺×平台×费用项×月）。双源投影：
+    # 第二张表在投影器内显式点名读取（read_table 白名单按单源圈定）。
+    # 店铺→mart 渠道挂接用版本受控种子
+    # common/public_data/seeds/store_channel_mapping.json 投影期解析。
+    ExtractDataset(
+        dataset="fin_store_expense",
+        source_table="fin_store_commission",
+        target_table=FACT_FIN_STORE_EXPENSE,
+        columns=(),
+        kind="melt_store_expense",
+    ),
     # B1-阶段二 Task 8：raw_wdt.dim_product → mart dim_product 全量镜像。
     # 注册顺序即执行顺序：镜像必须先于订单行展开（品牌反查依赖本表）。
     ExtractDataset(
@@ -169,6 +182,16 @@ EXTRACT_DATASETS = (
         target_table="fact_order_line",
         columns=(),
         kind="order_line_expand",
+        source="wdt",
+    ),
+    # BI 阶段 2（2026-10-12）：已取消单（status=4，主投影剔除）按单保留，
+    # 供月度取消率。同源 wdt_records 全量重放，与主投影注册顺序相邻。
+    ExtractDataset(
+        dataset="wdt_order_cancel_fact",
+        source_table="wdt_records",
+        target_table="fact_order_cancel_line",
+        columns=(),
+        kind="order_cancel_expand",
         source="wdt",
     ),
     # 仓库运作（2026-09-21）：wdt_records 销售出库 / 退货入库 payload
@@ -424,6 +447,34 @@ _FACT_FIN_STORE_FUNDS_DDL = (
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
 )
 
+# 渠道BI费用面板（2026-10-12 签认预填版）：店铺×平台×费用项×月 窄表。
+# month 口径与 fact_fin_store_funds 一致（VARCHAR(7) "YYYY-MM"）；源列
+# platform/fee_category/fee_item 存伪 JSON 单引号串，投影期解析后落
+# 纯文本；mart_store_name/mart_channel 来自种子映射，未命中落 NULL
+# （面板归「未挂渠道」）。不设 UNIQUE——replace_table 是 DELETE+INSERT
+# 全量替换，同业务键重复提报已在投影器内求和，唯一键反而会让多法人
+# 主体重复行炸掉整次 extract。
+_FACT_FIN_STORE_EXPENSE_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_fin_store_expense` (\n"
+    "  `record_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+    "  `month` VARCHAR(7) DEFAULT NULL,\n"
+    "  `source` VARCHAR(32) DEFAULT NULL,\n"
+    "  `fin_store_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `fin_platform` VARCHAR(64) DEFAULT NULL,\n"
+    "  `fee_category` VARCHAR(255) DEFAULT NULL,\n"
+    "  `fee_item` VARCHAR(255) DEFAULT NULL,\n"
+    "  `mart_store_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `mart_channel` VARCHAR(50) DEFAULT NULL,\n"
+    "  `expense_amount` DECIMAL(20,4) DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`record_id`),\n"
+    "  KEY `idx_fin_expense_channel_month` (`mart_channel`, `month`),\n"
+    "  KEY `idx_fin_expense_store` (`fin_store_name`, `month`),\n"
+    "  KEY `idx_fin_expense_mart_store` (`mart_store_name`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+)
+
 # 口径真源占位见 spec §10：``source`` 现为 ``local``（随规则推导的 restDays），
 # 用友 T+ 接入后改为 ``yonyou_tplus``；``note`` 预留给「钉钉排班校验源」的
 # 差异说明（校验源只告警、绝不覆盖口径）。
@@ -479,6 +530,16 @@ def finance_ddl_statements() -> tuple:
         _FACT_FIN_PLATFORM_DEPOSIT_DDL,
         _FACT_FIN_STORE_FUNDS_DDL,
     )
+
+
+def finance_expense_ddl_statements() -> tuple:
+    """费用窄表 DDL（独立迁移版本 mart-extract-finance-expense-v1）。
+
+    刻意不并入 :func:`finance_ddl_statements`：后者已随
+    mart-extract-finance-v1 / mart-facts-v1 冻结（校验和红线），混入即
+    判漂移拒绝启动。
+    """
+    return (_FACT_FIN_STORE_EXPENSE_DDL,)
 
 
 # B1-阶段二 Task 8：商品目录镜像（raw_wdt.dim_product 的 1:1 投影）。
@@ -648,6 +709,45 @@ _FACT_ORDER_LINE_AREA_DDL = (
 def order_line_area_ddl_statements() -> tuple:
     """fact_order_line 收货地区补列（独立迁移版本 mart-extract-order-line-v3）。"""
     return (_FACT_ORDER_LINE_AREA_DDL,)
+
+
+# 买家资产（BI 阶段 2）：订单行补 buyer_id（WDT 交易级 customer_id，
+# 2026-10-12 实测确认），解锁活跃买家/新客/复购率。v1-v3 已冻结，另起
+# v4 增量。拼多多按隐私协议不返回买家 → NULL（查询层须显式计数，
+# 不得静默少单，口径同 receiver_area）。
+_FACT_ORDER_LINE_BUYER_DDL = (
+    "ALTER TABLE `fact_order_line`\n"
+    "  ADD COLUMN `buyer_id` VARCHAR(64) DEFAULT NULL,\n"
+    "  ADD KEY `idx_order_line_buyer` (`buyer_id`)"
+)
+
+
+def order_line_buyer_ddl_statements() -> tuple:
+    """fact_order_line 买家补列（独立迁移版本 mart-extract-order-line-v4）。"""
+    return (_FACT_ORDER_LINE_BUYER_DDL,)
+
+
+# 取消单（BI 阶段 2）：主投影剔除 trade_status=4（已取消、明细实付全 0），
+# 另立一表按单保留，供月度取消率。每单一行、不展明细、不存金额；
+# cancel_time 取下单时间（payload created，缺失回退 modified）。
+_FACT_ORDER_CANCEL_LINE_DDL = (
+    "CREATE TABLE IF NOT EXISTS `fact_order_cancel_line` (\n"
+    "  `trade_no` VARCHAR(64) NOT NULL,\n"
+    "  `cancel_time` DATETIME(6) DEFAULT NULL,\n"
+    "  `shop_name` VARCHAR(200) DEFAULT NULL,\n"
+    "  `channel_name` VARCHAR(100) DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`trade_no`),\n"
+    "  KEY `idx_cancel_time` (`cancel_time`),\n"
+    "  KEY `idx_cancel_channel` (`channel_name`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def order_cancel_ddl_statements() -> tuple:
+    """fact_order_cancel_line 建表（独立迁移版本 mart-extract-order-cancel-v1）。"""
+    return (_FACT_ORDER_CANCEL_LINE_DDL,)
 
 
 # SKU×仓×日 日销明细（设计稿 §3.1.1）：由 fact_stockout_line（发货时间口径）

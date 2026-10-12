@@ -158,6 +158,54 @@ class LiveMigrationTests(unittest.TestCase):
         self.assertIn("sync_runs", mart_sql)
 
 
+class StoreExpenseMigrationTests(unittest.TestCase):
+    """费用窄表 fact_fin_store_expense（2026-10-12 渠道BI费用面板，
+    mart-extract-finance-expense-v1）。
+
+    刻意独立于 mart-extract-finance-v1：后者校验和已冻结，DDL 文本混入
+    即判漂移拒绝启动，所以新表必须走新版本。
+    """
+
+    def test_expense_migration_registered_after_finance_v1(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertIn("mart-extract-finance-expense-v1", versions)
+        self.assertLess(
+            versions.index("mart-extract-finance-v1"),
+            versions.index("mart-extract-finance-expense-v1"),
+        )
+
+    def test_fresh_database_creates_expense_table(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        mart_sql = "\n".join(q for q, _ in mart.cursor_instance.executed)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS `fact_fin_store_expense`", mart_sql
+        )
+        recorded = [params[0] for _, params in mart.cursor_instance.executed if params]
+        self.assertIn("mart-extract-finance-expense-v1", recorded)
+
+    def test_expense_ddl_columns_match_the_projection_whitelist(self):
+        # 表结构与投影列白名单是同一份契约（与 OrderLineChannelMigrationTests 同款）。
+        from common.public_data.extract_finance import _STORE_EXPENSE_COLUMNS
+        from common.public_data.mart_extract_schema import (
+            finance_expense_ddl_statements,
+        )
+
+        columns = set(
+            self._COLUMN_RE.findall(finance_expense_ddl_statements()[0])
+        )
+        self.assertEqual(
+            set(_STORE_EXPENSE_COLUMNS) | {"record_id", "synced_at", "sync_run_id"},
+            columns,
+        )
+
+    _COLUMN_RE = re.compile(r"^\s*`([a-z_]+)`\s+[A-Z]", re.MULTILINE)
+
+
 class SummarySkippedMigrationTests(unittest.TestCase):
     """sync_dataset_summary.skipped 列（mart-ops-summary-skipped-v1）。
 
@@ -271,9 +319,14 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
         self.assertNotIn("CREATE TABLE IF NOT EXISTS `fact_order_line`", mart_sql)
 
     def test_table_columns_match_the_projection_whitelist(self):
-        from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
+        from common.public_data.extract_order_line import (
+            _ORDER_CANCEL_COLUMNS,
+            _ORDER_LINE_COLUMNS,
+        )
         from common.public_data.mart_extract_schema import (
+            order_cancel_ddl_statements,
             order_line_area_ddl_statements,
+            order_line_buyer_ddl_statements,
             order_line_ddl_statements,
         )
 
@@ -283,9 +336,54 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
             columns |= set(self._ADD_COLUMN_RE.findall(statement))
         for statement in order_line_area_ddl_statements():
             columns |= set(self._ADD_COLUMN_RE.findall(statement))
+        for statement in order_line_buyer_ddl_statements():
+            columns |= set(self._ADD_COLUMN_RE.findall(statement))
 
         self.assertEqual(
             set(_ORDER_LINE_COLUMNS) | {"synced_at", "sync_run_id"}, columns
+        )
+
+    def test_cancel_table_columns_match_the_projection_whitelist(self):
+        from common.public_data.extract_order_line import _ORDER_CANCEL_COLUMNS
+        from common.public_data.mart_extract_schema import (
+            order_cancel_ddl_statements,
+        )
+
+        (cancel_ddl,) = order_cancel_ddl_statements()
+        columns = set(self._COLUMN_RE.findall(cancel_ddl))
+
+        self.assertEqual(
+            set(_ORDER_CANCEL_COLUMNS) | {"synced_at", "sync_run_id"}, columns
+        )
+
+    def test_buyer_and_cancel_migrations_are_registered_after_frozen_versions(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        registered = {version: target for version, target, _ in _MIGRATIONS}
+        self.assertEqual("mart", registered["mart-extract-order-line-v4"])
+        self.assertEqual("mart", registered["mart-extract-order-cancel-v1"])
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        # 只追加新版本，冻结版本原样保留（校验和红线）。
+        self.assertLess(
+            versions.index("mart-extract-order-line-v3"),
+            versions.index("mart-extract-order-line-v4"),
+        )
+        self.assertLess(
+            versions.index("mart-extract-order-line-v4"),
+            versions.index("mart-extract-order-cancel-v1"),
+        )
+
+    def test_fresh_db_applies_buyer_and_cancel_migrations(self):
+        from common.public_data.live_migrations import apply_live_migrations
+
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+        apply_live_migrations(dingtalk, wdt, mart)
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+
+        self.assertIn("ADD COLUMN `buyer_id` VARCHAR(64) DEFAULT NULL", mart_sql)
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS `fact_order_cancel_line`", mart_sql
         )
 
 

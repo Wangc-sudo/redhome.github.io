@@ -24,6 +24,7 @@ from common.public_data.mart_extract_schema import (
     FACT_FIN_PLATFORM_DEPOSIT,
     FACT_FIN_PREPAYMENT_INVOICE,
     FACT_FIN_RECEIVABLES_AGING,
+    FACT_FIN_STORE_EXPENSE,
     FACT_FIN_STORE_FUNDS,
     dataset_by_name,
     ddl_statements,
@@ -94,8 +95,10 @@ class ExtractSchemaTests(unittest.TestCase):
             "fin_offline_deposit_other_receivables": FACT_FIN_OFFLINE_DEPOSIT,
             "fin_ecommerce_platform_deposit": FACT_FIN_PLATFORM_DEPOSIT,
             "fin_ecommerce_store_funds_balance": FACT_FIN_STORE_FUNDS,
+            "fin_store_expense": FACT_FIN_STORE_EXPENSE,
             "wdt_dim_product_mirror": "dim_product",
             "wdt_order_line_fact": "fact_order_line",
+            "wdt_order_cancel_fact": "fact_order_cancel_line",
             "wdt_stockout_line_fact": "fact_stockout_line",
             "wdt_refund_line_fact": "fact_refund_line",
             "wdt_sales_daily": "fact_sales_daily",
@@ -116,6 +119,13 @@ class ExtractSchemaTests(unittest.TestCase):
             dataset_by_name("fin_ecommerce_store_funds_balance").kind,
             "melt_store_funds",
         )
+        self.assertEqual(
+            dataset_by_name("fin_store_expense").kind, "melt_store_expense"
+        )
+        self.assertEqual(
+            dataset_by_name("fin_store_expense").source_table,
+            "fin_store_commission",
+        )
         dim_mirror = dataset_by_name("wdt_dim_product_mirror")
         self.assertEqual(dim_mirror.kind, "dim_mirror")
         self.assertEqual(dim_mirror.source, "wdt")
@@ -124,11 +134,21 @@ class ExtractSchemaTests(unittest.TestCase):
         self.assertEqual(order_line.kind, "order_line_expand")
         self.assertEqual(order_line.source, "wdt")
         self.assertEqual(order_line.source_table, "wdt_records")
+        order_cancel = dataset_by_name("wdt_order_cancel_fact")
+        self.assertEqual(order_cancel.kind, "order_cancel_expand")
+        self.assertEqual(order_cancel.source, "wdt")
+        self.assertEqual(order_cancel.source_table, "wdt_records")
+        self.assertEqual(order_cancel.target_table, "fact_order_cancel_line")
         # 注册顺序即执行顺序：镜像必须先于订单行展开（品牌反查依赖）。
         names = [d.dataset for d in EXTRACT_DATASETS]
         self.assertLess(
             names.index("wdt_dim_product_mirror"),
             names.index("wdt_order_line_fact"),
+        )
+        # 取消单同源 wdt_records、只用交易级字段，紧随主投影之后。
+        self.assertLess(
+            names.index("wdt_order_line_fact"),
+            names.index("wdt_order_cancel_fact"),
         )
 
     def test_retired_and_technical_columns_are_not_projected(self):

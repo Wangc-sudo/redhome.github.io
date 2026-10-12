@@ -1,0 +1,52 @@
+{
+  "version": "2026-10-12",
+  "source": "e:/repos/渠道BI-店铺名映射-预填版-20261012.md（E 段实测 + 人工校准，2026-10-12 签认推进）+ WDT 销售侧实证复核（fact_order_line 店铺足迹，2026-10-12）",
+  "note": "键=(fin_store, fin_platform)，fin_platform 取自 raw 表 platform 列单引号串里的 name 字段。mart_store/mart_channel 为 null 表示暂不挂渠道（费用仍入表，面板归入'未挂渠道'）。provisional=true 的行是按预填建议选的默认值，待财务/运营二次确认后可直接改本文件。",
+  "mappings": [
+    {"fin_store": "习水村酒类专营店", "fin_platform": "京东", "mart_store": "JD习水村酒类专营店", "mart_channel": "京东", "confidence": "high", "provisional": false},
+    {"fin_store": "京东致中和", "fin_platform": "京东", "mart_store": "JD致中和旗舰店", "mart_channel": "京东", "confidence": "high", "provisional": false},
+    {"fin_store": "购喝", "fin_platform": "京东", "mart_store": "JD购喝", "mart_channel": "京东", "confidence": "high", "provisional": false},
+    {"fin_store": "金沙专卖店", "fin_platform": "京东", "mart_store": "JD金沙专卖店", "mart_channel": "京东", "confidence": "high", "provisional": false},
+    {"fin_store": "习酒酒类旗舰店", "fin_platform": "京东", "mart_store": "JD习水村习酒专卖店", "mart_channel": "京东", "confidence": "high", "provisional": false, "note": "#5 用户裁决（2026-10-12）：=JD习水村习酒专卖店；WDT「习水村-京东习酒习水村专卖店」68万在售佐证"},
+    {"fin_store": "京东古韵", "fin_platform": "京东", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#6 关店证据：财务 01-06 每月固定 1 元（店铺保持费），07 归零；渠道AI表（09起）无此店、WDT 无足迹。判定 7 月后关店，费用留未挂渠道，待财务确认关店时点"},
+
+    {"fin_store": "习水村酒类专营店", "fin_platform": "天猫", "mart_store": "TM习水村酒类专营店", "mart_channel": "天猫", "confidence": "high", "provisional": false},
+    {"fin_store": "习酒", "fin_platform": "天猫", "mart_store": "TM习酒酒类旗舰店", "mart_channel": "天猫", "confidence": "medium", "provisional": false},
+    {"fin_store": "习酒习水村专卖店", "fin_platform": "天猫", "mart_store": "TM习酒习水村专卖店", "mart_channel": "天猫", "confidence": "high", "provisional": false},
+    {"fin_store": "天猫易元", "fin_platform": "天猫", "mart_store": "TM易元宏雷酒类专营店", "mart_channel": "天猫", "confidence": "medium", "provisional": false},
+    {"fin_store": "惠群", "fin_platform": "天猫", "mart_store": "TM惠群贵礼旗舰店", "mart_channel": "天猫", "confidence": "medium", "provisional": false},
+    {"fin_store": "致中和", "fin_platform": "天猫", "mart_store": "TM致中和酒类旗舰店", "mart_channel": "天猫", "confidence": "high", "provisional": false},
+    {"fin_store": "习酒--闪购仓配基础服务", "fin_platform": "天猫", "mart_store": "TM习酒酒类旗舰店", "mart_channel": "天猫", "confidence": "manual", "provisional": true, "note": "#13 内部仓配虚拟店，服务费暂归主店"},
+    {"fin_store": "得物", "fin_platform": "天猫", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#14 新店证据：财务费用仅 08 月 604 元，WDT「习水村-得物店」08-22 起在售 2.6 万——8 月新开店，非关店；platform 列天猫系笔误，得物不在 7 渠道内，费用暂留未挂渠道，待财务定展示方式"},
+
+    {"fin_store": "习水村酒类专营店", "fin_platform": "快手", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#15 mart 无快手专属店，暂归 DY其他店铺"},
+    {"fin_store": "习酒习水村专卖店", "fin_platform": "快手", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#16 同上"},
+
+    {"fin_store": "习酒酒类旗舰店", "fin_platform": "抖音", "mart_store": "DY习酒酒类旗舰店", "mart_channel": "直播", "confidence": "high", "provisional": false},
+    {"fin_store": "习酒窖藏1988酒类旗舰店", "fin_platform": "抖音", "mart_store": "DY1988旗舰店（店播）", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#18 费用无法拆店播/货架，暂归店播"},
+    {"fin_store": "习水村酒类专营店", "fin_platform": "抖音", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#19"},
+    {"fin_store": "抖音致中和", "fin_platform": "抖音", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#20"},
+    {"fin_store": "抖音金沙", "fin_platform": "抖音", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#21"},
+    {"fin_store": "民酒汇酒类专营店", "fin_platform": "抖音", "mart_store": null, "mart_channel": "直播", "confidence": "high", "provisional": false, "note": "#22 实证：WDT「民酒汇-抖音民酒汇酒类专营店」（1013行/36.5万在售）→直播；渠道日报AI表漏录此店（已反馈运营补），店级无挂接对象故 mart_store 留空"},
+    {"fin_store": "知交酒习水村白酒专卖店", "fin_platform": "抖音", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#23 关店证据：财务仅 01 月 16 元、02-04 全 0、05 起消失；渠道AI表/WDT 均无足迹。判定 4 月后关店的历史店"},
+
+    {"fin_store": "业隆", "fin_platform": "拼多多", "mart_store": "PDD业隆酒类专营店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多习酒习水村专卖店", "fin_platform": "拼多多", "mart_store": "PDD习酒习水村专卖店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多习酒平澜路习水村专卖店", "fin_platform": "拼多多", "mart_store": "PDD习酒平澜路专卖店", "mart_channel": "拼多多", "confidence": "medium", "provisional": false},
+    {"fin_store": "拼多多习酒旗舰店", "fin_platform": "拼多多", "mart_store": "PDD习酒旗舰店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多习酒白酒专卖店", "fin_platform": "拼多多", "mart_store": "PDD习酒白酒专卖店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多习酒酒类专卖店", "fin_platform": "拼多多", "mart_store": "PDD习酒酒类专卖店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多习酒酱酒专卖店", "fin_platform": "拼多多", "mart_store": "PDD习酒酱酒专卖店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多惠峰酒类专营店", "fin_platform": "拼多多", "mart_store": "PDD惠峰酒类专营店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多致中和", "fin_platform": "拼多多", "mart_store": "PDD致中和酒类旗舰店", "mart_channel": "拼多多", "confidence": "high", "provisional": false},
+    {"fin_store": "拼多多女儿红酒类专卖店", "fin_platform": "拼多多", "mart_store": "PDD裕河酒水专营店（女儿红）", "mart_channel": "拼多多", "confidence": "medium", "provisional": false},
+    {"fin_store": "多多买菜", "fin_platform": "拼多多", "mart_store": "多多买菜", "mart_channel": "即时零售", "confidence": "high", "provisional": false},
+    {"fin_store": "十全酒美", "fin_platform": "拼多多", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#35 零费用挂名店：8 行（多法人重复提报）01-08 全为 0，不影响面板金额；渠道AI表/WDT 无足迹，待财务确认是否已关店"},
+    {"fin_store": "君酿", "fin_platform": "拼多多", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#36 关店证据：财务 01 月 2 元、02 月 15 元、03 月 -142 冲销，04 起全 0；渠道AI表/WDT 无足迹。判定 3 月后关店的历史店"},
+    {"fin_store": "拼多多裕河酒水专营店（盛峰）", "fin_platform": "拼多多", "mart_store": null, "mart_channel": "拼多多", "confidence": "high", "provisional": false, "note": "#37 实证：WDT「习水村-拼多多裕河酒水专营店」（12行/0.4万在售）→拼多多；与女儿红那家是否同店待确认（不影响渠道聚合）"},
+    {"fin_store": "拼多多金沙酒水旗舰店", "fin_platform": "拼多多", "mart_store": null, "mart_channel": null, "confidence": "manual", "provisional": true, "note": "#38 非持续经营店：财务仅 06 月一笔 -3238 冲销、其余全 0；WDT 只有京东金沙（8.2万）/抖音金沙回沙（143万）无拼多多金沙，待财务确认这笔冲销对应什么"},
+
+    {"fin_store": "习酒白酒旗舰店", "fin_platform": "视频号", "mart_store": "习酒旗舰店视频号", "mart_channel": "直播", "confidence": "medium", "provisional": false},
+    {"fin_store": "习水村酒类专营店", "fin_platform": "视频号", "mart_store": "DY其他店铺", "mart_channel": "直播", "confidence": "manual", "provisional": true, "note": "#40 暂归 DY其他店铺"}
+  ]
+}

@@ -2,12 +2,17 @@
 
 import unittest
 from datetime import date, datetime
+from unittest.mock import Mock, patch
 
 from common.broadcast.queries import (
+    fetch_expense_summary,
     fetch_hot_items,
     fetch_inventory_snapshot,
+    fetch_monthly_kpi,
     fetch_order_risk,
+    fetch_product_structure,
     fetch_purchase_inbound,
+    fetch_refund_reason,
     fetch_stock_alerts,
     is_wine,
     platform_of,
@@ -97,6 +102,166 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(platform_of("杭易-拼多多致中和旗舰店"), "拼多多")
         self.assertEqual(platform_of("习水村-天猫超市"), "天猫")
         self.assertEqual(platform_of("杭州习水村酒业有限公司"), "杭州习水村酒业有限公司")
+
+
+class ExpenseSummaryTests(unittest.TestCase):
+    """费用/盈利面板查询（2026-10-12）：渠道×月 费用/充值/GMV/费率。"""
+
+    def test_aggregates_by_channel_and_month_with_gmv_rate(self):
+        expense = [
+            {"month": "2026-08", "channel": "天猫", "source": "store_commission", "amt": 5000.0},
+            {"month": "2026-08", "channel": "天猫", "source": "promotion_recharge", "amt": 3000.0},
+            {"month": "2026-08", "channel": None, "source": "store_commission", "amt": 500.0},
+            {"month": "2026-07", "channel": "京东", "source": "store_commission", "amt": 900.0},
+        ]
+        unmapped = [{"store": "得物", "platform": "天猫"}]
+        gmv = [{"y": 2026, "m": 8, "channel": "天猫", "gmv": 160000.0}]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[expense, unmapped, gmv]):
+            data = fetch_expense_summary(
+                Mock(), months_back=2, today=date(2026, 9, 23)
+            )
+        self.assertEqual(data["months"], ["2026-08", "2026-09"])
+        tm = data["rows"][0]
+        self.assertEqual(tm["channel"], "天猫")
+        self.assertEqual(tm["cells"]["2026-08"]["total"], 8000.0)
+        self.assertEqual(tm["cells"]["2026-08"]["rate"], 0.05)
+        # 9 月在窗口内但财务未填 → 显式标注而不是静默
+        self.assertEqual(data["empty_months"], ["2026-09"])
+        # 窗口外的 07 月不进展示也不污染 empty 判定
+        self.assertNotIn("2026-07", data["months"])
+        # 未挂渠道桶（mart_channel IS NULL）+ 恒排最后
+        unmapped_row = data["rows"][-1]
+        self.assertEqual(unmapped_row["channel"], "未挂渠道")
+        self.assertEqual(unmapped_row["cells"]["2026-08"]["total"], 500.0)
+        self.assertEqual(data["unmapped_stores"], ["得物（天猫）"])
+
+    def test_rate_is_none_without_gmv_and_rows_sorted_by_total(self):
+        expense = [
+            {"month": "2026-09", "channel": "京东", "source": "store_commission", "amt": 100.0},
+            {"month": "2026-09", "channel": "拼多多", "source": "store_commission", "amt": 900.0},
+        ]
+        with patch("common.broadcast.queries._query", side_effect=[expense, [], []]):
+            data = fetch_expense_summary(Mock(), months_back=1, today=date(2026, 9, 23))
+        jd = next(r for r in data["rows"] if r["channel"] == "京东")
+        self.assertIsNone(jd["cells"]["2026-09"]["rate"])  # 无 GMV 不臆造费率
+        self.assertEqual(data["rows"][0]["channel"], "拼多多")
+        self.assertEqual(data["empty_months"], [])
+
+
+class MonthlyKpiTests(unittest.TestCase):
+    """月度 KPI 查询（BI 阶段 2）：买家资产 + 取消率 + 残月元数据。"""
+
+    def test_buyers_new_repeat_cancel_and_meta(self):
+        gmv = [
+            {"y": 2026, "m": 7, "gmv": 100.0, "orders": 10, "buyers": 8},
+            {"y": 2026, "m": 8, "gmv": 200.0, "orders": 15, "buyers": 12},
+        ]
+        first = [
+            {"buyer": "A", "first_ym": 202607},
+            {"buyer": "B", "first_ym": 202607},
+            {"buyer": "C", "first_ym": 202608},
+            {"buyer": "D", "first_ym": 202608},
+        ]
+        cancels = [{"y": 2026, "m": 8, "cancels": 3}]
+        meta = [{"data_start": datetime(2026, 8, 22, 10, 0, 0),
+                 "n": 1000, "buyer_null": 200}]
+        refund = [{"y": 2026, "m": 8, "refund_amt": 20.0, "refund_orders": 2}]
+        promo = [{"y": 2026, "m": 8, "promo": 50.0}]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[gmv, first, cancels, meta, refund, promo]):
+            data = fetch_monthly_kpi(Mock(), months_back=2)
+        self.assertEqual([m["ym"] for m in data["months"]],
+                         ["2026-07", "2026-08"])
+        self.assertEqual(data["data_start"], datetime(2026, 8, 22, 10, 0, 0))
+        self.assertEqual(data["buyer_null_share"], 0.2)
+        aug = data["months"][1]
+        self.assertEqual(aug["buyers"], 12)
+        self.assertEqual(aug["new_buyers"], 2)          # 首购月=2026-08
+        self.assertAlmostEqual(aug["repeat_rate"], 10 / 12)
+        self.assertEqual(aug["cancel_orders"], 3)
+        self.assertAlmostEqual(aug["cancel_rate"], 3 / 18)  # ÷(付款15+取消3)
+        self.assertAlmostEqual(aug["roi"], 4.0)
+        jul = data["months"][0]
+        self.assertEqual(jul["cancel_orders"], 0)
+        self.assertEqual(jul["cancel_rate"], 0.0)       # 无取消单
+
+    def test_buyer_metrics_are_none_without_buyers(self):
+        gmv = [{"y": 2026, "m": 9, "gmv": 50.0, "orders": 5, "buyers": 0}]
+        meta = [{"data_start": None, "n": 0, "buyer_null": 0}]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[gmv, [], [], meta, [], []]):
+            data = fetch_monthly_kpi(Mock(), months_back=1)
+        row = data["months"][0]
+        self.assertIsNone(row["repeat_rate"])           # 无买家不臆造复购率
+        self.assertIsNone(data["buyer_null_share"])
+        self.assertIsNone(data["data_start"])
+
+
+class ProductStructureTests(unittest.TestCase):
+    """商品结构查询（BI 阶段 5 子集）：系列/价格带/集中度。"""
+
+    def test_series_bands_top_and_hhi(self):
+        spec_rows = [
+            {"spec_no": "S1", "goods_name": "酒A", "gmv": 600.0, "qty": 3.0},
+            {"spec_no": "S2", "goods_name": "酒B", "gmv": 1000.0, "qty": 2.0},
+            {"spec_no": "S3", "goods_name": "酒C", "gmv": 400.0, "qty": 0},
+            {"spec_no": "S4", "goods_name": "酒D", "gmv": 100.0, "qty": 1.0},
+        ]
+        series_rows = [
+            {"spec_no": "S1", "series_name": "经典系列"},
+            {"spec_no": "S2", "series_name": None},
+            {"spec_no": "S4", "series_name": "经典系列"},
+        ]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[spec_rows, series_rows]):
+            data = fetch_product_structure(Mock(), today=date(2026, 9, 23))
+        self.assertEqual(data["total_gmv"], 2100.0)
+        # 系列结构：NULL/缺失归「未分类」（S2 无系列 + S3 不在 dim_product）
+        series = {s["series"]: s["gmv"] for s in data["series"]}
+        self.assertEqual(series, {"未分类": 1400.0, "经典系列": 700.0})
+        # 价格带：件均价分档（S1=200/件，S2=500/件，S4=100/件；S3 零件数）
+        bands = {b["band"]: b["gmv"] for b in data["price_bands"]}
+        self.assertEqual(bands["0-199"], 100.0)
+        self.assertEqual(bands["200-399"], 600.0)
+        self.assertEqual(bands["400-799"], 1000.0)
+        self.assertEqual(bands["单价未知"], 400.0)
+        # 集中度：单品数<10 时 Top10 占满；HHI=Σ占比²
+        self.assertAlmostEqual(data["top10_share"], 1.0)
+        self.assertAlmostEqual(
+            data["hhi"],
+            (1000 / 2100) ** 2 + (600 / 2100) ** 2
+            + (400 / 2100) ** 2 + (100 / 2100) ** 2,
+        )
+
+    def test_empty_window_returns_zero_total(self):
+        with patch("common.broadcast.queries._query", side_effect=[[], []]):
+            data = fetch_product_structure(Mock(), today=date(2026, 9, 23))
+        self.assertEqual(data["total_gmv"], 0.0)
+        self.assertIsNone(data["top10_share"])
+        self.assertIsNone(data["hhi"])
+
+
+class RefundReasonTests(unittest.TestCase):
+    """退款原因查询（BI 阶段 5 子集）：窗口内 reason 聚合。"""
+
+    def test_aggregates_with_share_sorted_by_amount(self):
+        rows = [
+            {"reason": "七天无理由退换", "amt": 300.0, "orders": 3},
+            {"reason": "未填写", "amt": 100.0, "orders": 1},  # SQL COALESCE 已归桶
+        ]
+        with patch("common.broadcast.queries._query", side_effect=[rows]):
+            data = fetch_refund_reason(Mock(), today=date(2026, 9, 23))
+        self.assertEqual(data["total_amount"], 400.0)
+        self.assertEqual(data["reasons"][0]["reason"], "七天无理由退换")
+        self.assertAlmostEqual(data["reasons"][0]["share"], 0.75)
+        self.assertEqual(data["reasons"][1]["orders"], 1)
+
+    def test_empty_returns_zero_total(self):
+        with patch("common.broadcast.queries._query", side_effect=[[]]):
+            data = fetch_refund_reason(Mock(), today=date(2026, 9, 23))
+        self.assertEqual(data["total_amount"], 0.0)
+        self.assertEqual(data["reasons"], [])
 
 
 class InventorySnapshotTests(unittest.TestCase):

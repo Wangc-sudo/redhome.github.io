@@ -358,20 +358,471 @@ def fetch_order_risk(connection, *, business_date, threshold=RISK_THRESHOLD):
     }
 
 
+#: 月度看板展示的月份数（最近 N 个月，含本月）。
+MONTHLY_KPI_MONTHS = 6
+
+
+def fetch_monthly_kpi(connection, *, months_back=MONTHLY_KPI_MONTHS):
+    """月度核心指标看板（P0）：GMV/订单数/客单价/买家/退款/净额/推广/ROI/取消。
+
+    数据源与口径：
+
+    * ``fact_order_line`` —— GMV = Σ paid_amount，已付款且未取消（投影层已
+      过滤 trade_status∈{4,5,24}，即剔除已取消/待付款/全额退款关闭）；
+      订单数 = COUNT DISTINCT trade_no；按 trade_time（付款时间）归月。
+    * ``fact_order_line`` 买家资产 —— 活跃买家 = COUNT(DISTINCT buyer_id)
+      （WDT 交易级 customer_id；拼多多按隐私协议不返回 → NULL 不计入，
+      buyer_null_share 显式给出缺失行占比）；新客 = 首购月落在当月的买家数；
+      复购率 = (活跃买家 − 新客) ÷ 活跃买家。
+    * ``fact_order_cancel_line`` —— 取消单 = COUNT DISTINCT trade_no
+      （status=4，主投影剔除单），按 cancel_time（下单时间）归月；
+      取消率 = 取消单 ÷ (付款订单数 + 取消单数)。
+    * ``fact_refund_line`` —— 退款金额 = Σ actual_refund_amount，退款单数 =
+      COUNT DISTINCT refund_no；按 check_time（入库审核时间）归月。
+    * ``fact_channel_daily_sales`` —— 推广花费 = Σ promotion_cost；按
+      business_date 归月。
+    * ``data_start`` = MIN(trade_time)，供残月标注（WDT 全量重放自
+      2026-08-22 起，8 月为残月、环比失真，面板须显式标注）。
+
+    缺失指标（面板显式标注）：同比 YoY —— fact_order_line 为 WDT 全量
+    重放，无去年同期数据。
+
+    返回 ``{"months": [...], "as_of": date, "data_start": ..., "buyer_null_share": float|None}``，
+    months 按月升序、取最近 *months_back* 个月。每行含 ym/gmv/mom/orders/
+    aov/buyers/new_buyers/repeat_rate/cancel_orders/cancel_rate/refund_amt/
+    refund_rate_amt/refund_orders/refund_rate_cnt/net_gmv/promo/roi。
+    """
+    # GMV + 订单数 + 买家数（按月，付款时间口径）。用 YEAR()/MONTH() 而非
+    # DATE_FORMAT 以避开 MySQL 驱动对 %Y-%m 的占位符歧义。
+    gmv_rows = _query(
+        connection,
+        "SELECT YEAR(`trade_time`) AS `y`, MONTH(`trade_time`) AS `m`, "
+        "SUM(`paid_amount`) AS `gmv`, "
+        "COUNT(DISTINCT `trade_no`) AS `orders`, "
+        "COUNT(DISTINCT `buyer_id`) AS `buyers` "
+        "FROM `fact_order_line` "
+        "WHERE `trade_time` IS NOT NULL "
+        "GROUP BY `y`, `m` ORDER BY `y`, `m`",
+    )
+    # 买家首购月（全表一遍，买家数远小于行数）：新客 = 首购月=当月。
+    first_rows = _query(
+        connection,
+        "SELECT `buyer_id` AS `buyer`, "
+        "MIN(YEAR(`trade_time`) * 100 + MONTH(`trade_time`)) AS `first_ym` "
+        "FROM `fact_order_line` "
+        "WHERE `buyer_id` IS NOT NULL AND `trade_time` IS NOT NULL "
+        "GROUP BY `buyer_id`",
+    )
+    new_map: dict[str, int] = {}
+    for r in first_rows:
+        first_ym = int(r["first_ym"])
+        key = f"{first_ym // 100:04d}-{first_ym % 100:02d}"
+        new_map[key] = new_map.get(key, 0) + 1
+    # 取消单（按下单时间归月）
+    cancel_rows = _query(
+        connection,
+        "SELECT YEAR(`cancel_time`) AS `y`, MONTH(`cancel_time`) AS `m`, "
+        "COUNT(DISTINCT `trade_no`) AS `cancels` "
+        "FROM `fact_order_cancel_line` "
+        "WHERE `cancel_time` IS NOT NULL "
+        "GROUP BY `y`, `m`",
+    )
+    cancel_map = {
+        f"{r['y']:04d}-{r['m']:02d}": int(r["cancels"] or 0) for r in cancel_rows
+    }
+    # 数据起点与买家缺失占比（残月标注 / 拼多多隐私说明）
+    meta_rows = _query(
+        connection,
+        "SELECT MIN(`trade_time`) AS `data_start`, COUNT(*) AS `n`, "
+        "SUM(`buyer_id` IS NULL) AS `buyer_null` FROM `fact_order_line`",
+    )
+    meta = meta_rows[0] if meta_rows else {}
+    total_lines = int(meta.get("n") or 0)
+    buyer_null = int(meta.get("buyer_null") or 0)
+    # 退款（按月，入库审核时间口径）
+    refund_rows = _query(
+        connection,
+        "SELECT YEAR(`check_time`) AS `y`, MONTH(`check_time`) AS `m`, "
+        "SUM(`actual_refund_amount`) AS `refund_amt`, "
+        "COUNT(DISTINCT `refund_no`) AS `refund_orders` "
+        "FROM `fact_refund_line` "
+        "WHERE `check_time` IS NOT NULL "
+        "GROUP BY `y`, `m`",
+    )
+    refund_map = {
+        f"{r['y']:04d}-{r['m']:02d}": r for r in refund_rows
+    }
+    # 推广花费（按月，账单日期口径）
+    promo_rows = _query(
+        connection,
+        "SELECT YEAR(`business_date`) AS `y`, MONTH(`business_date`) AS `m`, "
+        "SUM(`promotion_cost`) AS `promo` "
+        "FROM `fact_channel_daily_sales` "
+        "WHERE `business_date` IS NOT NULL AND `promotion_cost` IS NOT NULL "
+        "GROUP BY `y`, `m`",
+    )
+    promo_map = {
+        f"{r['y']:04d}-{r['m']:02d}": float(r["promo"] or 0) for r in promo_rows
+    }
+
+    months = []
+    prev_gmv = None
+    for r in sorted(gmv_rows, key=lambda x: (x["y"], x["m"])):
+        ym = f"{r['y']:04d}-{r['m']:02d}"
+        gmv = float(r["gmv"] or 0)
+        orders = int(r["orders"] or 0)
+        aov = gmv / orders if orders else 0.0
+        mom = (gmv - prev_gmv) / abs(prev_gmv) if prev_gmv else None
+        buyers = int(r["buyers"] or 0)
+        new_buyers = new_map.get(ym, 0)
+        cancels = cancel_map.get(ym, 0)
+        ref = refund_map.get(ym, {})
+        refund_amt = float(ref.get("refund_amt") or 0)
+        refund_orders = int(ref.get("refund_orders") or 0)
+        net_gmv = gmv - refund_amt
+        promo = promo_map.get(ym, 0.0)
+        months.append({
+            "ym": ym,
+            "gmv": gmv,
+            "mom": mom,
+            "orders": orders,
+            "aov": aov,
+            "buyers": buyers,
+            "new_buyers": new_buyers,
+            "repeat_rate": ((buyers - new_buyers) / buyers) if buyers else None,
+            "cancel_orders": cancels,
+            "cancel_rate": (
+                (cancels / (orders + cancels)) if (orders + cancels) else None
+            ),
+            "refund_amt": refund_amt,
+            "refund_rate_amt": (refund_amt / gmv) if gmv else None,
+            "refund_orders": refund_orders,
+            "refund_rate_cnt": (refund_orders / orders) if orders else None,
+            "net_gmv": net_gmv,
+            "promo": promo,
+            "roi": (gmv / promo) if promo else None,
+        })
+        prev_gmv = gmv
+    return {
+        "months": months[-months_back:],
+        "as_of": date.today(),
+        "data_start": meta.get("data_start"),
+        "buyer_null_share": (buyer_null / total_lines) if total_lines else None,
+    }
+
+
+#: 费用面板展示的月份数（最近 N 个月，含本月，同 MONTHLY_KPI_MONTHS）。
+EXPENSE_PANEL_MONTHS = 6
+
+#: fact_fin_store_expense 里未挂渠道行的展示名（mart_store_name IS NULL）。
+UNMAPPED_CHANNEL_LABEL = "未挂渠道"
+
+
+def _recent_months(today, months_back):
+    """返回最近 *months_back* 个月（含当月）的 "YYYY-MM" 列表，升序。"""
+    months = []
+    year, month = today.year, today.month
+    for _ in range(months_back):
+        months.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return sorted(months)
+
+
+def fetch_expense_summary(connection, *, months_back=EXPENSE_PANEL_MONTHS,
+                          today=None):
+    """费用/盈利面板（P0）：渠道×月 财务费用 / 推广充值 / GMV / 费率。
+
+    数据源与口径：
+
+    * ``fact_fin_store_expense`` —— 费用按 (month, mart_channel, source)
+      汇总；source=store_commission 是店铺费用（扣点等）、
+      promotion_recharge 是推广费充值（充值 vs 余额口径待财务确认，
+      暂按当月费用语义展示）；``mart_channel`` IS NULL 的行归
+      「未挂渠道」桶（店铺挂接种子未命中；渠道已挂但店铺未细分的行
+      ——mart_store_name IS NULL 而 mart_channel 非空——按其渠道正常
+      展示，不进该桶）。
+    * ``fact_channel_daily_sales`` —— GMV 按 (月, channel) 汇总；
+      费率 = 费用合计 ÷ 当月 GMV（无 GMV 的渠道费率为 None，不臆造）。
+
+    返回 ``{"months": [...], "rows": [...], "unmapped_stores": [...],
+    "empty_months": [...], "as_of": date}``：months 为最近 *months_back*
+    个月升序；rows 按费用总额降序、「未挂渠道」恒排最后；empty_months
+    是窗口内财务尚未填报的月份（raw 费用表 2026-09 起未填，显式标注
+    不静默）。窗口外月份（财务已填但超出展示窗）不参与 empty 判定。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    month_set = set(months)
+
+    expense_rows = _query(
+        connection,
+        "SELECT `month` AS `month`, `mart_channel` AS `channel`, "
+        "`source` AS `source`, SUM(`expense_amount`) AS `amt` "
+        "FROM `fact_fin_store_expense` "
+        "GROUP BY `month`, `mart_channel`, `source`",
+    )
+    unmapped_rows = _query(
+        connection,
+        "SELECT DISTINCT `fin_store_name` AS `store`, `fin_platform` AS `platform` "
+        "FROM `fact_fin_store_expense` WHERE `mart_channel` IS NULL",
+    )
+    gmv_rows = _query(
+        connection,
+        "SELECT YEAR(`business_date`) AS `y`, MONTH(`business_date`) AS `m`, "
+        "`channel` AS `channel`, SUM(`sales_amount`) AS `gmv` "
+        "FROM `fact_channel_daily_sales` "
+        "WHERE `business_date` IS NOT NULL "
+        "GROUP BY `y`, `m`, `channel`",
+    )
+    gmv_map = {
+        (f"{r['y']:04d}-{r['m']:02d}", r["channel"]): float(r["gmv"] or 0)
+        for r in gmv_rows
+    }
+
+    cells: dict[str, dict] = {}
+    filled_months = set()
+    for row in expense_rows:
+        ym = row["month"]
+        if ym not in month_set:
+            continue
+        filled_months.add(ym)
+        channel = row["channel"] or UNMAPPED_CHANNEL_LABEL
+        slot = cells.setdefault(channel, {}).setdefault(
+            ym, {"commission": 0.0, "recharge": 0.0}
+        )
+        amount = float(row["amt"] or 0)
+        if row["source"] == "promotion_recharge":
+            slot["recharge"] += amount
+        else:
+            slot["commission"] += amount
+
+    rows = []
+    for channel, by_month in cells.items():
+        enriched = {}
+        for ym in months:
+            cell = by_month.get(ym, {"commission": 0.0, "recharge": 0.0})
+            total = cell["commission"] + cell["recharge"]
+            gmv = gmv_map.get((ym, channel))
+            enriched[ym] = {
+                "commission": cell["commission"],
+                "recharge": cell["recharge"],
+                "total": total,
+                "gmv": gmv,
+                "rate": (total / gmv) if gmv else None,
+            }
+        rows.append({
+            "channel": channel,
+            "total": sum(c["total"] for c in enriched.values()),
+            "cells": enriched,
+        })
+    rows.sort(key=lambda x: (x["channel"] == UNMAPPED_CHANNEL_LABEL, -x["total"]))
+
+    return {
+        "months": months,
+        "rows": rows,
+        "unmapped_stores": sorted(
+            f"{r['store']}（{r['platform']}）"
+            for r in unmapped_rows if r["store"]
+        ),
+        "empty_months": [ym for ym in months if ym not in filled_months],
+        "as_of": today,
+    }
+
+
+#: 商品结构面板展示的月份数（近 N 个月窗口，同 MONTHLY_KPI_MONTHS）。
+PRODUCT_STRUCTURE_MONTHS = MONTHLY_KPI_MONTHS
+
+#: 系列结构展示 Top N，其余合并为「其他」。
+SERIES_TOP_N = 8
+
+#: 价格带分档（元，按件均价 = paid_amount/quantity 落档，左闭右开）。
+PRICE_BANDS = (
+    ("0-199", 0.0, 200.0),
+    ("200-399", 200.0, 400.0),
+    ("400-799", 400.0, 800.0),
+    ("800-1499", 800.0, 1500.0),
+    ("1500+", 1500.0, None),
+)
+
+_UNCLASSIFIED_SERIES = "未分类"
+_UNPRICED_BAND = "单价未知"
+
+
+def _window_start(months):
+    """``_recent_months`` 结果的首月 1 号（窗口下界）。"""
+    year, month = int(months[0][:4]), int(months[0][5:7])
+    return date(year, month, 1)
+
+
+def fetch_product_structure(connection, *, months_back=PRODUCT_STRUCTURE_MONTHS,
+                            today=None):
+    """商品结构面板：系列结构 / 价格带分布 / Top10 单品集中度。
+
+    数据源与口径：
+
+    * ``fact_order_line`` —— 近 *months_back* 个月（含当月，trade_time 口径）
+      按 spec_no 聚合 GMV 与件数；件均价 = paid_amount/quantity（实付口径，
+      零件数行无单价、其 GMV 归「单价未知」档显式示出）。
+    * ``dim_product`` —— spec_no 反查 series_name，NULL 归「未分类」
+      （不静默丢弃）；系列取 Top *SERIES_TOP_N*、其余并入「其他」。
+    * 集中度 —— Top10 单品 GMV 占比与 HHI（Σ(单品GMV占比²)，0-1，
+      越高越集中）。
+
+    返回 ``{"months": [...], "total_gmv": float, "series": [...],
+    "price_bands": [...], "top_products": [...], "top10_share": float|None,
+    "hhi": float|None, "as_of": date}``。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    window = _window_start(months)
+
+    spec_rows = _query(
+        connection,
+        "SELECT `spec_no` AS `spec_no`, MAX(`goods_name`) AS `goods_name`, "
+        "SUM(`paid_amount`) AS `gmv`, SUM(`quantity`) AS `qty` "
+        "FROM `fact_order_line` "
+        "WHERE `trade_time` >= %s "
+        "GROUP BY `spec_no`",
+        (window,),
+    )
+    series_rows = _query(
+        connection,
+        "SELECT `spec_no` AS `spec_no`, `series_name` AS `series_name` "
+        "FROM `dim_product`",
+    )
+    series_map = {r["spec_no"]: r["series_name"] for r in series_rows}
+
+    specs = []
+    for r in spec_rows:
+        gmv = float(r["gmv"] or 0)
+        qty = float(r["qty"] or 0)
+        specs.append({
+            "spec_no": r["spec_no"],
+            "goods_name": r["goods_name"],
+            "series_name": series_map.get(r["spec_no"]) or _UNCLASSIFIED_SERIES,
+            "gmv": gmv,
+            "unit_price": (gmv / qty) if qty else None,
+        })
+    total_gmv = sum(s["gmv"] for s in specs)
+
+    # 系列结构：TopN + 其他
+    by_series: dict[str, float] = {}
+    for s in specs:
+        by_series[s["series_name"]] = (
+            by_series.get(s["series_name"], 0.0) + s["gmv"]
+        )
+    series_items = sorted(by_series.items(), key=lambda kv: -kv[1])
+    if len(series_items) > SERIES_TOP_N:
+        other = sum(v for _, v in series_items[SERIES_TOP_N:])
+        series_items = series_items[:SERIES_TOP_N] + [("其他", other)]
+    series_out = [
+        {"series": name, "gmv": gmv,
+         "share": (gmv / total_gmv) if total_gmv else None}
+        for name, gmv in series_items
+    ]
+
+    # 价格带：件均价落档（零件数行无单价 → 显式档，不静默）
+    bands = []
+    for label, lo, hi in PRICE_BANDS:
+        gmv_band = sum(
+            s["gmv"] for s in specs
+            if s["unit_price"] is not None and s["unit_price"] >= lo
+            and (hi is None or s["unit_price"] < hi)
+        )
+        bands.append({"band": label, "gmv": gmv_band,
+                      "share": (gmv_band / total_gmv) if total_gmv else None})
+    unpriced = sum(s["gmv"] for s in specs if s["unit_price"] is None)
+    if unpriced:
+        bands.append({"band": _UNPRICED_BAND, "gmv": unpriced,
+                      "share": (unpriced / total_gmv) if total_gmv else None})
+
+    # 集中度：Top10 占比 + HHI
+    ranked = sorted(specs, key=lambda s: -s["gmv"])
+    top10_share = (
+        sum(s["gmv"] for s in ranked[:10]) / total_gmv if total_gmv else None
+    )
+    hhi = (
+        sum((s["gmv"] / total_gmv) ** 2 for s in specs) if total_gmv else None
+    )
+    return {
+        "months": months,
+        "total_gmv": total_gmv,
+        "series": series_out,
+        "price_bands": bands,
+        "top_products": [
+            {"spec_no": s["spec_no"], "goods_name": s["goods_name"],
+             "series_name": s["series_name"], "gmv": s["gmv"],
+             "share": (s["gmv"] / total_gmv) if total_gmv else None}
+            for s in ranked[:10]
+        ],
+        "top10_share": top10_share,
+        "hhi": hhi,
+        "as_of": today,
+    }
+
+
+def fetch_refund_reason(connection, *, months_back=MONTHLY_KPI_MONTHS,
+                        today=None):
+    """退款原因面板：窗口内按 reason 聚合退款金额/单数与占比。
+
+    数据源：``fact_refund_line``，按 check_time（入库审核时间）归月——
+    与月度 KPI 的退款口径一致。reason 为 NULL/空白归「未填写」显示
+    （不静默），按金额降序。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    window = _window_start(months)
+    rows = _query(
+        connection,
+        "SELECT COALESCE(NULLIF(TRIM(`reason`), ''), '未填写') AS `reason`, "
+        "SUM(`actual_refund_amount`) AS `amt`, "
+        "COUNT(DISTINCT `refund_no`) AS `orders` "
+        "FROM `fact_refund_line` "
+        "WHERE `check_time` >= %s "
+        "GROUP BY `reason` ORDER BY `amt` DESC",
+        (window,),
+    )
+    total_amt = sum(float(r["amt"] or 0) for r in rows)
+    reasons = [
+        {"reason": r["reason"], "amount": float(r["amt"] or 0),
+         "orders": int(r["orders"] or 0),
+         "share": (float(r["amt"] or 0) / total_amt) if total_amt else None}
+        for r in rows
+    ]
+    return {
+        "months": months,
+        "total_amount": total_amt,
+        "reasons": reasons,
+        "as_of": today,
+    }
+
+
 __all__ = [
     "DANGER_MONTH_SALES",
+    "EXPENSE_PANEL_MONTHS",
     "EXCLUDE_KEYWORDS",
     "HOT_SALES_DAYS",
     "HOT_TOP_N",
+    "MONTHLY_KPI_MONTHS",
+    "PRICE_BANDS",
+    "PRODUCT_STRUCTURE_MONTHS",
     "PURCHASE_LOOKBACK_HOURS",
     "PURCHASE_STATUS_DONE",
     "RISK_THRESHOLD",
     "RISK_TRADE_STATUSES",
+    "SERIES_TOP_N",
+    "UNMAPPED_CHANNEL_LABEL",
     "WINE_KEYWORDS",
+    "fetch_expense_summary",
     "fetch_hot_items",
     "fetch_inventory_snapshot",
+    "fetch_monthly_kpi",
     "fetch_order_risk",
+    "fetch_product_structure",
     "fetch_purchase_inbound",
+    "fetch_refund_reason",
     "fetch_stock_alerts",
     "is_wine",
     "platform_of",

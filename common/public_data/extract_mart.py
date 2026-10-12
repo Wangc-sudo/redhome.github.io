@@ -202,14 +202,18 @@ class MartExtractRepository:
     def replace_table(self, target_table, columns, rows):
         dataset = next((d for d in EXTRACT_DATASETS if d.target_table == target_table), None)
         replace_kinds = (
-            "snapshot", "melt_store_funds", "dim_mirror", "order_line_expand",
-            "stockout_line_expand", "refund_line_expand",
+            "snapshot", "melt_store_funds", "melt_store_expense", "dim_mirror",
+            "order_line_expand", "order_cancel_expand", "stockout_line_expand",
+            "refund_line_expand",
         )
         if dataset is None or dataset.kind not in replace_kinds:
             raise MartExtractError("unregistered snapshot table")
         allowed = set(dataset.target_columns) | {"synced_at", "sync_run_id"}
         if dataset.kind == "melt_store_funds":
             allowed |= {"store_name", "channel", "company_entity", "month", "balance"}
+        if dataset.kind == "melt_store_expense":
+            from common.public_data.extract_finance import _STORE_EXPENSE_COLUMNS
+            allowed |= set(_STORE_EXPENSE_COLUMNS)
         if target_table == "fact_fin_prepayment_invoice":
             allowed.add("statement_date")
         if dataset.kind == "dim_mirror":
@@ -218,6 +222,9 @@ class MartExtractRepository:
         if dataset.kind == "order_line_expand":
             from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
             allowed |= set(_ORDER_LINE_COLUMNS)
+        if dataset.kind == "order_cancel_expand":
+            from common.public_data.extract_order_line import _ORDER_CANCEL_COLUMNS
+            allowed |= set(_ORDER_CANCEL_COLUMNS)
         if dataset.kind in ("stockout_line_expand", "refund_line_expand"):
             from common.public_data.extract_stock_flow import dataset_columns
             allowed |= set(dataset_columns(dataset))
@@ -673,23 +680,27 @@ class MartExtractRepository:
 def _projector_for_kind(kind):
     """按 kind 惰性解析投影器，避免 extract_mart 与投影模块的硬依赖。"""
 
-    if kind in ("snapshot", "melt_store_funds"):
+    if kind in ("snapshot", "melt_store_funds", "melt_store_expense"):
         from common.public_data.extract_finance import (
             project_snapshot,
+            project_store_expense_melt,
             project_store_funds_melt,
         )
         return {
             "snapshot": project_snapshot,
             "melt_store_funds": project_store_funds_melt,
+            "melt_store_expense": project_store_expense_melt,
         }[kind]
-    if kind in ("dim_mirror", "order_line_expand"):
+    if kind in ("dim_mirror", "order_line_expand", "order_cancel_expand"):
         from common.public_data.extract_order_line import (
             project_dim_product_mirror,
+            project_order_cancels,
             project_order_lines,
         )
         return {
             "dim_mirror": project_dim_product_mirror,
             "order_line_expand": project_order_lines,
+            "order_cancel_expand": project_order_cancels,
         }[kind]
     if kind in ("stockout_line_expand", "refund_line_expand"):
         from common.public_data.extract_stock_flow import (
