@@ -143,13 +143,13 @@ class TestCalendarSource(unittest.TestCase):
     def test_explicit_local_source(self):
         self.assertIsInstance(calendar_source(self._cfg(source=SOURCE_LOCAL)), LocalRestDays)
 
-    def test_yonyou_tplus_is_placeholder_and_fails_loudly(self):
+    def test_yonyou_tplus_missing_credentials_fail_loudly(self):
         src = calendar_source(self._cfg(source=SOURCE_YONYOU_TP, yonyouTplus={"baseUrl": ""}))
         self.assertIsInstance(src, YonyouTplusSchedule)
         self.assertEqual(src.name, SOURCE_YONYOU_TP)
         with self.assertRaises(CalendarSourceUnavailable) as ctx:
             src.load(2026, 9)
-        self.assertIn("用友 T+", str(ctx.exception))
+        self.assertIn("凭据未就绪", str(ctx.exception))
 
     def test_unknown_source_raises(self):
         with self.assertRaises(CalendarError) as ctx:
@@ -169,8 +169,10 @@ class TestCalendarFromConfig(unittest.TestCase):
         self.assertEqual(cal.workdays()[0], 1)
 
     def test_yonyou_tplus_source_fails_loudly(self):
-        with self.assertRaises(CalendarSourceUnavailable):
+        """未配置 yonyouTplus 段时明确失败（缺全部凭据），不静默降级。"""
+        with self.assertRaises(CalendarSourceUnavailable) as ctx:
             Calendar.from_config({"month": 9, "source": "yonyou_tplus", "restDays": []})
+        self.assertIn("凭据未就绪", str(ctx.exception))
 
     def test_example_config_rule_is_consistent(self):
         """模板里的 rule 与 restDays 必须自洽，防止换月时漏改一半。"""
@@ -183,6 +185,94 @@ class TestCalendarFromConfig(unittest.TestCase):
         self.assertEqual(cfg.get("source"), SOURCE_LOCAL)
         cal = Calendar.from_config(cfg, now=datetime(2026, 9, 11))
         self.assertEqual(cal.total, 24)
+
+
+class TestYonyouTplusScheduleFramework(unittest.TestCase):
+    """T+ 排班源框架：凭据校验 / token 复用 / 按月缓存 / 失败回退+告警。
+
+    endpoint、签名、报文解析为待实测钉死点，这里只钉结构行为。
+    """
+
+    TP_CFG = {"baseUrl": "https://tplus.example.com", "appKey": "ak",
+              "appSecret": "sk", "tenantId": "t1", "schemeId": "sch1"}
+
+    def _transport(self, routes, calls):
+        def transport(method, url, headers=None, payload=None, timeout=10):
+            calls.append((method, url, payload))
+            for suffix, response in routes.items():
+                if url.endswith(suffix):
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
+            raise AssertionError(f"未 mock 的 URL: {url}")
+        return transport
+
+    def _source(self, routes, *, fallback_cfg=None, alarms=None):
+        calls = []
+        src = YonyouTplusSchedule(
+            self.TP_CFG,
+            fallback_cfg=fallback_cfg,
+            transport=self._transport(routes, calls),
+            alarm=(alarms.append if alarms is not None else None),
+        )
+        return src, calls
+
+    def test_load_success_and_caches_by_month(self):
+        src, calls = self._source({
+            "/auth/getAppToken": {"access_token": "tok-1"},
+            "/tplus/api/v1/schedule/query": {"days": [
+                {"date": "2026-09-06", "isRest": True},
+                {"date": "2026-09-05", "isRest": False},
+                {"date": "2026-10-01", "isRest": True},  # 跨月忽略
+            ]},
+        })
+        self.assertEqual(src.load(2026, 9), [6])
+        self.assertEqual(src.load(2026, 9), [6])  # 第二次走缓存
+        schedule_calls = [c for c in calls if c[1].endswith("/schedule/query")]
+        self.assertEqual(len(schedule_calls), 1)
+
+    def test_token_reused_across_months(self):
+        src, calls = self._source({
+            "/auth/getAppToken": {"access_token": "tok-1"},
+            "/tplus/api/v1/schedule/query": {"days": []},
+        })
+        src.load(2026, 9)
+        src.load(2026, 10)
+        token_calls = [c for c in calls if c[1].endswith("/auth/getAppToken")]
+        self.assertEqual(len(token_calls), 1)
+
+    def test_fetch_failure_falls_back_to_local_with_alarm(self):
+        alarms = []
+        src, _ = self._source(
+            {"/auth/getAppToken": ConnectionError("T+ 不可达")},
+            fallback_cfg={"restDays": [6, 13, 19]},
+            alarms=alarms,
+        )
+        self.assertEqual(src.load(2026, 9), [6, 13, 19])
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("回退 local restDays", alarms[0])
+
+    def test_fetch_failure_without_fallback_fails_loudly(self):
+        src, _ = self._source({"/auth/getAppToken": ConnectionError("T+ 不可达")})
+        with self.assertRaises(CalendarSourceUnavailable) as ctx:
+            src.load(2026, 9)
+        self.assertIn("无 local restDays 可回退", str(ctx.exception))
+
+    def test_partial_credentials_report_missing_keys(self):
+        src = YonyouTplusSchedule({"baseUrl": "https://x", "appKey": "ak"})
+        with self.assertRaises(CalendarSourceUnavailable) as ctx:
+            src.load(2026, 9)
+        message = str(ctx.exception)
+        self.assertIn("appSecret", message)
+        self.assertIn("tenantId", message)
+        self.assertIn("schemeId", message)
+        self.assertNotIn("baseUrl", message.split("缺", 1)[1])
+
+    def test_token_response_missing_token_fails_loudly(self):
+        src, _ = self._source({"/auth/getAppToken": {"unexpected": True}})
+        with self.assertRaises(CalendarSourceUnavailable) as ctx:
+            src.load(2026, 9)
+        self.assertIn("access_token", str(ctx.exception))
 
 
 class TestMonthDays(unittest.TestCase):
