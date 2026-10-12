@@ -240,6 +240,15 @@ function pipelineAction(sel) {
   }
 }
 /* ---- 改定时时间（2026-10-12：时 0-23 + 分 00/30 两维下拉，不手写 cron）- */
+let _scheduleEditRaw = '';
+/* 只换 cron 的分/时两段，保留日/月/周（与后端 /api/pipelines/update 同规则）。 */
+function rewriteCronTime(cron, hour, minute) {
+  const parts = (cron || '').trim().split(/\\s+/);
+  if (parts.length === 5) {
+    return minute + ' ' + hour + ' ' + parts[2] + ' ' + parts[3] + ' ' + parts[4];
+  }
+  return minute + ' ' + hour + ' * * *';
+}
 function openScheduleEdit(sid, cron) {
   const parts = (cron || '').trim().split(/\\s+/);
   let hour = 18, minute = 0;
@@ -249,11 +258,25 @@ function openScheduleEdit(sid, cron) {
   }
   if (!(hour >= 0 && hour <= 23)) hour = 18;
   if (minute !== 30) minute = 0;
+  _scheduleEditRaw = cron || '';
   document.getElementById('schedule-edit-service').textContent = sid;
-  document.getElementById('schedule-edit-cron').textContent = cron || '常驻';
+  /* 规则一并显示（中文为主），与列表「定时规则」列同口径，消除信息割裂。 */
+  document.getElementById('schedule-edit-rule').textContent =
+    cronZh(cron) || (cron || '常驻');
+  document.getElementById('schedule-edit-cron').textContent = cron || '—';
   document.getElementById('schedule-edit-hour').value = String(hour);
   document.getElementById('schedule-edit-minute').value = String(minute);
+  updateScheduleEditPreview();
   document.getElementById('schedule-mask').style.display = 'flex';
+}
+function updateScheduleEditPreview() {
+  const hour = parseInt(document.getElementById('schedule-edit-hour').value, 10);
+  const minute = parseInt(document.getElementById('schedule-edit-minute').value, 10);
+  const next = rewriteCronTime(_scheduleEditRaw, hour, minute);
+  const el = document.getElementById('schedule-edit-preview');
+  if (!el) return;
+  const zh = cronZh(next);
+  el.textContent = (zh ? '将改为：' + zh : '将改为') + '（' + next + '）';
 }
 function closeScheduleEdit() {
   document.getElementById('schedule-mask').style.display = 'none';
@@ -1710,25 +1733,32 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<button onclick=\"closeConfirm()\">取消</button>"
             "</div></div></div>"
         )
-        # 改定时时间弹窗（2026-10-12）：时 0-23 + 分 00/30，两维下拉选取。
+        # 改定时时间弹窗（2026-10-12）：把「定时规则」与「改时间」收在一处——
+        # 顶部显示当前规则（中文+原表达式），下方选时刻并实时预览改后规则，
+        # 避免「定时规则」列与时间编辑各说一半（用户 2026-10-12 反馈逻辑重叠）。
         schedule_mask = (
             "<div id=\"schedule-mask\" class=\"modal-mask\">"
             "<div class=\"modal-box\">"
             "修改 <b id=\"schedule-edit-service\"></b> 的定时时间"
-            "<div class=\"hint\">当前：<span id=\"schedule-edit-cron\"></span>"
-            "（只改时刻，保留工作日/每月几号等形态）</div>"
+            "<div>当前定时规则：<span id=\"schedule-edit-rule\"></span></div>"
+            "<div class=\"hint\">原表达式：<span id=\"schedule-edit-cron\"></span>"
+            "（只改时刻，工作日/每月几号等形态保留）</div>"
             "<div class=\"modal-btns\">"
-            "<select id=\"schedule-edit-hour\">"
+            "<select id=\"schedule-edit-hour\" "
+            "onchange=\"updateScheduleEditPreview()\">"
             + "".join(
                 f"<option value=\"{h}\">{h:02d}</option>" for h in range(24)
             )
             + "</select><span class=\"hint\">时</span>"
-            "<select id=\"schedule-edit-minute\">"
+            "<select id=\"schedule-edit-minute\" "
+            "onchange=\"updateScheduleEditPreview()\">"
             "<option value=\"0\">00</option><option value=\"30\">30</option>"
             "</select><span class=\"hint\">分</span>"
             "<button onclick=\"submitScheduleEdit()\">确定</button>"
             "<button onclick=\"closeScheduleEdit()\">取消</button>"
-            "</div></div></div>"
+            "</div>"
+            "<div class=\"hint\" id=\"schedule-edit-preview\"></div>"
+            "</div></div>"
         )
         table = ["<h1>定时任务（管道注册表）</h1>" + tabs]
         if view == "group":

@@ -432,6 +432,12 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn('id="schedule-mask"', body)     # 改定时时间弹窗挂载点
         self.assertIn('id="schedule-edit-hour"', body)
         self.assertIn('id="schedule-edit-minute"', body)
+        # 弹窗内一并显示「定时规则」并实时预览改后结果（消除与规则列的信息割裂）
+        self.assertIn("当前定时规则", body)
+        self.assertIn('id="schedule-edit-rule"', body)
+        self.assertIn('id="schedule-edit-preview"', body)
+        self.assertIn("function rewriteCronTime", body)
+        self.assertIn("function updateScheduleEditPreview", body)
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
