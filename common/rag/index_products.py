@@ -142,6 +142,13 @@ def main(argv=None):
     parser.add_argument("--confirm-local-test-write", action="store_true")
     args = parser.parse_args(argv)
 
+    # fail-soft：key 未配置不算故障（灰度期 seed enabled 但 env 未发 key 时
+    # 每小时静默跳过，不刷失败告警）；key 到位即自动生效。
+    jina_key = os.environ.get("JINA_API_KEY")
+    if not jina_key:
+        print("service=rag-index-products status=skipped reason=no_jina_key")
+        return
+
     from common.dingtalk.client import DingTalkClient
     from common.public_data.live_safety import require_live_run
     from common.public_data.settings import Settings
@@ -164,7 +171,7 @@ def main(argv=None):
 
     stats = run_index(
         client=client, milvus=milvus, store=store,
-        jina_key=os.environ["JINA_API_KEY"],
+        jina_key=jina_key,
         base_id=os.environ["KB_PRODUCTS_BASE_ID"],
         sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
         dim=dim, model=model,
