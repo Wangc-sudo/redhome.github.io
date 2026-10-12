@@ -2,6 +2,7 @@
 """common.rag 单元测试：embed / llm / 索引管道 / 检索编排，外部 API 全部打桩。"""
 
 import base64
+import os
 import unittest
 from unittest import mock
 
@@ -236,6 +237,16 @@ class RunIndexTest(unittest.TestCase):
         self.assertEqual(stats["text"], 1)
         self.assertEqual(stats["image"], 0)
         self.assertEqual(stats["image_failed"], 2)
+
+    def test_main_skips_without_jina_key(self):
+        """缺 JINA_API_KEY 时静默跳过（不触发 live 门禁/外部调用）。"""
+        env = {k: v for k, v in os.environ.items() if k != "JINA_API_KEY"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("builtins.print") as out:
+            index_products.main([])
+        printed = " ".join(str(c.args[0]) for c in out.call_args_list)
+        self.assertIn("status=skipped", printed)
+        self.assertIn("reason=no_jina_key", printed)
 
 
 class QaTest(unittest.TestCase):
