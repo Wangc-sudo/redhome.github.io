@@ -425,8 +425,13 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("催办", body)              # 功能（robot- 家族归类）
         self.assertIn("操作…", body)             # 操作列改下拉
         self.assertIn('data-service="robot-hangzhou"', body)
+        self.assertIn('data-schedule="0 2 * * *"', body)   # 行内带原 cron 供改时刻
+        self.assertIn("改定时时间", body)        # 操作列新增「改定时时间」
         self.assertIn('id="confirm-mask"', body)     # 弹窗确认挂载点
         self.assertIn('id="confirm-text"', body)
+        self.assertIn('id="schedule-mask"', body)     # 改定时时间弹窗挂载点
+        self.assertIn('id="schedule-edit-hour"', body)
+        self.assertIn('id="schedule-edit-minute"', body)
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
@@ -676,7 +681,16 @@ class PipelinePageTests(unittest.TestCase):
         for preset in ('value="daily"', 'value="weekday"', 'value="weekly"',
                        'value="monthly"', 'value="hourly"', 'value="custom"'):
             self.assertIn(preset, body)
-        self.assertIn('name="schedule_time" type="time"', body)
+        # 时点选择拆为「时(0-23)」「分(00/30)」两维下拉（2026-10-12 裁决）：
+        # 运维只选时刻，不手写也不再用原生 time 控件。
+        self.assertIn('name="schedule_hour"', body)
+        self.assertIn('name="schedule_minute"', body)
+        self.assertNotIn('name="schedule_time"', body)
+        self.assertNotIn('type="time"', body)
+        for hour in range(24):
+            self.assertIn(f'<option value="{hour}"', body)
+        self.assertIn('<option value="0">00</option>', body)
+        self.assertIn('<option value="30">30</option>', body)
         self.assertIn('name="schedule_dow"', body)     # 每周（默认隐藏）
         self.assertIn('name="schedule_dom"', body)     # 每月（默认隐藏）
         self.assertIn('name="schedule"', body)         # 自定义 cron（默认隐藏）
@@ -708,7 +722,11 @@ class PipelinePageTests(unittest.TestCase):
 
     def test_pipeline_audit_page_renders_entries(self):
         store = _PipelineStore()
-        store.audit_rows = [("admin", "add", "robot-x", "0 2 * * *", "2026-09-30 10:00:00")]
+        store.audit_rows = [
+            ("admin", "add", "robot-x", "0 2 * * *", "2026-09-30 10:00:00"),
+            ("admin", "schedule", "robot-hangzhou", "30 20 * * 1-5",
+             "2026-10-12 10:00:00"),
+        ]
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_audit_rows():
@@ -716,6 +734,8 @@ class PipelinePageTests(unittest.TestCase):
 
         self.assertIn("robot-x", body)
         self.assertIn("新增", body)  # action=add 中文化
+        self.assertIn("改定时", body)  # action=schedule 中文化
+        self.assertIn("30 20 * * 1-5", body)
 
     def test_pipeline_audit_page_has_cross_links(self):
         """G2（2026-10-12 断点报告）：审计分散四页，任务审计页给交叉索引。"""
@@ -983,6 +1003,143 @@ class PipelineAddTests(unittest.TestCase):
             400, client.post("/api/pipelines/add",
                              json={"service_id": "robot-hangzhou", "kind": "apps",
                                    "schedule": "0 2 * * *"}).status_code
+        )
+
+
+class _BrokenConfigSource:
+    """config_source 替身：读注册表即抛（模拟 Nacos 读取故障）。"""
+
+    def get_pipeline(self, service_id):
+        raise RuntimeError("registry down")
+
+
+class PipelineScheduleUpdateTests(unittest.TestCase):
+    """改定时时间（2026-10-12）：read-modify-write，只换 cron 分/时两段。
+
+    运维只选「时(0-23)」「分(00/30)」两维；日/月/周形态（工作日、每月 N
+    日）必须保留，且发布用原配置 replace（不得丢 sources/reads）。
+    """
+
+    def _client(self, *, configs=None, publisher=None, config_source=None,
+                fleet=("robot-hangzhou",), login=True):
+        app = create_app(
+            settings=_fake_settings(),
+            session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(_admin_viewer()),
+            fleet_source=lambda: fleet,
+            config_source=(config_source if config_source is not None
+                           else StaticConfigSource(
+                               configs or {"robot-hangzhou":
+                                           {"schedule": "0 18 * * 1-5"}})),
+            config_publisher=publisher,
+        )
+        client = TestClient(app)
+        if login:
+            _login(client)
+        return client
+
+    def test_update_rewrites_time_and_preserves_weekday(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = self._client(publisher=publisher)
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/update",
+                json={"service_id": "robot-hangzhou", "hour": 20, "minute": 30},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("30 20 * * 1-5", response.json()["schedule"])
+        self.assertEqual("30 20 * * 1-5", publisher.published[0].schedule)
+        self.assertEqual(True, publisher.published[0].enabled)
+        self.assertEqual(
+            [(ADMIN_USERID, "schedule", "robot-hangzhou", "30 20 * * 1-5")],
+            store.audit,
+        )
+
+    def test_update_falls_back_to_daily_for_non_cron_schedule(self):
+        publisher = _RecordingPublisher()
+        client = self._client(
+            configs={"robot-hangzhou": {"schedule": None, "enabled": True}},
+            publisher=publisher,
+        )
+        response = client.post(
+            "/api/pipelines/update",
+            json={"service_id": "robot-hangzhou", "hour": 7, "minute": 0},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("0 7 * * *", response.json()["schedule"])
+        self.assertEqual("0 7 * * *", publisher.published[0].schedule)
+
+    def test_update_preserves_sources_and_reads(self):
+        publisher = _RecordingPublisher()
+        client = self._client(
+            configs={"robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True,
+                                        "sources": ["dingtalk"],
+                                        "reads": ["dim_x"]}},
+            publisher=publisher,
+        )
+        response = client.post(
+            "/api/pipelines/update",
+            json={"service_id": "robot-hangzhou", "hour": 9, "minute": 30},
+        )
+
+        self.assertEqual(200, response.status_code)
+        published = publisher.published[0]
+        self.assertEqual(("dingtalk",), published.sources)
+        self.assertEqual(("dim_x",), published.reads)
+        self.assertEqual("30 9 * * *", published.schedule)
+
+    def test_update_rejects_bad_payload_and_unknown_service(self):
+        client = self._client(publisher=_RecordingPublisher())
+        for payload in (
+            {"service_id": "BAD ID", "hour": 1, "minute": 0},          # 非法 id
+            {"service_id": "nope", "hour": 1, "minute": 0},            # 不在舰队
+            {"service_id": "robot-hangzhou", "hour": 24, "minute": 0},  # 时越界
+            {"service_id": "robot-hangzhou", "hour": -1, "minute": 0},
+            {"service_id": "robot-hangzhou", "hour": 1, "minute": 15},  # 分非 00/30
+            {"service_id": "robot-hangzhou", "hour": "1", "minute": 0},  # 非 int
+            {"service_id": "robot-hangzhou", "hour": True, "minute": 0},  # bool
+        ):
+            self.assertEqual(
+                400, client.post("/api/pipelines/update", json=payload).status_code,
+                payload,
+            )
+
+    def test_update_requires_admin(self):
+        client = self._client(publisher=_RecordingPublisher(), login=False)
+        self.assertEqual(
+            401, client.post("/api/pipelines/update",
+                             json={"service_id": "robot-hangzhou",
+                                   "hour": 1, "minute": 0}).status_code
+        )
+
+    def test_update_503_when_no_publisher(self):
+        client = self._client(publisher=None)
+        self.assertEqual(
+            503, client.post("/api/pipelines/update",
+                             json={"service_id": "robot-hangzhou",
+                                   "hour": 1, "minute": 0}).status_code
+        )
+
+    def test_update_503_when_read_or_publish_fails(self):
+        # 读注册表失败
+        read_fail = self._client(config_source=_BrokenConfigSource(),
+                                 publisher=_RecordingPublisher())
+        self.assertEqual(
+            503, read_fail.post("/api/pipelines/update",
+                                json={"service_id": "robot-hangzhou",
+                                      "hour": 1, "minute": 0}).status_code
+        )
+        # 发布失败
+        publish_fail = self._client(
+            publisher=_RecordingPublisher(error=RuntimeError("publish down")))
+        self.assertEqual(
+            503, publish_fail.post("/api/pipelines/update",
+                                   json={"service_id": "robot-hangzhou",
+                                         "hour": 1, "minute": 0}).status_code
         )
 
 
