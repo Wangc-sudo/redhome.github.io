@@ -14,7 +14,7 @@ import re
 import unittest
 import warnings
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest import mock
 
@@ -2374,6 +2374,28 @@ class RecipientOverrideApiTests(unittest.TestCase):
         self.assertEqual(rows, response.json()["overrides"])
         self.assertEqual(400, self._client().get(
             "/api/pipelines/recipient-override").status_code)
+
+    def test_get_serializes_datetime_updated_at(self):
+        """线上实测：updated_at 为 datetime 时 JSONResponse 序列化失败 → 500，
+        抽屉显示「读取异常，请稍后重试」。出口须归一为字符串（2026-10-12
+        hotfix，方案 A P0）。"""
+        rows = [{
+            "id": 7, "service_id": "robot-hangzhou", "mode": "exclude",
+            "target_type": "name", "target_value": "李四",
+            "resolved_user_id": None, "enabled": 1, "note": None,
+            "updated_by": "ops",
+            "updated_at": datetime(2026, 10, 12, 8, 30, 0),
+        }]
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: list(rows)):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        overrides = response.json()["overrides"]
+        self.assertEqual(1, len(overrides))
+        self.assertIsInstance(overrides[0]["updated_at"], str)
+        self.assertEqual("李四", overrides[0]["target_value"])
 
     def test_add_resolves_snapshot_and_reports_unresolved(self):
         seen = {}
