@@ -406,7 +406,8 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_recent():
-            body = client.get("/pipelines").text
+            # 功能视角（含「管理群」列）现由 ?view=class 承载。
+            body = client.get("/pipelines", params={"view": "class"}).text
 
         self.assertIn("robot-hangzhou", body)    # 原始 id 小字备查
         self.assertIn("杭州", body)              # 服务中文名（区域中文化）
@@ -443,7 +444,7 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
         _login(client)
-        body = client.get("/pipelines").text
+        body = client.get("/pipelines", params={"view": "class"}).text
 
         order = ("<h2>催办</h2>", "<h2>播报</h2>", "<h2>页面</h2>",
                  "<h2>同步</h2>", "<h2>加工</h2>", "<h2>钉钉</h2>",
@@ -484,7 +485,7 @@ class PipelinePageTests(unittest.TestCase):
             viewer=_admin_viewer(), fleet=fleet,
         ))
         _login(client)
-        body = client.get("/pipelines").text
+        body = client.get("/pipelines", params={"view": "class"}).text
 
         self.assertIn("「杭州」群", body)
         self.assertEqual(2, body.count("「渠道」群"))  # 两条渠道线各自映射
@@ -494,6 +495,69 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("同步", body)                    # sync-wdt
         self.assertIn("钉钉", body)                    # dingtalk-gateway
         self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
+
+    def test_pipelines_page_view_tabs_default_group(self):
+        """双视角 tab（2026-10-12）：默认「按管理群」，两链接常驻。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines").text            # 不带 view → 默认群视角
+
+        self.assertIn("按管理群", body)
+        self.assertIn("按功能类别", body)
+        self.assertIn('href="/pipelines?view=group"', body)
+        self.assertIn('href="/pipelines?view=class"', body)
+        # 默认高亮群视角
+        self.assertIn('class="active" href="/pipelines?view=group"', body)
+        # 群视角：分组头 + 项数；不再是功能分表
+        self.assertIn("「杭州」群（1 项）", body)
+        self.assertNotIn("<h2>催办</h2>", body)
+
+    def test_pipelines_page_group_view_places_platform_last_keeps_rows(self):
+        """群视角：按区域分组、平台/无群恒置末位、任一行不丢。"""
+        fleet = (
+            "robot-hangzhou",        # 「杭州」群
+            "channel-missing-check",  # 「渠道」群（跨区域线单独成组）
+            "sync-wdt",               # 平台 / 无群
+            "dingtalk-gateway",       # 平台 / 无群
+        )
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("「杭州」群（1 项）", body)
+        self.assertIn("「渠道」群（1 项）", body)
+        self.assertIn("平台 / 无群（2 项）", body)
+        # 顺序：区域组在前，平台/无群收尾
+        self.assertLess(body.index("「杭州」群（1 项）"),
+                        body.index("「渠道」群（1 项）"))
+        self.assertLess(body.index("「渠道」群（1 项）"),
+                        body.index("平台 / 无群（2 项）"))
+        # 每行都在（不得因分组丢行）
+        for sid in fleet:
+            self.assertIn(sid, body)
+        # 群视角行内不再重复「管理群」列
+        self.assertNotIn("<th>管理群</th>", body)
+
+    def test_pipelines_page_class_view_keeps_category_tables(self):
+        """?view=class 保留原「按功能类别」三/多分表与「管理群」列。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines", params={"view": "class"}).text
+
+        self.assertIn("<h2>催办</h2>", body)
+        self.assertIn("<th>管理群</th>", body)
+        self.assertIn("「杭州」群", body)
+        self.assertIn('class="active" href="/pipelines?view=class"', body)
+        self.assertNotIn("平台 / 无群", body)
+
+    def test_pipelines_page_unknown_view_falls_back_to_group(self):
+        """非法 view → 回退默认群视角（不报错、不空页）。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines", params={"view": "bogus"}).text
+
+        self.assertIn("「杭州」群（1 项）", body)
+        self.assertIn("robot-hangzhou", body)
 
     def test_pipelines_page_reminder_targets(self):
         """收受影响人列：robot=名册在册人员（绑定）；渠道到齐=名册店铺负责人。"""
@@ -581,7 +645,7 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(app)
         _login(client)
-        body = client.get("/pipelines").text
+        body = client.get("/pipelines", params={"view": "class"}).text
 
         urge_i = body.index("<h2>催办</h2>")
         bcast_i = body.index("<h2>播报</h2>")
