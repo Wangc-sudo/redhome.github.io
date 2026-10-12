@@ -146,6 +146,15 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
+    # RAG 向量索引（2026-10-12 第一期，商品+图片跨模态）：AI 表「产品资料」→
+    # jina-clip-v2 embed → Milvus Lite；数据层幂等（id 先 delete 后 insert）。
+    "rag-index-products": {
+        "argv": [
+            "common.rag.index_products",
+            "--live-read",
+            "--confirm-local-test-write",
+        ],
+    },
     "roll-manifest": {
         "argv": [
             "common.public_data.cli", "roll-manifest",

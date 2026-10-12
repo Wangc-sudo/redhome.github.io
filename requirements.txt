@@ -14,3 +14,7 @@ redis==5.2.1
 openpyxl==3.1.5
 # scheduler 服务的 cron 表达式解析（仅 common/public_data/scheduler.py 使用）。
 croniter==3.0.4
+# RAG 向量检索（common/rag/）：Milvus Lite 嵌入式向量库，版本以 dops-ci
+# 实测冒烟（2026-10-12）为准；embedding 走 jina API 无需本地推理依赖。
+pymilvus==3.0.2
+milvus-lite==3.2.1
