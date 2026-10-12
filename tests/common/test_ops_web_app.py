@@ -653,6 +653,23 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("robot-x", body)
         self.assertIn("新增", body)  # action=add 中文化
 
+    def test_pipeline_audit_page_has_cross_links(self):
+        """G2（2026-10-12 断点报告）：审计分散四页，任务审计页给交叉索引。"""
+        store = _PipelineStore()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_audit_rows():
+            body = client.get("/pipelines/audit").text
+
+        self.assertIn('href="/roster"', body)     # 名册变更流水
+        self.assertIn('href="/audit"', body)      # 授权审计
+        self.assertIn('href="/calendar"', body)   # 日历改判流水
+
+    def test_action_label_covers_target(self):
+        """G1：名册月目标保存动作中文化（原回退英文原文 target）。"""
+        from common.ops_web.app import _ACTION_LABEL, _label
+        self.assertEqual("月目标", _label(_ACTION_LABEL, "target"))
+
     def test_pipeline_history_page_renders_entries(self):
         store = _PipelineStore()
         store.history_rows = [
@@ -1619,6 +1636,17 @@ class MembersPageTests(unittest.TestCase):
 
         self.assertEqual(503, response.status_code)
         self.assertNotIn("down", response.text)
+
+    def test_grant_form_explains_two_systems_and_roster_scope(self):
+        """G3/G6/G4（2026-10-12 断点报告）：授权页显性化两套体系 +
+        scope=roster 引导（治引导死锁）+ 生效延迟提示。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/").text
+
+        self.assertIn("互不影响", body)          # 两套体系说明（G3）
+        self.assertIn("对象填 roster", body)     # 名册管理权引导（G6）
+        self.assertIn("约 1 分钟内生效", body)   # ViewerResolver 60s TTL（G4）
 
 
 class GrantWriteApiTests(unittest.TestCase):

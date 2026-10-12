@@ -464,6 +464,7 @@ _ACTION_LABEL = {
     "update": "修正", "carry": "结转",
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
+    "target": "月目标",
 }
 
 #: 名册 scope / entity_type 中文标签（填报名册页分组与表单）。
@@ -1150,6 +1151,12 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<input name=\"grant_key\" placeholder=\"如 fin / hangzhou\" required>"
             "<input name=\"note\" placeholder=\"备注\">"
             "<button type=\"submit\">授权</button></form>"
+            # G3/G6/G4（2026-10-12 断点报告）：两套体系显性化 + scope=roster
+            # 引导（原说明只写在需授权才能看到的名册页，引导死锁）+ 生效延迟。
+            "<p class=\"hint\">本页授权管 BI 看板与本中心的访问权、以及名册"
+            "管理权（类型选 scope、对象填 roster）；「谁能填报/被催办」由"
+            "「填报名册」页维护，与这里互不影响——机器人门禁实时读名册，"
+            "名册改完即时生效。本页授权约 1 分钟内生效。</p>"
             "<h2>按区域一键开通</h2>"
             "<form class=\"inline\" onsubmit=\"grantRegion(event)\">"
             f"<select name=\"region\">{region_options}</select>"
@@ -1548,7 +1555,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<th>服务标识</th><th>详情</th></tr>"
             + "".join(rows) + "</table>"
             "<p class=\"hint\">本表只记注册表变更（开关/新增）；每次实际"
-            "运行（定时与「立即运行一次」）见「执行流水」页。</p>"
+            "运行（定时与「立即运行一次」见「执行流水」页）。"
+            # G2（2026-10-12 断点报告）：审计分散四页的交叉索引，防误判漏审。
+            "其他审计：<a href=\"/roster\">填报名册</a>页底=名册变更流水、"
+            "<a href=\"/audit\">授权审计</a>=成员授权变更、"
+            "<a href=\"/calendar\">工作日历</a>页底=日历改判流水。</p>"
         )
         return HTMLResponse(_page("任务审计", table,
                                   viewer_name=viewer.name or viewer.userid))
