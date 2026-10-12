@@ -757,6 +757,39 @@ _ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
 #: grant_type=scope、grant_key=roster；admin 隐式持有）。
 ROSTER_MANAGE_SCOPE = "roster"
 
+#: 「口径收口」（P5，2026-10-12，设计稿 §3）：名册 / 覆盖 / 授权三条边界裁决
+#: 的唯一权威表述，只在「收件人总览」页完整渲染一次；其余三页统一引用
+#: :data:`_RECIPIENT_RULES_LINK` 指针，避免同一套话散落多页各说各话。
+_RECIPIENT_RULES_HTML = (
+    "<details><summary>口径说明：名册 / 覆盖 / 授权各管什么"
+    "（点开看三层边界）</summary>"
+    "<p class=\"hint\">有效 @ 名单 =（在职成员 ∩ 名册）∪ 任务级覆盖 − 移除。"
+    "三层各管一件事，互不越界：</p>"
+    "<table>"
+    "<tr><th>层</th><th>管什么</th><th>粒度</th><th>波及面</th><th>去哪改</th></tr>"
+    "<tr><td>名册</td><td>业务资格（谁有资格填报·被催）</td>"
+    "<td>scope（区域/渠道）</td><td>该范围<b>所有</b>任务</td>"
+    "<td><a href=\"/roster\">填报名册</a></td></tr>"
+    "<tr><td>覆盖</td><td>单条任务的 @ 名单（include/exclude）</td>"
+    "<td>service_id（单条线）</td>"
+    "<td><b>仅</b>该条任务；不改正文、不改资格</td>"
+    "<td><a href=\"/pipelines\">定时任务页</a>抽屉</td></tr>"
+    "<tr><td>授权</td><td>系统访问权（看板 / 区域 / 名册管理权）</td>"
+    "<td>看板 / 区域 / roster</td>"
+    "<td>与「谁能被催办」<b>无关</b>，约 1 分钟生效</td>"
+    "<td><a href=\"/grants\">授权现状</a></td></tr>"
+    "</table>"
+    "<p class=\"hint\">一句话：名册定「资格」，成员定「在职」，"
+    "覆盖定「这条线的例外」。</p>"
+    "</details>"
+)
+
+#: 三页（成员与授权 / 填报名册 / 授权现状）共用的口径指针，逐字一致。
+_RECIPIENT_RULES_LINK = (
+    "<p class=\"hint\">名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）"
+    "——完整口径见「<a href=\"/recipients\">收件人总览</a>」。</p>"
+)
+
 
 def _label(mapping, value):
     """注册值 → 中文标签；未注册的原样返回（渲染处仍过 _esc）。"""
@@ -1839,10 +1872,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<button type=\"submit\">授权</button></form>"
             # G3/G6/G4（2026-10-12 断点报告）：两套体系显性化 + scope=roster
             # 引导（原说明只写在需授权才能看到的名册页，引导死锁）+ 生效延迟。
+            # P5（口径收口，设计稿 §3）：边界说明统一到「收件人总览」，本页只
+            # 保留可操作的授权指引，口径指针见页首 _RECIPIENT_RULES_LINK。
             "<p class=\"hint\">本页授权管 BI 看板与本中心的访问权、以及名册"
-            "管理权（类型选「看板页面」、对象填 roster（名册管理））；「谁能填报/被催办」由"
-            "「填报名册」页维护，与这里互不影响——机器人门禁实时读名册，"
-            "名册改完即时生效。本页授权约 1 分钟内生效。</p>"
+            "管理权（类型选「看板页面」、对象填 roster（名册管理））；"
+            "本页授权约 1 分钟内生效。</p>"
             "<h2>按区域一键开通</h2>"
             "<form class=\"inline\" onsubmit=\"grantRegion(event)\">"
             f"<select name=\"region\">{region_options}</select>"
@@ -1855,7 +1889,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<table><tr><th>账号</th><th>姓名</th><th>区域</th><th>部门</th></tr>"
             f"{rows}</table>"
         )
-        return HTMLResponse(_page("成员与授权", table, grant_form,
+        return HTMLResponse(_page("成员与授权", table, _RECIPIENT_RULES_LINK,
+                                  grant_form,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.get("/grants")
@@ -1887,7 +1922,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
         table = (
             "<h1>授权现状</h1>"
-            "<table><tr><th>账号</th><th>类型</th><th>对象</th><th>备注</th>"
+            + _RECIPIENT_RULES_LINK
+            + "<table><tr><th>账号</th><th>类型</th><th>对象</th><th>备注</th>"
             "<th>最后操作人</th><th>更新时间</th><th></th></tr>"
             + "".join(rows) + "</table>"
         )
@@ -2742,6 +2778,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             + "<span class=\"hint\">（每月 1 日 06:00 上月目标自动结转到当月，"
               "人工已录入的不覆盖；渠道门店目标不带月份，常年有效）</span></p>"
         )
+        # 口径收口（P5）：名册页给一条与成员/授权页逐字一致的口径指针。
+        sections.append(_RECIPIENT_RULES_LINK)
         # 名册页反向索引（P3，2026-10-12）：scope → 被该范围名册催办的任务。
         # 舰队清单是附属信息：读取故障只省略该行，不影响名册管理主功能
         # （与定时任务页「收受影响人」列同款 fail-soft）。
@@ -2978,9 +3016,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                             type(exc).__name__)
         sections = [
             "<h1>收件人总览（谁会被催办）</h1>",
-            "<p class=\"hint\">有效 @ 名单 =（在职成员 ∩ 名册）∪ 任务级覆盖 "
-            "− 移除。本页只读、为展示口径；改名单请到「填报名册」，或到定时"
-            "任务页对应任务的「收件人…」抽屉做单条微调。</p>",
+            # 口径收口（P5）：三条边界的唯一权威表述，全站只此一处完整渲染。
+            _RECIPIENT_RULES_HTML,
+            "<p class=\"hint\">本页只读、为展示口径：改名单请到「填报名册」，"
+            "或到定时任务页对应任务的「收件人…」抽屉做单条微调。</p>",
         ]
         for scope in report_roster.SCOPES:
             tasks = scope_tasks.get(scope) or []

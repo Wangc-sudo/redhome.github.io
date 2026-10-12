@@ -1519,6 +1519,54 @@ class RecipientsOverviewTests(unittest.TestCase):
         self.assertEqual(302, response.status_code)
 
 
+class RecipientRulesTests(unittest.TestCase):
+    """口径收口（P5，2026-10-12，设计稿 §3）：名册 / 覆盖 / 授权三条边界
+    只在「收件人总览」完整渲染一处；成员与授权 / 填报名册 / 授权现状三页
+    复用逐字一致的口径指针，避免同一套话散落多页各说各话。"""
+
+    _POINTER = "名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）"
+
+    def _admin_client(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        return client
+
+    def test_overview_renders_canonical_boundary_block(self):
+        body = self._admin_client().get("/recipients").text
+        self.assertIn("口径说明：名册 / 覆盖 / 授权各管什么", body)
+        self.assertIn("（在职成员 ∩ 名册）∪ 任务级覆盖 − 移除", body)
+        # 三条边界的关键裁决点都在权威区里（与设计稿 §3 逐条对应）
+        self.assertIn("业务资格", body)                 # 名册 = 资格
+        self.assertIn("scope（区域/渠道）", body)
+        self.assertIn("service_id（单条线）", body)      # 覆盖 = 单条任务
+        self.assertIn("不改正文、不改资格", body)
+        self.assertIn("与「谁能被催办」<b>无关</b>", body)  # 授权与催办无关
+        self.assertIn("名册定「资格」", body)
+        # 三个入口深链
+        self.assertIn('href="/roster"', body)
+        self.assertIn('href="/pipelines"', body)
+        self.assertIn('href="/grants"', body)
+
+    def test_three_pages_share_identical_pointer(self):
+        members = self._admin_client().get("/").text
+        grants = self._admin_client().get("/grants").text
+        store = _RosterStore()
+        client = self._admin_client()
+        with store.patch_fetch(), store.patch_audit():
+            roster = client.get("/roster").text
+        for page, body in (("成员与授权", members), ("授权现状", grants),
+                           ("填报名册", roster)):
+            with self.subTest(page=page):
+                self.assertIn(self._POINTER, body)
+                self.assertIn('href="/recipients"', body)
+
+    def test_members_page_drops_duplicated_boundary_wording(self):
+        """收口后成员与授权页不再重复边界解释：只留可操作指引 + 指针。"""
+        body = self._admin_client().get("/").text
+        self.assertIn("对象填 roster（名册管理）", body)   # 可操作指引保留
+        self.assertNotIn("与这里互不影响", body)           # 旧边界解释已移除
+
+
 class RosterApiTests(unittest.TestCase):
     def test_add_validates_and_upserts_with_actor(self):
         store = _RosterStore()
@@ -2086,12 +2134,17 @@ class MembersPageTests(unittest.TestCase):
 
     def test_grant_form_explains_two_systems_and_roster_scope(self):
         """G3/G6/G4（2026-10-12 断点报告）：授权页显性化两套体系 +
-        scope=roster 引导（治引导死锁）+ 生效延迟提示。"""
+        scope=roster 引导（治引导死锁）+ 生效延迟提示。
+        P5（2026-10-12，设计稿 §3）：两套体系的边界说明收口到「收件人总览」，
+        本页改为给一条逐字一致的口径指针（不再散落重复表述）。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         body = client.get("/").text
 
-        self.assertIn("互不影响", body)          # 两套体系说明（G3）
+        # 口径指针（名册/覆盖/授权各管什么 → 收件人总览）
+        self.assertIn("名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）",
+                      body)
+        self.assertIn('href="/recipients"', body)
         self.assertIn("对象填 roster", body)     # 名册管理权引导（G6）
         self.assertIn("约 1 分钟内生效", body)   # ViewerResolver 60s TTL（G4）
 
