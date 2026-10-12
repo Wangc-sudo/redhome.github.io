@@ -36,6 +36,8 @@ class _RouterCursor:
             self._rows = self._conn.member_rows
         elif "dim_report_roster" in sql:
             self._rows = self._conn.roster_rows
+        elif "dim_recipient_override" in sql:
+            self._rows = self._conn.recipient_rows
         else:
             self._rows = self._conn.fact_rows
 
@@ -47,11 +49,13 @@ class _RouterCursor:
 
 
 class _RouterConn:
-    def __init__(self, *, workdays=(), members=(), filled=(), roster=()):
+    def __init__(self, *, workdays=(), members=(), filled=(), roster=(),
+                 recipient=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.member_rows = list(members)
         self.fact_rows = [{"responsible_person": n} for n in filled]
         self.roster_rows = [{"person_name": n} for n in roster]
+        self.recipient_rows = list(recipient)
         self.queries = []
 
     def cursor(self):
@@ -396,6 +400,76 @@ class RunCheckTests(unittest.TestCase):
 
         self.assertEqual(outcome.status, "all_filled")
         outbox.enqueue.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 任务级收件人覆盖（dim_recipient_override，2026-10-12 方案 B）
+# ---------------------------------------------------------------------------
+
+class RecipientOverrideTests(unittest.TestCase):
+
+    def _outbox(self):
+        outbox = Mock()
+        outbox.enqueue.return_value = True
+        return outbox
+
+    def test_remind_include_appends_at_id(self):
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三"), ("u2", "李四")),
+            filled={"张三"},
+            recipient=[{"mode": "include", "target_type": "user_id",
+                        "target_value": "u9", "resolved_user_id": "u9"}],
+        )
+        outbox = self._outbox()
+
+        run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+        )
+
+        kwargs = outbox.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["at_user_ids"], ["u2", "u9"])
+        self.assertIn("**李四**", kwargs["body_md"])   # 正文不含被追加人
+
+    def test_remind_exclude_removes_by_name_but_keeps_body(self):
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三"), ("u2", "李四")),
+            filled=set(),
+            recipient=[{"mode": "exclude", "target_type": "name",
+                        "target_value": "李四"}],
+        )
+        outbox = self._outbox()
+
+        run_remind(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW,
+        )
+
+        kwargs = outbox.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["at_user_ids"], ["u1"])
+        self.assertIn("**张三、李四**", kwargs["body_md"])  # 正文不改
+
+    def test_check_override_applies_to_both_rows(self):
+        conn = _RouterConn(
+            workdays={_DAY},
+            members=_members(("u1", "张三")),
+            filled=set(),
+            recipient=[{"mode": "include", "target_type": "user_id",
+                        "target_value": "u9", "resolved_user_id": "u9"}],
+        )
+        outbox = self._outbox()
+
+        run_check(
+            conn, outbox, region="hangzhou", display="杭州", table_url=_URL,
+            business_date=_DAY, now=_NOW, cc_user_ids=("cc-1",),
+        )
+
+        calls = {call.kwargs["kind"]: call.kwargs
+                 for call in outbox.enqueue.call_args_list}
+        self.assertEqual(calls["check"]["at_user_ids"], ["u1", "cc-1", "u9"])
+        self.assertEqual(calls["ding"]["at_user_ids"], ["u1", "u9"])
 
 
 if __name__ == "__main__":

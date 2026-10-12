@@ -260,7 +260,7 @@ class BuildMessageTests(unittest.TestCase):
 
 def _make_conn(*, gate_hit=True, target_rows=(), recent_rows=(),
                daily_rows=(), union_rows=(), member_rows=(),
-               month_rows=(), union_column_ok=True):
+               month_rows=(), union_column_ok=True, recipient_overrides=()):
     def router(sql, params):
         if "sync_dataset_summary" in sql:
             return [{"hit": 1}] if gate_hit else []
@@ -272,6 +272,8 @@ def _make_conn(*, gate_hit=True, target_rows=(), recent_rows=(),
             return list(recent_rows)
         if "fact_channel_daily_sales" in sql:
             return list(daily_rows)
+        if "dim_recipient_override" in sql:
+            return list(recipient_overrides)
         if "union_id" in sql:
             if not union_column_ok:
                 raise RuntimeError("unknown column union_id")
@@ -471,6 +473,58 @@ class RunChannelMissingTests(unittest.TestCase):
         self.assertIn("人2", report["unmatched"])  # 超出上限落文本
         kwargs = outbox.enqueue.call_args.kwargs
         self.assertEqual(kwargs["at_user_ids"], ["staff-0", "staff-1", "boss-1"])
+
+    def test_recipient_override_include_and_exclude(self):
+        """覆盖表 include 追加 / exclude 按姓名移除（只改 @ 名单）。"""
+        target = (
+            {"store_name": "天猫旗舰", "channel": "天猫",
+             "owners_json": '[{"name": "张三"}]'},
+            {"store_name": "京东POP", "channel": "京东",
+             "owners_json": '[{"name": "李四"}]'},
+        )
+        members = [{"name": "张三", "user_id": "staff-1"},
+                   {"name": "李四", "user_id": "staff-2"}]
+        outbox = Mock()
+        outbox.enqueue.return_value = True
+        conn = _make_conn(
+            target_rows=target, daily_rows=[], member_rows=members,
+            recipient_overrides=[
+                {"mode": "exclude", "target_type": "name",
+                 "target_value": "李四"},
+                {"mode": "include", "target_type": "user_id",
+                 "target_value": "boss-9", "resolved_user_id": "boss-9"},
+            ],
+        )
+        outcome, report = self._run(conn, outbox)
+        self.assertEqual(outcome.status, "enqueued")
+        self.assertEqual(report["at_user_ids"], ["staff-1", "boss-9"])
+        kwargs = outbox.enqueue.call_args.kwargs
+        self.assertEqual(kwargs["at_user_ids"], ["staff-1", "boss-9"])
+
+    def test_recipient_override_merges_before_at_limit(self):
+        """合并早于 at_limit 截断：include 追加后仍受上限约束。"""
+        target = tuple(
+            {"store_name": f"店{i}", "channel": "天猫",
+             "owners_json": f'[{{"name": "人{i}"}}]'}
+            for i in range(2)
+        )
+        members = [{"name": f"人{i}", "user_id": f"staff-{i}"}
+                   for i in range(2)]
+        outbox = Mock()
+        outbox.enqueue.return_value = True
+        conn = _make_conn(
+            target_rows=target, daily_rows=[], member_rows=members,
+            recipient_overrides=[
+                {"mode": "include", "target_type": "user_id",
+                 "target_value": "boss-9", "resolved_user_id": "boss-9"},
+            ],
+        )
+        outcome, report = self._run(
+            conn, outbox, at_limit=1, cc_user_ids=("boss-1",),
+        )
+        self.assertEqual(outcome.status, "enqueued")
+        self.assertEqual(report["at_user_ids"], ["staff-0"])
+        self.assertEqual(report["cc_user_ids"], ["boss-1"])
 
     def test_dry_enqueues_nothing(self):
         outbox = Mock()

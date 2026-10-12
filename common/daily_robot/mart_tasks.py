@@ -25,6 +25,7 @@ from common.metrics.daily_report import (
     fetch_workdays,
     unfilled_members,
 )
+from common.public_data.recipient_override import merge_recipient_overrides
 from common.public_data.report_roster import fetch_scope_person_names
 
 
@@ -138,6 +139,12 @@ def run_remind(connection, outbox, *, region, display, table_url,
         return TaskOutcome("all_filled", "remind", business_date)
 
     names = [m["name"] for m in unfilled_rows]
+    # 任务级收件人覆盖（2026-10-12 方案 B）：只作用于 @ 名单，不改正文；
+    # 展示侧走同一 merge_recipient_overrides，口径不漂移。
+    at_user_ids = merge_recipient_overrides(
+        connection, f"robot-{region}",
+        [(m["user_id"], m["name"]) for m in unfilled_rows],
+    )
     title, body = build_reminder_message(
         display=display,
         month=business_date.month,
@@ -152,7 +159,7 @@ def run_remind(connection, outbox, *, region, display, table_url,
         business_date=business_date,
         title=title,
         body_md=body,
-        at_user_ids=[m["user_id"] for m in unfilled_rows],
+        at_user_ids=at_user_ids,
         created_at=now,
         dedupe_suffix=dedupe_suffix,
     )
@@ -184,7 +191,16 @@ def run_check(connection, outbox, *, region, display, table_url,
 
     names = [m["name"] for m in unfilled_rows]
     weekday = _WEEKDAYS[business_date.weekday()]
-    member_ids = [m["user_id"] for m in unfilled_rows]
+    member_pairs = [(m["user_id"], m["name"]) for m in unfilled_rows]
+    # 任务级收件人覆盖（2026-10-12 方案 B）：check 行（未填 + cc）与 ding 行
+    # （仅未填）分别套用，同一 service_id（robot-check-<region>）；exclude
+    # 支持按姓名命中 base。
+    check_at_user_ids = merge_recipient_overrides(
+        connection, f"robot-check-{region}",
+        [*member_pairs, *[(uid, None) for uid in cc_user_ids]],
+    )
+    ding_at_user_ids = merge_recipient_overrides(
+        connection, f"robot-check-{region}", member_pairs)
 
     title, body = build_check_message(
         display=display,
@@ -199,7 +215,7 @@ def run_check(connection, outbox, *, region, display, table_url,
         business_date=business_date,
         title=title,
         body_md=body,
-        at_user_ids=[*member_ids, *cc_user_ids],
+        at_user_ids=check_at_user_ids,
         created_at=now,
         dedupe_suffix=dedupe_suffix,
     )
@@ -215,7 +231,7 @@ def run_check(connection, outbox, *, region, display, table_url,
             weekday=weekday,
             url=table_url,
         ),
-        at_user_ids=member_ids,
+        at_user_ids=ding_at_user_ids,
         created_at=now,
         dedupe_suffix=dedupe_suffix,
     )

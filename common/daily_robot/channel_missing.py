@@ -31,6 +31,7 @@ from datetime import timedelta
 
 from common.daily_robot.mart_tasks import TaskOutcome
 from common.public_data.extract_ecom_people import channel_fallback_owners
+from common.public_data.recipient_override import merge_recipient_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +500,12 @@ def run_channel_missing(conn, outbox, *, region, display, business_date, now,
     )
 
     at_ids = [user_id for user_id, _ in resolved]
+    # 任务级收件人覆盖（2026-10-12 方案 B）：在最终 @ 名单上做 ±，不短路
+    # 归属三级回退；合并早于 at_limit 截断（与展示侧同 merge 入口）。
+    at_ids = merge_recipient_overrides(
+        conn, "channel-missing-check",
+        [(user_id, name) for user_id, name in resolved],
+    )
     cc = ()
     if len(at_ids) > at_limit:
         overflow_names = [name for _, name in resolved[at_limit:]]
