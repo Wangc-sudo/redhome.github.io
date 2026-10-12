@@ -2994,8 +2994,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web recipient override read failed: %s",
                 type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # updated_at 是 DB DATETIME（pymysql 返回 datetime 对象），直接进
+        # JSONResponse 会 json.dumps 失败 → 500（2026-10-12 线上实测：抽屉报
+        # 「读取异常，请稍后重试」）。出口统一用 _fmt_time 归一为北京时间字符串，
+        # 与页面其它时间展示口径一致。
+        overrides = [
+            dict(row, updated_at=_fmt_time(row.get("updated_at")))
+            for row in rows
+        ]
         return JSONResponse(
-            {"status": "ok", "service_id": service_id, "overrides": rows})
+            {"status": "ok", "service_id": service_id, "overrides": overrides})
 
     @app.post("/api/pipelines/recipient-override/add")
     async def recipient_override_add(request: Request):
