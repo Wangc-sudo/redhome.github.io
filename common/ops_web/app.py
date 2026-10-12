@@ -107,6 +107,10 @@ _PAGE_STYLE = (
     "input,select{padding:5px 8px;font-size:13px}"
     "button{padding:6px 14px;font-size:13px;cursor:pointer}"
     ".hint{color:#888;font-size:12px}"
+    # 收件人覆盖抽屉的「本线基名单」区块（P1，2026-10-12）：白底小卡承载来源与名单
+    ".base-box{background:#fff;border:1px solid #e3e6ea;border-radius:6px;"
+    "padding:10px 14px;margin:10px 0}"
+    ".base-box h3{margin:0 0 4px;font-size:13px}"
     ".modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);"
     "align-items:center;justify-content:center;z-index:99}"
     ".modal-box{background:#fff;padding:20px 24px;border-radius:8px;"
@@ -483,9 +487,26 @@ async function loadRecipientOverride() {
     el.innerHTML = '<p class="flash err">读取异常，请稍后重试</p>';
     return;
   }
-  renderRecipientOverride(data.overrides || []);
+  renderRecipientOverride(data);
 }
-function renderRecipientOverride(rows) {
+function renderRecipientBase(data) {
+  // 基名单：本线在做任务级覆盖「之前」的 @ 口径（与列表列同源，见后端 _recipient_base）。
+  const base = data.base || [];
+  const source = data.base_source || '';
+  const names = base.map(function (p) { return p.name || p.user_id; });
+  const list = base.length
+    ? '<p>共 ' + base.length + ' 人：' + esc(names.join('、')) + '</p>'
+    : '<p class="hint">本线暂无基名单（触发时没有可 @ 的人，请按下述来源核查）。</p>';
+  return '<div class="base-box">' +
+    '<h3>本线基名单（不含下方覆盖）</h3>' +
+    '<p class="hint">来源：' + (source ? esc(source) : '—') + '</p>' +
+    list +
+    '<p class="hint">下方覆盖只影响本任务（' + esc(_recipientService) + '）；' +
+    '要增删整片区域的填报人请去 <a href="/roster">填报名册</a>，' +
+    '要调整在职人员请去 <a href="/">成员与授权</a>。</p></div>';
+}
+function renderRecipientOverride(data) {
+  const rows = data.overrides || [];
   const modeLabel = {include: '追加', exclude: '移除'};
   const typeLabel = {user_id: '账号', name: '姓名'};
   let trs = '';
@@ -507,6 +528,7 @@ function renderRecipientOverride(rows) {
     : '<p class="hint">暂无覆盖（当前按名册口径发送）</p>';
   document.getElementById('recipient-body').innerHTML =
     '<h2>收件人覆盖 · ' + esc(_recipientService) + '</h2>' +
+    renderRecipientBase(data) +
     '<p class="hint">只改 @ 名单，不改消息正文；机器人在触发时套用。' +
     '「追加」加入、「移除」剔除；停用或删除即回退名册口径。姓名型需在' +
     '通讯录唯一命中才会 @（未命中会提示、不会 @ 错人）。</p>' + table +
@@ -1049,24 +1071,25 @@ def _recipient_entry_html(service_id):
             f'return false">收件人…</a>')
 
 
-def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
-                           qudao_owners, overrides=(), uid_to_name=None):
-    """收受影响人列（仅催办行调用；其余行由调用方给 —）。
+def _recipient_base(service_id, *, members_by_region, roster_by_region,
+                    qudao_owners, uid_to_name=None):
+    """基名单口径（不含任务级覆盖）——展示列与抽屉 API 共用同一来源。
 
-    口径与实际催办名单同源（2026-10-07 裁决「催办绑定名册」）：
-    * ``robot-<区域>``（填报提醒）/ ``robot-check-<区域>``（催办+DING）
-      = 该区域 ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员；
-      名册无记录（fail-open）= 区域在册填报人全员，与机器人
-      ``_unfilled`` 同真源；
-    * 渠道线催办（channel-missing-check）= 名册店铺负责人
-      （``dim_report_roster`` qudao/store/启用/role=owner 去重）；名册
-      未登记时机器人回退月目标表 owners_json，此处如实标注不复制回退链。
+    与机器人侧一致（2026-10-07 裁决「催办绑定名册」）：
 
-    2026-10-12 方案 B：叠加任务级收件人覆盖（include/exclude），只改
-    @ 名单；展示与机器人在触发时按同一 merge 口径，不承诺与某次运行逐位
-    一致（页面只能给口径）。
+    * ``robot-<区域>``（填报提醒）/ ``robot-check-<区域>``（催办+DING）：
+      该区域 ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员
+      （``kind='roster'``）；名册无启用记录（fail-open）→ 区域在册填报人
+      全员（``kind='fallback'``），与机器人 ``_unfilled`` 同真源；
+    * 渠道线催办（``channel-missing-check``）：名册 ``qudao/store/启用/
+      role=owner`` 去重后的人名（``kind='qudao'``）；名册未登记时机器人回退
+      月目标表 owners_json，此处如实标注不复制回退链；
+    * 其余服务不可计算（``kind='none'``）。
+
+    返回 ``{"kind", "pairs": [(user_id, name)], "region", "store_count"}``；
+    *pairs* 不含覆盖，有效名单由调用方再叠加
+    :func:`recipient_override.apply_recipient_overrides`。
     """
-    entry = _recipient_entry_html(service_id)
     if service_id.startswith("robot-"):
         # _service_region 兼容 robot-check- 长者前缀（2026-10-07 拆分）。
         region = _service_region(service_id)
@@ -1074,29 +1097,91 @@ def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
         roster = roster_by_region.get(region)
         if roster is not None:
             base = [(uid, name) for uid, name in pairs if name in roster]
-            if not base:
-                return ("<span class=\"hint\">名册在册但通讯录"
-                        "无匹配成员</span>" + entry)
-            return _targets_html(base, overrides, uid_to_name,
-                                 scope_label="名册") + entry
-        base = list(pairs)
-        if not base:
-            return "<span class=\"hint\">该区域无在册填报人</span>" + entry
-        return _targets_html(base, overrides, uid_to_name,
-                             scope_label="全员兜底") + entry
+            return {"kind": "roster", "pairs": base, "region": region,
+                    "store_count": None}
+        return {"kind": "fallback", "pairs": list(pairs), "region": region,
+                "store_count": None}
     if _service_region(service_id) == "qudao":
         owners = qudao_owners or {}
         names = sorted({name for bucket in owners.values() for name in bucket})
-        if not names:
-            return ("<span class=\"hint\">名册未登记店铺负责人"
-                    "（机器人自动回退读门店月目标表）</span>" + entry)
         name_to_uid = {}
         for uid, name in (uid_to_name or {}).items():
             name_to_uid.setdefault(name, uid)
         base = [(name_to_uid.get(name) or ("?" + name), name)
                 for name in names]
+        return {"kind": "qudao", "pairs": base, "region": None,
+                "store_count": len(owners)}
+    return {"kind": "none", "pairs": [], "region": None, "store_count": None}
+
+
+def _base_source_label(info):
+    """基名单来源的人话（抽屉 API 的 ``base_source``）。"""
+    region = info.get("region")
+    if info.get("kind") == "roster":
+        return f"名册（{region}）∩ 在职成员"
+    if info.get("kind") == "fallback":
+        return f"{region} 在职填报人（该区域名册未启用，全员兜底）"
+    if info.get("kind") == "qudao":
+        return "店铺负责人（名册 qudao·owner）"
+    return ""
+
+
+def _load_recipient_base(connection, service_id):
+    """按单条服务线装载基名单（抽屉 API 用；与 /pipelines 列同一口径）。
+
+    只读该线所需的表：``robot-*`` 取通讯录在职 + 名册启用人员；渠道线取名册
+    店铺负责人。返回 ``(pairs, source_label)``。
+    """
+    members_by_region, roster_by_region = {}, {}
+    qudao_owners, uid_to_name = None, {}
+    if service_id.startswith("robot-"):
+        region = _service_region(service_id)
+        for uid, name, reg, _dept in bi_authz.fetch_active_members(connection):
+            members_by_region.setdefault(reg, []).append((uid, name))
+            uid_to_name.setdefault(uid, name)
+        roster_by_region[region] = report_roster.fetch_scope_person_names(
+            connection, region)
+    elif _service_region(service_id) == "qudao":
+        qudao_owners = report_roster.fetch_store_owner_map(
+            connection, "qudao", roles=("owner",))
+    info = _recipient_base(
+        service_id, members_by_region=members_by_region,
+        roster_by_region=roster_by_region, qudao_owners=qudao_owners,
+        uid_to_name=uid_to_name)
+    return info["pairs"], _base_source_label(info)
+
+
+def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
+                           qudao_owners, overrides=(), uid_to_name=None):
+    """收受影响人列（仅催办行调用；其余行由调用方给 —）。
+
+    基名单由 :func:`_recipient_base` 计算，列与抽屉 API 同一口径不漂移。
+    2026-10-12 方案 B：叠加任务级收件人覆盖（include/exclude），只改 @ 名单；
+    展示与机器人在触发时按同一 merge 口径，不承诺与某次运行逐位一致。
+    """
+    entry = _recipient_entry_html(service_id)
+    info = _recipient_base(
+        service_id, members_by_region=members_by_region,
+        roster_by_region=roster_by_region, qudao_owners=qudao_owners,
+        uid_to_name=uid_to_name)
+    kind, base = info["kind"], info["pairs"]
+    if kind == "roster":
+        if not base:
+            return ("<span class=\"hint\">名册在册但通讯录"
+                    "无匹配成员</span>" + entry)
         return _targets_html(base, overrides, uid_to_name,
-                             store_count=len(owners)) + entry
+                             scope_label="名册") + entry
+    if kind == "fallback":
+        if not base:
+            return "<span class=\"hint\">该区域无在册填报人</span>" + entry
+        return _targets_html(base, overrides, uid_to_name,
+                             scope_label="全员兜底") + entry
+    if kind == "qudao":
+        if not base:
+            return ("<span class=\"hint\">名册未登记店铺负责人"
+                    "（机器人自动回退读门店月目标表）</span>" + entry)
+        return _targets_html(base, overrides, uid_to_name,
+                             store_count=info["store_count"]) + entry
     return "<span class=\"hint\">—</span>"
 
 
@@ -2980,7 +3065,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/api/pipelines/recipient-override")
     async def recipient_override_get(request: Request):
-        """某条服务线的全部覆盖行（含停用），供抽屉列表展示。"""
+        """某条服务线的覆盖行（含停用）+ 基名单（方案 A，2026-10-12）。
+
+        抽屉据此展示「有效名单 = 基名单 ∪ include − exclude」三层来源。
+        """
         require_admin(request)
         service_id = (request.query_params.get("service_id") or "").strip()
         if not _service_id_re.match(service_id):
@@ -2994,6 +3082,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web recipient override read failed: %s",
                 type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 基名单是附属信息：读取故障只让抽屉少「来源」区块，不给整页 503
+        # （与 /pipelines 列 fail-soft 同口径）。
+        base, base_source = [], ""
+        try:
+            with db_connector() as connection:
+                base_pairs, base_source = _load_recipient_base(
+                    connection, service_id)
+            base = [{"user_id": uid, "name": name} for uid, name in base_pairs]
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web recipient base load failed: %s", type(exc).__name__)
         # updated_at 是 DB DATETIME（pymysql 返回 datetime 对象），直接进
         # JSONResponse 会 json.dumps 失败 → 500（2026-10-12 线上实测：抽屉报
         # 「读取异常，请稍后重试」）。出口统一用 _fmt_time 归一为北京时间字符串，
@@ -3003,7 +3102,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             for row in rows
         ]
         return JSONResponse(
-            {"status": "ok", "service_id": service_id, "overrides": overrides})
+            {"status": "ok", "service_id": service_id, "base": base,
+             "base_source": base_source, "overrides": overrides})
 
     @app.post("/api/pipelines/recipient-override/add")
     async def recipient_override_add(request: Request):

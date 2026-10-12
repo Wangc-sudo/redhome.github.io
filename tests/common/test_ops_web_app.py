@@ -686,6 +686,18 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("读取失败", response.text)
         self.assertIn("robot-hangzhou", response.text)
 
+    def test_pipelines_page_recipient_drawer_shows_base_block(self):
+        """P1（2026-10-12）：抽屉脚本随页下发「本线基名单」区块 + 去名册深链，
+        并区分「本任务覆盖」与「整片区域名册」两层。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines").text
+
+        self.assertIn("function renderRecipientBase", body)
+        self.assertIn("本线基名单", body)
+        self.assertIn('href="/roster">填报名册', body)   # 名册层深链
+        self.assertIn('href="/">成员与授权', body)       # 在职层深链
+
     def test_pipelines_page_category_truth_overrides_derivation(self):
         """category 真源优先：注册表配置覆盖 service_id 推导（分表落位）。
 
@@ -2396,6 +2408,67 @@ class RecipientOverrideApiTests(unittest.TestCase):
         self.assertEqual(1, len(overrides))
         self.assertIsInstance(overrides[0]["updated_at"], str)
         self.assertEqual("李四", overrides[0]["target_value"])
+
+    def test_get_includes_base_and_source_from_roster(self):
+        """P1（2026-10-12）：抽屉 API 附带「本线基名单」——robot 线取该区域
+        在职成员 ∩ 名册启用在册人员，来源标注人话（与列表列同源口径）。"""
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: []), \
+                mock.patch.object(bi_authz, "fetch_active_members",
+                                  lambda conn: list(_MEMBERS)), \
+                mock.patch.object(report_roster, "fetch_scope_person_names",
+                                  lambda conn, scope=None:
+                                  frozenset({"张三", "王五"})):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual(
+            [{"user_id": "u-zhang", "name": "张三"},
+             {"user_id": "u-wang", "name": "王五"}], data["base"])
+        self.assertEqual("名册（hangzhou）∩ 在职成员", data["base_source"])
+
+    def test_get_returns_qudao_base(self):
+        """渠道线基名单 = 名册 qudao·owner 去重人名；无 uid 映射时以 ?名 占位。"""
+        owners = {"天猫-A店": {"张三"}, "京东-B店": {"李四", "张三"}}
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: []), \
+                mock.patch.object(report_roster, "fetch_store_owner_map",
+                                  lambda conn, scope, roles=None: owners):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "channel-missing-check"})
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual(
+            [{"user_id": "?张三", "name": "张三"},
+             {"user_id": "?李四", "name": "李四"}], data["base"])
+        self.assertEqual("店铺负责人（名册 qudao·owner）", data["base_source"])
+
+    def test_get_base_fail_soft_keeps_overrides(self):
+        """基名单是附属信息：装载故障只让抽屉少「来源」区块，不给整页 503。"""
+        def _boom(conn, scope=None):
+            raise RuntimeError("roster down")
+
+        rows = [{"id": 1, "service_id": "robot-hangzhou", "mode": "include",
+                 "target_type": "user_id", "target_value": "u9",
+                 "resolved_user_id": "u9", "enabled": 1, "note": None,
+                 "updated_by": "ops", "updated_at": None}]
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: list(rows)), \
+                mock.patch.object(bi_authz, "fetch_active_members",
+                                  lambda conn: list(_MEMBERS)), \
+                mock.patch.object(report_roster, "fetch_scope_person_names",
+                                  _boom):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual([], data["base"])
+        self.assertEqual("", data["base_source"])
+        self.assertEqual(rows, data["overrides"])
 
     def test_add_resolves_snapshot_and_reports_unresolved(self):
         seen = {}
