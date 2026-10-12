@@ -347,3 +347,11 @@ kb-gateway:
   enabled: true
   reads: [mart_ops]
   description: "knowledge-base QA robot (dedicated Stream app, customer-service group)"
+# --- RAG 向量索引（2026-10-12 第一期：商品+图片跨模态检索） ---
+rag-index-products:
+  kind: apps
+  category: 同步
+  enabled: true
+  schedule: "47 * * * *"
+  reads: [mart_ops]
+  description: "RAG vector index (DingTalk aitable -> jina-clip-v2 -> Milvus Lite)"
