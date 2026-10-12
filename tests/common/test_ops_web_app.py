@@ -1425,6 +1425,100 @@ class RosterPageTests(unittest.TestCase):
         self.assertNotIn("被这些任务催办（改本范围名册会波及）", body)
 
 
+class RecipientsOverviewTests(unittest.TestCase):
+    """收件人总览页（P4，2026-10-12）：只读、按区域/scope 一屏展示
+    「在职 ∩ 名册 ∪/∖ 覆盖」的层层结果，按区块 fail-soft（不整页 503）。"""
+
+    _FLEET = ("robot-hangzhou", "robot-check-hangzhou",
+              "channel-missing-check", "sync-wdt")
+
+    def _client(self, *, fleet=None, configs=None):
+        fleet = self._FLEET if fleet is None else fleet
+        configs = configs if configs is not None else {
+            service_id: {} for service_id in fleet}
+        client = TestClient(_fleet_app(
+            viewer=_admin_viewer(), fleet=tuple(fleet), configs=configs))
+        _login(client)
+        return client
+
+    def test_overview_groups_by_scope_base_and_effective_with_badge(self):
+        def _roster_names(conn, scope=None):
+            return frozenset({"张三", "王五"}) if scope == "hangzhou" else None
+
+        def _overrides(conn, sid):
+            if sid != "robot-hangzhou":
+                return []
+            return [{
+                "id": 1, "service_id": "robot-hangzhou", "mode": "include",
+                "target_type": "user_id", "target_value": "u9",
+                "resolved_user_id": "u9", "enabled": 1, "note": None,
+                "updated_at": None,
+            }]
+
+        owners = {"天猫-A店": {"张三"}, "京东-B店": {"李四"}}
+        with mock.patch.object(bi_authz, "fetch_active_members",
+                               lambda conn: list(_MEMBERS)), \
+                mock.patch.object(report_roster, "fetch_scope_person_names",
+                                  _roster_names), \
+                mock.patch.object(report_roster, "fetch_store_owner_map",
+                                  lambda conn, scope, roles=None: owners), \
+                mock.patch.object(recipient_override, "fetch_overrides",
+                                  _overrides):
+            response = self._client().get("/recipients")
+
+        self.assertEqual(200, response.status_code)
+        body = response.text
+        self.assertIn("收件人总览", body)
+        # 杭州：基名单 = 在职(张三/王五) ∩ 名册(张三/王五)，来源人话。
+        self.assertIn("<h2>杭州", body)
+        self.assertIn("名册（hangzhou）∩ 在职成员", body)
+        self.assertIn("张三、王五", body)
+        self.assertIn("（2 条催办任务）", body)
+        # 有效名单叠加覆盖（+1 覆盖），任务深链回定时任务页抽屉。
+        self.assertIn("+1 覆盖", body)
+        self.assertIn("u9", body)
+        self.assertIn('href="/pipelines?service=robot-hangzhou"', body)
+        self.assertIn('href="/pipelines?service=robot-check-hangzhou"', body)
+        # 渠道：基名单 = 名册 qudao·owner，带门店数徽标。
+        self.assertIn("店铺负责人（名册 qudao·owner）", body)
+        self.assertIn("张三、李四", body)
+        self.assertIn("2 店", body)
+        self.assertIn('href="/pipelines?service=channel-missing-check"', body)
+        # 非催办任务不进总览（与 P3 反查同一取值域）。
+        self.assertNotIn('href="/pipelines?service=sync-wdt"', body)
+        # 空 scope 给一句人话，不留空。
+        self.assertIn("本范围暂无绑定的催办任务。", body)
+
+    def test_overview_fail_soft_when_context_load_fails(self):
+        """只读上下文装载故障：各区块给提示，页面仍 200（不整页 503）。"""
+        def _boom(conn):
+            raise RuntimeError("members down")
+
+        with mock.patch.object(bi_authz, "fetch_active_members", _boom):
+            response = self._client().get("/recipients")
+
+        self.assertEqual(200, response.status_code)
+        body = response.text
+        self.assertIn("收件人总览", body)
+        self.assertIn("名单读取失败，请稍后重试。", body)
+
+    def test_overview_renders_without_fleet(self):
+        """无舰队清单：仍按 scope 展示基名单，只是无催办任务行。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        response = client.get("/recipients")
+        self.assertEqual(200, response.status_code)
+        body = response.text
+        self.assertIn("收件人总览", body)
+        self.assertIn("本范围暂无绑定的催办任务。", body)
+        self.assertNotIn('href="/pipelines?service=', body)
+
+    def test_overview_requires_admin(self):
+        client = TestClient(_fleet_app(viewer=_admin_viewer()))
+        response = client.get("/recipients", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+
+
 class RosterApiTests(unittest.TestCase):
     def test_add_validates_and_upserts_with_actor(self):
         store = _RosterStore()
