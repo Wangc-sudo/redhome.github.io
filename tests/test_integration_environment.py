@@ -81,6 +81,23 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertIn("python3 -m unittest discover -s tests -t . -v", script)
         self.assertNotIn("docker ", script)
 
+    def test_deploy_script_covers_ops_web_for_reload_and_health_gate(self):
+        deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
+        text = deploy_script.read_text(encoding="utf-8")
+
+        # ops-web 是长驻 uvicorn（serve() 无 --reload）且代码经 bind-mount
+        # 只读挂载：不列入 CODE_SERVICES 时，部署只 git reset 更新磁盘代码、
+        # 进程不重载——合并 main 后 ops-web 改动不生效（#57/#58/#59 实测）。
+        code_services = [
+            line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
+        ]
+        self.assertEqual(1, len(code_services))
+        for service in ("gateway", "scheduler", "bi-web", "ops-web"):
+            self.assertIn(service, code_services[0])
+
+        # 健康门须覆盖同一批长驻容器：force-recreate 后起不来要能触发回滚。
+        self.assertIn("--filter name=dops-ops-web", text)
+
     def test_sync_runner_is_opt_in_and_leak_free(self):
         completed = subprocess.run(
             [
