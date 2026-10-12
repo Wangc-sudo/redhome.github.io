@@ -235,7 +235,38 @@ function pipelineAction(sel) {
     };
     showConfirm('确认立即运行一次 ' + sid + '？（调度器下个 tick 认领触发；' +
                 '提醒/催办/汇总类当日已发的会绕开去重重发）');
+  } else if (value === 'schedule') {
+    openScheduleEdit(sid, sel.dataset.schedule || '');
   }
+}
+/* ---- 改定时时间（2026-10-12：时 0-23 + 分 00/30 两维下拉，不手写 cron）- */
+function openScheduleEdit(sid, cron) {
+  const parts = (cron || '').trim().split(/\\s+/);
+  let hour = 18, minute = 0;
+  if (parts.length === 5 && /^\\d+$/.test(parts[0]) && /^\\d+$/.test(parts[1])) {
+    minute = parseInt(parts[0], 10);
+    hour = parseInt(parts[1], 10);
+  }
+  if (!(hour >= 0 && hour <= 23)) hour = 18;
+  if (minute !== 30) minute = 0;
+  document.getElementById('schedule-edit-service').textContent = sid;
+  document.getElementById('schedule-edit-cron').textContent = cron || '常驻';
+  document.getElementById('schedule-edit-hour').value = String(hour);
+  document.getElementById('schedule-edit-minute').value = String(minute);
+  document.getElementById('schedule-mask').style.display = 'flex';
+}
+function closeScheduleEdit() {
+  document.getElementById('schedule-mask').style.display = 'none';
+}
+function submitScheduleEdit() {
+  const sid = document.getElementById('schedule-edit-service').textContent;
+  const hour = parseInt(document.getElementById('schedule-edit-hour').value, 10);
+  const minute = parseInt(document.getElementById('schedule-edit-minute').value, 10);
+  closeScheduleEdit();
+  postJSON('/api/pipelines/update', {service_id: sid, hour: hour, minute: minute},
+           '已改 ' + sid + ' 定时时间为 ' +
+           String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') +
+           '（≤30s 生效）');
 }
 function addPipeline(ev) {
   ev.preventDefault();
@@ -255,9 +286,8 @@ function addPipeline(ev) {
 /* ---- 定时构建器（2026-10-10：预设+时点合成 cron，实时中文预览）--------- */
 function cronFromForm(f) {
   const p = f.schedule_preset.value;
-  const t = (f.schedule_time.value || '18:00').split(':');
-  const hh = String(parseInt(t[0] || '0', 10));
-  const mm = String(parseInt(t[1] || '0', 10));
+  const hh = String(parseInt(f.schedule_hour.value || '0', 10));
+  const mm = String(parseInt(f.schedule_minute.value || '0', 10));
   if (p === 'daily') return mm + ' ' + hh + ' * * *';
   if (p === 'weekday') return mm + ' ' + hh + ' * * 1-5';
   if (p === 'weekly') return mm + ' ' + hh + ' * * ' + f.schedule_dow.value;
@@ -319,8 +349,10 @@ function updateSchedulePreview(f) {
 function schedulePresetChange(f) {
   const p = f.schedule_preset.value;
   const isCustom = p === 'custom';
+  const showTime = !isCustom && p !== 'hourly';
   f.schedule.style.display = isCustom ? '' : 'none';
-  f.schedule_time.style.display = (!isCustom && p !== 'hourly') ? '' : 'none';
+  f.schedule_hour.style.display = showTime ? '' : 'none';
+  f.schedule_minute.style.display = showTime ? '' : 'none';
   f.schedule_dow.style.display = p === 'weekly' ? '' : 'none';
   f.schedule_dom.style.display = p === 'monthly' ? '' : 'none';
   updateSchedulePreview(f);
@@ -486,7 +518,7 @@ _TRIGGER_LABEL = {"cron": "定时", "run_once": "手动"}
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
-    "update": "修正", "carry": "结转",
+    "update": "修正", "schedule": "改定时", "carry": "结转",
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
     "target": "月目标",
@@ -1622,9 +1654,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             action_cell = (
                 f"<select data-service=\"{_esc(config.service_id)}\" "
                 f"data-enabled=\"{'1' if config.enabled else '0'}\" "
+                f"data-schedule=\"{_esc(config.schedule or '')}\" "
                 "onchange=\"pipelineAction(this)\">"
                 "<option value=\"\">操作…</option>"
                 f"<option value=\"toggle\">{toggle_label}</option>"
+                "<option value=\"schedule\">改定时时间</option>"
                 f"{run_option}</select>"
             )
             # 视角差异仅在「管理群」列：群视角该维度已升为分组头，行内不再重复。
@@ -1676,6 +1710,26 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<button onclick=\"closeConfirm()\">取消</button>"
             "</div></div></div>"
         )
+        # 改定时时间弹窗（2026-10-12）：时 0-23 + 分 00/30，两维下拉选取。
+        schedule_mask = (
+            "<div id=\"schedule-mask\" class=\"modal-mask\">"
+            "<div class=\"modal-box\">"
+            "修改 <b id=\"schedule-edit-service\"></b> 的定时时间"
+            "<div class=\"hint\">当前：<span id=\"schedule-edit-cron\"></span>"
+            "（只改时刻，保留工作日/每月几号等形态）</div>"
+            "<div class=\"modal-btns\">"
+            "<select id=\"schedule-edit-hour\">"
+            + "".join(
+                f"<option value=\"{h}\">{h:02d}</option>" for h in range(24)
+            )
+            + "</select><span class=\"hint\">时</span>"
+            "<select id=\"schedule-edit-minute\">"
+            "<option value=\"0\">00</option><option value=\"30\">30</option>"
+            "</select><span class=\"hint\">分</span>"
+            "<button onclick=\"submitScheduleEdit()\">确定</button>"
+            "<button onclick=\"closeScheduleEdit()\">取消</button>"
+            "</div></div></div>"
+        )
         table = ["<h1>定时任务（管道注册表）</h1>" + tabs]
         if view == "group":
             # 分组顺序：城市区域 → 跨区域线（渠道/线下整体）→ 未登记区域
@@ -1703,7 +1757,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "翻译成可执行命令；「收受影响人」= 催办覆盖面（日报机器人="
                 "名册在册人员，名册未登记则该区域在册填报人全员兜底；"
                 "渠道到齐=名册店铺负责人），非催办行无。</p>"
-                + confirm_mask
+                + confirm_mask + schedule_mask
             )
         else:
             for title in _CATEGORY_TABLE_ORDER:
@@ -1719,7 +1773,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "2026-10-10 裁决按功能分表——群名是投递目标，管理群列已承载）；"
                 "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
                 "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
-                + confirm_mask
+                + confirm_mask + schedule_mask
             )
         table = "".join(table)
         add_form = (
@@ -1750,8 +1804,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<option value=\"hourly\">每小时整点</option>"
             "<option value=\"custom\">自定义 cron</option>"
             "</select>"
-            "<input name=\"schedule_time\" type=\"time\" value=\"18:00\" "
+            "<select name=\"schedule_hour\" "
             "onchange=\"updateSchedulePreview(this.form)\">"
+            + "".join(
+                f"<option value=\"{h}\"{' selected' if h == 18 else ''}>"
+                f"{h:02d}</option>"
+                for h in range(24)
+            )
+            + "</select><span class=\"hint\">时</span>"
+            "<select name=\"schedule_minute\" "
+            "onchange=\"updateSchedulePreview(this.form)\">"
+            "<option value=\"0\">00</option>"
+            "<option value=\"30\">30</option>"
+            "</select><span class=\"hint\">分</span>"
             "<select name=\"schedule_dow\" style=\"display:none\" "
             "onchange=\"updateSchedulePreview(this.form)\">"
             "<option value=\"1\">周一</option><option value=\"2\">周二</option>"
@@ -1905,6 +1970,68 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
+
+    @app.post("/api/pipelines/update")
+    async def pipeline_schedule_update(request: Request):
+        """修改既有线的定时时间（read-modify-write，只换 cron 的分/时两段）。
+
+        与 toggle 同型：读注册表 → 改 → 整条回写 → 审计同生共死。只接收
+        时(0-23)/分(00|30) 两维（运维不手写 cron），保留原 cron 的日/月/周，
+        因此「工作日 18:00」「每月 1 日」这类形态不被抹平成每天。
+        """
+        viewer = require_admin(request)
+        if config_publisher is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        hour = payload.get("hour")
+        minute = payload.get("minute")
+        if (not ops_control.SERVICE_ID_RE.match(service_id or "")
+                or not isinstance(hour, int) or isinstance(hour, bool)
+                or not isinstance(minute, int) or isinstance(minute, bool)
+                or not 0 <= hour <= 23 or minute not in (0, 30)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if service_id not in _fleet():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config = config_source.get_pipeline(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 仅替换 cron 的第 0 段(分)/第 1 段(时)，保留 日/月/周；非 5 段
+        # （空/常驻/异常）回落每天，避免拼出非法表达式。
+        fields = (config.schedule or "").split()
+        if len(fields) == 5:
+            new_cron = f"{minute} {hour} {fields[2]} {fields[3]} {fields[4]}"
+        else:
+            new_cron = f"{minute} {hour} * * *"
+        try:
+            # 只借它做 croniter 校验；返回值会丢 sources/reads，不用于发布。
+            ops_control.validate_pipeline_fields(
+                service_id, config.kind, new_cron,
+                enabled=config.enabled, description=config.description,
+                depends_on=config.depends_on, category=config.category,
+            )
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config_publisher(replace(config, schedule=new_cron))
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid, "schedule", service_id,
+                    detail=new_cron,
+                )
+        except Exception as exc:
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER publish: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "schedule": new_cron})
 
     @app.post("/api/pipelines/add")
     async def pipeline_add(request: Request):
