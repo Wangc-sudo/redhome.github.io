@@ -37,7 +37,7 @@
       "tenantId": "",
       "schemeId": ""
     },
-    "_说明": "source: local=用下发 restDays（现行兜底）/ yonyou_tplus=用友 T+ 排班（占位，未接入）。restDays 由 rule 推导（大小休+法定节假日+调休）：基准每周日休(小休周)，大休周的周六一并休，法定假计入，调休上班剔除；二者不一致应告警。接入 T+ 后填 yonyouTplus 凭据并切换 source。"
+    "_说明": "source: local=用下发 restDays（现行兜底）/ yonyou_tplus=用友 T+ 排班（框架已就绪，凭据填好后切换）。restDays 由 rule 推导（大小休+法定节假日+调休）：基准每周日休(小休周)，大休周的周六一并休，法定假计入，调休上班剔除；二者不一致应告警。T+ 凭据（baseUrl/appKey/appSecret/tenantId/schemeId）就绪后填 yonyouTplus 并切换 source；T+ 不可用时自动回退 restDays 并告警。"
   },
   "org": {
     "rootDeptId": 1050135497,
