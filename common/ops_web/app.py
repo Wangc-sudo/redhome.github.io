@@ -647,8 +647,9 @@ def _page(title, *sections, viewer_name=""):
         "<header><strong>ops-web</strong>"
         "<nav>"
         "<span class=\"nav-group\"><span class=\"nav-label\">日常</span>"
-        "<a href=\"/roster\">填报名册</a>"
-        "<a href=\"/calendar\">工作日历</a></span>"
+                "<a href=\"/roster\">填报名册</a>"
+                "<a href=\"/recipients\">收件人总览</a>"
+                "<a href=\"/calendar\">工作日历</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">权限</span>"
         "<a href=\"/\">成员与授权</a>"
         "<a href=\"/grants\">授权现状</a></span>"
@@ -1295,25 +1296,88 @@ def _reminder_targets_cell(service_id, *, members_by_region, roster_by_region,
         service_id, members_by_region=members_by_region,
         roster_by_region=roster_by_region, qudao_owners=qudao_owners,
         uid_to_name=uid_to_name)
+    if info["kind"] == "none":
+        return "<span class=\"hint\">—</span>"
+    return _effective_names_html(info, overrides, uid_to_name) + entry
+
+
+def _effective_names_html(info, overrides, uid_to_name):
+    """有效 @ 名单单元格（``base ∪ include − exclude``），不含覆盖抽屉入口。
+
+    *info* 为 :func:`_recipient_base` 结果。列与抽屉 API 同一口径；收件人总览
+    页（只读）复用此渲染，``/pipelines`` 列再由 :func:`_reminder_targets_cell`
+    追加抽屉入口。``none`` 口径返回 ``—``。
+    """
     kind, base = info["kind"], info["pairs"]
     if kind == "roster":
         if not base:
-            return ("<span class=\"hint\">名册在册但通讯录"
-                    "无匹配成员</span>" + entry)
-        return _targets_html(base, overrides, uid_to_name,
-                             scope_label="名册") + entry
+            return "<span class=\"hint\">名册在册但通讯录无匹配成员</span>"
+        return _targets_html(base, overrides, uid_to_name, scope_label="名册")
     if kind == "fallback":
         if not base:
-            return "<span class=\"hint\">该区域无在册填报人</span>" + entry
-        return _targets_html(base, overrides, uid_to_name,
-                             scope_label="全员兜底") + entry
+            return "<span class=\"hint\">该区域无在册填报人</span>"
+        return _targets_html(base, overrides, uid_to_name, scope_label="全员兜底")
     if kind == "qudao":
         if not base:
             return ("<span class=\"hint\">名册未登记店铺负责人"
-                    "（机器人自动回退读门店月目标表）</span>" + entry)
+                    "（机器人自动回退读门店月目标表）</span>")
         return _targets_html(base, overrides, uid_to_name,
-                             store_count=info["store_count"]) + entry
+                             store_count=info["store_count"])
     return "<span class=\"hint\">—</span>"
+
+
+def _recipients_scope_html(scope, task_ids, *, members_by_region,
+                           roster_by_region, qudao_owners, uid_to_name,
+                           overrides_by_service):
+    """收件人总览页单个 scope 区块（只读，P4，2026-10-12）。
+
+    先给「在职 ∩ 名册」基名单（同 :func:`_recipient_base` 口径，来源标注复用
+    :func:`_base_source_label`），再逐条催办任务列出叠加任务级覆盖后的有效 @
+    名单（``base ∪ include − exclude``，与 :func:`_effective_names_html` 同源）。
+    本页只读、无写面：覆盖调整入口深链到定时任务页对应行抽屉
+    （``/pipelines?service=<id>``）。范围无绑定催办任务时给一句人话。
+    """
+    scope_label = _label(_SCOPE_LABEL, scope)
+    rep_service = ("channel-missing-check" if scope == "qudao"
+                   else f"robot-{scope}")
+    info = _recipient_base(
+        rep_service, members_by_region=members_by_region,
+        roster_by_region=roster_by_region, qudao_owners=qudao_owners,
+        uid_to_name=uid_to_name)
+    parts = [f"<h2>{_esc(scope_label)}"
+             f"<span class=\"hint\">（{len(task_ids)} 条催办任务）</span></h2>"]
+    base_names = "、".join(name for _uid, name in info["pairs"])
+    base_cell = (
+        f"{_esc(base_names)}<span class=\"hint\">"
+        f"（{len(info['pairs'])} 人）</span>"
+        if base_names else "<span class=\"hint\">（空）</span>"
+    )
+    parts.append(
+        "<p>基名单（在职 ∩ 名册；展示口径，非某次运行快照）"
+        f"<span class=\"hint\">{_esc(_base_source_label(info))}</span>："
+        f"{base_cell}"
+        "　<a href=\"/roster\">改本范围名册</a>"
+        "　<a href=\"/\">查成员在职</a></p>"
+    )
+    if not task_ids:
+        parts.append("<p class=\"hint\">本范围暂无绑定的催办任务。</p>")
+        return "".join(parts)
+    rows = []
+    for service_id in task_ids:
+        effective = _effective_names_html(
+            info, overrides_by_service.get(service_id, ()), uid_to_name)
+        rows.append(
+            f"<tr><td>{_service_name_cell(service_id)}</td>"
+            f"<td>{effective}</td>"
+            f"<td><a href=\"/pipelines?service={_esc(service_id)}\">去调整</a>"
+            "</td></tr>"
+        )
+    parts.append(
+        "<table><tr><th>催办任务</th>"
+        "<th>有效 @ 名单（基名单 ∪ 覆盖）</th><th>调整</th></tr>"
+        + "".join(rows) + "</table>"
+    )
+    return "".join(parts)
 
 
 def _cron_zh(schedule):
@@ -2843,6 +2907,99 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         )
         return HTMLResponse(_page("填报名册", "".join(sections), add_form,
                                   audit_table,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    # -- 收件人总览（P4，2026-10-12；只读，无写面）--------------------------
+
+    @app.get("/recipients")
+    def recipients_page(request: Request):
+        """按区域/scope 一屏展示「在职 ∩ 名册 ∪/∖ 覆盖」的层层结果。
+
+        只读、无写面：所有值均为展示口径（与 ``/pipelines`` 列、抽屉 API 同源），
+        不承诺与某次运行逐位一致；调整入口深链回「填报名册」与定时任务页。
+        舰队清单/只读上下文均 fail-soft：单区块故障只缺该块，不整页 503。
+        """
+        viewer = require_admin(request)
+        configs = []
+        try:
+            if fleet_source is not None and config_source is not None:
+                for service_id in _fleet():
+                    try:
+                        configs.append(config_source.get_pipeline(service_id))
+                    except Exception as exc:
+                        # 单条注册表项畸形不拖垮整页：按默认配置展示。
+                        _LOGGER.warning(
+                            "ops-web recipients config parse failed: %s",
+                            type(exc).__name__)
+                        configs.append(PipelineConfig(service_id))
+        except Exception as exc:
+            _LOGGER.warning("ops-web recipients fleet load failed: %s",
+                            type(exc).__name__)
+            configs = []
+        # 复用 P3 反查口径（只收「催办」类且绑定区域的任务）→ {区域: [...]}。
+        scope_tasks = _scope_backlinks(configs)
+        reminder_ids = sorted({sid for ids in scope_tasks.values()
+                               for sid in ids})
+        overrides_by_service = {}
+        context = None
+        try:
+            with db_connector() as connection:
+                members_by_region, uid_to_name = {}, {}
+                for uid, name, region, _dept in \
+                        bi_authz.fetch_active_members(connection):
+                    members_by_region.setdefault(region, []).append((uid, name))
+                    uid_to_name.setdefault(uid, name)
+                roster_by_region = {
+                    scope: report_roster.fetch_scope_person_names(
+                        connection, scope)
+                    for scope in report_roster.SCOPES if scope != "qudao"
+                }
+                qudao_owners = report_roster.fetch_store_owner_map(
+                    connection, "qudao", roles=("owner",))
+                for service_id in reminder_ids:
+                    # 覆盖表是本期新表：未迁移/读失败按无名册口径，不整块失败。
+                    try:
+                        overrides_by_service[service_id] = \
+                            recipient_override.fetch_overrides(
+                                connection, service_id)
+                    except Exception as exc:
+                        _LOGGER.warning(
+                            "ops-web recipients override load failed: %s",
+                            type(exc).__name__)
+                        overrides_by_service[service_id] = ()
+            context = {
+                "members_by_region": members_by_region,
+                "roster_by_region": roster_by_region,
+                "qudao_owners": qudao_owners,
+                "uid_to_name": uid_to_name,
+            }
+        except Exception as exc:
+            _LOGGER.warning("ops-web recipients context load failed: %s",
+                            type(exc).__name__)
+        sections = [
+            "<h1>收件人总览（谁会被催办）</h1>",
+            "<p class=\"hint\">有效 @ 名单 =（在职成员 ∩ 名册）∪ 任务级覆盖 "
+            "− 移除。本页只读、为展示口径；改名单请到「填报名册」，或到定时"
+            "任务页对应任务的「收件人…」抽屉做单条微调。</p>",
+        ]
+        for scope in report_roster.SCOPES:
+            tasks = scope_tasks.get(scope) or []
+            if context is None:
+                sections.append(
+                    f"<h2>{_esc(_label(_SCOPE_LABEL, scope))}</h2>"
+                    "<p class=\"hint\">名单读取失败，请稍后重试。</p>")
+                continue
+            try:
+                sections.append(_recipients_scope_html(
+                    scope, tasks, overrides_by_service=overrides_by_service,
+                    **context))
+            except Exception as exc:
+                _LOGGER.warning("ops-web recipients scope failed: %s",
+                                type(exc).__name__)
+                sections.append(
+                    f"<h2>{_esc(_label(_SCOPE_LABEL, scope))}</h2>"
+                    "<p class=\"hint\">读取失败，请稍后重试。</p>")
+        return HTMLResponse(_page("收件人总览", "".join(sections),
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.post("/api/roster/add")
