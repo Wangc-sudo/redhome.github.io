@@ -70,6 +70,7 @@ _ORDER_LINE_COLUMNS = (
     "line_no",
     "trade_time",
     "trade_status",
+    "buyer_id",
     "spec_no",
     "goods_name",
     "brand_name",
@@ -295,6 +296,9 @@ def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
                 "line_no": line_no,
                 "trade_time": trade_time,
                 "trade_status": trade_status,
+                # 买家标识（WDT 交易级 customer_id，2026-10-12 实测确认）；
+                # 拼多多按隐私协议不返回 → NULL，查询层显式计数。
+                "buyer_id": _clean(payload.get("customer_id")) or None,
                 "spec_no": spec_no,
                 "goods_name": _clean(detail.get("goods_name")) or None,
                 "brand_name": brand_index.get(spec_no, _UNMATCHED_BRAND),
@@ -326,10 +330,78 @@ def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
     }
 
 
+# 取消单（BI 阶段 2）：主投影剔除 trade_status=4（已取消、明细实付全 0），
+# 本投影单保留该状态入 fact_order_cancel_line，供月度取消率。
+_CANCELLED_TRADE_STATUS = "4"
+
+# 与 mart fact_order_cancel_line DDL 一一对应（每 trade 一行，不展明细、
+# 不存金额；DDL 由独立迁移版本 mart-extract-order-cancel-v1 建）。
+_ORDER_CANCEL_COLUMNS = (
+    "trade_no",
+    "cancel_time",
+    "shop_name",
+    "channel_name",
+)
+
+
+def project_order_cancels(repository, dataset, run_id, synced_at) -> dict:
+    """Project canceled WDT trades (status=4) into fact_order_cancel_line.
+
+    与 project_order_lines 同源（sales.TradeQuery.queryWithDetail 全量重放），
+    仅取主投影剔除的已取消单。cancel_time 用下单时间（payload ``created``，
+    缺失回退 ``modified``）；channel 口径与主表一致（_normalize_channel）。
+    replace 语义全量重放。
+    """
+    trades = repository.read_wdt_trades(_TRADE_METHOD)
+    rows: list[dict] = []
+    record_ids: list[str] = []
+    for trade in trades:
+        payload = trade.get("payload_json")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                continue
+        if not isinstance(payload, dict):
+            continue
+        if _clean(payload.get("trade_status")) != _CANCELLED_TRADE_STATUS:
+            continue
+        trade_no = _clean(payload.get("trade_no"))
+        if not trade_no:
+            continue
+        shop_name = _clean(payload.get("shop_name"))
+        rows.append({
+            "trade_no": trade_no,
+            "cancel_time": (
+                _parse_datetime(payload.get("created"))
+                or _parse_datetime(payload.get("modified"))
+            ),
+            "shop_name": shop_name or None,
+            "channel_name": _normalize_channel(shop_name),
+            "synced_at": synced_at,
+            "sync_run_id": run_id,
+        })
+        record_ids.append(trade_no)
+    written = repository.replace_table(
+        dataset.target_table,
+        list(_ORDER_CANCEL_COLUMNS) + ["synced_at", "sync_run_id"],
+        rows,
+    )
+    return {
+        "records_read": len(trades),
+        "records_new": written,
+        "records_updated": 0,
+        "records_skipped": 0,
+        "_record_ids": record_ids,
+    }
+
+
 __all__ = [
+    "_CANCELLED_TRADE_STATUS",
     "_CHANNEL_KEYWORDS",
     "_DIM_PRODUCT_MIRROR_COLUMNS",
     "_EXCLUDED_TRADE_STATUSES",
+    "_ORDER_CANCEL_COLUMNS",
     "_ORDER_LINE_COLUMNS",
     "_TRADE_METHOD",
     "_UNMATCHED_BRAND",
@@ -337,5 +409,6 @@ __all__ = [
     "_normalize_channel",
     "normalize_area",
     "project_dim_product_mirror",
+    "project_order_cancels",
     "project_order_lines",
 ]

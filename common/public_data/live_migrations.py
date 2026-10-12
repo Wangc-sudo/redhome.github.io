@@ -28,9 +28,12 @@ from common.public_data.mart_extract_schema import (
     channel_ops_ddl_statements,
     legacy_ddl_statements as extract_ddl,
     finance_ddl_statements,
+    finance_expense_ddl_statements,
     order_line_area_ddl_statements,
+    order_line_buyer_ddl_statements,
     order_line_ddl_statements,
     order_line_channel_ddl_statements,
+    order_cancel_ddl_statements,
     stock_flow_ddl_statements,
 )
 from common.public_data.db import transaction
@@ -429,10 +432,17 @@ _MIGRATIONS = (
     ("mart-ops-summary-skipped-v1", "mart", _build_mart_summary_skipped_ddl()),
     ("mart-extract-v1", "mart", _build_mart_extract_ddl()),
     ("mart-extract-finance-v1", "mart", finance_ddl_statements()),
+    # 费用窄表（2026-10-12 渠道BI费用面板）：独立版本而非并入
+    # mart-extract-finance-v1（校验和红线，见 finance_expense_ddl_statements）。
+    ("mart-extract-finance-expense-v1", "mart", finance_expense_ddl_statements()),
     ("mart-extract-order-line-v1", "mart", order_line_ddl_statements()),
     ("mart-extract-order-line-v2", "mart", order_line_channel_ddl_statements()),
     ("mart-extract-stock-flow-v1", "mart", stock_flow_ddl_statements()),
     ("mart-extract-order-line-v3", "mart", order_line_area_ddl_statements()),
+    # 买家列（2026-10-12 BI 阶段 2）：独立版本而非改写 v1-v3（校验和红线）。
+    ("mart-extract-order-line-v4", "mart", order_line_buyer_ddl_statements()),
+    # 取消单表（2026-10-12 BI 阶段 2）：独立建表版本，勿并入已冻结版本。
+    ("mart-extract-order-cancel-v1", "mart", order_cancel_ddl_statements()),
     ("mart-extract-channel-ops-v1", "mart", channel_ops_ddl_statements()),
     (
         "mart-extract-daily-report-date-index-v1",

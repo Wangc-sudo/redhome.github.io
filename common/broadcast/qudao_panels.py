@@ -342,6 +342,283 @@ def build_order_risk_panel(connection, *, business_date):
 
 
 # ---------------------------------------------------------------------------
+# 0. 月度核心指标看板（P0）——白酒电商分析框架的月度总表
+# ---------------------------------------------------------------------------
+
+def build_monthly_kpi_panel(connection, *, today):
+    """月度核心指标看板：GMV/订单数/客单价/买家资产/取消/退款/净额/推广/ROI。
+
+    对齐「白酒电商数据分析」P0 模块：按月一行，月份连续。同比因数据源
+    限制显式标注缺口，不臆造；残月（数据起点所在月）标注环比失真。
+    """
+    from common.broadcast.queries import fetch_monthly_kpi
+
+    data = fetch_monthly_kpi(connection)
+    months = data["months"]
+    if not months:
+        return _placeholder_panel("📊 月度核心指标看板", "暂无订单数据（fact_order_line 为空）")
+    data_start = data.get("data_start")
+    start_ym = (
+        f"{data_start.year:04d}-{data_start.month:02d}" if data_start else None
+    )
+
+    def _mom_html(v):
+        if v is None:
+            return '<span class="muted">NA</span>'
+        cls = "g" if v >= 0 else "r"
+        sign = "+" if v >= 0 else ""
+        return f'<span class="{cls}">{sign}{v * 100:.1f}%</span>'
+
+    def _pct(v):
+        return f"{v * 100:.1f}%" if v is not None else '<span class="muted">—</span>'
+
+    def _int(v):
+        return f"{v:,}" if v else '<span class="muted">—</span>'
+
+    trs = []
+    for m in months:
+        roi_txt = f"{m['roi']:.2f}" if m["roi"] else '<span class="muted">—</span>'
+        promo_txt = _fmt_wan(m["promo"]) if m["promo"] else '<span class="muted">—</span>'
+        ym_label = _esc(m["ym"])
+        if data_start and m["ym"] == start_ym:
+            ym_label += (
+                f'<div class="muted small">残月({data_start.month}月'
+                f'{data_start.day}日起)</div>'
+            )
+        trs.append(
+            f'<tr>'
+            f'<td class="strong">{ym_label}</td>'
+            f'<td class="num">{_fmt_wan(m["gmv"])}</td>'
+            f'<td class="num">{_mom_html(m["mom"])}</td>'
+            f'<td class="num">{m["orders"]:,}</td>'
+            f'<td class="num">¥{m["aov"]:,.0f}</td>'
+            f'<td class="num">{_int(m["buyers"])}</td>'
+            f'<td class="num">{m["new_buyers"]:,}</td>'
+            f'<td class="num">{_pct(m["repeat_rate"])}</td>'
+            f'<td class="num">{m["cancel_orders"]:,}</td>'
+            f'<td class="num">{_pct(m["cancel_rate"])}</td>'
+            f'<td class="num">{_fmt_wan(m["refund_amt"])}</td>'
+            f'<td class="num">{_pct(m["refund_rate_amt"])}</td>'
+            f'<td class="num">{_fmt_wan(m["net_gmv"])}</td>'
+            f'<td class="num">{promo_txt}</td>'
+            f'<td class="num">{roi_txt}</td>'
+            f'</tr>'
+        )
+    notes = ['⚠️ 缺失指标：同比(无去年同期数据，WDT 为全量重放)']
+    if data.get("data_start") and start_ym in {m["ym"] for m in months}:
+        notes.append(
+            f'残月：数据自 {data_start:%Y-%m-%d} 起，{start_ym} 环比失真'
+        )
+    if data.get("buyer_null_share"):
+        notes.append(
+            f'买家ID缺失行占比 {data["buyer_null_share"] * 100:.0f}%'
+            '（拼多多按隐私协议不返回买家，未计入买家资产）'
+        )
+    body = (
+        f'<table><thead><tr>'
+        f'<th>月份</th><th>GMV(剔除取消)</th><th>环比</th>'
+        f'<th>订单数</th><th>客单价</th>'
+        f'<th>活跃买家</th><th>新客</th><th>复购率</th>'
+        f'<th>取消单</th><th>取消率</th>'
+        f'<th>退款金额</th><th>退款率</th>'
+        f'<th>净额(扣退款)</th><th>推广花费</th><th>ROI</th>'
+        f'</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        f'<div class="small muted" style="margin-top:6px">'
+        f'{" · ".join(notes)}'
+        f'</div>'
+    )
+    note = (
+        "口径：GMV=已付款未取消(trade_status∉4/5/24) Σ paid_amount 按付款时间归月 · "
+        "活跃买家=buyer_id 去重、新客=首购当月、复购率=(活跃−新客)÷活跃 · "
+        "取消率=取消单÷(付款订单+取消单)，按下单时间归月 · "
+        "退款=actual_refund_amount 按入库审核时间归月；净额=GMV−退款 · "
+        "推广=promotion_cost"
+    )
+    return _panel("📊 月度核心指标看板（P0）", body, note=note)
+
+
+# ---------------------------------------------------------------------------
+# 0.1 费用/盈利面板（P0）——渠道×月 费用与费率（材料一模式）
+# ---------------------------------------------------------------------------
+
+def build_expense_panel(connection, *, today):
+    """费用/盈利面板：渠道×月 财务费用（扣点等）、推广充值与费率。
+
+    数据 = fact_fin_store_expense（店铺挂接种子映射渠道）JOIN
+    fact_channel_daily_sales（GMV），费率=费用合计÷当月 GMV。
+    「未挂渠道」行与「财务未填月份」显式标注，不臆造、不静默。
+    """
+    from common.broadcast.queries import UNMAPPED_CHANNEL_LABEL, fetch_expense_summary
+
+    data = fetch_expense_summary(connection, today=today)
+    if not data["rows"]:
+        return _placeholder_panel(
+            "💰 费用/盈利面板", "暂无费用数据（fact_fin_store_expense 为空）"
+        )
+
+    def _cell(c):
+        if not c["total"] and c["gmv"] is None:
+            return '<span class="muted">—</span>'
+        second = (
+            f'{c["rate"] * 100:.1f}%' if c["rate"] is not None else "—"
+        )
+        if c["recharge"]:
+            second += f' · 充{_fmt_wan(c["recharge"])}'
+        return f'{_fmt_wan(c["total"])}<div class="muted small">{second}</div>'
+
+    ths = "".join(f"<th>{_esc(ym)}</th>" for ym in data["months"])
+    trs = []
+    for row in data["rows"]:
+        tds = "".join(
+            f'<td class="num">{_cell(row["cells"][ym])}</td>'
+            for ym in data["months"]
+        )
+        trs.append(
+            f'<tr><td class="strong">{_esc(row["channel"])}</td>{tds}'
+            f'<td class="num"><b>{_fmt_wan(row["total"])}</b></td></tr>'
+        )
+    body = (
+        f'<table><thead><tr><th>渠道</th>{ths}<th>近{len(data["months"])}月合计</th>'
+        f'</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+    )
+    notes = []
+    if data["empty_months"]:
+        notes.append(
+            f'⚠️ 财务未填：{"、".join(data["empty_months"])}'
+        )
+    if data["unmapped_stores"]:
+        shown = "、".join(data["unmapped_stores"][:6])
+        more = f" 等{len(data['unmapped_stores'])}店" if len(data["unmapped_stores"]) > 6 else ""
+        notes.append(
+            f'未挂渠道店铺（历史关店/渠道外新店/待归，不计入在营渠道费率）：'
+            f'{shown}{more}（分类证据见 seeds/store_channel_mapping.json，改后重跑 extract 生效）'
+        )
+    notes.append(
+        "口径：店铺费用=fin_store_commission（应缴/实缴待财务确认）· "
+        "推广=fin_ecommerce_promotion_recharge_balance（充值/余额口径待确认）· "
+        f"费率=费用合计÷当月GMV（{UNMAPPED_CHANNEL_LABEL}=挂接种子未命中的财务店铺）"
+    )
+    return _panel(
+        "💰 费用/盈利面板", body,
+        note=" · ".join(notes),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 0.2 商品结构面板——系列/价格带/集中度（材料二 P1 模块）
+# ---------------------------------------------------------------------------
+
+def build_product_structure_panel(connection, *, today):
+    """商品结构面板：系列结构 / 价格带分布 / Top10 单品集中度（近6月）。
+
+    系列与价格带各一张小表，Top10 附集中度汇总；NULL 系列归「未分类」、
+    零件数行 GMV 归「单价未知」档，均显式示出不静默。
+    """
+    from common.broadcast.queries import SERIES_TOP_N, fetch_product_structure
+
+    data = fetch_product_structure(connection, today=today)
+    if not data["total_gmv"]:
+        return _placeholder_panel(
+            "🧱 商品结构分析", "暂无订单数据（窗口内 GMV=0）"
+        )
+
+    def _share(v):
+        return f"{v * 100:.1f}%" if v is not None else '<span class="muted">—</span>'
+
+    series_trs = "".join(
+        f'<tr><td class="strong">{_esc(s["series"])}</td>'
+        f'<td class="num">{_fmt_wan(s["gmv"])}</td>'
+        f'<td class="num">{_share(s["share"])}</td></tr>'
+        for s in data["series"]
+    )
+    band_trs = "".join(
+        f'<tr><td class="strong">{_esc(b["band"])}元</td>'
+        f'<td class="num">{_fmt_wan(b["gmv"])}</td>'
+        f'<td class="num">{_share(b["share"])}</td></tr>'
+        for b in data["price_bands"]
+    )
+    top_trs = "".join(
+        f'<tr><td>{_esc(p["goods_name"] or p["spec_no"])}</td>'
+        f'<td class="small muted">{_esc(p["series_name"])}</td>'
+        f'<td class="num">{_fmt_wan(p["gmv"])}</td>'
+        f'<td class="num">{_share(p["share"])}</td></tr>'
+        for p in data["top_products"]
+    )
+    head = (
+        f'<div class="small muted" style="margin:0 0 4px">'
+        f'近{len(data["months"])}月 GMV 合计 {_fmt_wan(data["total_gmv"])} · '
+        f'Top10 占比 {_share(data["top10_share"])} · '
+        f'HHI {_share(data["hhi"])}（Σ单品占比²，越高越集中）</div>'
+    )
+    body = (
+        head
+        + f'<div class="small strong" style="margin:6px 0 2px">'
+          f'系列结构（Top{SERIES_TOP_N}，其余计「其他」）</div>'
+        + f'<table><thead><tr><th>系列</th><th>GMV</th><th>占比</th>'
+          f'</tr></thead><tbody>{series_trs}</tbody></table>'
+        + f'<div class="small strong" style="margin:10px 0 2px">'
+          f'价格带分布（件均价口径）</div>'
+        + f'<table><thead><tr><th>价格带</th><th>GMV</th><th>占比</th>'
+          f'</tr></thead><tbody>{band_trs}</tbody></table>'
+        + f'<div class="small strong" style="margin:10px 0 2px">Top10 单品</div>'
+        + f'<table><thead><tr><th>商品</th><th>系列</th><th>GMV</th><th>占比</th>'
+          f'</tr></thead><tbody>{top_trs}</tbody></table>'
+    )
+    return _panel(
+        "🧱 商品结构分析", body,
+        note=(
+            "口径：近6月 fact_order_line 按付款时间（trade_time），系列=dim_product.series_name"
+            "（NULL→未分类）；价格带按件均价=paid_amount÷quantity 实付口径分档；"
+            "集中度=Top10 单品 GMV 占比 / HHI"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 0.3 退款原因面板——损耗归因（材料二行业提示）
+# ---------------------------------------------------------------------------
+
+def build_refund_reason_panel(connection, *, today):
+    """退款原因面板：近6月按 reason 聚合退款金额/单数与占比。
+
+    与月度 KPI 的退款同口径（fact_refund_line.actual_refund_amount 按
+    check_time 归月）；reason 空白归「未填写」显示，不静默。
+    """
+    from common.broadcast.queries import fetch_refund_reason
+
+    data = fetch_refund_reason(connection, today=today)
+    if not data["reasons"]:
+        return _placeholder_panel(
+            "↩️ 退款原因分析", "暂无退款数据（fact_refund_line 为空）"
+        )
+
+    def _share(v):
+        return f"{v * 100:.1f}%" if v is not None else '<span class="muted">—</span>'
+
+    trs = "".join(
+        f'<tr><td class="strong">{_esc(r["reason"])}</td>'
+        f'<td class="num">{_fmt_wan(r["amount"])}</td>'
+        f'<td class="num">{r["orders"]:,}</td>'
+        f'<td class="num">{_share(r["share"])}</td></tr>'
+        for r in data["reasons"]
+    )
+    body = (
+        f'<div class="small muted" style="margin:0 0 4px">'
+        f'近{len(data["months"])}月退款合计 {_fmt_wan(data["total_amount"])}'
+        f'</div>'
+        f'<table><thead><tr><th>原因</th><th>退款金额</th><th>退款单数</th>'
+        f'<th>占比</th></tr></thead><tbody>{trs}</tbody></table>'
+    )
+    return _panel(
+        "↩️ 退款原因分析", body,
+        note=(
+            "口径：fact_refund_line.actual_refund_amount 按入库审核时间(check_time)归月，"
+            "与月度看板退款同口径；「未填写」为原因空白的退款单"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 装配
 # ---------------------------------------------------------------------------
 
@@ -351,6 +628,10 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
     单板块异常 → "暂缺"占位（绝不拖垮整页生成），错误进日志。
     """
     builders = (
+        ("月度核心指标看板", lambda: build_monthly_kpi_panel(connection, today=business_date)),
+        ("费用/盈利面板", lambda: build_expense_panel(connection, today=business_date)),
+        ("商品结构分析", lambda: build_product_structure_panel(connection, today=business_date)),
+        ("退款原因分析", lambda: build_refund_reason_panel(connection, today=business_date)),
         ("渠道日销快报", lambda: build_channel_daily_panel(
             connection,
             business_date=business_date,
@@ -374,9 +655,13 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
 
 __all__ = [
     "build_channel_daily_panel",
+    "build_expense_panel",
     "build_hot_items_panel",
+    "build_monthly_kpi_panel",
     "build_order_risk_panel",
+    "build_product_structure_panel",
     "build_purchase_inbound_panel",
     "build_qudao_panels",
+    "build_refund_reason_panel",
     "build_stock_alert_panel",
 ]

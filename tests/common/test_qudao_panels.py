@@ -249,6 +249,206 @@ class ItemPanelTests(unittest.TestCase):
         self.assertIn("30天销为近30天窗口", html)
 
 
+class MonthlyKpiPanelTests(unittest.TestCase):
+
+    def test_renders_monthly_table_with_available_metrics(self):
+        data = {
+            "months": [
+                {"ym": "2026-08", "gmv": 300000.0, "mom": None, "orders": 1500,
+                 "aov": 200.0, "buyers": 1200, "new_buyers": 300,
+                 "repeat_rate": 0.75, "cancel_orders": 40, "cancel_rate": 0.026,
+                 "refund_amt": 12000.0, "refund_rate_amt": 0.04,
+                 "refund_orders": 60, "refund_rate_cnt": 0.04,
+                 "net_gmv": 288000.0, "promo": 50000.0, "roi": 6.0},
+                {"ym": "2026-09", "gmv": 360000.0, "mom": 0.2, "orders": 1800,
+                 "aov": 200.0, "buyers": 1500, "new_buyers": 260,
+                 "repeat_rate": 0.827, "cancel_orders": 30, "cancel_rate": 0.016,
+                 "refund_amt": 9000.0, "refund_rate_amt": 0.025,
+                 "refund_orders": 45, "refund_rate_cnt": 0.025,
+                 "net_gmv": 351000.0, "promo": 60000.0, "roi": 6.0},
+            ],
+            "as_of": date(2026, 9, 23),
+            "data_start": datetime(2026, 8, 22, 10, 0, 0),
+            "buyer_null_share": 0.18,
+        }
+        with patch("common.broadcast.queries.fetch_monthly_kpi", return_value=data):
+            html = qudao_panels.build_monthly_kpi_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("📊 月度核心指标看板", html)
+        self.assertIn("2026-08", html)
+        self.assertIn("2026-09", html)
+        self.assertIn("GMV(剔除取消)", html)
+        self.assertIn("净额(扣退款)", html)
+        self.assertIn("+20.0%", html)          # 9 月环比
+        self.assertIn("NA", html)              # 8 月首月无环比
+        self.assertIn("6.00", html)            # ROI
+        # 买家资产/取消列（BI 阶段 2）
+        self.assertIn("<th>活跃买家</th>", html)
+        self.assertIn("<th>新客</th>", html)
+        self.assertIn("<th>复购率</th>", html)
+        self.assertIn("<th>取消单</th>", html)
+        self.assertIn("<th>取消率</th>", html)
+        self.assertIn("1,200", html)           # 8 月活跃买家
+        self.assertIn("75.0%", html)           # 8 月复购率
+        # 残月与买家缺失显式标注（不臆造）
+        self.assertIn("同比", html)
+        self.assertIn("残月(8月22日起)", html)
+        self.assertIn("买家ID缺失行占比 18%", html)
+        self.assertIn("取消率=取消单÷(付款订单+取消单)", html)
+
+    def test_empty_data_degrades_to_placeholder(self):
+        with patch("common.broadcast.queries.fetch_monthly_kpi",
+                   return_value={"months": [], "as_of": date(2026, 9, 23)}):
+            html = qudao_panels.build_monthly_kpi_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("暂无订单数据", html)
+
+
+class ExpensePanelTests(unittest.TestCase):
+
+    def _data(self):
+        return {
+            "months": ["2026-08", "2026-09"],
+            "rows": [
+                {"channel": "天猫", "total": 15000.0, "cells": {
+                    "2026-08": {"commission": 5000.0, "recharge": 3000.0,
+                                "total": 8000.0, "gmv": 160000.0, "rate": 0.05},
+                    "2026-09": {"commission": 6000.0, "recharge": 1000.0,
+                                "total": 7000.0, "gmv": 140000.0, "rate": 0.05},
+                }},
+                {"channel": "未挂渠道", "total": 500.0, "cells": {
+                    "2026-08": {"commission": 500.0, "recharge": 0.0,
+                                "total": 500.0, "gmv": None, "rate": None},
+                    "2026-09": {"commission": 0.0, "recharge": 0.0,
+                                "total": 0.0, "gmv": None, "rate": None},
+                }},
+            ],
+            "unmapped_stores": ["得物（天猫）", "十全酒美（拼多多）"],
+            "empty_months": ["2026-09"],
+            "as_of": date(2026, 9, 23),
+        }
+
+    def test_renders_channel_month_table_with_rates_and_markers(self):
+        with patch("common.broadcast.queries.fetch_expense_summary",
+                   return_value=self._data()):
+            html = qudao_panels.build_expense_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("💰 费用/盈利面板", html)
+        self.assertIn("<th>2026-08</th>", html)
+        self.assertIn("<th>2026-09</th>", html)
+        self.assertIn("近2月合计", html)
+        self.assertIn("8,000", html)              # 08 月天猫费用合计
+        self.assertIn("5.0% · 充3,000", html)     # 费率 + 推广充值标注
+        self.assertIn("—", html)                  # 无 GMV 费率占位
+        # 未挂渠道恒排最后
+        self.assertGreater(
+            html.index('<td class="strong">未挂渠道</td>'),
+            html.index('<td class="strong">天猫</td>'),
+        )
+        # 显式标注，不静默
+        self.assertIn("⚠️ 财务未填：2026-09", html)
+        self.assertIn("得物（天猫）", html)
+        self.assertIn("seeds/store_channel_mapping.json", html)
+        self.assertIn("应缴/实缴待财务确认", html)
+
+    def test_empty_data_degrades_to_placeholder(self):
+        with patch("common.broadcast.queries.fetch_expense_summary",
+                   return_value={"months": [], "rows": [], "unmapped_stores": [],
+                                 "empty_months": [], "as_of": date(2026, 9, 23)}):
+            html = qudao_panels.build_expense_panel(Mock(), today=date(2026, 9, 23))
+        self.assertIn("暂无费用数据", html)
+
+
+class ProductStructurePanelTests(unittest.TestCase):
+
+    def _data(self):
+        return {
+            "months": ["2026-08", "2026-09"],
+            "total_gmv": 2100.0,
+            "series": [
+                {"series": "未分类", "gmv": 1400.0, "share": 0.667},
+                {"series": "经典系列", "gmv": 700.0, "share": 0.333},
+            ],
+            "price_bands": [
+                {"band": "0-199", "gmv": 100.0, "share": 0.048},
+                {"band": "200-399", "gmv": 600.0, "share": 0.286},
+                {"band": "400-799", "gmv": 1000.0, "share": 0.476},
+                {"band": "800-1499", "gmv": 0.0, "share": 0.0},
+                {"band": "1500+", "gmv": 0.0, "share": 0.0},
+                {"band": "单价未知", "gmv": 400.0, "share": 0.19},
+            ],
+            "top_products": [
+                {"spec_no": "S2", "goods_name": "酒B", "series_name": "未分类",
+                 "gmv": 1000.0, "share": 0.476},
+            ],
+            "top10_share": 1.0,
+            "hhi": 0.347,
+            "as_of": date(2026, 9, 23),
+        }
+
+    def test_renders_series_bands_and_concentration(self):
+        with patch("common.broadcast.queries.fetch_product_structure",
+                   return_value=self._data()):
+            html = qudao_panels.build_product_structure_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("🧱 商品结构分析", html)
+        self.assertIn("系列结构", html)
+        self.assertIn("经典系列", html)
+        self.assertIn("价格带分布", html)
+        self.assertIn("400-799元", html)
+        self.assertIn("Top10 单品", html)
+        self.assertIn("酒B", html)
+        self.assertIn("HHI", html)
+        # 显式口径与不静默桶
+        self.assertIn("未分类", html)
+        self.assertIn("单价未知", html)
+        self.assertIn("件均价=paid_amount÷quantity", html)
+
+    def test_empty_data_degrades_to_placeholder(self):
+        with patch("common.broadcast.queries.fetch_product_structure",
+                   return_value={"months": ["2026-09"], "total_gmv": 0.0,
+                                 "series": [], "price_bands": [],
+                                 "top_products": [], "top10_share": None,
+                                 "hhi": None, "as_of": date(2026, 9, 23)}):
+            html = qudao_panels.build_product_structure_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("暂无订单数据", html)
+
+
+class RefundReasonPanelTests(unittest.TestCase):
+
+    def test_renders_reason_table_with_unfilled_bucket(self):
+        data = {
+            "months": ["2026-08", "2026-09"],
+            "total_amount": 400.0,
+            "reasons": [
+                {"reason": "七天无理由退换", "amount": 300.0, "orders": 3,
+                 "share": 0.75},
+                {"reason": "未填写", "amount": 100.0, "orders": 1, "share": 0.25},
+            ],
+            "as_of": date(2026, 9, 23),
+        }
+        with patch("common.broadcast.queries.fetch_refund_reason",
+                   return_value=data):
+            html = qudao_panels.build_refund_reason_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("↩️ 退款原因分析", html)
+        self.assertIn("七天无理由退换", html)
+        self.assertIn("未填写", html)
+        self.assertIn("75.0%", html)
+        self.assertIn("近2月退款合计", html)
+        self.assertIn("check_time", html)
+
+    def test_empty_data_degrades_to_placeholder(self):
+        with patch("common.broadcast.queries.fetch_refund_reason",
+                   return_value={"months": ["2026-09"], "total_amount": 0.0,
+                                 "reasons": [], "as_of": date(2026, 9, 23)}):
+            html = qudao_panels.build_refund_reason_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("暂无退款数据", html)
+
+
 class AssemblyTests(unittest.TestCase):
 
     def test_panel_failure_degrades_to_placeholder(self):
@@ -264,7 +464,7 @@ class AssemblyTests(unittest.TestCase):
                 workdays=_WORKDAYS,
                 monthly_targets={},
             )
-        self.assertEqual(len(panels), 5)
+        self.assertEqual(len(panels), 9)
         degraded = [p for p in panels if "数据暂缺" in p]
         # 热卖品（boom）+ 渠道（空连接无数据走"暂无"占位文案不同）→ 至少热卖品一个
         self.assertTrue(any("热卖品监控" in p for p in degraded))

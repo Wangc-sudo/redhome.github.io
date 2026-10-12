@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
@@ -9,10 +10,12 @@ from common.public_data.extract_mart import MartExtractError
 from common.public_data.extract_order_line import (
     _DIM_PRODUCT_MIRROR_COLUMNS,
     _EXCLUDED_TRADE_STATUSES,
+    _ORDER_CANCEL_COLUMNS,
     _ORDER_LINE_COLUMNS,
     _TRADE_METHOD,
     _UNMATCHED_BRAND,
     project_dim_product_mirror,
+    project_order_cancels,
     project_order_lines,
 )
 from common.public_data.mart_extract_schema import dataset_by_name
@@ -21,16 +24,23 @@ from tests.common import test_public_data_extract_mart as helpers
 _NOW, _RUN_ID, _Ctx = helpers._NOW, helpers._RUN_ID, helpers._Ctx
 
 
-def _trade(trade_no="JY20260901001", status="110", details=(), trade_time="2026-09-01 10:00:00", shop_name="习水村-抖音习酒旗舰店"):
+def _trade(trade_no="JY20260901001", status="110", details=(),
+           trade_time="2026-09-01 10:00:00",
+           shop_name="习水村-抖音习酒旗舰店", created=None, customer_id=None):
+    payload = {
+        "trade_no": trade_no,
+        "trade_status": status,
+        "trade_time": trade_time,
+        "shop_name": shop_name,
+        "detail_list": list(details),
+    }
+    if created is not None:
+        payload["created"] = created
+    if customer_id is not None:
+        payload["customer_id"] = customer_id
     return {
         "source_record_id": trade_no,
-        "payload_json": json.dumps({
-            "trade_no": trade_no,
-            "trade_status": status,
-            "trade_time": trade_time,
-            "shop_name": shop_name,
-            "detail_list": list(details),
-        }, ensure_ascii=False),
+        "payload_json": json.dumps(payload, ensure_ascii=False),
     }
 
 
@@ -163,12 +173,28 @@ class OrderLineProjectionTests(unittest.TestCase):
         self.assertEqual(rows[0]["shop_subsidy"], Decimal("0"))
         self.assertEqual(rows[1]["line_no"], 2)
         self.assertEqual(rows[1]["brand_name"], _UNMATCHED_BRAND)
+        self.assertIsNone(rows[0]["buyer_id"])  # 夹具未带 customer_id
         self.assertEqual(rows[0]["synced_at"], _NOW)
         self.assertEqual(result["records_read"], 1)
         self.assertEqual(result["records_new"], 2)
         self.assertEqual(
             result["_record_ids"], ["JY20260901001:1", "JY20260901001:2"],
         )
+
+    def test_buyer_id_is_taken_from_the_trade_level_customer_id(self):
+        # 买家标识 = WDT 交易级 customer_id（2026-10-12 实测确认）；
+        # 拼多多按隐私协议不返回 → None（查询层显式计数）。
+        ds = dataset_by_name("wdt_order_line_fact")
+        repo = self._repo(trades=[
+            _trade(details=[_detail()], customer_id="C-1001"),
+            _trade(trade_no="JY-2", details=[_detail()]),
+        ])
+
+        project_order_lines(repo, ds, _RUN_ID, _NOW)
+
+        rows = repo.replace_table.call_args.args[2]
+        self.assertEqual(rows[0]["buyer_id"], "C-1001")
+        self.assertIsNone(rows[1]["buyer_id"])
 
     def test_excluded_statuses_are_dropped(self):
         ds = dataset_by_name("wdt_order_line_fact")
@@ -241,6 +267,75 @@ class OrderLineProjectionTests(unittest.TestCase):
         self.assertEqual((expected.year, expected.month), (2026, 8))
 
 
+class OrderCancelProjectionTests(unittest.TestCase):
+    """BI 阶段 2：已取消单（status=4）按单保留，供月度取消率。"""
+
+    def _repo(self, trades=()):
+        repo = Mock()
+        repo.read_wdt_trades.return_value = list(trades)
+        repo.replace_table.side_effect = lambda _t, _c, rows: len(rows)
+        return repo
+
+    def test_keeps_only_cancelled_trades_one_row_per_trade(self):
+        ds = dataset_by_name("wdt_order_cancel_fact")
+        repo = self._repo(trades=[
+            _trade(trade_no="T-4", status="4", created="2026-09-03 09:00:00",
+                   shop_name="习水村-拼多多习酒旗舰店"),
+            _trade(trade_no="T-keep", status="110", details=[_detail()]),
+            _trade(trade_no="T-5", status="5", details=[_detail()]),
+            _trade(trade_no="T-24", status="24", details=[_detail()]),
+        ])
+
+        result = project_order_cancels(repo, ds, _RUN_ID, _NOW)
+
+        repo.read_wdt_trades.assert_called_once_with(_TRADE_METHOD)
+        table, columns, rows = repo.replace_table.call_args.args
+        self.assertEqual(table, "fact_order_cancel_line")
+        self.assertEqual(
+            set(columns),
+            set(_ORDER_CANCEL_COLUMNS) | {"synced_at", "sync_run_id"},
+        )
+        # 每单一行：status=4 保留且不展明细，正常单/5/24 剔除。
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trade_no"], "T-4")
+        self.assertEqual(rows[0]["channel_name"], "拼多多")
+        self.assertEqual(rows[0]["shop_name"], "习水村-拼多多习酒旗舰店")
+        self.assertEqual(rows[0]["cancel_time"], datetime(2026, 9, 3, 9, 0, 0))
+        self.assertEqual(rows[0]["synced_at"], _NOW)
+        self.assertEqual(result["records_read"], 4)
+        self.assertEqual(result["records_new"], 1)
+        self.assertEqual(result["_record_ids"], ["T-4"])
+
+    def test_cancel_time_falls_back_to_modified_when_created_missing(self):
+        ds = dataset_by_name("wdt_order_cancel_fact")
+        trade = _trade(trade_no="T-4", status="4")
+        payload = json.loads(trade["payload_json"])
+        payload["modified"] = "2026-09-03 10:00:00"
+        trade["payload_json"] = json.dumps(payload, ensure_ascii=False)
+        repo = self._repo(trades=[trade])
+
+        project_order_cancels(repo, ds, _RUN_ID, _NOW)
+
+        rows = repo.replace_table.call_args.args[2]
+        self.assertEqual(rows[0]["cancel_time"], datetime(2026, 9, 3, 10, 0, 0))
+
+    def test_bad_payloads_and_missing_trade_no_are_skipped(self):
+        ds = dataset_by_name("wdt_order_cancel_fact")
+        repo = self._repo(trades=[
+            {"source_record_id": "x1", "payload_json": "not json {"},
+            {"source_record_id": "x2", "payload_json": None},
+            {"source_record_id": "x3", "payload_json": json.dumps(
+                {"trade_status": "4"}
+            )},  # status=4 但缺 trade_no
+        ])
+
+        result = project_order_cancels(repo, ds, _RUN_ID, _NOW)
+
+        self.assertEqual(repo.replace_table.call_args.args[2], [])
+        self.assertEqual(result["records_new"], 0)
+        self.assertEqual(result["_record_ids"], [])
+
+
 class WdtRepositoryTests(unittest.TestCase):
     _repo = helpers.MartExtractRepositoryTests._repo
 
@@ -304,6 +399,13 @@ class WdtRepositoryTests(unittest.TestCase):
         columns = list(_DIM_PRODUCT_MIRROR_COLUMNS) + ["synced_at", "sync_run_id"]
         written = repo.replace_table(
             ds.target_table, columns, [{"spec_no": "SP-1"}],
+        )
+        self.assertEqual(written, 1)
+
+        ds = dataset_by_name("wdt_order_cancel_fact")
+        columns = list(_ORDER_CANCEL_COLUMNS) + ["synced_at", "sync_run_id"]
+        written = repo.replace_table(
+            ds.target_table, columns, [{"trade_no": "T-4"}],
         )
         self.assertEqual(written, 1)
 
