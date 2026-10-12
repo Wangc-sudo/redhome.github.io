@@ -396,6 +396,19 @@ def _pipeline_app(*, viewer=None, fleet=("robot-hangzhou",), publisher=None,
     )
 
 
+def _fleet_app(*, viewer=None, fleet=("robot-hangzhou",), configs=None,
+               connection=None):
+    """带舰队清单的 ops-web（名册页反向索引 P3 测试用）。"""
+    return create_app(
+        settings=_fake_settings(),
+        session_secret=SECRET,
+        db_connector=_connector(connection),
+        viewer_resolver=_StaticViewerResolver(viewer),
+        fleet_source=lambda: fleet,
+        config_source=StaticConfigSource(configs or {}),
+    )
+
+
 class PipelinePageTests(unittest.TestCase):
     def test_pipelines_page_lists_fleet_with_template_and_run_button(self):
         store = _PipelineStore()
@@ -699,6 +712,23 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("口径说明：为什么有人不在名单", body)
         self.assertIn('href="/roster">填报名册', body)   # 名册层深链
         self.assertIn('href="/">成员与授权', body)       # 在职层深链
+
+    def test_pipelines_page_service_deep_link_opens_drawer(self):
+        """P3（2026-10-12）：?service=<id> 深链随页下发自动开抽屉脚本；
+        未知/非法标识不注入。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        body = client.get("/pipelines",
+                          params={"service": "robot-hangzhou"}).text
+        self.assertIn("openRecipientOverride('robot-hangzhou')", body)
+
+        # 不在舰队清单里的标识：不注入（避免无意义开抽屉）。
+        other = client.get("/pipelines", params={"service": "nope"}).text
+        self.assertNotIn("openRecipientOverride('nope')", other)
+        # 非法字符（防注入）：不注入。
+        bad = client.get("/pipelines",
+                         params={"service": "x');alert(1)//"}).text
+        self.assertNotIn("alert(1)", bad)
 
     def test_pipelines_page_category_truth_overrides_derivation(self):
         """category 真源优先：注册表配置覆盖 service_id 推导（分表落位）。
@@ -1359,6 +1389,40 @@ class RosterPageTests(unittest.TestCase):
         self.assertNotIn('setRosterStatus(2, this.value)', body)
         self.assertNotIn("deleteRoster(2)", body)
         self.assertNotIn("toggleRoster", body)
+
+    def test_roster_page_scope_backlinks_to_pipelines_drawer(self):
+        """P3（2026-10-12）：名册 scope 区块显示「被这些任务催办」，并把
+        任务名深链到定时任务页对应行的抽屉（service_id → scope 反查）。"""
+        store = _RosterStore()
+        configs = {
+            "robot-hangzhou": {}, "robot-check-hangzhou": {},
+            "channel-missing-check": {}, "sync-wdt": {},
+        }
+        client = TestClient(_fleet_app(
+            viewer=_admin_viewer(), fleet=tuple(configs), configs=configs))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+
+        self.assertIn("被这些任务催办", body)
+        # 杭州 scope：两条区域催办任务，深链到 /pipelines?service=...
+        self.assertIn('href="/pipelines?service=robot-hangzhou"', body)
+        self.assertIn('href="/pipelines?service=robot-check-hangzhou"', body)
+        # 渠道 scope：channel-missing-check（_service_region == qudao）
+        self.assertIn('href="/pipelines?service=channel-missing-check"', body)
+        # 非催办任务（同步类）不进反向索引
+        self.assertNotIn('href="/pipelines?service=sync-wdt"', body)
+
+    def test_roster_page_backlinks_fail_soft_without_fleet(self):
+        """无舰队清单（fleet_source=None）时名册页照常渲染，仅省略反向索引行。"""
+        store = _RosterStore()
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            body = client.get("/roster").text
+        self.assertIn("填报名册", body)
+        self.assertIn("新增名册记录", body)
+        self.assertNotIn("被这些任务催办（改本范围名册会波及）", body)
 
 
 class RosterApiTests(unittest.TestCase):

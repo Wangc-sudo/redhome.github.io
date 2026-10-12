@@ -1024,6 +1024,49 @@ def _group_cell(service_id):
     return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
 
 
+def _scope_backlinks(configs):
+    """名册 scope → 被该范围名册影响的催办任务标识（P3，2026-10-12）。
+
+    由 ``service_id → 区域`` 反查（复用 :func:`_service_region` 口径）：
+    ``robot-<区域>`` / ``robot-check-<区域>`` → 区域；``channel-missing-check``
+    → ``qudao``。只收「催办」类任务（与定时任务页「收受影响人」列同一取值域），
+    无绑定区域的平台/应用线不计。返回 ``{scope: [service_id, ...]}``，各
+    scope 内按标识排序。
+    """
+    by_scope: dict = {}
+    for config in configs:
+        service_id = config.service_id
+        if resolve_category(service_id, config.category) != "催办":
+            continue
+        region = _service_region(service_id)
+        if region is None:
+            continue
+        by_scope.setdefault(region, []).append(service_id)
+    for ids in by_scope.values():
+        ids.sort()
+    return by_scope
+
+
+def _backlinks_html(service_ids):
+    """名册 scope 区块「被这些任务催办」反向索引行（P3，2026-10-12）。
+
+    每条任务名深链到定时任务页对应行的收件人抽屉：``/pipelines?service=<id>``
+    打开即自动弹出该行抽屉（见 ``pipelines_page`` 的 ``service`` 深链）。
+    范围无绑定催办任务时给一句人话，不留空。
+    """
+    if not service_ids:
+        return ("<p class=\"hint\">被这些任务催办："
+                "本范围暂无绑定的催办任务。</p>")
+    items = "、".join(
+        f"<a href=\"/pipelines?service={_esc(service_id)}\">"
+        f"{_esc(_service_name(service_id))}</a>"
+        f"<span class=\"hint\">（{_esc(service_id)}）</span>"
+        for service_id in service_ids
+    )
+    return ("<p class=\"hint\">被这些任务催办（改本范围名册会波及）："
+            f"{items}</p>")
+
+
 #: 定时任务页「按管理群」视角的分组顺序（2026-10-12 运维裁决）：城市区域
 #: 在前、跨区域线（渠道/线下整体）居中，无区域（平台/无群）恒置末位；
 #: 未登记区域排在已知区域之后。分组键为区域 key（非中文 label）。
@@ -1358,7 +1401,8 @@ def _delete_btn_html(row):
 _QUDAO_SORTS = ("channel", "store", "owner", "deputy", "target")
 
 
-def _qudao_section(rows, targets, numbers, sort="channel"):
+def _qudao_section(rows, targets, numbers, sort="channel",
+                   backlinks_html=""):
     """渠道门店一体视图（S2）：目标可编辑 + 负责人名册 + 发布快照。
 
     统一模板（2026-10-07 运维裁决）：行 = 负责人链接，列为
@@ -1520,7 +1564,8 @@ def _qudao_section(rows, targets, numbers, sort="channel"):
     return (
         "<h2>渠道门店<span class=\"hint\">（qudao，目标 + 负责人一体管理；"
         "点表头排序，默认按渠道聚合）</span></h2>"
-        "<table><tr>"
+        + backlinks_html
+        + "<table><tr>"
         + _th("渠道/地区", "channel")
         + _th("店铺/对象", "store")
         + _th("月目标（元）", "target")
@@ -2300,7 +2345,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
             "自查）。已存在的标识请用「操作」列开关，不可重复新增。</p>"
         )
-        return HTMLResponse(_page("定时任务", table, add_form,
+        # 名册页反向索引深链（P3，2026-10-12）：``/pipelines?service=<id>``
+        # 打开即自动弹出该行收件人抽屉，免去在群视角里翻找（服务标识受
+        # 注册表约束，此处再白名单校验后内联，防注入）。
+        deep_link = (request.query_params.get("service") or "").strip()
+        deep_link_script = ""
+        if deep_link in service_ids and re.fullmatch(
+                r"[A-Za-z0-9._:-]{1,64}", deep_link):
+            deep_link_script = (
+                "<script>document.addEventListener('DOMContentLoaded',"
+                "function(){openRecipientOverride('"
+                + deep_link + "');});</script>"
+            )
+        return HTMLResponse(_page("定时任务", table, add_form, deep_link_script,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.get("/pipelines/audit")
@@ -2621,16 +2678,40 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             + "<span class=\"hint\">（每月 1 日 06:00 上月目标自动结转到当月，"
               "人工已录入的不覆盖；渠道门店目标不带月份，常年有效）</span></p>"
         )
+        # 名册页反向索引（P3，2026-10-12）：scope → 被该范围名册催办的任务。
+        # 舰队清单是附属信息：读取故障只省略该行，不影响名册管理主功能
+        # （与定时任务页「收受影响人」列同款 fail-soft）。
+        scope_backlinks: dict = {}
+        try:
+            if fleet_source is not None:
+                backlink_configs = []
+                for service_id in _fleet():
+                    try:
+                        backlink_configs.append(
+                            config_source.get_pipeline(service_id))
+                    except Exception as exc:
+                        _LOGGER.warning(
+                            "ops-web roster backlink config parse failed: %s",
+                            type(exc).__name__)
+                        backlink_configs.append(PipelineConfig(service_id))
+                scope_backlinks = _scope_backlinks(backlink_configs)
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster backlink load failed: %s",
+                            type(exc).__name__)
+            scope_backlinks = {}
         for scope in report_roster.SCOPES:
             rows = by_scope.get(scope) or []
+            backlinks = _backlinks_html(scope_backlinks.get(scope) or [])
             if scope == "qudao":
                 sections.append(
-                    _qudao_section(rows, qudao_targets, qudao_numbers, sort=sort)
+                    _qudao_section(rows, qudao_targets, qudao_numbers,
+                                   sort=sort, backlinks_html=backlinks)
                 )
                 continue
             scope_label = _label(_SCOPE_LABEL, scope)
             sections.append(f"<h2>{_esc(scope_label)}"
                             f"<span class=\"hint\">（{len(rows)} 条）</span></h2>")
+            sections.append(backlinks)
             if not rows:
                 sections.append("<p class=\"hint\">暂无记录"
                                 + ("——该范围当前不拦截（没登记就不限制填报，维持现状）。"
