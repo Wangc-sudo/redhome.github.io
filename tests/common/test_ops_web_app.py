@@ -695,6 +695,8 @@ class PipelinePageTests(unittest.TestCase):
 
         self.assertIn("function renderRecipientBase", body)
         self.assertIn("本线基名单", body)
+        self.assertIn("function renderRecipientExplain", body)  # P2 归因
+        self.assertIn("口径说明：为什么有人不在名单", body)
         self.assertIn('href="/roster">填报名册', body)   # 名册层深链
         self.assertIn('href="/">成员与授权', body)       # 在职层深链
 
@@ -2468,7 +2470,62 @@ class RecipientOverrideApiTests(unittest.TestCase):
         data = response.json()
         self.assertEqual([], data["base"])
         self.assertEqual("", data["base_source"])
+        self.assertEqual([], data["explain"])
         self.assertEqual(rows, data["overrides"])
+
+    def test_get_includes_explain_for_robot(self):
+        """P2（2026-10-12）：抽屉附带「为什么不在名单」三组归因——名册有但
+        不在职、在职但不在名册、被本任务 exclude 移除（展示口径，不新增写面）。"""
+        rows = [{"id": 3, "service_id": "robot-hangzhou", "mode": "exclude",
+                 "target_type": "user_id", "target_value": "u-zhang",
+                 "resolved_user_id": "u-zhang", "enabled": 1, "note": None,
+                 "updated_by": "ops", "updated_at": None}]
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: list(rows)), \
+                mock.patch.object(bi_authz, "fetch_active_members",
+                                  lambda conn: list(_MEMBERS)), \
+                mock.patch.object(report_roster, "fetch_scope_person_names",
+                                  lambda conn, scope=None:
+                                  frozenset({"张三", "赵六"})):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "robot-hangzhou"})
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        # 基名单 = 在职(hangzhou: 张三/王五) ∩ 名册(张三/赵六) = 张三
+        self.assertEqual([{"user_id": "u-zhang", "name": "张三"}], data["base"])
+        groups = {g["key"]: g for g in data["explain"]}
+        self.assertEqual(["赵六"],
+                         [i["name"] for i in groups["roster_only"]["items"]])
+        self.assertEqual(["王五"],
+                         [i["name"] for i in groups["member_only"]["items"]])
+        self.assertEqual(["张三"],
+                         [i["name"] for i in groups["excluded"]["items"]])
+        self.assertIn("成员与授权", groups["roster_only"]["reason"])
+        self.assertIn("填报名册", groups["member_only"]["reason"])
+
+    def test_get_qudao_explain_has_no_member_groups(self):
+        """渠道线基名单直接来自名册 owner、无区域在职交集：explain 不产出
+        roster_only/member_only（否则会把全部 owner 误报为「不在职」），
+        只随覆盖产出 excluded。"""
+        owners = {"天猫-A店": {"张三"}, "京东-B店": {"李四"}}
+        rows = [{"id": 5, "service_id": "channel-missing-check",
+                 "mode": "exclude", "target_type": "name",
+                 "target_value": "张三", "resolved_user_id": None,
+                 "enabled": 1, "note": None, "updated_by": "ops",
+                 "updated_at": None}]
+        with mock.patch.object(recipient_override, "fetch_service_overrides",
+                               lambda conn, sid: list(rows)), \
+                mock.patch.object(report_roster, "fetch_store_owner_map",
+                                  lambda conn, scope, roles=None: owners):
+            response = self._client().get(
+                "/api/pipelines/recipient-override",
+                params={"service_id": "channel-missing-check"})
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual(["excluded"], [g["key"] for g in data["explain"]])
+        self.assertEqual(["张三"],
+                         [i["name"] for i in data["explain"][0]["items"]])
 
     def test_add_resolves_snapshot_and_reports_unresolved(self):
         seen = {}
