@@ -786,7 +786,16 @@ def _collect_records(connection):
             _label(_ACTION_LABEL, get("action")), when, get("detail") or "",
         ))
 
-    for row in recipient_override.fetch_recent_audits(connection, limit=200):
+    # 覆盖审计是本期新表：未迁移/读失败只跳过该来源，不整页 503
+    # （与 /pipelines 覆盖列的 fail-soft 口径一致）。
+    try:
+        override_audits = recipient_override.fetch_recent_audits(
+            connection, limit=200)
+    except Exception as exc:
+        _LOGGER.warning("ops-web recipient override audit load failed: %s",
+                        type(exc).__name__)
+        override_audits = ()
+    for row in override_audits:
         get = _audit_get(row, ("actor", "action", "service_id", "mode",
                                "target_type", "target_value", "detail",
                                "created_at"))
