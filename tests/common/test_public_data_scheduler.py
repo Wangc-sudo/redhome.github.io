@@ -830,3 +830,31 @@ def test_no_history_injection_means_no_recording():
     scheduler, _ = due_scheduler({"sync-wdt": {"schedule": "0 2 * * *"}})
     scheduler.tick()
     assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
+
+
+# -- _next_fire 多段 cron（ops-web「播报时间」≤3 时点，2026-10-13） -------------
+
+def test_next_fire_multi_segment_takes_earliest():
+    from common.public_data.scheduler import _next_fire
+
+    # now 早于当天 08:00 → 08:00（两段中更早）。
+    assert _next_fire(
+        "0 8 * * *;0 18 * * *", datetime(2026, 9, 21, 7, 0, 0)
+    ) == datetime(2026, 9, 21, 8, 0)
+    # now 在 08:00 与 18:00 之间 → 18:00。
+    assert _next_fire(
+        "0 8 * * *;0 18 * * *", datetime(2026, 9, 21, 12, 0, 0)
+    ) == datetime(2026, 9, 21, 18, 0)
+
+
+def test_next_fire_multi_segment_any_invalid_is_none():
+    from common.public_data.scheduler import _next_fire
+
+    assert _next_fire("0 8 * * *;bogus", T0) is None
+
+
+def test_next_fire_empty_or_none_is_none():
+    from common.public_data.scheduler import _next_fire
+
+    assert _next_fire("", T0) is None
+    assert _next_fire(None, T0) is None

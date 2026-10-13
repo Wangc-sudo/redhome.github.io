@@ -124,12 +124,19 @@ def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
         raise OpsControlError("kind must be one of apps/business")
     if not isinstance(schedule, str) or not schedule.strip():
         raise OpsControlError("schedule is required (cron expression)")
-    schedule = schedule.strip()
-    try:
-        from croniter import croniter
-        croniter(schedule)
-    except (ValueError, KeyError):
-        raise OpsControlError("schedule is not a valid cron expression")
+    # 播报时间最多 3 个时点：``;`` 分隔的多段 5 段 cron（单段是退化形态）。
+    segments = [seg.strip() for seg in schedule.split(";") if seg.strip()]
+    if not segments:
+        raise OpsControlError("schedule is required (cron expression)")
+    if len(segments) > 3:
+        raise OpsControlError("schedule supports at most 3 cron segments")
+    from croniter import croniter
+    for segment in segments:
+        try:
+            croniter(segment)
+        except (ValueError, KeyError):
+            raise OpsControlError("schedule is not a valid cron expression")
+    schedule = ";".join(segments)
     if not isinstance(enabled, bool):
         raise OpsControlError("enabled must be a boolean")
     if description is None:

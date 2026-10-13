@@ -420,8 +420,8 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_recent():
-            # 功能视角（含「管理群」列）现由 ?view=class 承载。
-            body = client.get("/pipelines", params={"view": "class"}).text
+            # 群视角是唯一视角（2026-10-13 收敛）：不带 view 即按管理群分组。
+            body = client.get("/pipelines").text
 
         self.assertIn("robot-hangzhou", body)    # 原始 id 小字备查
         self.assertIn("杭州", body)              # 服务中文名（区域中文化）
@@ -433,72 +433,38 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("新增定时任务", body)
         self.assertIn("应用线", body)            # kind=apps 中文化
         self.assertIn("服务标识", body)          # 表头中文化
-        self.assertIn("管理群", body)            # 新列表头
-        self.assertIn("功能", body)              # 新列表头
+        self.assertIn("按管理群", body)          # 唯一视角（无功能类别 tab）
         self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
-        self.assertIn("催办", body)              # 功能（robot- 家族归类）
+        self.assertIn("<details", body)          # 群分组原生折叠
+        self.assertIn("<summary", body)
         self.assertIn("操作…", body)             # 操作列改下拉
         self.assertIn('data-service="robot-hangzhou"', body)
-        self.assertIn('data-schedule="0 2 * * *"', body)   # 行内带原 cron 供改时刻
-        self.assertIn("改定时时间", body)        # 操作列新增「改定时时间」
+        self.assertIn('data-schedule="0 2 * * *"', body)   # 行内带原 cron 供改播报时间
+        self.assertIn("改播报时间", body)        # 操作列「改播报时间」
+        self.assertIn("<th>播报时间</th>", body)     # 列头改名
         self.assertIn('id="confirm-mask"', body)     # 弹窗确认挂载点
         self.assertIn('id="confirm-text"', body)
-        self.assertIn('id="schedule-mask"', body)     # 改定时时间弹窗挂载点
-        self.assertIn('id="schedule-edit-hour"', body)
-        self.assertIn('id="schedule-edit-minute"', body)
-        # 弹窗内一并显示「定时规则」并实时预览改后结果（消除与规则列的信息割裂）
-        self.assertIn("当前定时规则", body)
+        self.assertIn('id="schedule-mask"', body)     # 改播报时间弹窗挂载点
+        self.assertIn('id="schedule-edit-times"', body)      # 时点槽容器
+        self.assertIn('id="schedule-edit-add"', body)        # ＋时点
+        self.assertIn('id="schedule-edit-ok"', body)         # 确定
+        self.assertIn('id="schedule-edit-unsupported"', body)  # 非时刻型提示
+        self.assertNotIn('id="schedule-edit-hour"', body)     # 旧单时点控件已删
+        self.assertNotIn('id="schedule-edit-minute"', body)
+        # 弹窗内一并显示「当前播报时间」并实时预览改后结果
+        self.assertIn("当前播报时间", body)
         self.assertIn('id="schedule-edit-rule"', body)
         self.assertIn('id="schedule-edit-preview"', body)
-        self.assertIn("function rewriteCronTime", body)
+        self.assertIn("function parseBroadcastTimes", body)
+        self.assertIn("function buildBroadcastCron", body)
+        self.assertNotIn("function rewriteCronTime", body)  # 旧实现已删
         self.assertIn("function updateScheduleEditPreview", body)
         self.assertNotIn(">finished<", body)     # 英文状态值不外显
         self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
         self.assertNotIn("10:00:00", body)           # UTC 原文不外显
 
-    def test_pipelines_page_splits_category_tables(self):
-        """分表：按功能（2026-10-10 裁决）——先业务动作后数据与平台。"""
-        fleet = (
-            "scheduler",            # 平台
-            "dingtalk-gateway",     # 钉钉
-            "robot-hangzhou",       # 催办
-            "leaderboard-qudao",    # 播报
-            "pages-qudao-t1",       # 页面
-            "sync-wdt",             # 同步
-            "extract-mart",         # 加工
-        )
-        client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
-        _login(client)
-        body = client.get("/pipelines", params={"view": "class"}).text
-
-        order = ("<h2>催办</h2>", "<h2>播报</h2>", "<h2>页面</h2>",
-                 "<h2>同步</h2>", "<h2>加工</h2>", "<h2>钉钉</h2>",
-                 "<h2>平台</h2>", "<h2>未归类</h2>")
-        positions = [body.index(title) for title in order]
-        self.assertEqual(positions, sorted(positions))
-        # 落位：各行在自己功能段与下一段之间
-        self.assertLess(positions[0], body.index("robot-hangzhou"))
-        self.assertLess(body.index("robot-hangzhou"), positions[1])
-        self.assertLess(positions[1], body.index("leaderboard-qudao"))
-        self.assertLess(body.index("leaderboard-qudao"), positions[2])
-        self.assertLess(positions[2], body.index("pages-qudao-t1"))
-        self.assertLess(body.index("pages-qudao-t1"), positions[3])
-        self.assertLess(positions[3], body.index("sync-wdt"))
-        self.assertLess(body.index("sync-wdt"), positions[4])
-        self.assertLess(positions[4], body.index("extract-mart"))
-        self.assertLess(body.index("extract-mart"), positions[5])
-        self.assertLess(positions[5], body.index("dingtalk-gateway"))
-        self.assertLess(body.index("dingtalk-gateway"), positions[6])
-        self.assertLess(positions[6], body.index("scheduler"))
-        # 旧分表与冗余列不再出现
-        self.assertNotIn("<h2>应用类</h2>", body)
-        self.assertNotIn("<h2>业务线</h2>", body)
-        self.assertNotIn("<h2>数据线</h2>", body)
-        self.assertNotIn("<th>类型</th>", body)
-        self.assertNotIn("<th>功能</th>", body)
-
     def test_pipelines_page_group_and_function_classification(self):
-        """管理群/功能列：家族后缀、显式区域映射、应用线回退。"""
+        """群视角分组：家族后缀/显式区域映射、跨区域线与平台线归组。"""
         fleet = (
             "leaderboard-hangzhou",   # 家族：播报 + 「杭州」群
             "pages-qudao-t1",         # 显式区域：页面 + 「渠道」群（后缀非区域）
@@ -506,33 +472,26 @@ class PipelinePageTests(unittest.TestCase):
             "sync-wdt",               # 应用线：同步 + 无群
             "dingtalk-gateway",       # 平台线：钉钉 + 无群
         )
-        client = TestClient(_pipeline_app(
-            viewer=_admin_viewer(), fleet=fleet,
-        ))
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
         _login(client)
-        body = client.get("/pipelines", params={"view": "class"}).text
+        body = client.get("/pipelines").text
 
-        self.assertIn("「杭州」群", body)
-        self.assertEqual(2, body.count("「渠道」群"))  # 两条渠道线各自映射
-        self.assertIn("播报", body)                    # leaderboard- 家族
-        self.assertIn("页面", body)                    # pages- 家族
-        self.assertIn("催办", body)                    # channel-missing-check
-        self.assertIn("同步", body)                    # sync-wdt
-        self.assertIn("钉钉", body)                    # dingtalk-gateway
-        self.assertIn("榜单播报", body)                # leaderboard- 家族中文名
+        self.assertIn("「杭州」群（1 项）", body)   # leaderboard- 家族区域映射
+        self.assertIn("「渠道」群（2 项）", body)   # 两条渠道线同群聚为一组
+        self.assertIn("平台 / 无群（2 项）", body)  # sync-wdt + dingtalk-gateway
+        self.assertIn("榜单播报", body)            # leaderboard- 家族中文名
 
     def test_pipelines_page_view_tabs_default_group(self):
-        """双视角 tab（2026-10-12）：默认「按管理群」，两链接常驻。"""
+        """群视角唯一（2026-10-13 收敛）：无「按功能类别」tab、无 ?view=class。"""
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/pipelines").text            # 不带 view → 默认群视角
+        body = client.get("/pipelines").text
 
         self.assertIn("按管理群", body)
-        self.assertIn("按功能类别", body)
-        self.assertIn('href="/pipelines?view=group"', body)
-        self.assertIn('href="/pipelines?view=class"', body)
-        # 默认高亮群视角
-        self.assertIn('class="active" href="/pipelines?view=group"', body)
+        self.assertNotIn("按功能类别", body)
+        self.assertNotIn('href="/pipelines?view=group"', body)
+        self.assertNotIn('href="/pipelines?view=class"', body)
+        self.assertNotIn('class="tabs"', body)
         # 群视角：分组头 + 项数；不再是功能分表
         self.assertIn("「杭州」群（1 项）", body)
         self.assertNotIn("<h2>催办</h2>", body)
@@ -562,27 +521,6 @@ class PipelinePageTests(unittest.TestCase):
             self.assertIn(sid, body)
         # 群视角行内不再重复「管理群」列
         self.assertNotIn("<th>管理群</th>", body)
-
-    def test_pipelines_page_class_view_keeps_category_tables(self):
-        """?view=class 保留原「按功能类别」三/多分表与「管理群」列。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines", params={"view": "class"}).text
-
-        self.assertIn("<h2>催办</h2>", body)
-        self.assertIn("<th>管理群</th>", body)
-        self.assertIn("「杭州」群", body)
-        self.assertIn('class="active" href="/pipelines?view=class"', body)
-        self.assertNotIn("平台 / 无群", body)
-
-    def test_pipelines_page_unknown_view_falls_back_to_group(self):
-        """非法 view → 回退默认群视角（不报错、不空页）。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines", params={"view": "bogus"}).text
-
-        self.assertIn("「杭州」群（1 项）", body)
-        self.assertIn("robot-hangzhou", body)
 
     def test_pipelines_page_reminder_targets(self):
         """收受影响人列：robot=名册在册人员（绑定）；渠道到齐=名册店铺负责人。"""
@@ -662,7 +600,8 @@ class PipelinePageTests(unittest.TestCase):
         self.assertNotIn("读取失败", body)
 
     def test_pipelines_page_reminder_targets_fail_open_all_members(self):
-        """名册无记录 → 区域在册填报人全员兜底（与机器人 fail-open 同语义）。"""
+        """名册无记录 → 区域在册填报人全员兜底（与机器人 fail-open 同语义）；
+        跨多部门时按部门归组展示（2026-10-13 联动组织编排）。"""
         connection = _Connection({
             "dim_robot_member": [
                 ("u1", "张三", "hangzhou", "门店一部"),
@@ -675,7 +614,8 @@ class PipelinePageTests(unittest.TestCase):
         _login(client)
         body = client.get("/pipelines").text
 
-        self.assertIn("张三、李四", body)
+        self.assertIn("门店一部：张三", body)   # 按部门归组（非旧的「、」连接）
+        self.assertIn("门店二部：李四", body)
         self.assertIn("（2 人 · 全员兜底）", body)
 
     def test_pipelines_page_reminder_targets_empty_roster_hint(self):
@@ -731,11 +671,8 @@ class PipelinePageTests(unittest.TestCase):
         self.assertNotIn("alert(1)", bad)
 
     def test_pipelines_page_category_truth_overrides_derivation(self):
-        """category 真源优先：注册表配置覆盖 service_id 推导（分表落位）。
-
-        sync-wdt 推导=同步；注册表配 category=催办 后，整行落在催办段
-        （功能分表后无独立功能列，落位即真源表达）。
-        """
+        """category 真源优先：注册表配 category=催办 时，即便 service_id 推导为
+        「同步」，该行仍按催办装载（收受影响人列走催办取值域）。"""
         configs = {"sync-wdt": {"schedule": "0 2 * * *", "category": "催办"}}
         app = create_app(
             settings=_fake_settings(),
@@ -748,13 +685,18 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(app)
         _login(client)
-        body = client.get("/pipelines", params={"view": "class"}).text
+        seen = []
 
-        urge_i = body.index("<h2>催办</h2>")
-        bcast_i = body.index("<h2>播报</h2>")
-        row_i = body.index("sync-wdt")
-        self.assertLess(urge_i, row_i)          # 落催办段（真源胜出）
-        self.assertLess(row_i, bcast_i)
+        def _spy(conn, service_id):
+            seen.append(service_id)
+            return ()
+
+        with mock.patch.object(recipient_override, "fetch_overrides", _spy):
+            body = client.get("/pipelines").text
+
+        self.assertEqual(["sync-wdt"], seen)   # 真源 = 催办 → 催办装载被触发
+        self.assertIn("收受影响人", body)     # 催办行入口（列）仍在
+        self.assertIn("sync-wdt", body)       # 群视角仍在（平台 / 无群）
 
     def test_pipelines_page_add_form_offers_category_select(self):
         """新增表单带 category 下拉：空值=按标识推导，七值可选。"""
@@ -779,16 +721,17 @@ class PipelinePageTests(unittest.TestCase):
         for preset in ('value="daily"', 'value="weekday"', 'value="weekly"',
                        'value="monthly"', 'value="hourly"', 'value="custom"'):
             self.assertIn(preset, body)
-        # 时点选择拆为「时(0-23)」「分(00/30)」两维下拉（2026-10-12 裁决）：
-        # 运维只选时刻，不手写也不再用原生 time 控件。
+        # 时点选择拆为「时(0-23)」「分(0-59)」两维下拉（2026-10-13 裁决：
+        # 分维开放全量 0..59，非仅 00/30）。
         self.assertIn('name="schedule_hour"', body)
         self.assertIn('name="schedule_minute"', body)
         self.assertNotIn('name="schedule_time"', body)
         self.assertNotIn('type="time"', body)
         for hour in range(24):
             self.assertIn(f'<option value="{hour}"', body)
-        self.assertIn('<option value="0">00</option>', body)
+        self.assertIn('<option value="0" selected>00</option>', body)  # 分默认 0
         self.assertIn('<option value="30">30</option>', body)
+        self.assertIn('<option value="59">59</option>', body)          # 分上限
         self.assertIn('name="schedule_dow"', body)     # 每周（默认隐藏）
         self.assertIn('name="schedule_dom"', body)     # 每月（默认隐藏）
         self.assertIn('name="schedule"', body)         # 自定义 cron（默认隐藏）
@@ -914,6 +857,11 @@ class ZhLabelTests(unittest.TestCase):
         from common.ops_web.app import _cron_zh
         self.assertEqual("每 5 分钟", _cron_zh("*/5 * * * *"))
         self.assertEqual("每小时第 30 分", _cron_zh("30 * * * *"))
+        # 多段（播报时间多时点，2026-10-13）：逐段中文、以「；」连接
+        self.assertEqual("每天 08:00；每天 12:30",
+                         _cron_zh("0 8 * * *;30 12 * * *"))
+        self.assertEqual("每天 02:00", _cron_zh("0 2 * * *;"))   # 空段忽略
+        self.assertIsNone(_cron_zh("0 8 * * *;0 0 1 1 *"))  # 任一段不可识别
         self.assertIsNone(_cron_zh("0 0 1 1 *"))     # 带月份字段 → 回退
         self.assertIsNone(_cron_zh("not a cron"))
 
@@ -952,9 +900,10 @@ class ZhLabelTests(unittest.TestCase):
 
     def test_service_region_robot_check_maps_region(self):
         """robot-check-<region> 管理群区域解析（家族长者优先于 robot-）。"""
-        from common.ops_web.app import _group_cell
-        self.assertIn("「杭州」群", _group_cell("robot-check-hangzhou"))
-        self.assertIn("「杭州」群", _group_cell("robot-hangzhou"))
+        from common.ops_web.app import _service_region, _pipeline_group_title
+        self.assertEqual("hangzhou", _service_region("robot-check-hangzhou"))
+        self.assertEqual("hangzhou", _service_region("robot-hangzhou"))
+        self.assertIn("「杭州」群", _pipeline_group_title("hangzhou"))
 
     def test_fmt_time_converts_utc_to_beijing(self):
         from datetime import datetime, timezone
@@ -1112,10 +1061,11 @@ class _BrokenConfigSource:
 
 
 class PipelineScheduleUpdateTests(unittest.TestCase):
-    """改定时时间（2026-10-12）：read-modify-write，只换 cron 分/时两段。
+    """改播报时间（2026-10-13）：read-modify-write，只换 cron 分/时多段。
 
-    运维只选「时(0-23)」「分(00/30)」两维；日/月/周形态（工作日、每月 N
-    日）必须保留，且发布用原配置 replace（不得丢 sources/reads）。
+    请求体 ``{service_id, times:[{hour,minute}, ...]}``（1..3 个时点、任意
+    分 0-59、去重升序）；日/月/周形态（工作日、每月 N 日）取自现有首段保留，
+    且发布用原配置 replace（不得丢 sources/reads）。
     """
 
     def _client(self, *, configs=None, publisher=None, config_source=None,
@@ -1144,7 +1094,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         with store.patch_audit():
             response = client.post(
                 "/api/pipelines/update",
-                json={"service_id": "robot-hangzhou", "hour": 20, "minute": 30},
+                json={"service_id": "robot-hangzhou",
+                      "times": [{"hour": 20, "minute": 30}]},
             )
 
         self.assertEqual(200, response.status_code)
@@ -1156,6 +1107,44 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
             store.audit,
         )
 
+    def test_update_accepts_multiple_times_sorted_and_deduped(self):
+        """多时点：去重、按 (hour,minute) 升序，';' 连接多段 cron。"""
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = self._client(
+            configs={"robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True}},
+            publisher=publisher)
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/update",
+                json={"service_id": "robot-hangzhou",
+                      "times": [{"hour": 18, "minute": 0},
+                                {"hour": 8, "minute": 0},
+                                {"hour": 12, "minute": 30}]},
+            )
+
+        self.assertEqual(200, response.status_code)
+        expected = "0 8 * * *;30 12 * * *;0 18 * * *"
+        self.assertEqual(expected, response.json()["schedule"])
+        self.assertEqual(expected, publisher.published[0].schedule)
+        self.assertEqual(
+            [(ADMIN_USERID, "schedule", "robot-hangzhou", expected)],
+            store.audit,
+        )
+
+    def test_update_accepts_any_minute(self):
+        """分 0-59 全量合法（旧实现仅 00/30；minute=15 现应成功）。"""
+        publisher = _RecordingPublisher()
+        client = self._client(publisher=publisher)
+        response = client.post(
+            "/api/pipelines/update",
+            json={"service_id": "robot-hangzhou",
+                  "times": [{"hour": 1, "minute": 15}]},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("15 1 * * 1-5", response.json()["schedule"])
+
     def test_update_falls_back_to_daily_for_non_cron_schedule(self):
         publisher = _RecordingPublisher()
         client = self._client(
@@ -1164,7 +1153,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         )
         response = client.post(
             "/api/pipelines/update",
-            json={"service_id": "robot-hangzhou", "hour": 7, "minute": 0},
+            json={"service_id": "robot-hangzhou",
+                  "times": [{"hour": 7, "minute": 0}]},
         )
 
         self.assertEqual(200, response.status_code)
@@ -1181,7 +1171,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         )
         response = client.post(
             "/api/pipelines/update",
-            json={"service_id": "robot-hangzhou", "hour": 9, "minute": 30},
+            json={"service_id": "robot-hangzhou",
+                  "times": [{"hour": 9, "minute": 30}]},
         )
 
         self.assertEqual(200, response.status_code)
@@ -1192,14 +1183,29 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
 
     def test_update_rejects_bad_payload_and_unknown_service(self):
         client = self._client(publisher=_RecordingPublisher())
+        three = [{"hour": 1, "minute": 0}, {"hour": 2, "minute": 0},
+                 {"hour": 3, "minute": 0}]
         for payload in (
-            {"service_id": "BAD ID", "hour": 1, "minute": 0},          # 非法 id
-            {"service_id": "nope", "hour": 1, "minute": 0},            # 不在舰队
-            {"service_id": "robot-hangzhou", "hour": 24, "minute": 0},  # 时越界
-            {"service_id": "robot-hangzhou", "hour": -1, "minute": 0},
-            {"service_id": "robot-hangzhou", "hour": 1, "minute": 15},  # 分非 00/30
-            {"service_id": "robot-hangzhou", "hour": "1", "minute": 0},  # 非 int
-            {"service_id": "robot-hangzhou", "hour": True, "minute": 0},  # bool
+            {"service_id": "BAD ID", "times": three},             # 非法 id
+            {"service_id": "nope", "times": three},               # 不在舰队
+            {"service_id": "robot-hangzhou"},                     # 缺 times
+            {"service_id": "robot-hangzhou", "times": None},      # 非 list
+            {"service_id": "robot-hangzhou", "times": []},        # 空
+            {"service_id": "robot-hangzhou",                      # 超 3 时点
+             "times": [{"hour": h, "minute": 0} for h in (1, 2, 3, 4)]},
+            {"service_id": "robot-hangzhou", "times": [1]},       # 项非 dict
+            {"service_id": "robot-hangzhou",                      # 时越界
+             "times": [{"hour": 24, "minute": 0}]},
+            {"service_id": "robot-hangzhou",
+             "times": [{"hour": -1, "minute": 0}]},
+            {"service_id": "robot-hangzhou",                      # 分越界
+             "times": [{"hour": 1, "minute": 60}]},
+            {"service_id": "robot-hangzhou",                      # 非 int
+             "times": [{"hour": "1", "minute": 0}]},
+            {"service_id": "robot-hangzhou",                      # bool
+             "times": [{"hour": True, "minute": 0}]},
+            {"service_id": "robot-hangzhou",                      # bool 分
+             "times": [{"hour": 1, "minute": True}]},
         ):
             self.assertEqual(
                 400, client.post("/api/pipelines/update", json=payload).status_code,
@@ -1211,7 +1217,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         self.assertEqual(
             401, client.post("/api/pipelines/update",
                              json={"service_id": "robot-hangzhou",
-                                   "hour": 1, "minute": 0}).status_code
+                                   "times": [{"hour": 1, "minute": 0}]}
+                             ).status_code
         )
 
     def test_update_503_when_no_publisher(self):
@@ -1219,7 +1226,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         self.assertEqual(
             503, client.post("/api/pipelines/update",
                              json={"service_id": "robot-hangzhou",
-                                   "hour": 1, "minute": 0}).status_code
+                                   "times": [{"hour": 1, "minute": 0}]}
+                             ).status_code
         )
 
     def test_update_503_when_read_or_publish_fails(self):
@@ -1229,7 +1237,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         self.assertEqual(
             503, read_fail.post("/api/pipelines/update",
                                 json={"service_id": "robot-hangzhou",
-                                      "hour": 1, "minute": 0}).status_code
+                                      "times": [{"hour": 1, "minute": 0}]}
+                                ).status_code
         )
         # 发布失败
         publish_fail = self._client(
@@ -1237,7 +1246,8 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         self.assertEqual(
             503, publish_fail.post("/api/pipelines/update",
                                    json={"service_id": "robot-hangzhou",
-                                         "hour": 1, "minute": 0}).status_code
+                                         "times": [{"hour": 1, "minute": 0}]}
+                                   ).status_code
         )
 
 

@@ -143,12 +143,10 @@ _PAGE_STYLE = (
     ".flash{margin:12px 0;padding:10px 14px;border-radius:6px;font-size:14px}"
     ".flash.ok{background:#e6f4ea;color:#1e6b3a;border:1px solid #b7e0c4}"
     ".flash.err{background:#fdecea;color:#a12622;border:1px solid #f3c1bd}"
-    # 定时任务页双视角 tab（2026-10-12）：按管理群（默认）/ 按功能类别
-    ".tabs{display:flex;gap:8px;margin:16px 0 0}"
-    ".tabs a{padding:6px 14px;border:1px solid #d0d5dd;border-bottom:none;"
-    "border-radius:6px 6px 0 0;background:#f0f2f5;color:#1f3a5f;"
-    "text-decoration:none;font-size:13px}"
-    ".tabs a.active{background:#fff;font-weight:600}"
+    # 定时任务页「按管理群」分组折叠（2026-10-13）：原生 details 免 JS
+    "details.group{margin:16px 0 6px}"
+    "details.group>summary{font-size:15px;font-weight:600;cursor:pointer;"
+    "padding:6px 0;color:#1f3a5f}"
 )
 
 _PAGE_JS = """
@@ -251,57 +249,191 @@ function pipelineAction(sel) {
     openScheduleEdit(sid, sel.dataset.schedule || '');
   }
 }
-/* ---- 改定时时间（2026-10-12：时 0-23 + 分 00/30 两维下拉，不手写 cron）- */
-let _scheduleEditRaw = '';
-/* 只换 cron 的分/时两段，保留日/月/周（与后端 /api/pipelines/update 同规则）。 */
-function rewriteCronTime(cron, hour, minute) {
-  const parts = (cron || '').trim().split(/\\s+/);
-  if (parts.length === 5) {
-    return minute + ' ' + hour + ' ' + parts[2] + ' ' + parts[3] + ' ' + parts[4];
+/* ---- 改播报时间（2026-10-13：≤3 个 HH:MM 时点，多段 cron 并集）-------- */
+let _scheduleEditSid = '';
+let _scheduleEditTail = null;
+/* 拆多段 cron：';' 分隔、strip、去空段。 */
+function _cronSegments(cron) {
+  return (cron || '').split(';').map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+/* 取 cron 首段的日/月/周尾段；非 5 段回落 ['*','*','*']。 */
+function _cronTail(cron) {
+  const segs = _cronSegments(cron);
+  if (segs.length === 0) return ['*', '*', '*'];
+  const parts = segs[0].split(/\\s+/);
+  if (parts.length === 5) return [parts[2], parts[3], parts[4]];
+  return ['*', '*', '*'];
+}
+/* 解析「播报时间」形态：1..3 段、每段 5 字段、分纯数字、时按 ',' 拆且每段
+   纯数字（排除 * / */N）、各段尾段一致；否则 null（不支持按播报时间编辑）。 */
+function parseBroadcastTimes(cron) {
+  const segs = _cronSegments(cron);
+  if (segs.length < 1 || segs.length > 3) return null;
+  const times = [];
+  let tail = null;
+  for (let i = 0; i < segs.length; i++) {
+    const parts = segs[i].split(/\\s+/);
+    if (parts.length !== 5) return null;
+    if (!/^\\d+$/.test(parts[0])) return null;
+    const mm = parseInt(parts[0], 10);
+    if (mm > 59) return null;
+    const hours = parts[1].split(',');
+    for (let j = 0; j < hours.length; j++) {
+      if (!/^\\d+$/.test(hours[j])) return null;
+      const hh = parseInt(hours[j], 10);
+      if (hh > 23) return null;
+      times.push({hour: hh, minute: mm});
+    }
+    const segTail = [parts[2], parts[3], parts[4]];
+    if (tail === null) tail = segTail;
+    else if (tail.join(' ') !== segTail.join(' ')) return null;
   }
-  return minute + ' ' + hour + ' * * *';
+  if (times.length < 1 || times.length > 3) return null;
+  return {times: times, tail: tail};
+}
+/* 槽行：时 0-23 + 分 0-59 + 删除。 */
+function _slotRowHTML(hour, minute) {
+  let hOpts = '', mOpts = '';
+  for (let h = 0; h < 24; h++) {
+    hOpts += '<option value="' + h + '"' + (h === hour ? ' selected' : '') +
+      '>' + String(h).padStart(2, '0') + '</option>';
+  }
+  for (let m = 0; m < 60; m++) {
+    mOpts += '<option value="' + m + '"' + (m === minute ? ' selected' : '') +
+      '>' + String(m).padStart(2, '0') + '</option>';
+  }
+  return '<div class="sched-slot">' +
+    '<select class="sched-hour" onchange="updateScheduleEditPreview()">' +
+    hOpts + '</select><span class="hint">时</span>' +
+    '<select class="sched-minute" onchange="updateScheduleEditPreview()">' +
+    mOpts + '</select><span class="hint">分</span>' +
+    '<button type="button" class="sched-del" ' +
+    'onclick="removeScheduleSlot(this)">\u2715</button></div>';
 }
 function openScheduleEdit(sid, cron) {
-  const parts = (cron || '').trim().split(/\\s+/);
-  let hour = 18, minute = 0;
-  if (parts.length === 5 && /^\\d+$/.test(parts[0]) && /^\\d+$/.test(parts[1])) {
-    minute = parseInt(parts[0], 10);
-    hour = parseInt(parts[1], 10);
-  }
-  if (!(hour >= 0 && hour <= 23)) hour = 18;
-  if (minute !== 30) minute = 0;
-  _scheduleEditRaw = cron || '';
+  _scheduleEditSid = sid;
+  const parsed = parseBroadcastTimes(cron);
   document.getElementById('schedule-edit-service').textContent = sid;
-  /* 规则一并显示（中文为主），与列表「定时规则」列同口径，消除信息割裂。 */
   document.getElementById('schedule-edit-rule').textContent =
-    cronZh(cron) || (cron || '常驻');
+    cronZhSegs(cron) || (cron || '常驻');
   document.getElementById('schedule-edit-cron').textContent = cron || '—';
-  document.getElementById('schedule-edit-hour').value = String(hour);
-  document.getElementById('schedule-edit-minute').value = String(minute);
-  updateScheduleEditPreview();
+  const box = document.getElementById('schedule-edit-times');
+  const addBtn = document.getElementById('schedule-edit-add');
+  const hint = document.getElementById('schedule-edit-unsupported');
+  const okBtn = document.getElementById('schedule-edit-ok');
+  const preview = document.getElementById('schedule-edit-preview');
+  if (!parsed) {
+    _scheduleEditTail = null;
+    box.innerHTML = '';
+    box.style.display = 'none';
+    addBtn.style.display = 'none';
+    hint.style.display = '';
+    preview.textContent = '';
+    okBtn.disabled = true;
+  } else {
+    _scheduleEditTail = parsed.tail;
+    box.style.display = '';
+    addBtn.style.display = '';
+    hint.style.display = 'none';
+    okBtn.disabled = false;
+    box.innerHTML = parsed.times.map(function (t) {
+      return _slotRowHTML(t.hour, t.minute);
+    }).join('');
+    addBtn.disabled = parsed.times.length >= 3;
+    updateScheduleEditPreview();
+  }
   document.getElementById('schedule-mask').style.display = 'flex';
 }
+function addScheduleSlot() {
+  const box = document.getElementById('schedule-edit-times');
+  if (!box || box.children.length >= 3) return;
+  box.insertAdjacentHTML('beforeend', _slotRowHTML(18, 0));
+  document.getElementById('schedule-edit-add').disabled =
+    box.children.length >= 3;
+  updateScheduleEditPreview();
+}
+function removeScheduleSlot(btn) {
+  const box = document.getElementById('schedule-edit-times');
+  if (!box || box.children.length <= 1) return;
+  btn.closest('.sched-slot').remove();
+  document.getElementById('schedule-edit-add').disabled =
+    box.children.length >= 3;
+  updateScheduleEditPreview();
+}
+function readScheduleSlots() {
+  const box = document.getElementById('schedule-edit-times');
+  if (!box) return [];
+  const rows = box.querySelectorAll('.sched-slot');
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    out.push({
+      hour: parseInt(rows[i].querySelector('.sched-hour').value, 10),
+      minute: parseInt(rows[i].querySelector('.sched-minute').value, 10),
+    });
+  }
+  return out;
+}
+/* 槽 → 多段 cron：按 (hour,minute) 去重、升序；尾段保留，';' 连接。 */
+function buildBroadcastCron(times, tail) {
+  const t = tail || ['*', '*', '*'];
+  const seen = {}, uniq = [];
+  times.forEach(function (it) {
+    const key = it.hour * 60 + it.minute;
+    if (seen[key]) return;
+    seen[key] = 1;
+    uniq.push(it);
+  });
+  uniq.sort(function (a, b) {
+    return (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute);
+  });
+  return uniq.map(function (it) {
+    return it.minute + ' ' + it.hour + ' ' + t[0] + ' ' + t[1] + ' ' + t[2];
+  }).join(';');
+}
+/* 多段 cron 的中文预览：逐段 cronZh 后以「；」连接；任一段不识别 → null。 */
+function cronZhSegs(cron) {
+  const segs = _cronSegments(cron);
+  const parts = [];
+  for (let i = 0; i < segs.length; i++) {
+    const zh = cronZh(segs[i]);
+    if (!zh) return null;
+    parts.push(zh);
+  }
+  return parts.length ? parts.join('；') : null;
+}
 function updateScheduleEditPreview() {
-  const hour = parseInt(document.getElementById('schedule-edit-hour').value, 10);
-  const minute = parseInt(document.getElementById('schedule-edit-minute').value, 10);
-  const next = rewriteCronTime(_scheduleEditRaw, hour, minute);
   const el = document.getElementById('schedule-edit-preview');
-  if (!el) return;
-  const zh = cronZh(next);
-  el.textContent = (zh ? '将改为：' + zh : '将改为') + '（' + next + '）';
+  if (!el || _scheduleEditTail === null) return;
+  const cron = buildBroadcastCron(readScheduleSlots(), _scheduleEditTail);
+  const zh = cronZhSegs(cron);
+  el.textContent = (zh ? '将改为：' + zh : '将改为') + '（' + cron + '）';
 }
 function closeScheduleEdit() {
   document.getElementById('schedule-mask').style.display = 'none';
 }
 function submitScheduleEdit() {
-  const sid = document.getElementById('schedule-edit-service').textContent;
-  const hour = parseInt(document.getElementById('schedule-edit-hour').value, 10);
-  const minute = parseInt(document.getElementById('schedule-edit-minute').value, 10);
+  if (_scheduleEditTail === null) return;
+  const times = readScheduleSlots();
+  if (!times.length) { alert('请至少保留一个时点'); return; }
+  const seen = {}, uniq = [];
+  times.forEach(function (it) {
+    const key = it.hour * 60 + it.minute;
+    if (seen[key]) return;
+    seen[key] = 1;
+    uniq.push(it);
+  });
+  uniq.sort(function (a, b) {
+    return (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute);
+  });
+  const label = uniq.map(function (it) {
+    return String(it.hour).padStart(2, '0') + ':' +
+      String(it.minute).padStart(2, '0');
+  }).join('、');
+  const sid = _scheduleEditSid;
   closeScheduleEdit();
-  postJSON('/api/pipelines/update', {service_id: sid, hour: hour, minute: minute},
-           '已改 ' + sid + ' 定时时间为 ' +
-           String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') +
-           '（≤30s 生效）');
+  postJSON('/api/pipelines/update', {service_id: sid, times: uniq},
+           '已改 ' + sid + ' 播报时间为 ' + label + '（≤30s 生效）');
 }
 function addPipeline(ev) {
   ev.preventDefault();
@@ -710,12 +842,6 @@ def _fmt_time(value):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(_BJT).strftime("%Y-%m-%d %H:%M:%S")
 
-
-#: 定时任务页分表顺序（2026-10-10 运维裁决「按功能分表」：先业务动作
-#: 后数据与平台；群名不分表——群是投递目标，管理群列已承载该视角）。
-_CATEGORY_TABLE_ORDER = (
-    "催办", "播报", "页面", "同步", "加工", "钉钉", "平台", "未归类",
-)
 
 # -- 展示层中文标签（底层值不动：审计/状态存量英文值仅在渲染时映射） --------
 _RUN_STATUS_LABEL = {
@@ -1178,13 +1304,6 @@ def _service_region(service_id):
     return None
 
 
-def _group_cell(service_id):
-    """管理群列：区域线 → 「<区域中文名>」群；非区域线 → —。"""
-    region = _service_region(service_id)
-    if region is None:
-        return "<span class=\"hint\">—</span>"
-    return _esc(f"「{_REGION_LABELS.get(region, region)}」群")
-
 
 def _scope_backlinks(configs):
     """名册 scope → 被该范围名册影响的催办任务标识（P3，2026-10-12）。
@@ -1242,19 +1361,43 @@ def _pipeline_group_title(region):
     return f"「{_REGION_LABELS.get(region, region)}」群"
 
 
-def _category_bucket(config):
-    """功能分表桶：注册表 category 真源优先、按标识推导兜底；None=未归类。"""
-    return resolve_category(config.service_id, config.category) or "未归类"
+
+def _names_by_dept_html(effective, display, dept_by_uid):
+    """有效名单的人类展示：跨多部门时按「部门：姓名、…；部门：…」归组。
+
+    单部门（或无部门）→ 维持原「、」连接（少噪声）；名称逐个 ``_esc``，
+    避免整串二次转义。*effective* 为有效 user_id 序（去重保序）。
+    """
+    def _name_of(uid):
+        return display.get(uid) or (uid[1:] if uid.startswith("?") else uid)
+
+    dept_map = dept_by_uid or {}
+    order, groups = [], {}
+    for uid in effective:
+        dept = dept_map.get(uid) or ""
+        if dept not in groups:
+            groups[dept] = []
+            order.append(dept)
+        groups[dept].append(_name_of(uid))
+    if len(order) <= 1:
+        return "、".join(_esc(n) for n in groups[order[0]]) if order else ""
+    return "；".join(
+        (f"{_esc(dept)}：" if dept else "未分部门：")
+        + "、".join(_esc(n) for n in groups[dept])
+        for dept in order
+    )
 
 
 def _targets_html(base, overrides, uid_to_name, scope_label=None,
-                  store_count=None):
+                  store_count=None, dept_by_uid=None):
     """有效名单 + 口径徽标（2026-10-12 方案 B）。
 
     *base* 为基名单 ``[(user_id, name)]``，*overrides* 为该线启用覆盖行；
     有效名单 = ``base ∪ include − exclude``（与机器人侧同一
     :func:`recipient_override.apply_recipient_overrides`）。有覆盖时补
     ``（+N 覆盖／−M 移除）`` 徽标；口径徽标计数按有效名单。
+    *dept_by_uid*（2026-10-13）为该区域有效成员的 ``{user_id: dept_name}``，
+    跨多部门时按部门归组展示（与「组织编排」同构）。
     """
     effective = recipient_override.apply_recipient_overrides(base, overrides)
     display = dict(uid_to_name or {})
@@ -1284,8 +1427,8 @@ def _targets_html(base, overrides, uid_to_name, scope_label=None,
         if removed:
             bits.append(f"−{len(removed)} 移除")
         badge = f"<span class=\"hint\">（{'／'.join(bits)}）</span>"
-    return (f"{_esc('、'.join(names))}"
-            f"<span class=\"hint\">（{meta}）</span>{badge}")
+    return (_names_by_dept_html(effective, display, dept_by_uid)
+            + f"<span class=\"hint\">（{meta}）</span>{badge}")
 
 
 def _recipient_entry_html(service_id):
@@ -1298,6 +1441,31 @@ def _recipient_entry_html(service_id):
             f'return false">收件人…</a>')
 
 
+def _effective_members_by_region(members, overrides):
+    """在职成员 ∘ 组织归属覆盖 → ``{region: [(uid, name, dept_name)]}``。
+
+    与「组织编排」页 :func:`_build_org_overview` 同一口径（2026-10-13 P6
+    联动）：覆盖优先、其次种子派生；覆盖 ``region`` 为空（移出全部区域 /
+    未归类）不进任何区域视图。*members* 为
+    :func:`bi_authz.fetch_active_members` 的 ``(uid, name, region, dept_name)``；
+    *overrides* 为 :func:`org_assignment_override.fetch_overrides` 的
+    ``{user_id: row}``。各组按 ``(name, uid)`` 排序。
+    """
+    overrides = overrides or {}
+    buckets = {}
+    for uid, name, region, dept_name in members:
+        override = overrides.get(uid)
+        if override is not None:
+            region = override["region"]
+            dept_name = override["dept_name"] or dept_name
+        if not region:
+            continue
+        buckets.setdefault(region, []).append((uid, name, dept_name or ""))
+    for rows in buckets.values():
+        rows.sort(key=lambda item: (item[1], item[0]))
+    return buckets
+
+
 def _recipient_base(service_id, *, members_by_region, roster_by_region,
                     qudao_owners, uid_to_name=None):
     """基名单口径（不含任务级覆盖）——展示列与抽屉 API 共用同一来源。
@@ -1305,29 +1473,34 @@ def _recipient_base(service_id, *, members_by_region, roster_by_region,
     与机器人侧一致（2026-10-07 裁决「催办绑定名册」）：
 
     * ``robot-<区域>``（填报提醒）/ ``robot-check-<区域>``（催办+DING）：
-      该区域 ``dim_robot_member`` 在册填报人 ∩ 名册启用在册人员
-      （``kind='roster'``）；名册无启用记录（fail-open）→ 区域在册填报人
+      该区域**有效**成员（在职 ∘ 组织归属覆盖）∩ 名册启用在册人员
+      （``kind='roster'``）；名册无启用记录（fail-open）→ 区域有效成员
       全员（``kind='fallback'``），与机器人 ``_unfilled`` 同真源；
     * 渠道线催办（``channel-missing-check``）：名册 ``qudao/store/启用/
       role=owner`` 去重后的人名（``kind='qudao'``）；名册未登记时机器人回退
       月目标表 owners_json，此处如实标注不复制回退链；
     * 其余服务不可计算（``kind='none'``）。
 
-    返回 ``{"kind", "pairs": [(user_id, name)], "region", "store_count"}``；
-    *pairs* 不含覆盖，有效名单由调用方再叠加
-    :func:`recipient_override.apply_recipient_overrides`。
+    *members_by_region* 为 :func:`_effective_members_by_region` 的
+    ``{region: [(uid, name, dept_name)]}``（2026-10-13 三元组）。返回
+    ``{"kind", "pairs": [(user_id, name)], "region", "store_count",
+    "dept_by_uid"}``；*pairs* 不含覆盖，有效名单由调用方再叠加
+    :func:`recipient_override.apply_recipient_overrides`；*dept_by_uid* 供
+    展示层按部门归组。
     """
     if service_id.startswith("robot-"):
         # _service_region 兼容 robot-check- 长者前缀（2026-10-07 拆分）。
         region = _service_region(service_id)
-        pairs = members_by_region.get(region) or []
+        rows = members_by_region.get(region) or []
+        pairs = [(uid, name) for uid, name, _dept in rows]
+        dept_by_uid = {uid: dept for uid, _name, dept in rows if dept}
         roster = roster_by_region.get(region)
         if roster is not None:
             base = [(uid, name) for uid, name in pairs if name in roster]
             return {"kind": "roster", "pairs": base, "region": region,
-                    "store_count": None}
+                    "store_count": None, "dept_by_uid": dept_by_uid}
         return {"kind": "fallback", "pairs": list(pairs), "region": region,
-                "store_count": None}
+                "store_count": None, "dept_by_uid": dept_by_uid}
     if _service_region(service_id) == "qudao":
         owners = qudao_owners or {}
         names = sorted({name for bucket in owners.values() for name in bucket})
@@ -1337,8 +1510,9 @@ def _recipient_base(service_id, *, members_by_region, roster_by_region,
         base = [(name_to_uid.get(name) or ("?" + name), name)
                 for name in names]
         return {"kind": "qudao", "pairs": base, "region": None,
-                "store_count": len(owners)}
-    return {"kind": "none", "pairs": [], "region": None, "store_count": None}
+                "store_count": len(owners), "dept_by_uid": {}}
+    return {"kind": "none", "pairs": [], "region": None, "store_count": None,
+            "dept_by_uid": {}}
 
 
 def _base_source_label(info):
@@ -1373,9 +1547,9 @@ def _recipient_explain(service_id, *, members_by_region, roster_by_region,
     if service_id.startswith("robot-"):
         region = _service_region(service_id)
         members = members_by_region.get(region) or []
-        member_names = {name for _uid, name in members}
+        member_names = {name for _uid, name, _dept in members}
         uid_of_name = {}
-        for uid, name in members:
+        for uid, name, _dept in members:
             uid_of_name.setdefault(name, uid)
         roster = roster_by_region.get(region)
         if roster is not None:
@@ -1422,14 +1596,25 @@ def _load_recipient_context(connection, service_id):
     """装载该线 base/explain 所需的只读上下文（两口径共用，单次装载）。
 
     返回 ``{"members_by_region", "roster_by_region", "qudao_owners",
-    "uid_to_name"}``；不可计算的线（应用/平台）返回全空。
+    "uid_to_name"}``；不可计算的线（应用/平台）返回全空。区域线的
+    *members_by_region* 为**有效**成员（在职 ∘ 组织归属覆盖，三元组
+    ``(uid, name, dept_name)``，2026-10-13 联动组织编排）；覆盖表读失败
+    fail-soft 回退种子口径。
     """
     members_by_region, roster_by_region = {}, {}
     qudao_owners, uid_to_name = None, {}
     if service_id.startswith("robot-"):
         region = _service_region(service_id)
-        for uid, name, reg, _dept in bi_authz.fetch_active_members(connection):
-            members_by_region.setdefault(reg, []).append((uid, name))
+        members = bi_authz.fetch_active_members(connection)
+        try:
+            overrides = org_assignment_override.fetch_overrides(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org assignment override load failed: %s",
+                type(exc).__name__)
+            overrides = {}
+        members_by_region = _effective_members_by_region(members, overrides)
+        for uid, name, _reg, _dept in members:
             uid_to_name.setdefault(uid, name)
         roster_by_region[region] = report_roster.fetch_scope_person_names(
             connection, region)
@@ -1470,20 +1655,24 @@ def _effective_names_html(info, overrides, uid_to_name):
     追加抽屉入口。``none`` 口径返回 ``—``。
     """
     kind, base = info["kind"], info["pairs"]
+    dept_by_uid = info.get("dept_by_uid")
     if kind == "roster":
         if not base:
             return "<span class=\"hint\">名册在册但通讯录无匹配成员</span>"
-        return _targets_html(base, overrides, uid_to_name, scope_label="名册")
+        return _targets_html(base, overrides, uid_to_name, scope_label="名册",
+                             dept_by_uid=dept_by_uid)
     if kind == "fallback":
         if not base:
             return "<span class=\"hint\">该区域无在册填报人</span>"
-        return _targets_html(base, overrides, uid_to_name, scope_label="全员兜底")
+        return _targets_html(base, overrides, uid_to_name, scope_label="全员兜底",
+                             dept_by_uid=dept_by_uid)
     if kind == "qudao":
         if not base:
             return ("<span class=\"hint\">名册未登记店铺负责人"
                     "（机器人自动回退读门店月目标表）</span>")
         return _targets_html(base, overrides, uid_to_name,
-                             store_count=info["store_count"])
+                             store_count=info["store_count"],
+                             dept_by_uid=dept_by_uid)
     return "<span class=\"hint\">—</span>"
 
 
@@ -1543,6 +1732,26 @@ def _recipients_scope_html(scope, task_ids, *, members_by_region,
 
 def _cron_zh(schedule):
     """常见 cron 的人性化中文（仅展示；不认识的形态返回 None → 原文显示）。
+
+    支持 ``;`` 分隔的**多段**（播报时间多时点，2026-10-13）：逐段中文后以
+    「；」连接；任一段不可识别则整条回退原文。单段即退化形态。
+    """
+    if not schedule:
+        return None
+    segments = [seg.strip() for seg in schedule.split(";") if seg.strip()]
+    if not segments:
+        return None
+    parts = []
+    for segment in segments:
+        zh = _cron_zh_single(segment)
+        if zh is None:
+            return None
+        parts.append(zh)
+    return "；".join(parts)
+
+
+def _cron_zh_single(schedule):
+    """单段 5 段 cron 的中文（:func:`_cron_zh` 的段实现）。
 
     覆盖注册表全部形态：每天（多）时点、每周 X、每月 D 日、每 N 分钟、
     每小时第 M 分；其余（含月份字段）一律回退原文。
@@ -2526,11 +2735,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.get("/pipelines")
     def pipelines_page(request: Request):
         viewer = require_admin(request)
-        # 双视角（2026-10-12 运维裁决）：默认「按管理群」（同群任务聚合，
-        # 一眼看清这个群会收到哪些任务）；?view=class 走原「按功能类别」。
-        view = (request.query_params.get("view") or "group").strip()
-        if view not in ("group", "class"):
-            view = "group"
+        # 「按管理群」视角（2026-10-12 裁决；2026-10-13 收敛为唯一视角）：
+        # 同群任务聚合，一眼看清这个群会收到哪些任务。
         service_ids = _fleet()
         configs = []
         for service_id in service_ids:
@@ -2573,10 +2779,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                         if sid.startswith("robot-")
                     }
                     if robot_regions:
-                        for uid, name, region, _dept in \
-                                bi_authz.fetch_active_members(connection):
-                            members_by_region.setdefault(region, []).append(
-                                (uid, name))
+                        members = bi_authz.fetch_active_members(connection)
+                        # 组织归属覆盖（2026-10-13 联动组织编排）：读失败
+                        # fail-soft 回种子口径，不让整列「读取失败」。
+                        try:
+                            org_overrides = \
+                                org_assignment_override.fetch_overrides(
+                                    connection)
+                        except Exception as exc:
+                            _LOGGER.warning(
+                                "ops-web org assignment override load "
+                                "failed: %s", type(exc).__name__)
+                            org_overrides = {}
+                        members_by_region = _effective_members_by_region(
+                            members, org_overrides)
+                        for uid, name, _reg, _dept in members:
                             uid_to_name.setdefault(uid, name)
                         for region in robot_regions:
                             roster_by_region[region] = \
@@ -2613,10 +2830,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for sid in reminder_ids:
                     reminder_cells[sid] = (
                         "<span class=\"hint\">读取失败</span>")
-        # 桶：群视角按区域 key（None=平台/无群）；功能视角按功能分类。
-        buckets = ({}
-                   if view == "group"
-                   else {title: [] for title in _CATEGORY_TABLE_ORDER})
+        # 桶：按区域 key 分组（None=平台/无群）；分组键为 _service_region。
+        buckets = {}
         for config in configs:
             request_row = latest.get(config.service_id)
             if request_row is None:
@@ -2650,13 +2865,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "onchange=\"pipelineAction(this)\">"
                 "<option value=\"\">操作…</option>"
                 f"<option value=\"toggle\">{toggle_label}</option>"
-                "<option value=\"schedule\">改定时时间</option>"
+                "<option value=\"schedule\">改播报时间</option>"
                 f"{run_option}</select>"
             )
-            # 视角差异仅在「管理群」列：群视角该维度已升为分组头，行内不再重复。
+            # 群维度已升为分组头，行内不再重复。
             head = f"<tr><td>{_service_name_cell(config.service_id)}</td>"
-            if view != "group":
-                head += f"<td>{_group_cell(config.service_id)}</td>"
             row = (
                 head
                 + f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
@@ -2668,31 +2881,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 f"<td>{request_cell}</td>"
                 f"<td>{action_cell}</td></tr>"
             )
-            if view == "group":
-                buckets.setdefault(
-                    _service_region(config.service_id), []).append(row)
-            else:
-                buckets[_category_bucket(config)].append(row)
-        header = (
-            "<tr><th>服务标识</th><th>管理群</th>"
-            "<th>收受影响人</th><th>启用</th>"
-            "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
-            "<th>最近运行</th><th>操作</th></tr>"
-        )
+            buckets.setdefault(
+                _service_region(config.service_id), []).append(row)
         group_header = (
             "<tr><th>服务标识</th>"
             "<th>收受影响人</th><th>启用</th>"
-            "<th>定时规则</th><th>依赖</th><th>描述</th><th>模板</th>"
+            "<th>播报时间</th><th>依赖</th><th>描述</th><th>模板</th>"
             "<th>最近运行</th><th>操作</th></tr>"
-        )
-        # 视角切换 tab（服务端渲染两链接；无 SPA，维持零依赖）。
-        tabs = (
-            "<div class=\"tabs\">"
-            f"<a class=\"{'active' if view == 'group' else ''}\" "
-            "href=\"/pipelines?view=group\">按管理群</a>"
-            f"<a class=\"{'active' if view == 'class' else ''}\" "
-            "href=\"/pipelines?view=class\">按功能类别</a>"
-            "</div>"
         )
         confirm_mask = (
             "<div id=\"confirm-mask\" class=\"modal-mask\">"
@@ -2711,78 +2906,61 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<button onclick=\"closeRecipientOverride()\">关闭</button>"
             "</div></div></div>"
         )
-        # 改定时时间弹窗（2026-10-12）：把「定时规则」与「改时间」收在一处——
-        # 顶部显示当前规则（中文+原表达式），下方选时刻并实时预览改后规则，
-        # 避免「定时规则」列与时间编辑各说一半（用户 2026-10-12 反馈逻辑重叠）。
+        # 改播报时间弹窗（2026-10-13）：顶部显示当前规则（中文+原表达式），
+        # 下方按「≤3 个 HH:MM 时点」增删槽并实时预览改后规则；非「每天固定
+        # 时刻」形态（或已超 3 个时点）不支持按播报时间编辑。
         schedule_mask = (
             "<div id=\"schedule-mask\" class=\"modal-mask\">"
             "<div class=\"modal-box\">"
-            "修改 <b id=\"schedule-edit-service\"></b> 的定时时间"
-            "<div>当前定时规则：<span id=\"schedule-edit-rule\"></span></div>"
+            "修改 <b id=\"schedule-edit-service\"></b> 的播报时间"
+            "<div>当前播报时间：<span id=\"schedule-edit-rule\"></span></div>"
             "<div class=\"hint\">原表达式：<span id=\"schedule-edit-cron\"></span>"
-            "（只改时刻，工作日/每月几号等形态保留）</div>"
+            "（只改时/分，工作日/每月几号等形态保留；最多 3 个时点）</div>"
+            "<div id=\"schedule-edit-times\"></div>"
+            "<div><button type=\"button\" id=\"schedule-edit-add\" "
+            "onclick=\"addScheduleSlot()\">＋时点</button></div>"
+            "<div class=\"hint\" id=\"schedule-edit-unsupported\" "
+            "style=\"display:none\">该任务非「每天固定时刻」形态（或已超 3 个"
+            "时点），不支持按播报时间编辑。</div>"
             "<div class=\"modal-btns\">"
-            "<select id=\"schedule-edit-hour\" "
-            "onchange=\"updateScheduleEditPreview()\">"
-            + "".join(
-                f"<option value=\"{h}\">{h:02d}</option>" for h in range(24)
-            )
-            + "</select><span class=\"hint\">时</span>"
-            "<select id=\"schedule-edit-minute\" "
-            "onchange=\"updateScheduleEditPreview()\">"
-            "<option value=\"0\">00</option><option value=\"30\">30</option>"
-            "</select><span class=\"hint\">分</span>"
-            "<button onclick=\"submitScheduleEdit()\">确定</button>"
+            "<button id=\"schedule-edit-ok\" "
+            "onclick=\"submitScheduleEdit()\">确定</button>"
             "<button onclick=\"closeScheduleEdit()\">取消</button>"
             "</div>"
             "<div class=\"hint\" id=\"schedule-edit-preview\"></div>"
             "</div></div>"
         )
-        table = ["<h1>定时任务（管道注册表）</h1>" + tabs]
-        if view == "group":
-            # 分组顺序：城市区域 → 跨区域线（渠道/线下整体）→ 未登记区域
-            # → 平台/无群（恒置末位）；不得丢行。
-            ordered = [r for r in _GROUP_ORDER if buckets.get(r)]
-            ordered += sorted(
-                r for r in buckets
-                if r is not None and r not in _GROUP_ORDER and buckets[r])
-            if buckets.get(None):
-                ordered.append(None)
-            for region in ordered:
-                rows = buckets[region]
-                table.append(
-                    f"<h2>{_esc(_pipeline_group_title(region))}"
-                    f"（{len(rows)} 项）</h2>"
-                    f"<table>{group_header}" + "".join(rows) + "</table>"
-                )
+        table = ["<h1>定时任务（管道注册表）</h1>"]
+        # 分组顺序：城市区域 → 跨区域线（渠道/线下整体）→ 未登记区域
+        # → 平台/无群（恒置末位）；不得丢行。
+        ordered = [r for r in _GROUP_ORDER if buckets.get(r)]
+        ordered += sorted(
+            r for r in buckets
+            if r is not None and r not in _GROUP_ORDER and buckets[r])
+        if buckets.get(None):
+            ordered.append(None)
+        for region in ordered:
+            rows = buckets[region]
             table.append(
-                "<p class=\"hint\">按管理群视角：同一区域的服务归为一组，"
-                "一眼看清「这个群会收到哪些任务」；「渠道」「线下整体」为"
-                "跨区域线，单独成组；无绑定区域的应用线/平台服务归入"
-                "「平台 / 无群」。点「按功能类别」可按功能与定时规则查看。"
-                "配置存 Nacos 注册表（PIPELINES 组），开关与新增在下一个"
-                "调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-                "翻译成可执行命令；「收受影响人」= 催办覆盖面（日报机器人="
-                "名册在册人员，名册未登记则该区域在册填报人全员兜底；"
-                "渠道到齐=名册店铺负责人），非催办行无。</p>"
-                + confirm_mask + schedule_mask
+                f"<details class=\"group\" open><summary>"
+                f"{_esc(_pipeline_group_title(region))}（{len(rows)} 项）"
+                f"</summary><table>{group_header}"
+                + "".join(rows) + "</table></details>"
             )
-        else:
-            for title in _CATEGORY_TABLE_ORDER:
-                table.append(
-                    f"<h2>{title}</h2><table>{header}"
-                    + "".join(buckets[title]) + "</table>"
-                )
-            table.append(
-                "<p class=\"hint\">配置存 Nacos 注册表（PIPELINES 组），开关与新增在"
-                "下一个调度轮询（≤30 秒）生效；「模板」= 调度器能否把该服务标识"
-                "翻译成可执行命令；「管理群」= 该线服务的钉钉群（按区域映射）；"
-                "分表=按功能（注册表 category 真源，未配置按服务标识推导兜底；"
-                "2026-10-10 裁决按功能分表——群名是投递目标，管理群列已承载）；"
-                "「收受影响人」= 催办覆盖面（日报机器人=名册在册人员，名册未登记"
-                "则该区域在册填报人全员兜底；渠道到齐=名册店铺负责人），非催办行无。</p>"
-                + confirm_mask + schedule_mask
-            )
+        table.append(
+            "<p class=\"hint\">按管理群视角：同一区域的服务归为一组，"
+            "一眼看清「这个群会收到哪些任务」；「渠道」「线下整体」为"
+            "跨区域线，单独成组；无绑定区域的应用线/平台服务归入"
+            "「平台 / 无群」。点分组标题可折叠。「播报时间」= 该任务的"
+            "定时规则（中文为主、原 cron 小字备查；用行内「操作」→"
+            "「改播报时间」可改，最多 3 个 HH:MM 时点）。配置存 Nacos"
+            "注册表（PIPELINES 组），开关与新增在下一个调度轮询"
+            "（≤30 秒）生效；「模板」= 调度器能否把该服务标识翻译成"
+            "可执行命令；「收受影响人」= 催办覆盖面（日报机器人=名册"
+            "在册人员，名册未登记则该区域在册填报人全员兜底，按部门"
+            "归组展示；渠道到齐=名册店铺负责人），非催办行无。</p>"
+            + confirm_mask + schedule_mask
+        )
         table = "".join(table)
         add_form = (
             "<h2>新增定时任务</h2>"
@@ -2822,9 +3000,12 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             + "</select><span class=\"hint\">时</span>"
             "<select name=\"schedule_minute\" "
             "onchange=\"updateSchedulePreview(this.form)\">"
-            "<option value=\"0\">00</option>"
-            "<option value=\"30\">30</option>"
-            "</select><span class=\"hint\">分</span>"
+            + "".join(
+                f"<option value=\"{m}\"{' selected' if m == 0 else ''}>"
+                f"{m:02d}</option>"
+                for m in range(60)
+            )
+            + "</select><span class=\"hint\">分</span>"
             "<select name=\"schedule_dow\" style=\"display:none\" "
             "onchange=\"updateSchedulePreview(this.form)\">"
             "<option value=\"1\">周一</option><option value=\"2\">周二</option>"
@@ -2993,24 +3174,37 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/pipelines/update")
     async def pipeline_schedule_update(request: Request):
-        """修改既有线的定时时间（read-modify-write，只换 cron 的分/时两段）。
+        """修改既有线的播报时间（read-modify-write，只换 cron 的分/时两段）。
 
-        与 toggle 同型：读注册表 → 改 → 整条回写 → 审计同生共死。只接收
-        时(0-23)/分(00|30) 两维（运维不手写 cron），保留原 cron 的日/月/周，
-        因此「工作日 18:00」「每月 1 日」这类形态不被抹平成每天。
+        与 toggle 同型：读注册表 → 改 → 整条回写 → 审计同生共死。请求体
+        ``{service_id, times:[{hour, minute}, ...]}``（1..3 个 HH:MM 时点，
+        任意分 0-59）；保留原 cron 的日/月/周（取首段尾段），因此「工作日
+        18:00」「每月 1 日」这类形态不被抹平成每天；多时点回写为 ``;`` 分隔
+        的多段 cron（调度器按并集触发）。
         """
         viewer = require_admin(request)
         if config_publisher is None:
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         payload = await _json_body(request)
         service_id = payload.get("service_id")
-        hour = payload.get("hour")
-        minute = payload.get("minute")
+        times = payload.get("times")
         if (not ops_control.SERVICE_ID_RE.match(service_id or "")
-                or not isinstance(hour, int) or isinstance(hour, bool)
-                or not isinstance(minute, int) or isinstance(minute, bool)
-                or not 0 <= hour <= 23 or minute not in (0, 30)):
+                or not isinstance(times, list)
+                or not 1 <= len(times) <= 3):
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        clean = []
+        for item in times:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=400,
+                                    detail=ErrorDetail.BAD_REQUEST)
+            hour, minute = item.get("hour"), item.get("minute")
+            if (not isinstance(hour, int) or isinstance(hour, bool)
+                    or not isinstance(minute, int) or isinstance(minute, bool)
+                    or not 0 <= hour <= 23 or not 0 <= minute <= 59):
+                raise HTTPException(status_code=400,
+                                    detail=ErrorDetail.BAD_REQUEST)
+            clean.append((hour, minute))
+        clean = sorted(set(clean))
         if service_id not in _fleet():
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         try:
@@ -3018,13 +3212,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        # 仅替换 cron 的第 0 段(分)/第 1 段(时)，保留 日/月/周；非 5 段
-        # （空/常驻/异常）回落每天，避免拼出非法表达式。
-        fields = (config.schedule or "").split()
+        # 尾段取现有 cron 首段(分 时 日 月 周)的第 2/3/4 字段，保留 日/月/周；
+        # 非 5 段（空/常驻/异常）回落每天，避免拼出非法表达式。
+        fields = (config.schedule or "").split(";")[0].split()
         if len(fields) == 5:
-            new_cron = f"{minute} {hour} {fields[2]} {fields[3]} {fields[4]}"
+            tail = (fields[2], fields[3], fields[4])
         else:
-            new_cron = f"{minute} {hour} * * *"
+            tail = ("*", "*", "*")
+        new_cron = ";".join(
+            f"{minute} {hour} {tail[0]} {tail[1]} {tail[2]}"
+            for hour, minute in clean
+        )
         try:
             # 只借它做 croniter 校验；返回值会丢 sources/reads，不用于发布。
             ops_control.validate_pipeline_fields(
@@ -3387,10 +3585,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         context = None
         try:
             with db_connector() as connection:
-                members_by_region, uid_to_name = {}, {}
-                for uid, name, region, _dept in \
-                        bi_authz.fetch_active_members(connection):
-                    members_by_region.setdefault(region, []).append((uid, name))
+                members = bi_authz.fetch_active_members(connection)
+                # 组织归属覆盖（2026-10-13 联动组织编排）：读失败 fail-soft
+                # 回种子口径，不让整块「读取失败」。
+                try:
+                    org_overrides = org_assignment_override.fetch_overrides(
+                        connection)
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "ops-web org assignment override load failed: %s",
+                        type(exc).__name__)
+                    org_overrides = {}
+                members_by_region = _effective_members_by_region(
+                    members, org_overrides)
+                uid_to_name = {}
+                for uid, name, _reg, _dept in members:
                     uid_to_name.setdefault(uid, name)
                 roster_by_region = {
                     scope: report_roster.fetch_scope_person_names(
