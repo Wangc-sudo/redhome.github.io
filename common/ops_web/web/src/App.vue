@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue';
 import draggable from 'vuedraggable';
 import {
+  addDept,
+  addRegion,
   assignMember,
   deleteOverride,
   getOverview,
@@ -268,6 +270,73 @@ function openDetail(member) {
   detailUserId.value = member.user_id;
 }
 
+// -- 新增区域 / 部门抽屉 --------------------------------------------------
+const drawer = ref(null);            // null | 'region' | 'dept'
+const drawerError = ref('');
+const drawerBusy = ref(false);
+const regionForm = ref({ region_key: '', label: '' });
+const deptForm = ref({ region_key: '', dept_name: '', dept_id: '' });
+
+function openRegionDrawer() {
+  regionForm.value = { region_key: '', label: '' };
+  drawerError.value = '';
+  drawer.value = 'region';
+}
+
+function openDeptDrawer(region) {
+  deptForm.value = { region_key: region.key, dept_name: '', dept_id: '' };
+  drawerError.value = '';
+  drawer.value = 'dept';
+}
+
+function closeDrawer() {
+  drawer.value = null;
+  drawerError.value = '';
+}
+
+async function submitRegion() {
+  const region_key = regionForm.value.region_key.trim();
+  const label = regionForm.value.label.trim();
+  if (!region_key || !label) {
+    drawerError.value = '区域键与中文名均为必填';
+    return;
+  }
+  drawerBusy.value = true;
+  drawerError.value = '';
+  try {
+    await addRegion({ region_key, label });
+    showFlash('ok', `已登记区域「${label}」`);
+    closeDrawer();
+    await load({ silent: true });
+  } catch (err) {
+    drawerError.value = err.message;
+  } finally {
+    drawerBusy.value = false;
+  }
+}
+
+async function submitDept() {
+  const region_key = deptForm.value.region_key.trim();
+  const dept_name = deptForm.value.dept_name.trim();
+  const dept_id = deptForm.value.dept_id.trim();
+  if (!dept_name) {
+    drawerError.value = '部门名称为必填';
+    return;
+  }
+  drawerBusy.value = true;
+  drawerError.value = '';
+  try {
+    await addDept({ region_key, dept_name, dept_id: dept_id || null });
+    showFlash('ok', `已在 ${regionLabel(region_key)} 登记部门「${dept_name}」`);
+    closeDrawer();
+    await load({ silent: true });
+  } catch (err) {
+    drawerError.value = err.message;
+  } finally {
+    drawerBusy.value = false;
+  }
+}
+
 onMounted(() => load());
 </script>
 
@@ -352,7 +421,17 @@ onMounted(() => load());
       <section class="col">
         <div class="col-head">
           <h2>区域 → 部门 → 成员</h2>
-          <span class="count">{{ regions.length }} 个区域</span>
+          <div class="col-head-actions">
+            <span class="count">{{ regions.length }} 个区域</span>
+            <button
+              class="btn mini"
+              :disabled="busy || loading"
+              title="登记一个区域（即使暂无成员也会出现在树里）"
+              @click="openRegionDrawer"
+            >
+              + 新增区域
+            </button>
+          </div>
         </div>
         <div v-if="!regions.length" class="empty">暂无已归类成员</div>
         <div
@@ -364,6 +443,14 @@ onMounted(() => load());
           <div class="region-head">
             <h3>{{ region.label }}</h3>
             <span class="region-key">{{ region.key }}</span>
+            <button
+              class="btn mini"
+              :disabled="busy || loading"
+              :title="`在 ${region.label} 登记一个部门（即使暂无成员也会出现在树里）`"
+              @click="openDeptDrawer(region)"
+            >
+              + 新增部门
+            </button>
           </div>
           <draggable
             class="dept-drop"
@@ -464,6 +551,59 @@ onMounted(() => load());
         </div>
       </div>
     </div>
+
+    <!-- 新增区域 / 部门抽屉（右侧滑入） -->
+    <div v-if="drawer" class="drawer-mask" @click.self="closeDrawer">
+      <aside class="drawer">
+        <h3 class="drawer-title">
+          {{ drawer === 'region' ? '新增区域' : '新增部门' }}
+        </h3>
+        <p class="drawer-note">
+          {{
+            drawer === 'region'
+              ? '登记进组织编排树；即使暂无成员也会显示，可把成员拖入该区域。'
+              : `登记进「${regionLabel(deptForm.region_key)}」；即使暂无成员也会显示，可把成员拖入该部门。`
+          }}
+        </p>
+
+        <div v-if="drawer === 'region'" class="drawer-form">
+          <label class="field">
+            <span class="field-label">区域键（英文小写，如 hangzhou）</span>
+            <input v-model="regionForm.region_key" class="input" placeholder="hangzhou" />
+          </label>
+          <label class="field">
+            <span class="field-label">中文名</span>
+            <input v-model="regionForm.label" class="input" placeholder="杭州" />
+          </label>
+        </div>
+
+        <div v-else class="drawer-form">
+          <label class="field">
+            <span class="field-label">部门名称</span>
+            <input v-model="deptForm.dept_name" class="input" placeholder="杭州销售部" />
+          </label>
+          <label class="field">
+            <span class="field-label">部门 ID（可选，留空按部门名归属）</span>
+            <input v-model="deptForm.dept_id" class="input" placeholder="1050062512" />
+          </label>
+        </div>
+
+        <p v-if="drawerError" class="drawer-error">{{ drawerError }}</p>
+
+        <div class="drawer-actions">
+          <button class="btn ghost" :disabled="drawerBusy" @click="closeDrawer">
+            取消
+          </button>
+          <button
+            class="btn primary"
+            :disabled="drawerBusy"
+            @click="drawer === 'region' ? submitRegion() : submitDept()"
+          >
+            {{ drawerBusy ? '提交中…' : '确定' }}
+          </button>
+        </div>
+      </aside>
+    </div>
   </div>
 </template>
 
@@ -534,6 +674,23 @@ onMounted(() => load());
 .btn.ghost {
   border-color: transparent;
   color: #4b5563;
+}
+.btn.primary {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+.btn.primary:hover {
+  background: #1d4ed8;
+}
+.btn.mini {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.col-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* flash */
@@ -684,6 +841,9 @@ onMounted(() => load());
   margin: 0;
   font-size: 14px;
 }
+.region-head .btn {
+  margin-left: auto;
+}
 .region-key {
   color: #9ca3af;
   font-size: 11px;
@@ -792,5 +952,63 @@ onMounted(() => load());
 }
 .modal-actions .muted {
   margin-right: auto;
+}
+
+/* 新增区域 / 部门抽屉 */
+.drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(17, 24, 39, 0.35);
+}
+.drawer {
+  width: min(380px, 92vw);
+  height: 100%;
+  padding: 18px;
+  background: #fff;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.15);
+  overflow-y: auto;
+}
+.drawer-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.drawer-note {
+  margin: 0 0 16px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.drawer-form {
+  display: grid;
+  gap: 12px;
+}
+.field {
+  display: grid;
+  gap: 5px;
+}
+.field-label {
+  color: #6b7280;
+  font-size: 12px;
+}
+.input {
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #1f2933;
+}
+.drawer-error {
+  margin: 12px 0 0;
+  color: #b91c1c;
+  font-size: 12px;
+}
+.drawer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
 }
 </style>

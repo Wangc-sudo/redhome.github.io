@@ -39,6 +39,7 @@ from common.public_data import (
     channel_target,
     ops_control,
     org_assignment_override,
+    org_catalog,
     recipient_override,
     report_roster,
 )
@@ -978,16 +979,29 @@ def _org_region_label(region):
     return _ORG_REGION_LABELS.get(region, region)
 
 
-def _build_org_overview(members, overrides):
-    """在职成员 + 有效覆盖 → 组织编排视图（regions / pool）。
+def _build_org_overview(members, overrides, catalog=None):
+    """在职成员 + 有效覆盖 + 组织目录 → 组织编排视图（regions / pool）。
 
     *members* 是 ``(user_id, name, region, dept_name)`` 元组
     （``bi_authz.fetch_active_members`` 的产出）；*overrides* 是
-    ``{user_id: row}``（只含启用行；读失败时传空 → 回种子口径）。
+    ``{user_id: row}``（只含启用行；读失败时传空 → 回种子口径）；
+    *catalog* 是 :func:`org_catalog.fetch_catalog` 的产出（登记的区域/部门，
+    缺省空 → 完全等价旧行为）。
 
     有效归属：覆盖优先、其次种子派生；覆盖 ``region`` 为空 → 「未归类」池。
     部门分组键取 ``dept_id or dept_name``（基名单只有部门名，覆盖带 id）。
+    目录登记的区域/部门即使**没有成员**也渲染（可作为拖拽归属目标）。
     """
+    catalog = catalog or {}
+    catalog_regions = {
+        str(row.get("region_key") or "").strip(): row
+        for row in catalog.get("regions") or []
+        if str(row.get("region_key") or "").strip()
+    }
+    catalog_region_labels = {
+        key: (row.get("label") or key) for key, row in catalog_regions.items()
+    }
+
     grouped = {}        # region -> {dept_key: {dept_id, dept_name, members}}
     for user_id, name, region, dept_name in members:
         override = overrides.get(user_id)
@@ -1009,27 +1023,60 @@ def _build_org_overview(members, overrides):
         group = depts.get(key)
         if group is None:
             group = {"dept_id": dept_id, "dept_name": dept_name or "",
-                     "members": []}
+                     "sort_order": 0, "members": []}
             depts[key] = group
         group["members"].append(entry)
+
+    # 目录登记（消费侧）：区域/部门即使无成员也播种进分组树。
+    for row in catalog.get("depts") or []:
+        region = str(row.get("region_key") or "").strip()
+        if not region:
+            continue
+        dept_id = row.get("dept_id")
+        dept_name = row.get("dept_name") or ""
+        key = dept_id or dept_name or ""
+        if not key:
+            continue
+        depts = grouped.setdefault(region, {})
+        group = depts.get(key)
+        if group is None:
+            group = {"dept_id": dept_id, "dept_name": dept_name,
+                     "sort_order": 0, "members": []}
+            depts[key] = group
+        group["sort_order"] = int(row.get("sort_order") or 0)
+        if dept_name and not group["dept_name"]:
+            group["dept_name"] = dept_name
 
     pool = grouped.pop(None, [])
     pool.sort(key=lambda item: (item["name"], item["user_id"]))
 
     known = list(_ORG_REGION_ORDER)
-    extra = sorted(k for k in grouped if k not in known)
+    catalog_order = sorted(
+        (key for key in catalog_regions if key not in known),
+        key=lambda key: (int(catalog_regions[key].get("sort_order") or 0), key),
+    )
+    catalog_extra = set(catalog_order)
+    extra = sorted(
+        key for key in grouped
+        if key not in known and key not in catalog_extra
+    )
     regions = []
-    for key in known + extra:
-        depts = grouped.get(key)
-        if not depts:
+    for key in known + catalog_order + extra:
+        depts = grouped.get(key) or {}
+        if key not in catalog_regions and not depts:
             continue
-        groups = sorted(depts.values(),
-                        key=lambda g: (g["dept_name"], g["dept_id"] or ""))
+        groups = sorted(
+            depts.values(),
+            key=lambda g: (g["sort_order"], g["dept_name"],
+                           g["dept_id"] or ""),
+        )
         for group in groups:
             group["members"].sort(
                 key=lambda item: (item["name"], item["user_id"]))
         regions.append({
-            "key": key, "label": _org_region_label(key), "depts": groups,
+            "key": key,
+            "label": catalog_region_labels.get(key) or _org_region_label(key),
+            "depts": groups,
         })
     return {"status": "ok", "regions": regions, "pool": pool}
 
@@ -2027,7 +2074,14 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning(
                 "ops-web org override read failed: %s", type(exc).__name__)
         overrides = {row["user_id"]: row for row in rows if row["enabled"]}
-        overview = _build_org_overview(members, overrides)
+        try:
+            with db_connector() as connection:
+                catalog = org_catalog.fetch_catalog(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org catalog read failed: %s", type(exc).__name__)
+            catalog = {"regions": [], "depts": []}
+        overview = _build_org_overview(members, overrides, catalog)
         overview["overrides"] = [
             dict(row, updated_at=_fmt_time(row.get("updated_at")),
                  region_label=_org_region_label(row.get("region")))
@@ -2067,6 +2121,69 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning(
                 "ops-web org assign failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/region/add")
+    async def org_region_add(request: Request):
+        """登记一个区域（消费侧组织目录；即使无成员也进树）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        label = payload.get("label")
+        sort_order = payload.get("sort_order")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(label, str) or not label.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if sort_order is not None and (
+                isinstance(sort_order, bool) or not isinstance(sort_order, int)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.upsert_region(
+                    connection, region_key, label,
+                    sort_order=sort_order or 0, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region add failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/add")
+    async def org_dept_add(request: Request):
+        """登记一个区域下的部门（消费侧组织目录；即使无成员也进树）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        dept_id = payload.get("dept_id")
+        sort_order = payload.get("sort_order")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if dept_id is not None and not isinstance(dept_id, str):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if sort_order is not None and (
+                isinstance(sort_order, bool) or not isinstance(sort_order, int)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.upsert_dept(
+                    connection, region_key, dept_name, dept_id=dept_id,
+                    sort_order=sort_order or 0, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept add failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
 
