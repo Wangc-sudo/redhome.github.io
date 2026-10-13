@@ -587,6 +587,9 @@ def _dashboard_definition(dashboard, registry: Dict[str, Any]) -> Dict[str, Any]
             {
                 "card": placement.card,
                 "title": placement.title,
+                # 数据源出处（2026-10-13）：展示用，前端在标题旁渲染圆点；
+                # 空串 = 不渲染（旧格式看板零影响）。
+                "source": placement.source,
                 "span": placement.span,
                 "on_click": placement.on_click,
                 "params": list(registry[placement.card].params_schema),

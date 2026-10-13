@@ -630,6 +630,9 @@ class V1ApiTests(unittest.TestCase):
                     {
                         "card": "kpi_offline_mtd",
                         "title": "t-kpi_offline_mtd",
+                        # 数据源出处（2026-10-13）：definition 每卡增该展示字段；
+                        # 未标注的卡为空串（缺省即旧行为）。
+                        "source": "",
                         "span": 4,
                         "on_click": None,
                         # The registry's param whitelist, so the client
@@ -672,6 +675,30 @@ class V1ApiTests(unittest.TestCase):
 
         self.assertEqual("region", payload["cards"][0]["on_click"])
         self.assertEqual([], payload["cards"][0]["params"])
+
+    def test_definition_carries_card_source_for_the_dot(self):
+        """数据源出处（2026-10-13）：卡级 source 原样透出；未标注为空串。"""
+        source = StaticDashboardSource(
+            {
+                "l2-channel": {
+                    "title": "渠道下钻",
+                    "enabled": True,
+                    "refresh_seconds": 300,
+                    "nav_order": 20,
+                    "cards": [
+                        {"card": "bar_channel_mtd", "title": "t-bar", "span": 6,
+                         "source": "钉钉AI表格 · 渠道日销"},
+                        {"card": "kpi_channel_mtd", "title": "t-kpi", "span": 3},
+                    ],
+                }
+            }
+        )
+        client = TestClient(_build_app(dashboard_source=source))
+
+        payload = client.get("/api/v1/dashboards/l2-channel").json()
+
+        self.assertEqual("钉钉AI表格 · 渠道日销", payload["cards"][0]["source"])
+        self.assertEqual("", payload["cards"][1]["source"])
 
     def test_definition_404_for_missing_or_disabled_and_503_for_corrupt(self):
         source = _CorruptDashboardSource(

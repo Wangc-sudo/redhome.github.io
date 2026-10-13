@@ -165,26 +165,36 @@ qd-channel-sales:
   filters:
     - {param: date, source: dates, label: "日期"}
   cards:
+    # 数据源标注（2026-10-13）：source 为展示用出处文案，前端在卡标题旁渲染
+    # 圆点；空串 = 不渲染。三条腿：钉钉AI表格（渠道日销）/ WDT（交易单·库存）
+    # / 财务AI表格（店铺扣点费用管理）。
     - card: kpi_qd_mtd
       title: "本月累计销售"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: kpi_qd_today
       title: "当日销售"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: kpi_qd_progress
       title: "时间进度"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: trend_qd_daily
       title: "渠道日销趋势"
+      source: "钉钉AI表格 · 渠道日销"
       span: 8
     - card: bar_qd_channel
       title: "渠道本月排行"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: table_qd_store_mtd
       title: "店铺本月排行"
+      source: "钉钉AI表格 · 渠道日销"
       span: 12
     - card: table_qd_unfilled_today
       title: "当日未填报门店"
+      source: "钉钉AI表格 · 渠道日销"
       span: 12
     # —— 旧页渠道专属板块补齐（2026-10-13 运维裁决，共 21 卡）——
     # 旧 /qudao.html 由 pages-web 追加的 13 个渠道专属面板逐块迁成 BI 卡
@@ -192,66 +202,87 @@ qd-channel-sales:
     # 面板 1-8 复用 common.broadcast.queries 既有 fetch_*，不新写 SQL。
     - card: table_qd_monthly_kpi
       title: "月度经营概览"
+      source: "钉钉AI表格 + WDT"
       span: 12
     - card: table_qd_expense
       title: "渠道费用"
+      source: "财务AI表格 · 店铺扣点费用管理"
       span: 6
     - card: table_qd_expense_rate
       title: "渠道费率"
+      source: "财务AI表格 · 店铺扣点费用管理"
       span: 6
     - card: table_qd_bill_category
       title: "账单费用分类"
+      source: "财务AI表格 · 店铺扣点费用管理"
       span: 4
     - card: table_qd_bill_platform
       title: "账单平台构成"
+      source: "财务AI表格 · 店铺扣点费用管理"
       span: 4
     - card: table_qd_bill_items
       title: "账单费用项 TOP"
+      source: "财务AI表格 · 店铺扣点费用管理"
       span: 4
     - card: table_qd_product_series
       title: "商品系列结构"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_product_bands
       title: "价格带结构"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_product_top
       title: "商品销售 TOP"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_product_summary
       title: "商品集中度"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_refund_reason
       title: "退款原因"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_gmv_factors
       title: "GMV 归因"
+      source: "WDT · 交易单"
       span: 6
     - card: table_qd_cohort
       title: "客群复购留存"
+      source: "WDT · 交易单"
       span: 12
     - card: table_qd_baijiu_node
       title: "白酒节点弹性"
+      source: "WDT · 交易单"
       span: 12
     - card: table_qd_channel_daily
       title: "渠道日销快报"
+      source: "钉钉AI表格 · 渠道日销"
       span: 12
     - card: table_qd_hot_items
       title: "热销商品动销"
+      source: "WDT · 交易单"
       span: 12
     - card: table_qd_stock_urgent
       title: "库存告急"
+      source: "WDT · 库存快照"
       span: 6
     - card: table_qd_stock_oversold
       title: "超卖与零库存"
+      source: "WDT · 库存快照"
       span: 6
     - card: table_qd_purchase_inbound
       title: "采购入库"
+      source: "WDT · 采购入库单"
       span: 12
     - card: table_qd_order_risk
       title: "订单风险"
+      source: "WDT · 交易单"
       span: 12
     - card: table_qd_notes
       title: "口径说明"
+      source: "口径说明 · 汇总"
       span: 12
 l2-region:
   title: "区域下钻"

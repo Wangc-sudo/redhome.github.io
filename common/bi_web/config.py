@@ -48,7 +48,9 @@ _ALLOWED_DASHBOARD_KEYS = frozenset(
     {"title", "enabled", "refresh_seconds", "cards", "nav_order", "filters",
      "icon", "group", "required_scope", "_说明"}
 )
-_ALLOWED_CARD_KEYS = frozenset({"card", "title", "span", "on_click", "_说明"})
+_ALLOWED_CARD_KEYS = frozenset(
+    {"card", "title", "span", "on_click", "source", "_说明"}
+)
 _ALLOWED_FILTER_KEYS = frozenset({"param", "source", "label", "_说明"})
 _ALLOWED_ON_CLICK_KEYS = frozenset({"param", "_说明"})
 
@@ -98,6 +100,9 @@ class CardPlacement:
     title: str = ""
     span: int = DEFAULT_SPAN
     on_click: str | None = None
+    #: 卡片数据源出处（展示用自由文本，如「钉钉AI表格 · 渠道日销」）：空串 =
+    #: 前端不渲染标题旁的数据源圆点。仅作标注，不参与任何取数/校验逻辑。
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -287,7 +292,14 @@ def _parse_card(dashboard_id, index, raw):
                 "needs a non-empty 'param'"
             )
 
-    return CardPlacement(card=card, title=title, span=span, on_click=on_click_param)
+    source = raw.get("source", "")
+    if not isinstance(source, str):
+        raise DashboardConfigError(
+            f"dashboard '{dashboard_id}' cards[{index}] field 'source' must be a string"
+        )
+
+    return CardPlacement(card=card, title=title, span=span,
+                         on_click=on_click_param, source=source)
 
 
 def _parse_filter(dashboard_id, index, raw):

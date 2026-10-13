@@ -163,6 +163,11 @@ a{text-decoration:none;color:inherit}
   display:flex;align-items:center;gap:8px}
 .card-title .tag{margin-left:auto;order:2;font-size:11px;font-weight:500;color:var(--text-muted);
   padding:3px 9px;border-radius:var(--radius-pill);background:var(--track-bg);white-space:nowrap}
+/* 数据源圆点（2026-10-13）：紧贴标题文本（order 默认 0，在 auto-margin 的 .tag 之前），
+   hover 显示原生 title 提示。 */
+.card-title .src-dot{width:7px;height:7px;border-radius:50%;flex:none;cursor:help;
+  background:var(--text-subtle);opacity:.45;transition:opacity .15s,background .15s}
+.card-title .src-dot:hover{opacity:1;background:var(--primary)}
 .card-body{display:flex;flex-direction:column;justify-content:center;flex:1;min-height:0}
 .card-body.kpi{min-height:96px}
 .card-body.chart{height:312px;min-height:312px;justify-content:flex-start}

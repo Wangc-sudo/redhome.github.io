@@ -321,6 +321,21 @@ function buildFilters(def){
 
 /* ---- 卡片占位与取数 -------------------------------------------------------- */
 
+/* 数据源圆点（2026-10-13）：placement.source 非空时挂到 .card-title 尾部，
+ * 用原生 title 悬停提示（不抢图表 hover 的 #tip）。空串 = 不挂。
+ * 必须在 buildCards（占位卡）与 replaceWidget（每次取数整块替换）两处都调用：
+ * 取数成功会换掉整个 widget，只挂占位卡会丢。 */
+function decorateSource(widget, placement){
+  var src = placement && placement.source;
+  if (!src) return;
+  var t = widget.querySelector('.card-title');
+  if (!t || t.querySelector('.src-dot')) return;
+  var d = document.createElement('span');
+  d.className = 'src-dot';
+  d.title = '数据源：' + src;
+  t.appendChild(d);
+}
+
 function buildCards(def){
   var grid = document.getElementById('grid');
   clear(grid);
@@ -328,6 +343,7 @@ function buildCards(def){
   records = (def.cards || []).map(function(placement, index){
     var box = CardBox('c' + (placement.span || 12), '', placement.title || placement.card);
     box.widget.setAttribute('data-card', placement.card);
+    decorateSource(box.widget, placement);
     box.body.innerHTML = '<div class="empty">' + esc(LOADING_TEXT) + '</div>';
     grid.appendChild(box.widget);
     return {placement: placement, index: index, widget: box.widget};
@@ -495,6 +511,7 @@ function replaceWidget(rec, widget){
   /* 重渲染只换卡体：widget 在原位被整块替换，DOM 顺序不动（与拖拽排序
    * 互不干扰）；data-card 与折叠态要在新节点上恢复。 */
   widget.setAttribute('data-card', rec.placement.card);
+  decorateSource(widget, rec.placement); /* 新卡补挂数据源圆点（取数整块替换后） */
   if (dragWidget === rec.widget) dragWidget = widget; /* 定时刷新撞上拖拽中：锚点跟到新节点 */
   rec.widget.parentNode.replaceChild(widget, rec.widget);
   rec.widget = widget;
