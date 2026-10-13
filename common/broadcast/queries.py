@@ -799,13 +799,304 @@ def fetch_refund_reason(connection, *, months_back=MONTHLY_KPI_MONTHS,
     }
 
 
+#: GMV 三因子拆解展示窗口（近 N 个月，同 MONTHLY_KPI_MONTHS）。
+FACTOR_MONTHS = MONTHLY_KPI_MONTHS
+
+
+def fetch_gmv_factors(connection, *, months_back=FACTOR_MONTHS):
+    """GMV 三因子拆解：买家数 × 人均件数 × 件均价（近 *months_back* 月）。
+
+    口径（``fact_order_line``，trade_time 付款时间归月，剔除取消单）：
+
+    * 买家数 = COUNT(DISTINCT buyer_id)（WDT 交易级 customer_id；拼多多按
+      隐私协议不返回 buyer_id → NULL 不计入，缺失会使人均件数/件均价被
+      高估，面板附缺失说明，不臆造补数）；
+    * 件数 = Σ quantity；GMV = Σ paid_amount；
+    * 人均件数 = 件数 ÷ 买家数；件均价 = GMV ÷ 件数；
+    * 恒等式 GMV = 买家数 × 人均件数 × 件均价（代数恒等）。
+    * 环比归因（连环替代法，三项加总恰等于 ΔGMV）：
+      买家数贡献 = Δ买家数 × 上期人均件数 × 上期件均价；
+      人均件数贡献 = 本期买家数 × Δ人均件数 × 上期件均价；
+      件均价贡献 = 本期买家数 × 本期人均件数 × Δ件均价。
+
+    返回 ``{"months": [...], "as_of": date}``，每行含 ym/gmv/buyers/qty/
+    unit_price/qty_per_buyer/contrib（contrib 含 buyers/qty_per_buyer/
+    unit_price/delta，首月为 None）。
+    """
+    rows = _query(
+        connection,
+        "SELECT YEAR(`trade_time`) AS `y`, MONTH(`trade_time`) AS `m`, "
+        "SUM(`paid_amount`) AS `gmv`, SUM(`quantity`) AS `qty`, "
+        "COUNT(DISTINCT `buyer_id`) AS `buyers` "
+        "FROM `fact_order_line` "
+        "WHERE `trade_time` IS NOT NULL "
+        "GROUP BY `y`, `m` ORDER BY `y`, `m`",
+    )
+    months = []
+    prev = None
+    for r in sorted(rows, key=lambda x: (x["y"], x["m"])):
+        ym = f"{r['y']:04d}-{r['m']:02d}"
+        gmv = float(r["gmv"] or 0)
+        qty = float(r["qty"] or 0)
+        buyers = int(r["buyers"] or 0)
+        unit_price = (gmv / qty) if qty else None
+        qty_per_buyer = (qty / buyers) if buyers else None
+        contrib = None
+        if (
+            prev is not None
+            and prev["unit_price"] is not None and unit_price is not None
+            and prev["qty_per_buyer"] is not None and qty_per_buyer is not None
+        ):
+            contrib = {
+                "buyers": (buyers - prev["buyers"])
+                * prev["qty_per_buyer"] * prev["unit_price"],
+                "qty_per_buyer": buyers
+                * (qty_per_buyer - prev["qty_per_buyer"]) * prev["unit_price"],
+                "unit_price": buyers * qty_per_buyer
+                * (unit_price - prev["unit_price"]),
+                "delta": gmv - prev["gmv"],
+            }
+        months.append({
+            "ym": ym,
+            "gmv": gmv,
+            "buyers": buyers,
+            "qty": qty,
+            "unit_price": unit_price,
+            "qty_per_buyer": qty_per_buyer,
+            "contrib": contrib,
+        })
+        prev = months[-1]
+    return {"months": months[-months_back:], "as_of": date.today()}
+
+
+#: Cohort 留存矩阵展示窗口（近 N 个月，同 MONTHLY_KPI_MONTHS）。
+COHORT_MONTHS = MONTHLY_KPI_MONTHS
+
+
+def _month_offset(later_ym, earlier_ym):
+    """``later - earlier`` 的月差（同口径 "YYYY-MM" 字符串）。"""
+    return (
+        (int(later_ym[:4]) - int(earlier_ym[:4])) * 12
+        + (int(later_ym[5:7]) - int(earlier_ym[5:7]))
+    )
+
+
+def fetch_cohort_retention(connection, *, months_back=COHORT_MONTHS, today=None):
+    """Cohort 留存矩阵：按首购月分队列，追踪其后每月复购留存率。
+
+    口径（``fact_order_line``，buyer_id 非空，trade_time 付款时间归月）：
+
+    * 队列 = 买家首购月（该 buyer 的 MIN(trade_time) 所在月）；
+    * 留存率(Mk) = 首购后第 k 月仍有成交的队列买家数 ÷ 队列规模，
+      M0（首购月）恒为 100%；
+    * 展示窗口取最近 *months_back* 个月内的首购月；列 M0..Mk 覆盖到
+      数据最新月；avg_retention(Mk)=Σ(已满 k 月的各队列当月活跃买家)÷
+      Σ(已满 k 月的队列规模)（未满 k 月的队列不计入该列均值，避免失真）。
+    拼多多买家按隐私协议无 buyer_id（NULL 不计入队列，不臆造）。
+
+    返回 ``{"cohorts": [...], "periods": [...], "avg_retention": {...},
+    "last_ym": str, "as_of": date}``，cohorts 每行含 cohort/size/retention
+    （retention 为 {offset: ratio}）。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    month_set = set(months)
+    rows = _query(
+        connection,
+        "SELECT `buyer_id` AS `buyer`, "
+        "YEAR(`trade_time`) AS `y`, MONTH(`trade_time`) AS `m` "
+        "FROM `fact_order_line` "
+        "WHERE `buyer_id` IS NOT NULL AND `trade_time` IS NOT NULL "
+        "GROUP BY `buyer_id`, `y`, `m`",
+    )
+    active: dict[str, set] = {}
+    for r in rows:
+        ym = f"{r['y']:04d}-{r['m']:02d}"
+        active.setdefault(r["buyer"], set()).add(ym)
+
+    cohorts: dict[str, list] = {}
+    for yms in active.values():
+        cohort = min(yms)
+        if cohort in month_set:
+            cohorts.setdefault(cohort, []).append(yms)
+    last_ym = max((max(yms) for yms in active.values() if yms), default=None)
+
+    cohorts_out = []
+    max_offset = 0
+    for cohort in sorted(cohorts):
+        buyers = cohorts[cohort]
+        size = len(buyers)
+        counts: dict[str, int] = {}
+        for yms in buyers:
+            for ym in yms:
+                offset = _month_offset(ym, cohort)
+                if offset < 0:
+                    continue
+                counts[offset] = counts.get(offset, 0) + 1
+                max_offset = max(max_offset, offset)
+        cohorts_out.append({
+            "cohort": cohort,
+            "size": size,
+            "retention": {off: cnt / size for off, cnt in counts.items()},
+        })
+    periods = list(range(0, max_offset + 1))
+
+    avg_retention = {}
+    if last_ym:
+        for k in periods:
+            denom = 0
+            numer = 0
+            for row in cohorts_out:
+                if _month_offset(last_ym, row["cohort"]) < k:
+                    continue  # 该队列尚未满 k 月，不计入
+                denom += row["size"]
+                numer += row["retention"].get(k, 0) * row["size"]
+            avg_retention[k] = (numer / denom) if denom else None
+    return {
+        "cohorts": cohorts_out,
+        "periods": periods,
+        "avg_retention": avg_retention,
+        "last_ym": last_ym,
+        "as_of": today,
+    }
+
+
+#: 白酒节点弹性展示窗口（近 N 个月，同 MONTHLY_KPI_MONTHS）。
+NODE_MONTHS = MONTHLY_KPI_MONTHS
+
+#: 白酒节点标记：dim_calendar.note 命中的节日关键词 → 展示名（口径受控）。
+#: 节点=礼赠/宴席高峰；节假日名称由 holiday-cn 导入 note（未导入则节点缺）。
+BAIJIU_NODE_KEYWORDS = (
+    ("春节", "春节"),
+    ("中秋", "中秋"),
+    ("国庆", "国庆"),
+    ("元旦", "元旦"),
+    ("端午", "端午"),
+    ("清明", "清明"),
+    ("劳动", "劳动节"),
+    ("双11", "双十一"),
+    ("双十一", "双十一"),
+    ("618", "618"),
+)
+
+
+def _node_label(note, is_workday):
+    """dim_calendar.note → 白酒节点展示名（调休上班日/非节点返回 None）。"""
+    text = str(note or "")
+    if not text or "调休" in text or int(is_workday or 0):
+        return None
+    for keyword, label in BAIJIU_NODE_KEYWORDS:
+        if keyword in text:
+            return label
+    return None
+
+
+def fetch_baijiu_node_elasticity(connection, *, months_back=NODE_MONTHS,
+                                 today=None):
+    """白酒节点弹性：节日节点窗口日均 GMV ÷ 平日日均 GMV（近 *months_back* 月）。
+
+    数据源与口径：
+
+    * 节点标记 —— ``dim_calendar``（business_date / is_workday / note）：
+      note 命中 :data:`BAIJIU_NODE_KEYWORDS` 且 is_workday=0（调休上班日
+      不计）的日期标记为节点日，按展示名分组为节点窗口；
+    * GMV —— ``fact_order_line`` 按 DATE(trade_time) 汇总日 GMV（剔除取消
+      口径同月度看板）；
+    * 有效窗口 = [max(展示窗口首日, 数据首日), min(today, 数据末日)]，避免
+      数据起点前的空日与结尾空日稀释基线；
+    * 弹性 = 节点日均 GMV ÷ 平日（非节点）日均 GMV；>1 表示节点旺。
+
+    若 ``dim_calendar`` 窗口内无节点标记（如法定节假日未导入 note），返回
+    ``nodes=[]``、``has_calendar``，面板显式标注「数据缺失」，不臆造节点。
+    返回 ``{"nodes": [...], "baseline_daily": float|None, "baseline_days": int,
+    "window": [...], "has_calendar": bool, "has_data": bool, "as_of": date}``。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    window = _window_start(months)
+
+    daily_rows = _query(
+        connection,
+        "SELECT DATE(`trade_time`) AS `d`, SUM(`paid_amount`) AS `gmv` "
+        "FROM `fact_order_line` "
+        "WHERE `trade_time` >= %s "
+        "GROUP BY `d` ORDER BY `d`",
+        (window,),
+    )
+    daily = {
+        r["d"]: float(r["gmv"] or 0)
+        for r in daily_rows if r["d"] is not None
+    }
+    if not daily:
+        return {
+            "nodes": [], "baseline_daily": None, "baseline_days": 0,
+            "window": months, "has_calendar": False, "has_data": False,
+            "as_of": today,
+        }
+    days_sorted = sorted(daily)
+    eff_start = max(window, days_sorted[0])
+    eff_end = min(today, days_sorted[-1])
+
+    cal_rows = _query(
+        connection,
+        "SELECT `business_date` AS `d`, `is_workday` AS `is_workday`, "
+        "`note` AS `note` FROM `dim_calendar` "
+        "WHERE `business_date` >= %s AND `business_date` <= %s",
+        (eff_start, eff_end),
+    )
+    node_days: dict[str, list] = {}
+    baseline_days = []
+    for r in cal_rows:
+        day = r["d"]
+        if day is None:
+            continue
+        label = _node_label(r.get("note"), r.get("is_workday"))
+        if label:
+            node_days.setdefault(label, []).append(day)
+        else:
+            baseline_days.append(day)
+
+    baseline_avg = (
+        sum(daily.get(d, 0.0) for d in baseline_days) / len(baseline_days)
+        if baseline_days else None
+    )
+    nodes = []
+    for label, days in node_days.items():
+        total = sum(daily.get(d, 0.0) for d in days)
+        avg = total / len(days) if days else None
+        nodes.append({
+            "node": label,
+            "days": len(days),
+            "gmv": total,
+            "daily_avg": avg,
+            "elasticity": (
+                (avg / baseline_avg)
+                if (avg is not None and baseline_avg) else None
+            ),
+        })
+    nodes.sort(key=lambda n: -n["gmv"])
+    return {
+        "nodes": nodes,
+        "baseline_daily": baseline_avg,
+        "baseline_days": len(baseline_days),
+        "window": months,
+        "has_calendar": bool(cal_rows),
+        "has_data": True,
+        "as_of": today,
+    }
+
+
 __all__ = [
+    "BAIJIU_NODE_KEYWORDS",
+    "COHORT_MONTHS",
     "DANGER_MONTH_SALES",
     "EXPENSE_PANEL_MONTHS",
     "EXCLUDE_KEYWORDS",
+    "FACTOR_MONTHS",
     "HOT_SALES_DAYS",
     "HOT_TOP_N",
     "MONTHLY_KPI_MONTHS",
+    "NODE_MONTHS",
     "PRICE_BANDS",
     "PRODUCT_STRUCTURE_MONTHS",
     "PURCHASE_LOOKBACK_HOURS",
@@ -815,7 +1106,10 @@ __all__ = [
     "SERIES_TOP_N",
     "UNMAPPED_CHANNEL_LABEL",
     "WINE_KEYWORDS",
+    "fetch_baijiu_node_elasticity",
+    "fetch_cohort_retention",
     "fetch_expense_summary",
+    "fetch_gmv_factors",
     "fetch_hot_items",
     "fetch_inventory_snapshot",
     "fetch_monthly_kpi",
