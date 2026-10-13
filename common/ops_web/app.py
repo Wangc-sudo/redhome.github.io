@@ -509,7 +509,7 @@ function renderRecipientBase(data) {
     list +
     '<p class="hint">下方覆盖只影响本任务（' + esc(_recipientService) + '）；' +
     '要增删整片区域的填报人请去 <a href="/roster">填报名册</a>，' +
-    '要调整在职人员请去 <a href="/">成员与授权</a>。</p></div>';
+    '要调整在职人员请去 <a href="/member-grants">成员与授权</a>。</p></div>';
 }
 function renderRecipientExplain(data) {
   // 「为什么不在名单」归因（P2）：解释「相关但未生效」的人各自去哪改。
@@ -525,7 +525,7 @@ function renderRecipientExplain(data) {
     groups.length + ' 类）</summary><ul>' + lis + '</ul>' +
     '<p class="hint">有效 @ 名单 = （在职成员 ∩ 名册）∪ 追加 − 移除。' +
     '整片区域的资格改 <a href="/roster">填报名册</a>，' +
-    '在职状态查 <a href="/">成员与授权</a>，' +
+    '在职状态查 <a href="/member-grants">成员与授权</a>，' +
     '本任务的例外用下方覆盖。</p></details>';
 }
 function renderRecipientOverride(data) {
@@ -653,7 +653,7 @@ def _page(title, *sections, viewer_name=""):
                 "<a href=\"/recipients\">收件人总览</a>"
                 "<a href=\"/calendar\">工作日历</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">权限</span>"
-        "<a href=\"/\">成员与授权</a>"
+        "<a href=\"/member-grants\">成员与授权</a>"
         "<a href=\"/members\">组织编排</a>"
         "<a href=\"/grants\">授权现状</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">系统</span>"
@@ -1473,7 +1473,7 @@ def _recipients_scope_html(scope, task_ids, *, members_by_region,
         f"<span class=\"hint\">{_esc(_base_source_label(info))}</span>："
         f"{base_cell}"
         "　<a href=\"/roster\">改本范围名册</a>"
-        "　<a href=\"/\">查成员在职</a></p>"
+        "　<a href=\"/member-grants\">查成员在职</a></p>"
     )
     if not task_ids:
         parts.append("<p class=\"hint\">本范围暂无绑定的催办任务。</p>")
@@ -1928,7 +1928,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return JSONResponse({"status": "ok", "database": "ok"})
 
     # -- 页面 ----------------------------------------------------------------
-    @app.get("/")
+    # 「成员与授权」页（B3，2026-10-13 起迁至 /member-grants；原挂在 /）。
+    @app.get("/member-grants")
     def members_page(request: Request):
         viewer = require_admin(request)
         try:
@@ -1982,8 +1983,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                                   viewer_name=viewer.name or viewer.userid))
 
     # -- 「组织编排」SPA（Vue3，区域 → 部门 → 成员拖拽；2026-10-13 P6）-------
-    @app.get("/members")
-    def members_spa_page(request: Request):
+    def _org_spa_shell(request: Request):
         """SPA 壳：返回 Vite 产物 index.html（数据走 /api/org/*）。"""
         require_admin(request)
         if not os.path.isfile(_ORG_SPA_INDEX):
@@ -1993,6 +1993,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return FileResponse(
             _ORG_SPA_INDEX, media_type="text/html",
             headers={"Cache-Control": "no-cache"})
+
+    @app.get("/")
+    def org_home_page(request: Request):
+        """登录后首页即「组织编排」SPA（B3，2026-10-13）：登录即见拖拽树。"""
+        return _org_spa_shell(request)
+
+    @app.get("/members")
+    def members_spa_page(request: Request):
+        """保留 /members（旧书签与既有测试兼容），与 / 同壳。"""
+        return _org_spa_shell(request)
 
     @app.get("/api/org/overview")
     def org_overview(request: Request):

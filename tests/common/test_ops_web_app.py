@@ -711,7 +711,7 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("function renderRecipientExplain", body)  # P2 归因
         self.assertIn("口径说明：为什么有人不在名单", body)
         self.assertIn('href="/roster">填报名册', body)   # 名册层深链
-        self.assertIn('href="/">成员与授权', body)       # 在职层深链
+        self.assertIn('href="/member-grants">成员与授权', body)  # 在职层深链
 
     def test_pipelines_page_service_deep_link_opens_drawer(self):
         """P3（2026-10-12）：?service=<id> 深链随页下发自动开抽屉脚本；
@@ -1548,7 +1548,7 @@ class RecipientRulesTests(unittest.TestCase):
         self.assertIn('href="/grants"', body)
 
     def test_three_pages_share_identical_pointer(self):
-        members = self._admin_client().get("/").text
+        members = self._admin_client().get("/member-grants").text
         grants = self._admin_client().get("/grants").text
         store = _RosterStore()
         client = self._admin_client()
@@ -1562,7 +1562,7 @@ class RecipientRulesTests(unittest.TestCase):
 
     def test_members_page_drops_duplicated_boundary_wording(self):
         """收口后成员与授权页不再重复边界解释：只留可操作指引 + 指针。"""
-        body = self._admin_client().get("/").text
+        body = self._admin_client().get("/member-grants").text
         self.assertIn("对象填 roster（名册管理）", body)   # 可操作指引保留
         self.assertNotIn("与这里互不影响", body)           # 旧边界解释已移除
 
@@ -2113,7 +2113,7 @@ class MembersPageTests(unittest.TestCase):
         client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
         _login(client)
 
-        body = client.get("/").text
+        body = client.get("/member-grants").text
 
         self.assertIn("u-zhang", body)
         self.assertIn("hangzhou", body)
@@ -2127,7 +2127,7 @@ class MembersPageTests(unittest.TestCase):
         )
         _login(client)
 
-        response = client.get("/")
+        response = client.get("/member-grants")
 
         self.assertEqual(503, response.status_code)
         self.assertNotIn("down", response.text)
@@ -2139,7 +2139,7 @@ class MembersPageTests(unittest.TestCase):
         本页改为给一条逐字一致的口径指针（不再散落重复表述）。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/").text
+        body = client.get("/member-grants").text
 
         # 口径指针（名册/覆盖/授权各管什么 → 收件人总览）
         self.assertIn("名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）",
@@ -2153,7 +2153,7 @@ class MembersPageTests(unittest.TestCase):
         治「入口太多、运维不知道点哪」。链接文案与路由保持不变。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/").text
+        body = client.get("/member-grants").text
 
         self.assertEqual(4, body.count('class="nav-group"'))
         for label in ("日常", "权限", "系统", "记录"):
@@ -2166,7 +2166,9 @@ class MembersPageTests(unittest.TestCase):
         # 每组含各自链接（路由不变，仅归位）
         self.assertIn('href="/roster"', group("日常"))
         self.assertIn('href="/calendar"', group("日常"))
-        self.assertIn('href="/"', group("权限"))
+        # B3：成员与授权改指 /member-grants，组织编排仍在 /members。
+        self.assertIn('href="/member-grants"', group("权限"))
+        self.assertIn('href="/members"', group("权限"))
         self.assertIn('href="/grants"', group("权限"))
         self.assertIn('href="/pipelines"', group("系统"))
         self.assertIn('href="/records"', group("记录"))
@@ -2178,7 +2180,7 @@ class MembersPageTests(unittest.TestCase):
         """任务2（2026-10-12）：术语清洗——页面不出现 userid/scope/region 黑话。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/").text
+        body = client.get("/member-grants").text
 
         self.assertIn(">账号<", body)             # 表头 userid → 账号
         self.assertNotIn(">userid<", body)
@@ -2910,7 +2912,25 @@ class OrgAssignmentApiTests(unittest.TestCase):
         base.update(rows or {})
         return _OrgConn(base, **kwargs)
 
-    # -- /members（SPA 壳）--------------------------------------------------
+    # -- / 与 /members（SPA 壳）---------------------------------------------
+
+    def test_root_serves_org_spa_shell(self):
+        """B3（2026-10-13）：登录后首页 / 即「组织编排」SPA 壳（登录即见拖拽树）。"""
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8")
+        handle.write("<!DOCTYPE html><div id=\"app\"></div>")
+        handle.close()
+        try:
+            with mock.patch("common.ops_web.app._ORG_SPA_INDEX", handle.name):
+                client = self._admin_client(_OrgConn({}))
+                response = client.get("/")
+            self.assertEqual(200, response.status_code)
+            self.assertIn("text/html", response.headers["content-type"])
+            self.assertIn("id=\"app\"", response.text)
+        finally:
+            import os
+            os.unlink(handle.name)
 
     def test_members_spa_requires_session(self):
         client = TestClient(_app(viewer=_admin_viewer()))
