@@ -4,13 +4,16 @@
 与报数网关的边界：本进程用**另一组应用凭据**建独立 Stream 连接，
 只服务客服群问答；事件面与报数面物理隔离，互不争抢、可独立重启。
 
-消息流（P1 纯规则，同步回复，目标 <5s）：
+消息流（P1 规则打底、P2 接天翼 DeepSeek，同步回复，目标 <5s）：
     Stream 回调 → msg_id 去重（kb_qa_audit INSERT IGNORE）
       → 会话白名单（可选 env）→ 规则路由
-      → 商品参数/筛选/素材 → kb_products 查询 → 模板渲染
-      → 手册类 → 兜底文案（P2 接 LLM+RAG）
+      → 商品参数/筛选/素材 → kb_products 查询 → LLM 口语化渲染（降模板）
+      → 手册类 → BM25 召回切片 → LLM 带出处答案（降切片摘录/兜底）
       → reply_text（sessionWebhook）
       → 审计行回填 intent/matched/reply_kind
+
+P2 fail-open 铁律：LLM 未配置/不可达/超时/返回畸形时全部降级 P1 模板行为，
+绝不把异常甩给客服（``from_environment()`` 缺配返回 None 即「无 LLM」）。
 
 异常处理沿用平台非泄露约定：日志与回执都不含异常原文。
 """
@@ -22,6 +25,14 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
+from common.kb_qa.docs import search_docs
+from common.kb_qa.llm import (
+    LlmError,
+    extract_query,
+    from_environment,
+    render_doc_answer,
+    render_product_answer,
+)
 from common.kb_qa.products import (
     HELP_TEXT,
     find_products,
@@ -39,7 +50,7 @@ from common.kb_qa.router import (
     classify,
 )
 
-#: 手册问答未接入前的诚实兜底（P2 替换为 RAG 答案）。
+#: 手册无召回切片（未导入/问得偏）时的诚实兜底。
 _DOC_FALLBACK = (
     "产品手册问答还在接入中。现在可以先问我商品参数"
     "（如「习酒窖藏1998 箱规」）或素材（如「发我摘要酒细节图」）。"
@@ -51,6 +62,19 @@ _ASSET_PENDING = "文件直发功能接入中，请先到 AI 表「产品资料�
 
 #: 群回复 markdown 卡片标题。
 _REPLY_TITLE = "产品资料助手"
+
+#: 手册切片摘录兜底：无 LLM 时直接回切片标题 + 前 200 字（带出处）。
+_DOC_EXCERPT_CHARS = 200
+
+
+def _render_doc_excerpt(chunks):
+    """BM25 召回切片 → 「标题 + 前 200 字」摘录（无 LLM 时的降级答案）。"""
+    lines = ["根据产品手册："]
+    for chunk in chunks:
+        title = chunk.get("doc_title") or "产品手册"
+        excerpt = (chunk.get("content") or "").strip()[:_DOC_EXCERPT_CHARS]
+        lines.append(f"【{title}】{excerpt}")
+    return "\n".join(lines)
 
 
 def parse_conversation_allowlist(raw):
@@ -86,7 +110,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     """
 
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
-                 log=print, reply_client=None, robot_code=None):
+                 log=print, reply_client=None, robot_code=None, llm=None,
+                 doc_search=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -94,6 +119,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._log = log
         self._reply_client = reply_client
         self._robot_code = robot_code
+        self._llm = llm
+        self._doc_search = doc_search or search_docs
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -176,19 +203,15 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         if intent.category in (PRODUCT_PARAM, PRODUCT_FILTER):
             rows = find_products(conn, intent.keyword)
             if not rows:
-                if intent.category == PRODUCT_PARAM:
-                    return render_not_found(intent.keyword), intent.category, None
+                # 规则层关键词整词/分词全 miss：有 LLM 时二次解析换关键词重查一次。
+                rows = self._reparse_products(conn, text)
+            if not rows:
                 return render_not_found(intent.keyword), intent.category, None
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
+                # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
                 return render_clarify(intent.keyword, rows), intent.category, None
-            if intent.category == PRODUCT_FILTER or len(rows) > 1:
-                reply = (
-                    render_filter_answer(rows, intent.keyword)
-                    if len(rows) > 1
-                    else render_param_answer(rows[0])
-                )
-                return reply, intent.category, rows[0]["record_id"]
-            return render_param_answer(rows[0]), intent.category, rows[0]["record_id"]
+            reply = self._render_products(text, rows, intent)
+            return reply, intent.category, rows[0]["record_id"]
         if intent.category == PRODUCT_ASSET:
             rows = find_products(conn, intent.keyword)
             if not rows:
@@ -205,8 +228,53 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 lines.append(f"- {field}：{len(items)} 个文件")
             return "\n".join(lines), intent.category, row["record_id"]
         if intent.category == DOC_QA:
-            return _DOC_FALLBACK, intent.category, None
+            return self._answer_docs(conn, text)
         return HELP_TEXT, CHITCHAT, None
+
+    # ------------------------------------------------------------------
+    # P2：LLM 渲染与手册召回（全部 fail-open，异常只降级不外泄）
+    # ------------------------------------------------------------------
+
+    def _render_products(self, question, rows, intent):
+        """命中行后的渲染：有 LLM 先试口语化答案，失败/无 LLM 降 P1 模板。
+
+        ``_answer`` 已拦下「多款 PARAM 反问」，这里只可能是单款 PARAM 或
+        FILTER 列表，故降级分支与 P1 完全一致（多行列表 / 单行参数卡）。
+        """
+        if self._llm is not None:
+            try:
+                return render_product_answer(self._llm, question, rows)
+            except LlmError:
+                self._log("kb qa: llm product render failed")
+        if len(rows) > 1:
+            return render_filter_answer(rows, intent.keyword)
+        return render_param_answer(rows[0])
+
+    def _reparse_products(self, conn, question):
+        """检索全 miss 时的 LLM 二次解析：换关键词重查一次商品。"""
+        if self._llm is None:
+            return []
+        try:
+            _category, keyword = extract_query(self._llm, question)
+        except LlmError:
+            self._log("kb qa: llm query extract failed")
+            return []
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return []
+        return find_products(conn, keyword)
+
+    def _answer_docs(self, conn, question):
+        """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。"""
+        chunks = self._doc_search(conn, question, k=3)
+        if not chunks:
+            return _DOC_FALLBACK, DOC_QA, None
+        if self._llm is not None:
+            try:
+                return render_doc_answer(self._llm, question, chunks), DOC_QA, None
+            except LlmError:
+                self._log("kb qa: llm doc render failed")
+        return _render_doc_excerpt(chunks), DOC_QA, None
 
     def _safe_reply(self, incoming, text):
         conversation_id = getattr(incoming, "conversation_id", "") or ""
@@ -265,11 +333,17 @@ def main(argv=None):
     reply_client = DingTalkClient(
         app_key, app_secret, os.environ["KB_DINGTALK_OPERATOR_ID"]
     )
+    # P2：LLM 未配置（KB_LLM_* 缺失）或模型未开通时 from_environment 返回
+    # None，handler 按「无 LLM」降级 P1 模板运行，不影响 P1 既有能力。
+    llm = from_environment()
+    if llm is None:
+        print("kb qa: LLM not configured, running in P1 template mode")
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
         reply_client=reply_client,
         robot_code=app_key,
+        llm=llm,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()
