@@ -654,9 +654,7 @@ def _page(title, *sections, viewer_name=""):
                 "<a href=\"/recipients\">收件人总览</a>"
                 "<a href=\"/calendar\">工作日历</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">权限</span>"
-        "<a href=\"/member-grants\">成员与授权</a>"
-        "<a href=\"/members\">组织编排</a>"
-        "<a href=\"/grants\">授权现状</a></span>"
+        "<a href=\"/members\">组织编排</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">系统</span>"
         "<a href=\"/pipelines\">定时任务</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">记录</span>"
@@ -1975,58 +1973,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return JSONResponse({"status": "ok", "database": "ok"})
 
     # -- 页面 ----------------------------------------------------------------
-    # 「成员与授权」页（B3，2026-10-13 起迁至 /member-grants；原挂在 /）。
+    # 「成员与授权」页已停用（2026-10-13）：在职成员展示与归属管理迁至
+    # 「组织编排」SPA（/members）。路由保留防书签 404，页面引导跳转。
     @app.get("/member-grants")
     def members_page(request: Request):
         viewer = require_admin(request)
-        try:
-            with db_connector() as connection:
-                members = bi_authz.fetch_active_members(connection)
-        except Exception as exc:
-            _LOGGER.warning("ops-web members load failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        rows = "".join(
-            f"<tr><td>{_esc(user_id)}</td><td>{_esc(name)}</td>"
-            f"<td>{_esc(region)}</td><td>{_esc(dept_name)}</td></tr>"
-            for user_id, name, region, dept_name in members
+        notice = (
+            "<h1>成员与授权</h1>"
+            "<div class=\"state\">"
+            "<p>本页功能已合并至<a href=\"/members\">组织编排</a>："
+            "在职成员展示、区域/部门归属调整均在「组织编排」页完成。</p>"
+            "<p>如需管理 BI 看板 / 区域数据授权，请联系系统管理员。</p>"
+            "<a class=\"btn\" href=\"/members\">前往组织编排</a>"
+            "</div>"
         )
-        regions = sorted({region for _uid, _n, region, _d in members})
-        region_options = "".join(
-            f"<option value=\"{_esc(region)}\">{_esc(region)}</option>"
-            for region in regions
-        )
-        grant_form = (
-            "<h2>单人授权</h2>"
-            "<form class=\"inline\" onsubmit=\"submitGrant(event)\">"
-            "<input name=\"user_id\" placeholder=\"账号\" required>"
-            "<select name=\"grant_type\">"
-            "<option value=\"scope\">看板页面</option>"
-            "<option value=\"region\">区域数据</option>"
-            "</select>"
-            "<input name=\"grant_key\" placeholder=\"对象：看板名或区域名\" required>"
-            "<input name=\"note\" placeholder=\"备注\">"
-            "<button type=\"submit\">授权</button></form>"
-            # G3/G6/G4（2026-10-12 断点报告）：两套体系显性化 + scope=roster
-            # 引导（原说明只写在需授权才能看到的名册页，引导死锁）+ 生效延迟。
-            # P5（口径收口，设计稿 §3）：边界说明统一到「收件人总览」，本页只
-            # 保留可操作的授权指引，口径指针见页首 _RECIPIENT_RULES_LINK。
-            "<p class=\"hint\">本页授权管 BI 看板与本中心的访问权、以及名册"
-            "管理权（类型选「看板页面」、对象填 roster（名册管理））；"
-            "本页授权约 1 分钟内生效。</p>"
-            "<h2>按区域一键开通</h2>"
-            "<form class=\"inline\" onsubmit=\"grantRegion(event)\">"
-            f"<select name=\"region\">{region_options}</select>"
-            "<button type=\"submit\">该区域全员开通区域权限</button>"
-            "<span class=\"hint\">候选名单即下表在职成员；逐行落审计。</span>"
-            "</form>"
-        )
-        table = (
-            "<h1>在职成员</h1>"
-            "<table><tr><th>账号</th><th>姓名</th><th>区域</th><th>部门</th></tr>"
-            f"{rows}</table>"
-        )
-        return HTMLResponse(_page("成员与授权", table, _RECIPIENT_RULES_LINK,
-                                  grant_form,
+        return HTMLResponse(_page("成员与授权", notice,
                                   viewer_name=viewer.name or viewer.userid))
 
     # -- 「组织编排」SPA（Vue3，区域 → 部门 → 成员拖拽；2026-10-13 P6）-------
@@ -2187,6 +2148,110 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
 
+    @app.post("/api/org/region/disable")
+    async def org_region_disable(request: Request):
+        """停用一个登记区域（软删：enabled=0）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        enabled = payload.get("enabled", False)
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.set_catalog_enabled(
+                    connection, "region", region_key=region_key,
+                    enabled=enabled, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region disable failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/region/delete")
+    async def org_region_delete(request: Request):
+        """物理删除一个登记区域（级联删除其下部门）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.delete_catalog_entry(
+                    connection, "region", region_key=region_key,
+                    actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/disable")
+    async def org_dept_disable(request: Request):
+        """停用一个登记部门（软删：enabled=0）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        enabled = payload.get("enabled", False)
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.set_catalog_enabled(
+                    connection, "dept", region_key=region_key,
+                    dept_name=dept_name, enabled=enabled, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept disable failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/delete")
+    async def org_dept_delete(request: Request):
+        """物理删除一个登记部门。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.delete_catalog_entry(
+                    connection, "dept", region_key=region_key,
+                    dept_name=dept_name, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
     @app.post("/api/org/toggle")
     async def org_toggle(request: Request):
         """停用/启用一条归属覆盖（按天然键 user_id）。"""
@@ -2254,41 +2319,20 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "deleted": deleted})
 
+    # 「授权现状」页已停用（2026-10-13）：授权管理不再通过本页自助操作。
+    # 路由保留防书签 404，页面引导联系管理员。
     @app.get("/grants")
     def grants_page(request: Request):
         viewer = require_admin(request)
-        try:
-            with db_connector() as connection:
-                grants = bi_authz.fetch_all_grants(connection)
-        except Exception as exc:
-            _LOGGER.warning("ops-web grants load failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        rows = []
-        for row in grants:
-            get = (lambda key: row.get(key)) if isinstance(row, dict) else None
-            if get is not None:
-                user_id, grant_type = get("user_id"), get("grant_type")
-                grant_key, note = get("grant_key"), get("note")
-                updated_by, updated_at = get("updated_by"), get("updated_at")
-            else:
-                (user_id, grant_type, grant_key, note,
-                 updated_by, updated_at) = row
-            rows.append(
-                f"<tr><td>{_esc(user_id)}</td>"
-                f"<td>{_esc(_label(_GRANT_TYPE_LABEL, grant_type))}</td>"
-                f"<td>{_esc(grant_key)}</td><td>{_esc(note)}</td>"
-                f"<td>{_esc(updated_by)}</td><td>{_esc(updated_at)}</td>"
-                f"<td><button onclick=\"revokeGrant('{_esc(user_id)}',"
-                f"'{_esc(grant_type)}','{_esc(grant_key)}')\">收回</button></td></tr>"
-            )
-        table = (
+        notice = (
             "<h1>授权现状</h1>"
-            + _RECIPIENT_RULES_LINK
-            + "<table><tr><th>账号</th><th>类型</th><th>对象</th><th>备注</th>"
-            "<th>最后操作人</th><th>更新时间</th><th></th></tr>"
-            + "".join(rows) + "</table>"
+            "<div class=\"state\">"
+            "<p>授权管理功能已停用。如需开通 BI 看板 / 区域数据 / 名册管理"
+            "权限，请联系系统管理员。</p>"
+            "<a class=\"btn\" href=\"/members\">返回组织编排</a>"
+            "</div>"
         )
-        return HTMLResponse(_page("授权现状", table,
+        return HTMLResponse(_page("授权现状", notice,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.get("/audit")

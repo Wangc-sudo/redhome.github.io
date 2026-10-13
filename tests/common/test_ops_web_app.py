@@ -1547,24 +1547,22 @@ class RecipientRulesTests(unittest.TestCase):
         self.assertIn('href="/pipelines"', body)
         self.assertIn('href="/grants"', body)
 
-    def test_three_pages_share_identical_pointer(self):
-        members = self._admin_client().get("/member-grants").text
-        grants = self._admin_client().get("/grants").text
+    def test_roster_page_shares_pointer(self):
+        """「填报名册」仍共享口径指针（成员与授权 / 授权现状已停用）。"""
         store = _RosterStore()
         client = self._admin_client()
         with store.patch_fetch(), store.patch_audit():
             roster = client.get("/roster").text
-        for page, body in (("成员与授权", members), ("授权现状", grants),
-                           ("填报名册", roster)):
-            with self.subTest(page=page):
-                self.assertIn(self._POINTER, body)
-                self.assertIn('href="/recipients"', body)
+        self.assertIn(self._POINTER, roster)
+        self.assertIn('href="/recipients"', roster)
 
-    def test_members_page_drops_duplicated_boundary_wording(self):
-        """收口后成员与授权页不再重复边界解释：只留可操作指引 + 指针。"""
-        body = self._admin_client().get("/member-grants").text
-        self.assertIn("对象填 roster（名册管理）", body)   # 可操作指引保留
-        self.assertNotIn("与这里互不影响", body)           # 旧边界解释已移除
+    def test_decommissioned_pages_do_not_carry_pointer(self):
+        """「成员与授权」「授权现状」已停用（2026-10-13），不再渲染口径指针。"""
+        members = self._admin_client().get("/member-grants").text
+        grants = self._admin_client().get("/grants").text
+        for page, body in (("成员与授权", members), ("授权现状", grants)):
+            with self.subTest(page=page):
+                self.assertNotIn(self._POINTER, body)
 
 
 class RosterApiTests(unittest.TestCase):
@@ -2106,51 +2104,26 @@ class RosterPublishTests(unittest.TestCase):
 
 
 class MembersPageTests(unittest.TestCase):
-    def test_members_render_grouped_data_escaped(self):
-        connection = _Connection({
-            "dim_robot_member": _MEMBERS + [("u-x", "<script>alert(1)</script>", "hq", None)],
-        })
-        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+    def test_members_page_shows_decommission_notice(self):
+        """「成员与授权」页已停用（2026-10-13），引导跳转组织编排。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-
         body = client.get("/member-grants").text
+        self.assertIn("已合并至", body)
+        self.assertIn('href="/members"', body)
 
-        self.assertIn("u-zhang", body)
-        self.assertIn("hangzhou", body)
-        # XSS 插值以转义形态出现，原始 <script> 绝不进 HTML。
-        self.assertNotIn("<script>alert(1)</script>", body)
-        self.assertIn("&lt;script&gt;", body)
-
-    def test_store_failure_is_a_generalized_503(self):
+    def test_members_page_no_longer_reads_db(self):
+        """停用后页面不读成员表，DB 故障不再 503。"""
         client = TestClient(
             _app(viewer=_admin_viewer(), connector_error=RuntimeError("down"))
         )
         _login(client)
-
         response = client.get("/member-grants")
-
-        self.assertEqual(503, response.status_code)
-        self.assertNotIn("down", response.text)
-
-    def test_grant_form_explains_two_systems_and_roster_scope(self):
-        """G3/G6/G4（2026-10-12 断点报告）：授权页显性化两套体系 +
-        scope=roster 引导（治引导死锁）+ 生效延迟提示。
-        P5（2026-10-12，设计稿 §3）：两套体系的边界说明收口到「收件人总览」，
-        本页改为给一条逐字一致的口径指针（不再散落重复表述）。"""
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/member-grants").text
-
-        # 口径指针（名册/覆盖/授权各管什么 → 收件人总览）
-        self.assertIn("名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）",
-                      body)
-        self.assertIn('href="/recipients"', body)
-        self.assertIn("对象填 roster", body)     # 名册管理权引导（G6）
-        self.assertIn("约 1 分钟内生效", body)   # ViewerResolver 60s TTL（G4）
+        self.assertEqual(200, response.status_code)
 
     def test_nav_flat_links_are_grouped_by_purpose(self):
-        """任务1（2026-10-12）：顶栏 8 项平铺 → 4 组（日常/权限/系统/记录），
-        治「入口太多、运维不知道点哪」。链接文案与路由保持不变。"""
+        """顶栏分组：日常 / 权限 / 系统 / 记录。
+        「成员与授权」「授权现状」已停用（2026-10-13），权限组仅留组织编排。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         body = client.get("/member-grants").text
@@ -2163,32 +2136,15 @@ class MembersPageTests(unittest.TestCase):
             tail = body.split(f'nav-label">{label}<', 1)[1]
             return tail.split("</span>", 1)[0]
 
-        # 每组含各自链接（路由不变，仅归位）
         self.assertIn('href="/roster"', group("日常"))
         self.assertIn('href="/calendar"', group("日常"))
-        # B3：成员与授权改指 /member-grants，组织编排仍在 /members。
-        self.assertIn('href="/member-grants"', group("权限"))
+        # 权限组仅保留组织编排
         self.assertIn('href="/members"', group("权限"))
-        self.assertIn('href="/grants"', group("权限"))
+        self.assertNotIn('href="/member-grants"', group("权限"))
+        self.assertNotIn('href="/grants"', group("权限"))
         self.assertIn('href="/pipelines"', group("系统"))
         self.assertIn('href="/records"', group("记录"))
-        self.assertIn("操作记录", group("记录"))
-        # 结构判据：nav 包裹 + 恰好 4 组（旧平铺无这两者）
         self.assertIn("<nav>", body)
-
-    def test_member_pages_use_plain_chinese_labels(self):
-        """任务2（2026-10-12）：术语清洗——页面不出现 userid/scope/region 黑话。"""
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/member-grants").text
-
-        self.assertIn(">账号<", body)             # 表头 userid → 账号
-        self.assertNotIn(">userid<", body)
-        self.assertIn(">看板页面<", body)          # scope（页面）→ 看板页面
-        self.assertIn(">区域数据<", body)          # region（行级）→ 区域数据
-        self.assertNotIn("scope（页面）", body)
-        self.assertNotIn("region（行级）", body)
-        self.assertIn("该区域全员开通区域权限", body)
 
 
 class GrantWriteApiTests(unittest.TestCase):
@@ -2288,21 +2244,13 @@ class RegionBatchTests(unittest.TestCase):
 
 
 class GrantsAndAuditPageTests(unittest.TestCase):
-    def test_grants_page_lists_current_rows(self):
-        connection = _Connection({
-            "bi_authz_grant` ": [
-                ("u-zhang", "scope", "fin", "财务页", ADMIN_USERID,
-                 "2026-09-21 10:00:00.000000"),
-            ],
-        })
-        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+    def test_grants_page_shows_decommission_notice(self):
+        """「授权现状」页已停用（2026-10-13），引导联系管理员。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-
         body = client.get("/grants").text
-
-        self.assertIn("u-zhang", body)
-        self.assertIn("fin", body)
-        self.assertIn("收回", body)
+        self.assertIn("授权管理功能已停用", body)
+        self.assertIn('href="/members"', body)
 
     def test_audit_page_lists_entries_newest_first(self):
         connection = _Connection({
