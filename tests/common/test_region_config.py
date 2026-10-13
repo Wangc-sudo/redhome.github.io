@@ -81,7 +81,8 @@ class ShippedRegionSeedTests(unittest.TestCase):
 
     def test_shipped_seed_carries_leaderboard_fields(self):
         cfg = load_region_seed(_SEED_PATH)["hangzhou"]
-        self.assertEqual(cfg.dept_order, ("杭中", "滨萧", "余杭"))
+        self.assertEqual(
+            cfg.dept_order, ("杭中", "滨萧", "余杭", "杭州销售部"))
         self.assertEqual(cfg.dept_label, {"杭州运营总监": "运营总监"})
         self.assertEqual(cfg.broadcast_exclude, ("余发兴",))
 
