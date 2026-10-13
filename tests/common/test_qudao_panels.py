@@ -583,6 +583,73 @@ class BaijiuNodePanelTests(unittest.TestCase):
         self.assertIn("暂无订单数据", html)
 
 
+class PlatformBillPanelTests(unittest.TestCase):
+
+    def _data(self):
+        return {
+            "months": ["2026-08", "2026-09"],
+            "filled_months": ["2026-08"],
+            "empty_months": ["2026-09"],
+            "grand_total": 4600.0,
+            "by_category": [
+                {"category": "店铺扣点", "total": 6000.0},
+                {"category": "开票填写负数", "total": -1500.0},
+                {"category": None, "total": 100.0},
+            ],
+            "by_platform": [
+                {"platform": "天猫", "total": 4000.0, "share": 4000.0 / 4600.0},
+                {"platform": None, "total": 100.0, "share": 100.0 / 4600.0},
+            ],
+            "top_items": [
+                {"item": "佣金", "total": 3000.0, "share": 3000.0 / 4600.0},
+            ],
+            "other_items": {"count": 3, "total": 500.0},
+            "as_of": date(2026, 9, 23),
+        }
+
+    def test_renders_three_tables_and_notes(self):
+        with patch("common.broadcast.queries.fetch_bill_breakdown",
+                   return_value=self._data()):
+            html = qudao_panels.build_platform_bill_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("🧾 账单费用拆解", html)
+        # 三张表关键单元格
+        self.assertIn("<th>费用类别</th>", html)
+        self.assertIn("<th>平台</th>", html)
+        self.assertIn("费用项目 Top1", html)
+        self.assertIn('<td class="strong">店铺扣点</td>', html)
+        self.assertIn('<td class="strong">天猫</td>', html)
+        self.assertIn('<td class="strong">佣金</td>', html)
+        self.assertIn("65.2%", html)          # 3000/4600
+        # None 标签显式成行（不静默丢弃）
+        self.assertIn('<td class="strong"></td>', html)
+        # 其他 N 项合并行
+        self.assertIn("其他 3 项", html)
+        self.assertIn("10.9%", html)          # 500/4600
+        # 口径与显式缺失标注
+        self.assertIn("数据源：平台账单", html)
+        self.assertIn("对应应缴/实缴口径，待财务确认", html)
+        self.assertIn("⚠️ 财务未填：2026-09", html)
+        self.assertIn("推广类型明细（关键词推广/人群推广/货品全站推）", html)
+        self.assertIn("本期不臆造", html)
+
+    def test_empty_data_degrades_to_placeholder(self):
+        empty = {
+            "months": ["2026-09"], "filled_months": [], "empty_months": ["2026-09"],
+            "grand_total": 0.0, "by_category": [], "by_platform": [],
+            "top_items": [], "other_items": {"count": 0, "total": 0.0},
+            "as_of": date(2026, 9, 23),
+        }
+        with patch("common.broadcast.queries.fetch_bill_breakdown",
+                   return_value=empty):
+            html = qudao_panels.build_platform_bill_panel(
+                Mock(), today=date(2026, 9, 23)
+            )
+        self.assertIn("🧾 账单费用拆解", html)
+        self.assertIn("暂无账单费用数据", html)
+
+
 class AssemblyTests(unittest.TestCase):
 
     def test_panel_failure_degrades_to_placeholder(self):
@@ -598,7 +665,7 @@ class AssemblyTests(unittest.TestCase):
                 workdays=_WORKDAYS,
                 monthly_targets={},
             )
-        self.assertEqual(len(panels), 12)
+        self.assertEqual(len(panels), 13)
         degraded = [p for p in panels if "数据暂缺" in p]
         # 热卖品（boom）+ 渠道（空连接无数据走"暂无"占位文案不同）→ 至少热卖品一个
         self.assertTrue(any("热卖品监控" in p for p in degraded))

@@ -505,6 +505,90 @@ def build_expense_panel(connection, *, today):
 
 
 # ---------------------------------------------------------------------------
+# 0.1.1 账单费用拆解面板——平台账单（店铺扣点）按类别/平台/费用项目拆解
+# ---------------------------------------------------------------------------
+
+def build_platform_bill_panel(connection, *, today):
+    """账单费用拆解面板：平台账单（source=store_commission）三张明细表。
+
+    费用类别 / 平台 / 费用项目 TopN 各一张小表，占比 = 该项 ÷ 账单合计
+    （账单合计为 0 时占比显示「—」，不臆造）。财务未填月份与「推广类型
+    明细缺失」显式标注，不静默、不臆造。
+    """
+    from common.broadcast.queries import fetch_bill_breakdown
+
+    data = fetch_bill_breakdown(connection, today=today)
+    if not data["by_category"] and not data["by_platform"]:
+        return _placeholder_panel(
+            "🧾 账单费用拆解",
+            "暂无账单费用数据（fact_fin_store_expense 的 store_commission 为空）",
+        )
+
+    grand_total = data["grand_total"]
+
+    def _ratio(v):
+        return (v / grand_total) if grand_total else None
+
+    def _share(v):
+        return f"{v * 100:.1f}%" if v is not None else "—"
+
+    def _table(head, trs):
+        return (
+            f'<table><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(trs)}</tbody></table>'
+        )
+
+    category_trs = (
+        f'<tr><td class="strong">{_esc(c["category"])}</td>'
+        f'<td class="num">{_fmt_wan(c["total"])}</td>'
+        f'<td class="num">{_share(_ratio(c["total"]))}</td></tr>'
+        for c in data["by_category"]
+    )
+    platform_trs = (
+        f'<tr><td class="strong">{_esc(p["platform"])}</td>'
+        f'<td class="num">{_fmt_wan(p["total"])}</td>'
+        f'<td class="num">{_share(p["share"])}</td></tr>'
+        for p in data["by_platform"]
+    )
+    top_n = len(data["top_items"])
+    item_trs = [
+        f'<tr><td class="strong">{_esc(i["item"])}</td>'
+        f'<td class="num">{_fmt_wan(i["total"])}</td>'
+        f'<td class="num">{_share(i["share"])}</td></tr>'
+        for i in data["top_items"]
+    ]
+    other = data["other_items"]
+    if other["count"] > 0:
+        item_trs.append(
+            f'<tr><td class="strong">其他 {other["count"]} 项</td>'
+            f'<td class="num">{_fmt_wan(other["total"])}</td>'
+            f'<td class="num">{_share(_ratio(other["total"]))}</td></tr>'
+        )
+    body = (
+        f'<div class="small strong" style="margin:6px 0 2px">费用类别</div>'
+        + _table('<th>费用类别</th><th>金额</th><th>占比</th>', category_trs)
+        + f'<div class="small strong" style="margin:10px 0 2px">平台</div>'
+        + _table('<th>平台</th><th>金额</th><th>占比</th>', platform_trs)
+        + f'<div class="small strong" style="margin:10px 0 2px">费用项目</div>'
+        + _table(
+            f'<th>费用项目 Top{top_n}</th><th>金额</th><th>占比</th>', item_trs
+        )
+    )
+    notes = [
+        "数据源：平台账单（钉钉表「电商—店铺扣点费用管理」→ fin_store_commission"
+        " → fact_fin_store_expense，source=store_commission）",
+        "费用类别（店铺扣点/开票填写负数）对应应缴/实缴口径，待财务确认",
+    ]
+    if data["empty_months"]:
+        notes.append(f'⚠️ 财务未填：{"、".join(data["empty_months"])}')
+    notes.append(
+        "数据缺失：推广类型明细（关键词推广/人群推广/货品全站推）不在账单粒度内，"
+        "需接平台推广后台 API，本期不臆造"
+    )
+    return _panel("🧾 账单费用拆解", body, note=" · ".join(notes))
+
+
+# ---------------------------------------------------------------------------
 # 0.2 商品结构面板——系列/价格带/集中度（材料二 P1 模块）
 # ---------------------------------------------------------------------------
 
@@ -818,6 +902,7 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
     builders = (
         ("月度核心指标看板", lambda: build_monthly_kpi_panel(connection, today=business_date)),
         ("费用/盈利面板", lambda: build_expense_panel(connection, today=business_date)),
+        ("账单费用拆解", lambda: build_platform_bill_panel(connection, today=business_date)),
         ("商品结构分析", lambda: build_product_structure_panel(connection, today=business_date)),
         ("退款原因分析", lambda: build_refund_reason_panel(connection, today=business_date)),
         ("GMV 三因子拆解", lambda: build_gmv_factor_panel(connection, today=business_date)),
@@ -853,6 +938,7 @@ __all__ = [
     "build_hot_items_panel",
     "build_monthly_kpi_panel",
     "build_order_risk_panel",
+    "build_platform_bill_panel",
     "build_product_structure_panel",
     "build_purchase_inbound_panel",
     "build_qudao_panels",
