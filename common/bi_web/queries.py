@@ -3576,12 +3576,30 @@ def run_table_qd_unfilled_today(connection, params) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _qd_jsonable(value):
+    """行值归一为 JSON 可编码类型：Decimal→float、date/datetime→ISO 串。
+
+    旧页 fetch_* 多处直接回传 pymysql 原始行（库存快照等含 DECIMAL，日期
+    列含 date/datetime），而 app 层的 JSONResponse 编码失败会落到设计好的
+    500 card_error（2026-10-13 实测 table_qd_stock_urgent/oversold）。这里
+    统一在载荷出口归一，None 原样透传（不静默补 0）。
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
 def _qd_table(columns, rows, anchor) -> dict:
     """qd 迁移卡共用的 table 载荷：列定义 + 行 + 日期（页面页脚显示）。"""
     return {
         "chart": "table",
         "columns": columns,
-        "rows": rows,
+        "rows": [
+            {key: _qd_jsonable(value) for key, value in row.items()}
+            for row in rows
+        ],
         "date": anchor.isoformat(),
     }
 
@@ -4114,12 +4132,18 @@ def run_table_qd_order_risk(connection, params) -> dict:
     data = fetch_order_risk(
         connection, business_date=anchor - timedelta(days=1)
     )
+    def _title(group):
+        # 与旧面板一致：platform_of 未识别时兜底返回店名本身，
+        # 避免「店名-店名」重复显示（qudao_panels.build_order_risk_panel）。
+        if group["platform"] == group["shop_name"]:
+            return group["shop_name"]
+        return f'{group["platform"]}-{group["shop_name"]}'
+
     rows = []
     for group in data["groups"]:
         for area in group["areas"]:
             rows.append({
-                "shop": group["shop_name"],
-                "platform": group["platform"],
+                "shop": _title(group),
                 "area": area["area"],
                 "count": area["count"],
                 "mark": "",
@@ -4127,15 +4151,13 @@ def run_table_qd_order_risk(connection, params) -> dict:
     for group in data["incomplete_groups"]:
         for area in group["areas"]:
             rows.append({
-                "shop": group["shop_name"],
-                "platform": group["platform"],
+                "shop": _title(group),
                 "area": area["area"],
                 "count": area["count"],
                 "mark": "地区字段不全（仅供参考）",
             })
     columns = [
-        {"key": "shop", "title": "店铺"},
-        {"key": "platform", "title": "平台"},
+        {"key": "shop", "title": "店铺 / 平台"},
         {"key": "area", "title": "重点地区"},
         {"key": "count", "title": "异常单数", "format": "number"},
         {"key": "mark", "title": "标记"},

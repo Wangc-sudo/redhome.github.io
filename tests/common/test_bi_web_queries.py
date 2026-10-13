@@ -3726,6 +3726,25 @@ class QdDashboardTests(unittest.TestCase):
             oversold["rows"],
         )
 
+    def test_qd_table_normalizes_decimal_and_date_for_json(self):
+        """载荷出口归一 Decimal/日期——旧页 fetch_* 直传 pymysql 原始行，
+        Decimal 非 JSON 可编码类型，app 层会落 500 card_error
+        （2026-10-13 实测 table_qd_stock_urgent/oversold）。"""
+        import json
+
+        payload = bi_web_queries._qd_table(
+            [{"key": "v", "title": "值"}],
+            [{"v": Decimal("1.25"), "d": date(2026, 8, 4),
+              "t": datetime(2026, 8, 4, 10, 30), "n": None}],
+            date(2026, 8, 4),
+        )
+        self.assertEqual(
+            {"v": 1.25, "d": "2026-08-04",
+             "t": "2026-08-04T10:30:00", "n": None},
+            payload["rows"][0],
+        )
+        json.dumps(payload)  # 归一后必须可编码
+
     def test_table_qd_purchase_inbound_flattens_groups(self):
         from unittest import mock
 
