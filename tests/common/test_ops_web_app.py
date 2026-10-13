@@ -3153,6 +3153,105 @@ class OrgAssignmentApiTests(unittest.TestCase):
                      if "dim_org_assignment_override_audit" in sql)
         self.assertEqual("reset", audit[1])
 
+    # -- 组织目录（新增区域 / 部门，2026-10-13 P7）-------------------------
+
+    def test_overview_renders_catalog_region_and_dept_without_members(self):
+        conn = self._members_conn({
+            "dim_org_region": [
+                {"region_key": "chengdu", "label": "成都", "sort_order": 0},
+            ],
+            "dim_org_dept": [
+                {"region_key": "hangzhou", "dept_name": "杭州销售部",
+                 "dept_id": None, "sort_order": 0},
+                {"region_key": "chengdu", "dept_name": "成都销售部",
+                 "dept_id": None, "sort_order": 0},
+            ],
+        })
+        data = self._admin_client(conn).get("/api/org/overview").json()
+        regions = {region["key"]: region for region in data["regions"]}
+
+        # 目录登记的新区域（无成员）也出现，label 取目录值。
+        self.assertIn("chengdu", regions)
+        self.assertEqual("成都", regions["chengdu"]["label"])
+        chengdu = {d["dept_name"]: d for d in regions["chengdu"]["depts"]}
+        self.assertEqual([], chengdu["成都销售部"]["members"])
+        # 目录登记的部门（无成员）并入既有区域。
+        hangzhou = {d["dept_name"]: d for d in regions["hangzhou"]["depts"]}
+        self.assertIn("杭州销售部", hangzhou)
+        self.assertEqual([], hangzhou["杭州销售部"]["members"])
+
+    def test_overview_catalog_read_fails_soft(self):
+        conn = self._members_conn(fail={"dim_org_region"})
+        response = self._admin_client(conn).get("/api/org/overview")
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertIn("hangzhou",
+                      {region["key"] for region in data["regions"]})
+
+    def test_region_add_requires_admin(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(
+            401, client.post("/api/org/region/add",
+                             json={"region_key": "chengdu", "label": "成都"}
+                             ).status_code)
+
+    def test_region_add_writes_catalog_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post("/api/org/region/add",
+                               json={"region_key": "chengdu", "label": "成都"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok"}, response.json())
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any("INSERT INTO `dim_org_region`" in sql
+                            and "ON DUPLICATE KEY UPDATE" in sql
+                            for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_catalog_audit" in sql)
+        self.assertEqual(ADMIN_USERID, audit[0])
+        self.assertEqual("add_region", audit[1])
+        self.assertEqual("chengdu", audit[3])
+        self.assertEqual(1, conn.commits)
+
+    def test_region_add_rejects_bad_body(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        self.assertEqual(
+            400, client.post("/api/org/region/add",
+                             json={"region_key": "Bad Key", "label": "成都"}
+                             ).status_code)
+        self.assertEqual(
+            400, client.post("/api/org/region/add",
+                             json={"region_key": "chengdu", "label": ""}
+                             ).status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_dept_add_writes_catalog_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/dept/add",
+            json={"region_key": "hangzhou", "dept_name": "杭州销售部",
+                  "dept_id": "1050062512"})
+        self.assertEqual(200, response.status_code)
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any("INSERT INTO `dim_org_dept`" in sql
+                            and "ON DUPLICATE KEY UPDATE" in sql
+                            for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_catalog_audit" in sql)
+        self.assertEqual("add_dept", audit[1])
+        self.assertEqual("hangzhou", audit[3])
+        self.assertEqual("1050062512", audit[4])
+        self.assertEqual("杭州销售部", audit[5])
+
+    def test_dept_add_rejects_missing_name(self):
+        client = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, client.post("/api/org/dept/add",
+                             json={"region_key": "hangzhou",
+                                   "dept_name": "  "}).status_code)
+
 
 if __name__ == "__main__":
     unittest.main()

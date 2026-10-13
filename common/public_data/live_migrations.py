@@ -44,6 +44,9 @@ from common.public_data.ops_control import (
 from common.public_data.org_assignment_override import (
     org_assignment_override_ddl_statements,
 )
+from common.public_data.org_catalog import (
+    org_catalog_ddl_statements,
+)
 from common.public_data.recipient_override import (
     recipient_override_ddl_statements,
 )
@@ -540,6 +543,14 @@ _MIGRATIONS = (
         "mart-ops-org-assignment-override-v1",
         "mart",
         org_assignment_override_ddl_statements(),
+    ),
+    (
+        # 组织目录登记（2026-10-13 P7「组织编排」新增区域/部门）：dim_org_region
+        # + dim_org_dept（消费侧登记，即使无成员也渲染）+ 审计表。灰度=表驱动
+        # （只登记目标区域/部门），回退=停用/删除行。
+        "mart-ops-org-catalog-v1",
+        "mart",
+        org_catalog_ddl_statements(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

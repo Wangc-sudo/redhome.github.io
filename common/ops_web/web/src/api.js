@@ -95,3 +95,26 @@ export function resetOverrides() {
     body: JSON.stringify({}),
   });
 }
+
+/**
+ * 登记一个区域（消费侧组织目录；即使无成员也进树）。
+ * @param {{region_key:string, label:string, sort_order?:number}} payload
+ */
+export function addRegion(payload) {
+  return request('/api/org/region/add', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 登记一个区域下的部门（消费侧组织目录；即使无成员也进树）。
+ * @param {{region_key:string, dept_name:string, dept_id?:(string|null),
+ *          sort_order?:number}} payload
+ */
+export function addDept(payload) {
+  return request('/api/org/dept/add', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}

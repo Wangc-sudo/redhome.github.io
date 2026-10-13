@@ -1,0 +1,309 @@
+# -*- coding: utf-8 -*-
+"""组织目录登记层（``dim_org_region`` / ``dim_org_dept``，2026-10-13 P7）。
+
+「组织编排」的区域集合此前来自常量 ``_ORG_REGION_ORDER``、部门来自
+``dim_robot_member`` 派生——**没有任何写路径**：想让一个「尚无成员」的部门
+（如「杭州销售部」）出现在树里、并能作为拖拽归属的目标，只能改代码 / 种子。
+
+本模块提供一层**消费侧目录登记**（纯 ops-web 管理）：
+
+* 区域 / 部门即使**没有任何成员**也能登记进树，并可作为成员拖拽的目标；
+* 与 ``dim_org_assignment_override`` 同构：表驱动灰度、回退 = 停用 / 删除行；
+* **边界**：只覆盖「组织编排树」这一层，不触碰钉钉组织、不改写
+  ``dim_robot_member``；一个**全新区域**要让催办 / 榜单 / 报表真正跑起来，
+  仍需 Nacos ``REGIONS`` 配置 + ``org.seed.json`` 部门 + ``pipelines`` /
+  ``_ROBOT_REGIONS`` 接入（属后续独立工作，本模块不做）。
+
+读面 fail-soft：目录表读失败（迁移未应用 / DB 抖动）→ 记 WARNING 并回
+空目录，**绝不拖垮组织树**。写纪律同 ``report_roster`` / ``recipient_override``：
+SQL 只存在于本模块；ops-web 是唯一写方，每次变更与同事务一行 audit 同生共死。
+"""
+
+import contextlib
+import logging
+import re
+from datetime import datetime, timezone
+
+from common.public_data.db import transaction
+
+logger = logging.getLogger(__name__)
+
+#: 区域键形态约束（与 org.seed.json 键同风格；不做存在性校验——表驱动）。
+_REGION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+_REGION_KEY_MAX = 32
+_LABEL_MAX = 64
+_DEPT_ID_MAX = 64
+_DEPT_NAME_MAX = 255
+_ACTOR_MAX = 64
+_AUDIT_DETAIL_MAX = 255
+
+# ---------------------------------------------------------------------------
+# DDL（CREATE TABLE IF NOT EXISTS 使重放幂等）
+# ---------------------------------------------------------------------------
+
+_REGION_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_org_region` (\n"
+    "  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+    "  `region_key` VARCHAR(32) NOT NULL,\n"
+    "  `label` VARCHAR(64) NOT NULL,\n"
+    "  `sort_order` INT NOT NULL DEFAULT 0,\n"
+    "  `enabled` TINYINT(1) NOT NULL DEFAULT 1,\n"
+    "  `updated_by` VARCHAR(64) DEFAULT NULL,\n"
+    "  `updated_at` DATETIME(6) DEFAULT NULL,\n"
+    "  UNIQUE KEY `uk_org_region` (`region_key`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+_DEPT_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_org_dept` (\n"
+    "  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+    "  `region_key` VARCHAR(32) NOT NULL,\n"
+    "  `dept_id` VARCHAR(64) DEFAULT NULL,\n"
+    "  `dept_name` VARCHAR(255) NOT NULL,\n"
+    "  `sort_order` INT NOT NULL DEFAULT 0,\n"
+    "  `enabled` TINYINT(1) NOT NULL DEFAULT 1,\n"
+    "  `updated_by` VARCHAR(64) DEFAULT NULL,\n"
+    "  `updated_at` DATETIME(6) DEFAULT NULL,\n"
+    "  UNIQUE KEY `uk_org_dept` (`region_key`, `dept_name`),\n"
+    "  KEY `idx_region_enabled` (`region_key`, `enabled`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+_AUDIT_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_org_catalog_audit` (\n"
+    "  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+    "  `actor` VARCHAR(64) NOT NULL,\n"
+    "  `action` VARCHAR(16) NOT NULL,\n"
+    "  `target_type` VARCHAR(16) NOT NULL,\n"
+    "  `region_key` VARCHAR(32) DEFAULT NULL,\n"
+    "  `dept_id` VARCHAR(64) DEFAULT NULL,\n"
+    "  `dept_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `detail` VARCHAR(255) DEFAULT NULL,\n"
+    "  `created_at` DATETIME(6) NOT NULL,\n"
+    "  KEY `idx_created_at` (`created_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+#: 读面列序（fetch_catalog 的 SELECT 与之逐位一致；序列行 / 字典行两用）。
+_REGION_KEYS = (
+    "id", "region_key", "label", "sort_order", "enabled",
+    "updated_by", "updated_at",
+)
+_DEPT_KEYS = (
+    "id", "region_key", "dept_id", "dept_name", "sort_order", "enabled",
+    "updated_by", "updated_at",
+)
+
+
+def org_catalog_ddl_statements() -> tuple:
+    """迁移语句：区域表 + 部门表 + 审计表（建表顺序即返回顺序）。"""
+    return (_REGION_DDL, _DEPT_DDL, _AUDIT_DDL)
+
+
+class OrgCatalogError(ValueError):
+    """目录写面数据无效（消息只含字段名，不含值）。"""
+
+
+# ---------------------------------------------------------------------------
+# 内部小工具
+# ---------------------------------------------------------------------------
+
+def _utc_now_text():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _fetch_all(connection, sql, params=()):
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall() if hasattr(cursor, "fetchall") else ()
+        return list(rows)
+
+
+def _get(row, key, position):
+    if isinstance(row, dict):
+        return row.get(key)
+    return row[position]
+
+
+def _text(value, limit):
+    if value in (None, ""):
+        return None
+    return str(value).strip()[:limit] or None
+
+
+def _clean(value, limit):
+    """必填文本：去空白、限长；空值抛 :class:`OrgCatalogError`。"""
+    text = value.strip() if isinstance(value, str) else ""
+    if not text or len(text) > limit:
+        raise OrgCatalogError("a required text field is missing or too long")
+    return text
+
+
+def _as_region(row):
+    return {
+        "id": _get(row, "id", 0),
+        "region_key": str(_get(row, "region_key", 1) or "").strip(),
+        "label": _get(row, "label", 2),
+        "sort_order": int(_get(row, "sort_order", 3) or 0),
+        "enabled": int(_get(row, "enabled", 4) or 0),
+        "updated_by": _get(row, "updated_by", 5),
+        "updated_at": _get(row, "updated_at", 6),
+    }
+
+
+def _as_dept(row):
+    return {
+        "id": _get(row, "id", 0),
+        "region_key": str(_get(row, "region_key", 1) or "").strip(),
+        "dept_id": _get(row, "dept_id", 2),
+        "dept_name": _get(row, "dept_name", 3),
+        "sort_order": int(_get(row, "sort_order", 4) or 0),
+        "enabled": int(_get(row, "enabled", 5) or 0),
+        "updated_by": _get(row, "updated_by", 6),
+        "updated_at": _get(row, "updated_at", 7),
+    }
+
+
+_REGION_COLUMNS = (
+    "`id`, `region_key`, `label`, `sort_order`, `enabled`, "
+    "`updated_by`, `updated_at`"
+)
+_DEPT_COLUMNS = (
+    "`id`, `region_key`, `dept_id`, `dept_name`, `sort_order`, `enabled`, "
+    "`updated_by`, `updated_at`"
+)
+
+
+def _insert_audit(connection, actor, action, *, target_type, region_key=None,
+                  dept_id=None, dept_name=None, detail=""):
+    """同事务落一行目录变更流水（不写 commit，随调用方事务）。"""
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(
+            "INSERT INTO `dim_org_catalog_audit` "
+            "(`actor`, `action`, `target_type`, `region_key`, `dept_id`, "
+            "`dept_name`, `detail`, `created_at`) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (str(actor)[:_ACTOR_MAX], action, target_type,
+             _text(region_key, _REGION_KEY_MAX), _text(dept_id, _DEPT_ID_MAX),
+             _text(dept_name, _DEPT_NAME_MAX),
+             (detail or "")[:_AUDIT_DETAIL_MAX] or None, _utc_now_text()),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 读面（fail-soft）
+# ---------------------------------------------------------------------------
+
+def fetch_catalog(connection):
+    """**启用**目录行 → ``{"regions": [...], "depts": [...]}``。
+
+    读失败（迁移未应用 / DB 抖动）→ 记 WARNING 并回空目录（fail-soft），
+    调用方据此回退「无目录」旧行为，不拖垮组织树。
+    """
+    try:
+        region_rows = _fetch_all(
+            connection,
+            f"SELECT {_REGION_COLUMNS} FROM `dim_org_region` "
+            "WHERE `enabled` = 1 ORDER BY `sort_order`, `region_key`",
+        )
+        dept_rows = _fetch_all(
+            connection,
+            f"SELECT {_DEPT_COLUMNS} FROM `dim_org_dept` "
+            "WHERE `enabled` = 1 "
+            "ORDER BY `region_key`, `sort_order`, `dept_name`",
+        )
+    except Exception:
+        logger.warning(
+            "dim_org_region/dim_org_dept 读取失败（迁移未应用？），按无目录：",
+            exc_info=True,
+        )
+        return {"regions": [], "depts": []}
+    return {
+        "regions": [_as_region(row) for row in region_rows],
+        "depts": [_as_dept(row) for row in dept_rows],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 写面（ops-web 唯一写方；每次变更与 audit 同事务）
+# ---------------------------------------------------------------------------
+
+def _validate_region(region_key, label, sort_order):
+    region_key = region_key.strip() if isinstance(region_key, str) else region_key
+    if not region_key or not isinstance(region_key, str) \
+            or not _REGION_RE.match(region_key):
+        raise OrgCatalogError("region_key must be a region key")
+    label = _clean(label, _LABEL_MAX)
+    return region_key, label, _coerce_order(sort_order)
+
+
+def _coerce_order(sort_order):
+    if sort_order in (None, ""):
+        return 0
+    if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+        raise OrgCatalogError("sort_order must be an integer")
+    return sort_order
+
+
+def upsert_region(connection, region_key, label, *, actor, sort_order=0):
+    """登记 / 更新一个区域（``region_key`` 冲突即更新并重新启用）。
+
+    审计 action='add_region'。返回规范化的 ``(region_key, label, sort_order)``。
+    """
+    region_key, label, sort_order = _validate_region(region_key, label, sort_order)
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            cursor.execute(
+                "INSERT INTO `dim_org_region` "
+                "(`region_key`, `label`, `sort_order`, `enabled`, "
+                "`updated_by`, `updated_at`) "
+                "VALUES (%s, %s, %s, 1, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                "`label` = VALUES(`label`), "
+                "`sort_order` = VALUES(`sort_order`), `enabled` = 1, "
+                "`updated_by` = VALUES(`updated_by`), "
+                "`updated_at` = VALUES(`updated_at`)",
+                (region_key, label, sort_order, actor, _utc_now_text()),
+            )
+            _insert_audit(
+                connection, actor, "add_region", target_type="region",
+                region_key=region_key, detail=label,
+            )
+    return region_key, label, sort_order
+
+
+def upsert_dept(connection, region_key, dept_name, *, dept_id=None, actor,
+                sort_order=0):
+    """登记 / 更新一个区域下的部门（``(region_key, dept_name)`` 冲突即更新）。
+
+    ``dept_id`` 可选（允许纯占位部门，此时拖拽归属键取部门名）。
+    审计 action='add_dept'。返回 ``(region_key, dept_id, dept_name, sort_order)``。
+    """
+    region_key = region_key.strip() if isinstance(region_key, str) else region_key
+    if not region_key or not isinstance(region_key, str) \
+            or not _REGION_RE.match(region_key):
+        raise OrgCatalogError("region_key must be a region key")
+    dept_name = _clean(dept_name, _DEPT_NAME_MAX)
+    dept_id = _text(dept_id, _DEPT_ID_MAX)
+    sort_order = _coerce_order(sort_order)
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            cursor.execute(
+                "INSERT INTO `dim_org_dept` "
+                "(`region_key`, `dept_id`, `dept_name`, `sort_order`, "
+                "`enabled`, `updated_by`, `updated_at`) "
+                "VALUES (%s, %s, %s, %s, 1, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                "`dept_id` = VALUES(`dept_id`), "
+                "`sort_order` = VALUES(`sort_order`), `enabled` = 1, "
+                "`updated_by` = VALUES(`updated_by`), "
+                "`updated_at` = VALUES(`updated_at`)",
+                (region_key, dept_id, dept_name, sort_order, actor,
+                 _utc_now_text()),
+            )
+            _insert_audit(
+                connection, actor, "add_dept", target_type="dept",
+                region_key=region_key, dept_id=dept_id, dept_name=dept_name,
+            )
+    return region_key, dept_id, dept_name, sort_order
