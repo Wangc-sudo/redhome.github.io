@@ -388,6 +388,36 @@ def finish_run_history(connection, history_id, returncode):
         cursor.close()
 
 
+# 启动自愈落款文案：与 finish_run_history 的「锁占用/异常」文案区分来源，
+# 便于审计上分辨「被重启杀死的遗留行」与「本次运行真实异常」。
+_STALE_RUN_NOTE = "调度器实例退出时中断，未产生退出码（启动自愈）"
+
+
+def reconcile_stale_run_history(connection, *, now=None):
+    """启动自愈：把上一实例遗留的 ``running`` 流水行收口为 ``failed``。
+
+    仅 scheduler 是 ``pd_ops_run_history`` 的唯一写方；进程启动时残留的
+    ``running`` 行必然属于已退出实例（管道跑在守护线程，主进程被重启时
+    子进程随之被杀，``finally`` 里的回写来不及执行）。仅收口 ``started_at``
+    早于本次启动时刻的行（防御性 cutoff，规避极端并发/时钟回拨误伤）。
+
+    返回受影响行数（幂等：重复调用第二次返回 0）。
+    """
+    ts = now or _utc_now_text()
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "UPDATE `pd_ops_run_history` "
+                "SET `status` = 'failed', `note` = %s, `finished_at` = %s "
+                "WHERE `status` = 'running' AND `started_at` < %s",
+                (_STALE_RUN_NOTE, ts, ts),
+            )
+            return getattr(cursor, "rowcount", 0)
+    finally:
+        cursor.close()
+
+
 def fetch_run_history(connection, limit=200, service_id=None):
     """执行流水（ops-web 执行流水页），最新在前；可按 service_id 过滤。"""
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
@@ -471,3 +501,7 @@ class DbRunHistoryGateway:
 
     def record_finish(self, history_id, returncode):
         return self._call(finish_run_history, history_id, returncode)
+
+    def reconcile_orphans(self):
+        """启动自愈：收口上一实例遗留的 running 流水行。返回受影响行数。"""
+        return self._call(reconcile_stale_run_history)

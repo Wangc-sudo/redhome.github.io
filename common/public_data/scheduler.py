@@ -752,6 +752,24 @@ class Scheduler:
                 history_id, exc_info=True,
             )
 
+    def _reconcile_history(self):
+        """启动自愈：收口上一实例遗留的 running 流水行（旁路，只告警）。
+
+        本进程启动时残留的 running 行必然属于已退出实例（管道跑在守护
+        线程，主进程被重启时子进程随之被杀、回写来不及执行）。未注入
+        store → no-op；故障 → 仅告警，绝不阻断调度。返回收口行数。
+        """
+        store = self._run_history
+        if store is None:
+            return 0
+        try:
+            return store.reconcile_orphans()
+        except Exception:
+            logger.warning(
+                "运行流水启动自愈失败（旁路故障，不影响调度）", exc_info=True,
+            )
+            return 0
+
     def _run_once(self, service_id, argv, request_id):
         """run-once 包装：复用 _run 的锁/运行路径，结束后回写结果。"""
         returncode = self._run(service_id, argv, trigger_type="run_once")
@@ -803,10 +821,13 @@ class Scheduler:
     # -- main loop ------------------------------------------------------------
 
     def run_forever(self):
+        reconciled = self._reconcile_history()
         logger.info(
             "scheduler 启动：%d 条注册管道，每 %.0fs 轮询",
             len(self._service_ids), self._poll_seconds,
         )
+        if reconciled:
+            logger.info("启动自愈：收口 %d 条遗留 running 流水行", reconciled)
         while True:
             self.tick()
             self._sleeper(self._poll_seconds)

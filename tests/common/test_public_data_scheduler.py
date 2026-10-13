@@ -748,6 +748,8 @@ class FakeRunHistoryStore:
         self.started = []    # (service_id, trigger_type)
         self.finished = []   # (history_id, returncode)
         self._next_id = 0
+        self.reconcile_calls = 0
+        self.reconcile_result = 0
 
     def record_start(self, service_id, trigger_type):
         self._next_id += 1
@@ -756,6 +758,10 @@ class FakeRunHistoryStore:
 
     def record_finish(self, history_id, returncode):
         self.finished.append((history_id, returncode))
+
+    def reconcile_orphans(self):
+        self.reconcile_calls += 1
+        return self.reconcile_result
 
 
 def _history_scheduler(configs, history, **kwargs):
@@ -830,6 +836,56 @@ def test_no_history_injection_means_no_recording():
     scheduler, _ = due_scheduler({"sync-wdt": {"schedule": "0 2 * * *"}})
     scheduler.tick()
     assert [sid for sid, _ in scheduler._runner.calls] == ["sync-wdt"]
+
+
+# -- 启动自愈（run_forever 收口上一实例遗留的 running 流水行） ----------------
+
+class _StopLoop(Exception):
+    """打断 run_forever 的无限循环（sleeper 首轮即抛）。"""
+
+
+def test_startup_reconcile_runs_once_before_polling():
+    history = FakeRunHistoryStore()
+    history.reconcile_result = 3
+    order = []
+
+    def sleeper(_seconds):
+        order.append("sleep")
+        raise _StopLoop
+
+    scheduler = Scheduler(
+        config_source=StaticConfigSource({"sync-wdt": {"schedule": "0 2 * * *"}}),
+        service_ids=("sync-wdt",),
+        runner=RecordingRunner(),
+        lock_factory=lambda service_id: NullLock(),
+        settings=SETTINGS,
+        executor=SyncExecutor(),
+        clock=FakeClock(),
+        sleeper=sleeper,
+        poll_seconds=1,
+        run_history=history,
+    )
+    try:
+        scheduler.run_forever()
+    except _StopLoop:
+        pass
+    assert history.reconcile_calls == 1   # 启动时恰好收口一次
+    assert order == ["sleep"]             # 自愈发生在进入轮询之前
+
+
+def test_reconcile_history_noop_without_store():
+    scheduler = make_scheduler({"sync-wdt": {"schedule": "0 2 * * *"}})
+    assert scheduler._reconcile_history() == 0
+
+
+def test_reconcile_history_failure_is_only_warned():
+    class BrokenHistory:
+        def reconcile_orphans(self):
+            raise ConnectionError("db down")
+
+    scheduler = make_scheduler({"sync-wdt": {"schedule": "0 2 * * *"}})
+    scheduler._run_history = BrokenHistory()
+    assert scheduler._reconcile_history() == 0   # 不抛，仅告警
 
 
 # -- _next_fire 多段 cron（ops-web「播报时间」≤3 时点，2026-10-13） -------------

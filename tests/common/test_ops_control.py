@@ -355,6 +355,56 @@ class RunHistoryLifecycleTests(unittest.TestCase):
             ops_control.fetch_run_history(self.db, True)
 
 
+# -- 启动自愈：收口上一实例遗留的 running 流水行 -----------------------------
+
+class ReconcileStaleRunHistoryTests(unittest.TestCase):
+    FUTURE = "2099-01-01 00:00:00.000000"
+    PAST = "2000-01-01 00:00:00.000000"
+
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_collapses_running_and_leaves_terminal_rows(self):
+        r1 = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        r2 = ops_control.insert_run_history(self.db, "sync-dingtalk", "run_once")
+        done = ops_control.insert_run_history(self.db, "robot-hangzhou", "cron")
+        ops_control.finish_run_history(self.db, done, 0)
+        n = ops_control.reconcile_stale_run_history(self.db, now=self.FUTURE)
+        self.assertEqual(n, 2)
+        rows = {row["id"]: row for row in ops_control.fetch_run_history(self.db)}
+        for hid in (r1, r2):
+            self.assertEqual(rows[hid]["status"], "failed")
+            self.assertIsNone(rows[hid]["exit_code"])
+            self.assertIsNotNone(rows[hid]["note"])
+            self.assertIsNotNone(rows[hid]["finished_at"])
+        self.assertEqual(rows[done]["status"], "finished")  # 终态不受影响
+
+    def test_cutoff_skips_rows_newer_than_startup(self):
+        # 只收口 started_at < 本次启动时刻 的行（防御性 cutoff）。
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        n = ops_control.reconcile_stale_run_history(self.db, now=self.PAST)
+        self.assertEqual(n, 0)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["id"], hid)
+        self.assertEqual(rows[0]["status"], "running")
+
+    def test_is_idempotent(self):
+        ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        self.assertEqual(
+            ops_control.reconcile_stale_run_history(self.db, now=self.FUTURE), 1
+        )
+        self.assertEqual(
+            ops_control.reconcile_stale_run_history(self.db, now=self.FUTURE), 0
+        )
+
+    def test_late_finish_does_not_override_reconciled_row(self):
+        hid = ops_control.insert_run_history(self.db, "sync-wdt", "cron")
+        ops_control.reconcile_stale_run_history(self.db, now=self.FUTURE)
+        ops_control.finish_run_history(self.db, hid, 0)  # 迟到回写
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["status"], "failed")
+
+
 # -- scheduler 侧网关（DbRunRequestGateway） --------------------------------
 
 class DbRunRequestGatewayTests(unittest.TestCase):
@@ -397,6 +447,23 @@ class DbRunHistoryGatewayTests(unittest.TestCase):
         self.assertEqual(rows[0]["service_id"], "pages-qudao")
         self.assertEqual(rows[0]["trigger_type"], "cron")
         self.assertEqual(rows[0]["status"], "finished")
+
+    def test_gateway_reconcile_orphans(self):
+        hid = self.gateway.record_start("sync-dingtalk", "cron")
+        self.assertTrue(hid)
+        # 幽灵行必然「陈旧」：把 started_at 置为过去，模拟上一实例遗留的行
+        # （本地时钟分辨率下 insert 与 reconcile 同刻，< 判不出差异）。
+        cur = self.db.cursor()
+        cur.execute(
+            "UPDATE pd_ops_run_history SET started_at = ? WHERE id = ?",
+            ("2000-01-01 00:00:00.000000", hid),
+        )
+        self.db.commit()
+        self.assertEqual(self.gateway.reconcile_orphans(), 1)
+        rows = ops_control.fetch_run_history(self.db)
+        self.assertEqual(rows[0]["service_id"], "sync-dingtalk")
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertIsNotNone(rows[0]["note"])
 
 
 if __name__ == "__main__":
