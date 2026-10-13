@@ -113,6 +113,34 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         )
         self.assertIn("exec -T scheduler", text)
 
+    def test_deploy_script_covers_pages_web_and_nginx_cutover(self):
+        deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
+        text = deploy_script.read_text(encoding="utf-8")
+
+        # pages-web 是长驻 uvicorn（代码 bind-mount 只读挂载）：不列入
+        # CODE_SERVICES 时部署只更新磁盘代码、进程不重载（#57-#59 同款坑）。
+        code_services = [
+            line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
+        ]
+        self.assertEqual(1, len(code_services))
+        self.assertIn("pages-web", code_services[0])
+
+        # 健康门覆盖 pages-web 容器 + 榜单页发布链探针（8300，@static
+        # 静态兜底使探针在 pages-web 故障时仍 200，不误伤部署门）。
+        self.assertIn("--filter name=dops-pages-web", text)
+        self.assertIn("8300/hangzhou.html", text)
+
+        # nginx conf 真源同步 + HUP 平滑重载：conf 只落 repo 不拷贝到
+        # /opt/dops/nginx/ 时 nginx 永远跑旧配置；且须在 force-recreate
+        # 长驻服务之前完成（先拉起 pages-web 再切流量）。
+        self.assertIn("docker/integration/nginx/pages-cloud.conf", text)
+        self.assertIn("cp docker/integration/nginx/pages-cloud.conf", text)
+        self.assertIn("kill -s HUP nginx", text)
+        self.assertLess(
+            text.index("kill -s HUP nginx"),
+            text.index("up -d --force-recreate"),
+        )
+
     def test_sync_runner_is_opt_in_and_leak_free(self):
         completed = subprocess.run(
             [

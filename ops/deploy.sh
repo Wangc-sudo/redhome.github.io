@@ -29,7 +29,7 @@ PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
 # ops-web 与 bi-web 同为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：
 # 漏在本列表时 git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进
 # main 后不生效（#57/#58/#59 实测，2026-10-12 补齐）。
-CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web}"
+CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web pages-web}"
 # 灾备/CI 模式（DOPS_SYNC_ONLY=1，如 dops-ci）：只 git 同步代码到部署分支，
 # 不重建镜像、不重启服务——避免灾备机与生产机重复跑 cron / 抢占 DingTalk stream。
 SYNC_ONLY="${DOPS_SYNC_ONLY:-0}"
@@ -97,6 +97,13 @@ apply() {
   fi
   # 应用 compose/env 变更（nginx/ntp 等不强制重建）
   docker compose -f "$COMPOSE_FILE" up -d
+  # nginx conf 真源同步 + 平滑重载（2026-10-13 pages-web cutover）：conf
+  # 此前只落 repo，/opt/dops/nginx/pages.conf 不会被更新，nginx 永远跑旧
+  # 配置。HUP 失败不阻断部署（页面兜底链 + health_gate 兜）。
+  if [ -f docker/integration/nginx/pages-cloud.conf ]; then
+    cp docker/integration/nginx/pages-cloud.conf /opt/dops/nginx/pages.conf
+    docker compose -f "$COMPOSE_FILE" kill -s HUP nginx 2>/dev/null || true
+  fi
   # 先补迁移、再重启服务（2026-10-12 补齐）：代码经 bind-mount 即时可见，
   # 而「注册了迁移」的功能（如 #62 收件人覆盖的 dim_recipient_override）
   # 若只等下一次 pipeline 运行才建表，就会留下「代码已上线、表还没建」的
@@ -115,12 +122,16 @@ health_gate() {
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
-      # 关键长驻容器均在 Up（bi-web/ops-web 另看各自的 healthz）
-      if [ -z "$(docker ps \
-          --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
-          --filter name=dops-ops-web \
-          --format '{{.Status}}' | grep -v Up)" ]; then
-        return 0
+      # 榜单页发布链探针（@static 静态兜底使 pages-web 故障时仍 200，
+      # 不误伤部署门）。
+      if curl -fsS --max-time 5 http://127.0.0.1:8300/hangzhou.html >/dev/null 2>&1; then
+        # 关键长驻容器均在 Up（bi-web/ops-web/pages-web 另看各自的 healthz）
+        if [ -z "$(docker ps \
+            --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
+            --filter name=dops-ops-web --filter name=dops-pages-web \
+            --format '{{.Status}}' | grep -v Up)" ]; then
+          return 0
+        fi
       fi
     fi
     sleep 3

@@ -190,8 +190,52 @@ services:
       retries: 3
       start_period: 15s
 
+  # 榜单页请求时渲染（2026-10-13 cron 解耦）：取代 pages-* 定时管线 +
+  # nginx 纯静态分发的旧链路——页面新鲜度不再钉在 cron 上（调度停摆
+  # 页面静默腐烂实测）。请求时查 mart 现场渲染，TTL 300s 缓存防惊群；
+  # 渲染失败回磁盘 last-good，服务整个挂掉由 nginx @static 吃旧静态
+  # 文件。公开页无登录态，无需 BI_WEB_SESSION_SECRET。
+  pages-web:
+    image: dops-app:latest
+    container_name: dops-pages-web
+    restart: unless-stopped
+    env_file:
+      - /opt/dops/app.env
+    working_dir: /opt/dops/repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      PUBLIC_DATA_SERVICE_ID: pages-web
+      # 区域集合真源（渲染前校验 region，未知区域 404）。cloud compose 的
+      # bi-web/ops-web 未注 REGION_SEED 是已知坑，pages-web 必须显式注入。
+      PUBLIC_DATA_REGION_SEED: /opt/dops/repo/docker/integration/regions.seed.json
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.pages_web.app
+    # host 网络 nginx 经环回回源：只绑宿主环回，不新增公网暴露面。
+    ports:
+      - "127.0.0.1:18090:8080"
+    volumes:
+      - /opt/dops/repo:/opt/dops/repo:ro
+      - /opt/dops/live:/opt/dops/live:ro
+      # 渲染成功即双写（当前页+存档页）：date_nav 存档扫描与 nginx
+      # @static 静态兜底持续保温，需要 rw（区别于上面两个只读挂载）。
+      - /opt/dops/pages-output:/output:rw
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # 榜单静态页发布（2026-09-23 提前拉起）：serve pages-output，host 网络占 80。
-  # 仅静态文件，无 upstream；bi-web 公网反代待阶段 2（备案+域名+免登）再加。
+  # 2026-10-13 起榜单 html 反代 pages-web（请求时渲染），静态文件退为
+  # last-good 兜底；bi-web 公网反代待阶段 2（备案+域名+免登）再加。
   nginx:
     image: nginx:1.27-alpine
     container_name: dops-nginx
