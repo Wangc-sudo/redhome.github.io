@@ -138,6 +138,28 @@ class WriteValidationTests(unittest.TestCase):
         with self.assertRaises(OpsControlError):
             validate_pipeline_fields("robot-x", "apps", "not a cron")
 
+    def test_multi_segment_schedule_accepted_and_normalized(self):
+        cfg = validate_pipeline_fields(
+            "robot-x", "apps", "0 8 * * *;30 12 * * *"
+        )
+        self.assertEqual(cfg.schedule, "0 8 * * *;30 12 * * *")
+        # 分段两侧空白被规范化（无多余空白/分号）。
+        padded = validate_pipeline_fields(
+            "robot-x", "apps", " 0 8 * * * ;30 12 * * * "
+        )
+        self.assertEqual(padded.schedule, "0 8 * * *;30 12 * * *")
+
+    def test_more_than_three_schedule_segments_rejected(self):
+        with self.assertRaises(OpsControlError):
+            validate_pipeline_fields(
+                "robot-x", "apps",
+                "0 8 * * *;0 9 * * *;0 10 * * *;0 11 * * *",
+            )
+
+    def test_invalid_schedule_segment_rejected(self):
+        with self.assertRaises(OpsControlError):
+            validate_pipeline_fields("robot-x", "apps", "0 8 * * *;not cron")
+
     def test_self_dependency_rejected(self):
         with self.assertRaises(OpsControlError):
             validate_pipeline_fields(

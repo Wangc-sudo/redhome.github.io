@@ -405,14 +405,34 @@ class _MysqlLock:
             self._connection.close()
 
 
+def _cron_segments(schedule):
+    """``;`` 分隔的多段 cron → 去空白/去空的段元组；非字符串 → 空元组。
+
+    播报时间可配多个时点（2026-10-13 裁决 ≤3），底层 ``schedule`` 以 ``;``
+    连接各时段的 5 段 cron；单段是退化形态（长度 1）。
+    """
+    if not isinstance(schedule, str):
+        return ()
+    return tuple(seg.strip() for seg in schedule.split(";") if seg.strip())
+
+
 def _next_fire(schedule, now):
-    """Next fire time strictly after *now*; None when the cron is invalid."""
+    """Next fire time strictly after *now*; None when any cron segment is invalid.
+
+    多段（``;`` 分隔）取各段**最早**的下一次点火；任一段非法则整条按非法
+    处理（None），调度器据此跳过该线——与单段的既有关闭语义一致。
+    """
     try:
         from croniter import croniter
     except ImportError:  # pragma: no cover - dependency is pinned
         raise RuntimeError("croniter is required for the scheduler")
+    segments = _cron_segments(schedule)
+    if not segments:
+        return None
     try:
-        return croniter(schedule, now).get_next(datetime)
+        return min(
+            croniter(segment, now).get_next(datetime) for segment in segments
+        )
     except (ValueError, KeyError):
         return None
 
