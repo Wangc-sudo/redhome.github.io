@@ -52,7 +52,12 @@ Shaoxing offline-sales board (2026-10-10, ``8300/shaoxing.html`` same
 pattern, mirroring the Hangzhou seven) adds
 ``kpi_sx_mtd``/``kpi_sx_today``/``kpi_sx_progress``/``trend_sx_daily``/
 ``bar_sx_dept``/``table_sx_people_progress``/
-``table_sx_unfilled_today`` for fifty-eight.
+``table_sx_unfilled_today`` for fifty-eight.  The channel-sales board
+(2026-10-13, ``8300/qudao.html`` same nginx-bridge pattern, sourcing the
+channel fact table rather than the offline one) adds seven more
+(``kpi_qd_mtd``/``kpi_qd_today``/``kpi_qd_progress``/``trend_qd_daily``/
+``bar_qd_channel``/``table_qd_store_mtd``/``table_qd_unfilled_today``)
+for sixty-five.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -244,6 +249,25 @@ _CARDS = (
           queries.run_table_sx_people_progress, {"date": "dates"}),
     _card("table_sx_unfilled_today", "table",
           queries.run_table_sx_unfilled_today, {"date": "dates"}),
+    # 渠道销售BI看板（qd-channel-sales，2026-10-13 裁决）：与三条线下
+    # 看板同构（业务线为渠道），8300/qudao.html 的 BI 替身，nginx 反代
+    # 保留原 URL。真源 = 渠道线事实表（汇总/趋势/排行/店铺）与渠道催办
+    # channel_missing（未填报），trend 卡不开 gran（run_trend_channel_daily
+    # 无 gran 支持，避免假控件）。
+    _card("kpi_qd_mtd", "scalar", queries.run_kpi_qd_mtd,
+          {"date": "dates"}),
+    _card("kpi_qd_today", "scalar", queries.run_kpi_qd_today,
+          {"date": "dates"}),
+    _card("kpi_qd_progress", "scalar", queries.run_kpi_qd_progress,
+          {"date": "dates"}),
+    _card("trend_qd_daily", "line", queries.run_trend_qd_daily,
+          {"date": "dates"}),
+    _card("bar_qd_channel", "bar", queries.run_bar_qd_channel,
+          {"date": "dates"}),
+    _card("table_qd_store_mtd", "table", queries.run_table_qd_store_mtd,
+          {"date": "dates"}),
+    _card("table_qd_unfilled_today", "table",
+          queries.run_table_qd_unfilled_today, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,

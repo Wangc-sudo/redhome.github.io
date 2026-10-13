@@ -3137,6 +3137,192 @@ class SxDashboardTests(unittest.TestCase):
         )
 
 
+class _QdUnfilledFakeConnection(FakeConnection):
+    """渠道未填报卡 fake：按 SQL 内容分流三路。
+
+    ``fetch_roster_rows`` → ``fact_channel_store_target`` 全店（无参）+
+    ``fact_channel_daily_sales`` DISTINCT 近窗（since, anchor）；
+    ``fetch_daily_rows`` → ``fact_channel_daily_sales`` 锚点当日行。
+    """
+
+    def scripted_fetchall(self, sql):
+        params = self.executed[-1][1] or ()
+        if "fact_channel_store_target" in sql:
+            return [
+                dict(row)
+                for row in self._rowsets.get("fact_channel_store_target", [])
+            ]
+        if "fact_channel_daily_sales" in sql:
+            rows = self._rowsets.get("fact_channel_daily_sales", [])
+            if "DISTINCT" in sql:
+                since, anchor = params
+                return [
+                    {"store_name": row["store_name"], "channel": row["channel"]}
+                    for row in rows
+                    if row.get("business_date") is not None
+                    and since <= row["business_date"] < anchor
+                    and str(row.get("store_name") or "").strip()
+                ]
+            anchor = params[0]
+            return [
+                dict(row) for row in rows
+                if row.get("business_date") == anchor
+            ]
+        return super().scripted_fetchall(sql)
+
+
+class QdDashboardTests(unittest.TestCase):
+    """渠道销售BI看板（qd-channel-sales，2026-10-13 裁决）：
+
+    汇总/趋势/排行/店铺走渠道线事实表 ``fact_channel_daily_sales``；
+    未填报卡复用 ``channel_missing``，与渠道催办逐字同口径；全卡 date 锚定。
+    """
+
+    def _calendar_rows(self):
+        return [
+            {"business_date": date(2026, 8, 3)},
+            {"business_date": date(2026, 8, 4)},
+            {"business_date": date(2026, 8, 5)},
+        ]
+
+    def test_kpi_qd_today_sums_channel_fact_on_anchor(self):
+        connection = FakeConnection(
+            rowsets={"fact_channel_daily_sales": [{"s": Decimal("123")}]}
+        )
+        payload = bi_web_queries.run_kpi_qd_today(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(123.0, payload["value"])
+        self.assertEqual("2026-08-04", payload["date"])
+        sql, params = connection.executed[-1]
+        self.assertIn("fact_channel_daily_sales", sql)
+        self.assertEqual((date(2026, 8, 4),), params)
+
+    def test_kpi_qd_mtd_derives_month_from_date_anchor(self):
+        connection = FakeConnection(
+            rowsets={"fact_channel_daily_sales": [{"s": Decimal("80")}]}
+        )
+        payload = bi_web_queries.run_kpi_qd_mtd(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(80.0, payload["value"])
+        # 渠道线无 BI 月目标源：只给金额，不给达成率
+        self.assertNotIn("target", payload)
+        self.assertNotIn("rate", payload)
+        sql, params = connection.executed[-1]
+        self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)), params)
+        self.assertIn("CURDATE()", sql)  # 未来日截断
+
+    def test_kpi_qd_progress_shares_company_calendar(self):
+        connection = FakeConnection(
+            rowsets={"dim_calendar": self._calendar_rows()}
+        )
+        payload = bi_web_queries.run_kpi_qd_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(2.0, payload["value"])
+        self.assertEqual(3.0, payload["target"])
+        self.assertAlmostEqual(2 / 3, payload["rate"])
+
+    def test_trend_qd_daily_delegates_to_channel_month(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_trend_channel_daily",
+            return_value={"chart": "line"},
+        ) as trend:
+            payload = bi_web_queries.run_trend_qd_daily(
+                connection, {"date": "2026-08-04"})
+        self.assertEqual({"chart": "line"}, payload)
+        trend.assert_called_once_with(connection, {"month": "2026-08"})
+
+    def test_bar_qd_channel_delegates_to_channel_mtd(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_bar_channel_mtd",
+            return_value={"chart": "bar"},
+        ) as bar:
+            payload = bi_web_queries.run_bar_qd_channel(
+                connection, {"date": "2026-08-04"})
+        self.assertEqual({"chart": "bar"}, payload)
+        bar.assert_called_once_with(connection, {"month": "2026-08"})
+
+    def test_table_qd_store_mtd_delegates_to_store_mtd(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_table_store_mtd",
+            return_value={"chart": "table"},
+        ) as table:
+            payload = bi_web_queries.run_table_qd_store_mtd(
+                connection, {"date": "2026-08-04"})
+        self.assertEqual({"chart": "table"}, payload)
+        table.assert_called_once_with(connection, {"month": "2026-08"})
+
+    def _unfilled_connection(self):
+        return _QdUnfilledFakeConnection(
+            rowsets={
+                "fact_channel_store_target": [
+                    {"store_name": "天猫旗舰店", "channel": "天猫",
+                     "owners_json": None},
+                    {"store_name": "京东自营店", "channel": "京东",
+                     "owners_json": None},
+                ],
+                "fact_channel_daily_sales": [
+                    # 天猫旗舰店当日已填（非 0）→ 不计缺；京东自营店当日无行
+                    {"store_name": "天猫旗舰店", "channel": "天猫",
+                     "sales_amount": Decimal("50"), "responsible_person": None,
+                     "business_date": date(2026, 10, 9)},
+                ],
+            }
+        )
+
+    def test_table_qd_unfilled_today_roster_bound(self):
+        payload = bi_web_queries.run_table_qd_unfilled_today(
+            self._unfilled_connection(), {"date": "2026-10-09"})
+        self.assertEqual("2026-10-09", payload["date"])
+        self.assertEqual(
+            ["rank", "store", "channel"],
+            [column["key"] for column in payload["columns"]],
+        )
+        self.assertEqual(
+            [{"rank": 1, "store": "京东自营店", "channel": "京东"}],
+            payload["rows"],
+        )
+
+    def test_table_qd_unfilled_today_null_row_is_missing(self):
+        # 显式 NULL 行与「无行」同属缺报（与催办判定逐字一致）
+        connection = _QdUnfilledFakeConnection(
+            rowsets={
+                "fact_channel_store_target": [
+                    {"store_name": "猫超店", "channel": "猫超",
+                     "owners_json": None},
+                ],
+                "fact_channel_daily_sales": [
+                    {"store_name": "猫超店", "channel": "猫超",
+                     "sales_amount": None, "responsible_person": None,
+                     "business_date": date(2026, 10, 9)},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_qd_unfilled_today(
+            connection, {"date": "2026-10-09"})
+        self.assertEqual(
+            [{"rank": 1, "store": "猫超店", "channel": "猫超"}],
+            payload["rows"],
+        )
+
+    def test_table_qd_unfilled_today_absent_day_all_missing(self):
+        # 锚点日无任何事实行 → 名册全店皆缺（排序按门店名）
+        payload = bi_web_queries.run_table_qd_unfilled_today(
+            self._unfilled_connection(), {"date": "2026-10-08"})
+        self.assertEqual(
+            ["京东自营店", "天猫旗舰店"],
+            [row["store"] for row in payload["rows"]],
+        )
+
+
 class _PeopleFakeConnection(FakeConnection):
     """mart 路径 fake：事实行按最近一条语句的 region 参数过滤
     （模拟 fetch_month_facts 的 ``WHERE region = %s``）；日历行走 rowsets。"""

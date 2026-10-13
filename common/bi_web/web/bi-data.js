@@ -53,7 +53,8 @@ function fetchJson(url){
 var PATH_ALIASES = {
   '/hangzhou.html': 'hz-offline-sales',
   '/offline_all.html': 'offline-all-sales',
-  '/shaoxing.html': 'sx-offline-sales'
+  '/shaoxing.html': 'sx-offline-sales',
+  '/qudao.html': 'qd-channel-sales'
 };
 
 function dashboardId(){

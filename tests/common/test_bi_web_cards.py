@@ -103,6 +103,15 @@ STAGE_B_CARD_IDS = (
     "bar_sx_dept",
     "table_sx_people_progress",
     "table_sx_unfilled_today",
+    # 渠道销售BI看板七卡（2026-10-13 裁决：8300/qudao.html 切 BI，与
+    # 三条线下看板同构但走渠道线事实表），共 65 张。
+    "kpi_qd_mtd",
+    "kpi_qd_today",
+    "kpi_qd_progress",
+    "trend_qd_daily",
+    "bar_qd_channel",
+    "table_qd_store_mtd",
+    "table_qd_unfilled_today",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -178,6 +187,13 @@ EXPECTED_CHARTS = {
     "bar_sx_dept": "bar",
     "table_sx_people_progress": "table",
     "table_sx_unfilled_today": "table",
+    "kpi_qd_mtd": "scalar",
+    "kpi_qd_today": "scalar",
+    "kpi_qd_progress": "scalar",
+    "trend_qd_daily": "line",
+    "bar_qd_channel": "bar",
+    "table_qd_store_mtd": "table",
+    "table_qd_unfilled_today": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -240,6 +256,13 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_sx_dept": queries.run_bar_sx_dept,
     "table_sx_people_progress": queries.run_table_sx_people_progress,
     "table_sx_unfilled_today": queries.run_table_sx_unfilled_today,
+    "kpi_qd_mtd": queries.run_kpi_qd_mtd,
+    "kpi_qd_today": queries.run_kpi_qd_today,
+    "kpi_qd_progress": queries.run_kpi_qd_progress,
+    "trend_qd_daily": queries.run_trend_qd_daily,
+    "bar_qd_channel": queries.run_bar_qd_channel,
+    "table_qd_store_mtd": queries.run_table_qd_store_mtd,
+    "table_qd_unfilled_today": queries.run_table_qd_unfilled_today,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -321,6 +344,16 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_sx_dept": {"date": "dates"},
     "table_sx_people_progress": {"date": "dates"},
     "table_sx_unfilled_today": {"date": "dates"},
+    # 渠道看板七卡（2026-10-13）：同杭州/绍兴看板锚定 date（dates 工作日
+    # 值域闸，非法值 400）；trend 卡不开 gran（run_trend_channel_daily
+    # 无 gran 支持）。
+    "kpi_qd_mtd": {"date": "dates"},
+    "kpi_qd_today": {"date": "dates"},
+    "kpi_qd_progress": {"date": "dates"},
+    "trend_qd_daily": {"date": "dates"},
+    "bar_qd_channel": {"date": "dates"},
+    "table_qd_store_mtd": {"date": "dates"},
+    "table_qd_unfilled_today": {"date": "dates"},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -368,7 +401,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(58, len(REGISTRY))
+        self.assertEqual(65, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

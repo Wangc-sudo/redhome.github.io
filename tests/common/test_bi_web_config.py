@@ -531,7 +531,9 @@ class BiSeedFileTests(unittest.TestCase):
              # 线下整体销售BI看板（2026-10-10：8300/offline_all.html 切 BI）
              "offline-all-sales",
              # 绍兴线下销售BI看板（2026-10-10：8300/shaoxing.html 切 BI）
-             "sx-offline-sales"},
+             "sx-offline-sales",
+             # 渠道销售BI看板（2026-10-13：8300/qudao.html 切 BI）
+             "qd-channel-sales"},
             set(mapping),
         )
         configs = {
@@ -656,14 +658,15 @@ class BiSeedFileTests(unittest.TestCase):
         # 86400（T+1 口径，全站无自动刷新/轮询）。
         # 例外（常亮大屏 300s 自动刷新，config.py 下限 60 内）：
         # hz-offline-sales（2026-10-09 运维裁决）、offline-all-sales 与
-        # sx-offline-sales（2026-10-10 同方案）——全站唯三轮询页。
+        # sx-offline-sales（2026-10-10 同方案）、qd-channel-sales
+        # （2026-10-13 同方案）——全站唯四轮询页。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):
                 expected = (
                     300
                     if dashboard_id in (
                         "hz-offline-sales", "offline-all-sales",
-                        "sx-offline-sales",
+                        "sx-offline-sales", "qd-channel-sales",
                     )
                     else 86400
                 )
@@ -711,6 +714,28 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             (4, 4, 4, 8, 4, 12, 12),
             tuple(placement.span for placement in oa.cards),
+        )
+
+        # 渠道销售BI看板（2026-10-13 运维裁决：8300/qudao.html 静态页切
+        # BI，同 hangzhou.html 反代方案 A，真源走渠道线事实表）：经营驾驶
+        # 舱组、nav_order 8（sx 7 之后）、date 筛选、七卡布局。
+        qd = configs["qd-channel-sales"]
+        self.assertEqual(8, qd.nav_order)
+        self.assertEqual("经营驾驶舱", qd.group)
+        self.assertEqual("/static/icons/channel.svg", qd.icon)
+        self.assertEqual(
+            (("date", "dates", "日期"),),
+            tuple((spec.param, spec.source, spec.label) for spec in qd.filters),
+        )
+        self.assertEqual(
+            ("kpi_qd_mtd", "kpi_qd_today", "kpi_qd_progress",
+             "trend_qd_daily", "bar_qd_channel",
+             "table_qd_store_mtd", "table_qd_unfilled_today"),
+            tuple(placement.card for placement in qd.cards),
+        )
+        self.assertEqual(
+            (4, 4, 4, 8, 4, 12, 12),
+            tuple(placement.span for placement in qd.cards),
         )
 
         # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
