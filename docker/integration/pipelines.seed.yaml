@@ -55,8 +55,10 @@ extract-mart:
 robot-hangzhou:
   kind: business
   category: 催办
-  enabled: true
-  schedule: "0 18 * * *"
+  # 运行态调整待运维补注：Nacos 侧 enabled=false 且 schedule 改为 30 18
+  # （2026-10-13 对账发现，git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
+  schedule: "30 18 * * *"
   reads: [mart_ops]
   description: "hangzhou daily-report remind (mart_ops -> robot_outbox)"
 robot-check-hangzhou:
@@ -127,23 +129,27 @@ pages-qudao:
   kind: business
   category: 页面
   # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  # 运行态调整待运维补注：Nacos 侧 schedule 为 30 19 * * *（2026-10-13
+  # 对账发现，git 无对应记录），enabled=false 与 seed 一致；seed 镜像 Nacos 真值。
   enabled: false
-  schedule: "30 8,15,17 * * *"
+  schedule: "30 19 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
 # --- 渠道日销 T+1 采集与门店到齐催办（2026-09-28 方案） ---
-# 灰度发布：四条线先 enabled:false 手工 dry-run，确认后放行（P4）。
+# 2026-10-13 放行（用户批准）：前三条 Nacos 定点启用，明日 10:31 首播；
+# pages-qudao-t1 维持停用（qudao.html 已切 BI 桥，本线 cron 产出静态文件
+# 无路由消费 = 空跑，T+1 数据需求由 extract-channel 覆盖）。
 sync-channel-sales:
   kind: apps
   category: 同步
-  enabled: false
+  enabled: true
   schedule: "31 10 * * *"
   reads: [raw_dingtalk, mart_ops]
   description: "渠道日销 T+1 补采（dingtalk channel_daily_sales* + channel_monthly_target）"
 extract-channel:
   kind: apps
   category: 加工
-  enabled: false
+  enabled: true
   schedule: "35 10 * * *"
   reads: [raw_dingtalk, mart_ops]
   depends_on: [sync-channel-sales]
@@ -151,7 +157,10 @@ extract-channel:
 channel-missing-check:
   kind: business
   category: 催办
-  enabled: false
+  # @ 映射 0%（电商 19 负责人不在 dim_robot_member，2026-10-13 实测）：
+  # 当前发纯文本缺口表无人被 @；映射修复（电商部门纳入组织同步投影或
+  # recipient_override）单独立项。
+  enabled: true
   schedule: "40 10 * * *"
   reads: [mart_ops]
   depends_on: [extract-channel]
@@ -159,6 +168,8 @@ channel-missing-check:
 pages-qudao-t1:
   kind: business
   category: 页面
+  # 2026-10-13 Nacos 定点停用（此前 Nacos=true 每天 10:45 空跑）：
+  # qudao.html 已是 nginx→BI 桥，本线 leaderboard-html 产出静态文件无路由消费。
   enabled: false
   schedule: "45 10 * * *"
   reads: [mart_ops]
@@ -200,7 +211,9 @@ leaderboard-vanke:
 leaderboard-qudao:
   kind: business
   category: 播报
-  enabled: true
+  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
+  # git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard group broadcast (mart_ops -> robot_outbox)"
@@ -221,14 +234,18 @@ offline-daily-summary:
 offline-weekly-summary:
   kind: business
   category: 播报
-  enabled: true
+  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
+  # git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "30 9 * * 1"
   reads: [mart_ops]
   description: "offline_all weekly summary (last week totals + wow + ranking)"
 offline-monthly-summary:
   kind: business
   category: 播报
-  enabled: true
+  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
+  # git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "0 10 1 * *"
   reads: [mart_ops]
   description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
@@ -275,28 +292,36 @@ robot-check-shaoxing:
 robot-junpin:
   kind: business
   category: 催办
+  # 运行态调整待运维补注：Nacos 侧 schedule 为 30 18（2026-10-13 对账
+  # 发现，git 无对应记录；enabled=true 一致）。seed 镜像 Nacos 真值。
   enabled: true
-  schedule: "0 18 * * *"
+  schedule: "30 18 * * *"
   reads: [mart_ops]
   description: "junpin daily-report remind (mart_ops -> robot_outbox)"
 robot-check-junpin:
   kind: business
   category: 催办
+  # 运行态调整待运维补注：Nacos 侧 schedule 为 0 22（2026-10-13 对账
+  # 发现，git 无对应记录；enabled=true 一致）。seed 镜像 Nacos 真值。
   enabled: true
-  schedule: "0 20 * * *"
+  schedule: "0 22 * * *"
   reads: [mart_ops]
   description: "junpin unfilled check + DING (mart_ops -> robot_outbox)"
 robot-qudao:
   kind: business
   category: 催办
-  enabled: true
+  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
+  # git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "0 18 * * *"
   reads: [mart_ops]
   description: "qudao daily-report remind (mart_ops -> robot_outbox)"
 robot-check-qudao:
   kind: business
   category: 催办
-  enabled: true
+  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
+  # git 无对应记录）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "0 20 * * *"
   reads: [mart_ops]
   description: "qudao unfilled check + DING (mart_ops -> robot_outbox)"
@@ -323,7 +348,9 @@ dingtalk-gateway:
 sync-runner:
   kind: apps
   category: 同步
-  enabled: true
+  # legacy 合并同步：拆为 sync-dingtalk / sync-wdt 两跳后运行态停用
+  # （Nacos enabled=false，2026-10-13 对账确认）。seed 镜像 Nacos 真值。
+  enabled: false
   schedule: "0 2 * * *"
   reads: [raw_dingtalk, raw_wdt, mart_ops]
   description: "legacy combined sync (both sources)"
