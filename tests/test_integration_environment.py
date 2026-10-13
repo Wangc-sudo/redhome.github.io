@@ -156,6 +156,22 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             text.index("up -d --force-recreate"),
         )
 
+        # nginx -t 校验门：conf 落盘后先校验、通过才 HUP，失败回滚旧 conf——
+        # 防「正则语法错 → nginx -t emerg → HUP 静默失效 + nginx 重启起不来」
+        # （2026-10-13 实测踩到）。
+        self.assertIn("exec -T nginx nginx -t", text)
+        self.assertIn("$NGINX_CONF.prev", text)
+
+        # conf 内榜单页正则含 {}，nginx 配置解析要求整段加引号，否则
+        # nginx -t emerg、切流静默失效（2026-10-13 实测踩到）。
+        nginx_conf = (
+            REPOSITORY_ROOT / "docker" / "integration" / "nginx" / "pages-cloud.conf"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'location ~ "^/[a-z0-9_]+(-\\d{4}-\\d{2}-\\d{2})?\\.html$"',
+            nginx_conf,
+        )
+
     def test_sync_runner_is_opt_in_and_leak_free(self):
         completed = subprocess.run(
             [
