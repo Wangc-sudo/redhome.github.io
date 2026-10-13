@@ -578,6 +578,7 @@
     "/hangzhou.html": "hz-offline-sales",
     "/offline_all.html": "offline-all-sales",
     "/shaoxing.html": "sx-offline-sales",
+    "/qudao.html": "qd-channel-sales",
   };
   const dashboardId = () => {
     if (PATH_ALIASES[window.location.pathname]) {

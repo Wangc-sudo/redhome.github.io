@@ -3428,3 +3428,130 @@ def run_table_oa_scopes(connection, params) -> dict:
         "date": anchor.isoformat(),
         "report_day": report_day.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 渠道销售BI看板（qd-channel-sales，2026-10-13 运维裁决）
+#
+# 8300/qudao.html 静态榜单页切 BI（URL 保留，nginx 反代方案 A，同
+# 2026-10-09 hangzhou.html 先例）。与三条线下看板同构，但业务线为渠道
+# （电商渠道）：汇总/趋势/排行/店铺卡真源 = 渠道线事实表
+# ``fact_channel_daily_sales``（无 region 列、无合计行），门店未填报卡
+# 真源 = 渠道催办 ``channel_missing``（点名册/判定与 10:31 T+1 催办同
+# 口径，不做第二套）。全卡锚定 ``date``（工作日日历点选，值域 dates），
+# 月窗口 = 锚点日所在月；BI 实时口径含锚点当天（与静态页 T-1 刻意不同）。
+# 渠道线无 BI 月目标源（线下 region_month_target 只服务 fact_daily_
+# report_offline），故「本月累计」卡只给金额、不给达成率进度条。
+# ---------------------------------------------------------------------------
+
+#: 渠道锚点日当月 Σsales（月窗口 + 排未来日；渠道表无合计行）。
+_CHANNEL_MONTH_SUM_SQL = (
+    "SELECT COALESCE(SUM(sales_amount), 0) AS `s` "
+    "FROM `fact_channel_daily_sales` "
+    "WHERE `business_date` BETWEEN %s AND %s "
+    "AND `business_date` <= CURDATE()"
+)
+
+#: 渠道锚点日当日 Σsales。
+_CHANNEL_DAY_SQL = (
+    "SELECT COALESCE(SUM(sales_amount), 0) AS `s` "
+    "FROM `fact_channel_daily_sales` "
+    "WHERE `business_date` = %s"
+)
+
+
+def run_kpi_qd_mtd(connection, params) -> dict:
+    """渠道本月累计销售（scalar）：月窗口 = 锚点日所在月（截断未来日）。"""
+    anchor = _hz_anchor(params)
+    first_day, last_day = month_bounds(anchor.strftime("%Y-%m"))
+    rows = _fetch_rows(connection, _CHANNEL_MONTH_SUM_SQL, (first_day, last_day))
+    value = rows[0]["s"] if rows else 0
+    return {
+        "chart": "scalar",
+        "value": float(value),
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_kpi_qd_today(connection, params) -> dict:
+    """渠道当日销售（scalar）：锚点日 Σ sales_amount（渠道表无合计行）。"""
+    anchor = _hz_anchor(params)
+    rows = _fetch_rows(connection, _CHANNEL_DAY_SQL, (anchor,))
+    value = rows[0]["s"] if rows else 0
+    return {
+        "chart": "scalar",
+        "value": float(value),
+        "unit": _UNIT,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_kpi_qd_progress(connection, params) -> dict:
+    """渠道时间进度（scalar）：与杭州卡同函数——工作日日历公司统一。"""
+    return run_kpi_hz_progress(connection, params)
+
+
+def run_trend_qd_daily(connection, params) -> dict:
+    """渠道日销趋势（line）：分渠道多系列（月 = 锚点日所在月）。"""
+    anchor = _hz_anchor(params)
+    return run_trend_channel_daily(
+        connection, {"month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_bar_qd_channel(connection, params) -> dict:
+    """渠道本月排行（bar）：channel_month_ranking 锚点月版。"""
+    anchor = _hz_anchor(params)
+    return run_bar_channel_mtd(
+        connection, {"month": anchor.strftime("%Y-%m")}
+    )
+
+
+def run_table_qd_store_mtd(connection, params) -> dict:
+    """店铺本月排行（table）：全渠道含渠道列（月 = 锚点日所在月）。"""
+    anchor = _hz_anchor(params)
+    return run_table_store_mtd(
+        connection, {"month": anchor.strftime("%Y-%m")}
+    )
+
+
+def _qd_unfilled_payload(connection, anchor):
+    """渠道锚点日未填报门店（table）：与渠道催办同真源。
+
+    复用 :mod:`common.daily_robot.channel_missing` 的纯逻辑与只读查询：
+    点名册 = 月目标表全店 ∪ 近 30 天活跃店（不减 storeExclude，单纯报）；
+    判定 = 当日无行或 ``sales_amount IS NULL`` → 缺，店铺名留空行按渠道级
+    状态兜底。与 10:31 T+1 催办/群播报逐字同口径，绝不另造一套。
+    """
+    from common.daily_robot import channel_missing as cm
+
+    target_rows, recent_rows = cm.fetch_roster_rows(connection, anchor)
+    roster = cm.expected_stores(target_rows, recent_rows)
+    daily_rows = cm.fetch_daily_rows(connection, anchor)
+    states = cm.store_states(daily_rows)
+    cstates = cm.channel_states(daily_rows)
+    missing = []
+    for store, channel in roster.items():
+        state = states.get(store) or cstates.get(channel) or cm.MISSING
+        if state == cm.MISSING:
+            missing.append((store, channel))
+    missing.sort()
+    return {
+        "chart": "table",
+        "columns": [
+            {"key": "rank", "title": "#"},
+            {"key": "store", "title": "门店"},
+            {"key": "channel", "title": "渠道"},
+        ],
+        "rows": [
+            {"rank": index, "store": store, "channel": channel}
+            for index, (store, channel) in enumerate(missing, start=1)
+        ],
+        "date": anchor.isoformat(),
+    }
+
+
+def run_table_qd_unfilled_today(connection, params) -> dict:
+    """渠道锚点日未填报门店（table）：``_qd_unfilled_payload`` 锚定版。"""
+    return _qd_unfilled_payload(connection, _hz_anchor(params))
