@@ -41,6 +41,9 @@ from common.public_data.ops_control import (
     pipeline_ops_ddl_statements,
     run_history_ddl_statements,
 )
+from common.public_data.org_assignment_override import (
+    org_assignment_override_ddl_statements,
+)
 from common.public_data.recipient_override import (
     recipient_override_ddl_statements,
 )
@@ -529,6 +532,14 @@ _MIGRATIONS = (
         "mart-ops-recipient-override-v1",
         "mart",
         recipient_override_ddl_statements(),
+    ),
+    (
+        # 组织归属覆盖（2026-10-13 P6「区域→部门→成员」拖拽编排）：
+        # dim_org_assignment_override（消费侧 merge，不改写 dim_robot_member）
+        # + 审计表。灰度=表驱动（只为目标人员建行），回退=停用/删除行。
+        "mart-ops-org-assignment-override-v1",
+        "mart",
+        org_assignment_override_ddl_statements(),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

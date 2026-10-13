@@ -2828,5 +2828,311 @@ class RecipientOverrideApiTests(unittest.TestCase):
         self.assertEqual(503, response.status_code)
 
 
+class _OrgCursor:
+    """组织编排端点假游标：按 SQL 关键字路由行，可设 rowcount 与故障关键字。"""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._last = ""
+        self._rows = []
+        self.rowcount = 0
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        self._last = sql
+        for keyword in self._conn.fail:
+            if keyword in sql:
+                raise RuntimeError("db down")
+        self._rows = self._conn.route(sql)
+        if sql.lstrip().upper().startswith(("UPDATE", "DELETE")):
+            self.rowcount = self._conn.rowcount
+        else:
+            self.rowcount = len(self._rows)
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        pass
+
+
+class _OrgConn:
+    def __init__(self, rows_by_keyword=None, *, rowcount=1, fail=()):
+        self.rows = rows_by_keyword or {}
+        self.rowcount = rowcount
+        self.fail = set(fail)
+        self.executed = []
+        self.commits = 0
+
+    def route(self, sql):
+        for keyword, rows in self.rows.items():
+            if keyword in sql:
+                return list(rows)
+        return []
+
+    def cursor(self):
+        return _OrgCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+_ORG_OVERRIDE_ROW = {
+    "id": 1, "user_id": "u-wang", "name": "王五", "region": "hq",
+    "dept_id": None, "dept_name": "总经办", "enabled": 1, "note": None,
+    "updated_by": "ops", "updated_at": None,
+}
+
+
+class OrgAssignmentApiTests(unittest.TestCase):
+    """组织编排 SPA 后端（2026-10-13 P6）：/members 壳 + /api/org/*。
+
+    覆盖：admin 闸、overview 结构（区域/部门/池）、覆盖读 fail-soft、
+    成员读 503、assign/toggle/delete/reset 落库与审计、参数校验。
+    """
+
+    def _admin_client(self, connection):
+        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+        _login(client)
+        return client
+
+    def _members_conn(self, rows=None, **kwargs):
+        base = {"dim_robot_member": _MEMBERS}
+        base.update(rows or {})
+        return _OrgConn(base, **kwargs)
+
+    # -- /members（SPA 壳）--------------------------------------------------
+
+    def test_members_spa_requires_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        response = client.get("/members", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+        self.assertIn("reason=login", response.headers["location"])
+
+    def test_members_spa_forbidden_for_non_admin(self):
+        viewer = authz.Viewer(
+            userid="u1", name="张三", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u1")
+        response = client.get("/members", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+        self.assertIn("reason=forbidden", response.headers["location"])
+
+    def test_members_spa_serves_shell_when_built(self):
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8")
+        handle.write("<!DOCTYPE html><div id=\"app\"></div>")
+        handle.close()
+        try:
+            with mock.patch("common.ops_web.app._ORG_SPA_INDEX", handle.name):
+                client = self._admin_client(_OrgConn({}))
+                response = client.get("/members")
+            self.assertEqual(200, response.status_code)
+            self.assertIn("text/html", response.headers["content-type"])
+            self.assertIn("id=\"app\"", response.text)
+        finally:
+            import os
+            os.unlink(handle.name)
+
+    def test_members_spa_503_when_build_missing(self):
+        with mock.patch("common.ops_web.app._ORG_SPA_INDEX",
+                        "Z:/nonexistent/ops-web/dist/index.html"):
+            client = self._admin_client(_OrgConn({}))
+            response = client.get("/members")
+        self.assertEqual(503, response.status_code)
+
+    # -- /api/org/overview --------------------------------------------------
+
+    def test_overview_gate(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.get("/api/org/overview").status_code)
+
+    def test_overview_forbidden_for_non_admin(self):
+        viewer = authz.Viewer(
+            userid="u1", name="张三", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u1")
+        self.assertEqual(403, client.get("/api/org/overview").status_code)
+
+    def test_overview_groups_base_members(self):
+        client = self._admin_client(self._members_conn())
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual("ok", data["status"])
+        regions = {region["key"]: region for region in data["regions"]}
+        hangzhou = {
+            member["name"]
+            for group in regions["hangzhou"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"张三", "王五"}, hangzhou)
+        hq = {
+            member["name"]
+            for group in regions["hq"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"李四"}, hq)
+        self.assertEqual("杭州", regions["hangzhou"]["label"])
+        self.assertEqual("总部", regions["hq"]["label"])
+        self.assertEqual([], data["pool"])
+        self.assertEqual([], data["overrides"])
+
+    def test_overview_applies_override_move_region_and_dept(self):
+        client = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}))
+        data = client.get("/api/org/overview").json()
+
+        regions = {region["key"]: region for region in data["regions"]}
+        hangzhou = {
+            member["user_id"]
+            for group in regions["hangzhou"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"u-zhang"}, hangzhou)          # 王五已移出杭州
+        hq_groups = {group["dept_name"]: group["members"]
+                     for group in regions["hq"]["depts"]}
+        self.assertEqual({"u-li", "u-wang"},              # 王五移入总部
+                         {m["user_id"] for m in hq_groups["总经办"]})
+        self.assertEqual(1, len(data["overrides"]))
+        self.assertEqual("总部", data["overrides"][0]["region_label"])
+
+    def test_overview_override_region_null_goes_to_pool(self):
+        row = dict(_ORG_OVERRIDE_ROW, user_id="u-li", name="李四",
+                   region=None, dept_name=None)
+        client = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [row]}))
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual(["u-li"], [m["user_id"] for m in data["pool"]])
+        self.assertNotIn("hq", {region["key"] for region in data["regions"]})
+
+    def test_overview_override_read_fails_soft(self):
+        conn = self._members_conn(fail={"dim_org_assignment_override"})
+        client = self._admin_client(conn)
+        response = client.get("/api/org/overview")
+
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual([], data["overrides"])           # 覆盖读失败 = 空
+        self.assertIn("hangzhou",
+                      {region["key"] for region in data["regions"]})
+
+    def test_overview_members_read_503(self):
+        conn = self._members_conn(fail={"dim_robot_member"})
+        client = self._admin_client(conn)
+        self.assertEqual(503, client.get("/api/org/overview").status_code)
+
+    # -- 写面 ---------------------------------------------------------------
+
+    def test_assign_requires_admin(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(
+            401, client.post("/api/org/assign",
+                             json={"user_id": "u-zhang"}).status_code)
+
+    def test_assign_writes_override_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post("/api/org/assign", json={
+            "user_id": "u-zhang", "region": "hq", "dept_id": "d9",
+            "dept_name": "总经办", "name": "张三"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok"}, response.json())
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any(
+            "INSERT INTO `dim_org_assignment_override`" in sql
+            and "ON DUPLICATE KEY UPDATE" in sql for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual(ADMIN_USERID, audit[0])
+        self.assertEqual("assign", audit[1])
+        self.assertEqual(1, conn.commits)                 # 审计同事务
+
+    def test_assign_null_region_moves_out(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-li", "region": None})
+        self.assertEqual(200, response.status_code)
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual("移出全部区域", audit[7])
+
+    def test_assign_rejects_missing_user_id(self):
+        client = self._admin_client(self._members_conn())
+        response = client.post("/api/org/assign", json={"region": "hq"})
+        self.assertEqual(400, response.status_code)
+
+    def test_assign_rejects_bad_region_type(self):
+        client = self._admin_client(self._members_conn())
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-zhang", "region": 5})
+        self.assertEqual(400, response.status_code)
+
+    def test_assign_rejects_illegal_region_key(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-zhang", "region": "Bad Key"})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_toggle_hit_and_miss(self):
+        rows = {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}
+        hit = self._admin_client(self._members_conn(rows, rowcount=1))
+        self.assertEqual(
+            200, hit.post("/api/org/toggle",
+                          json={"user_id": "u-wang", "enabled": False}
+                          ).status_code)
+        miss = self._admin_client(self._members_conn(rows, rowcount=0))
+        self.assertEqual(
+            400, miss.post("/api/org/toggle",
+                           json={"user_id": "u-wang", "enabled": False}
+                           ).status_code)
+
+    def test_toggle_rejects_bad_body(self):
+        client = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, client.post("/api/org/toggle",
+                             json={"user_id": "u-wang", "enabled": "yes"}
+                             ).status_code)
+
+    def test_delete_hit_and_miss(self):
+        hit = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}))
+        self.assertEqual(
+            200, hit.post("/api/org/delete",
+                          json={"user_id": "u-wang"}).status_code)
+        miss = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, miss.post("/api/org/delete",
+                           json={"user_id": "u-wang"}).status_code)
+
+    def test_reset_clears_all(self):
+        conn = self._members_conn(rowcount=3)
+        client = self._admin_client(conn)
+        response = client.post("/api/org/reset", json={})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(3, response.json()["deleted"])
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual("reset", audit[1])
+
+
 if __name__ == "__main__":
     unittest.main()

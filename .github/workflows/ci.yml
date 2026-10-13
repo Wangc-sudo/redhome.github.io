@@ -75,11 +75,32 @@ jobs:
       - name: 构建
         run: npm run build
 
+  # ops-web「组织编排」SPA（Vue3+Vite）。产物 static/dist 提交入库（生产不构建），
+  # 本 job 保证源码可构建且 dist 与源码一致（改了源码忘了重构建 → 直接红）。
+  ops-web-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: common/ops_web/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: common/ops_web/web/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: 构建
+        run: npm run build
+      - name: 校验 dist 与源码一致（产物必须随源码一起提交）
+        run: git diff --exit-code -- ../static/dist
+
   # 单一质量门：branch protection 只需要求这一个 check。
   # 后续若加 push 式 CD / 部署回执，从这里挂。
   gate:
     runs-on: ubuntu-latest
-    needs: [python-lint, python-tests, frontend]
+    needs: [python-lint, python-tests, frontend, ops-web-frontend]
     steps:
       - name: 质量门汇总
         run: echo "CI green on ${GITHUB_REF} (${GITHUB_SHA}) — 合并 main 即部署意图"
