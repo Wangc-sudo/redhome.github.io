@@ -718,7 +718,8 @@ class BiSeedFileTests(unittest.TestCase):
 
         # 渠道销售BI看板（2026-10-13 运维裁决：8300/qudao.html 静态页切
         # BI，同 hangzhou.html 反代方案 A，真源走渠道线事实表）：经营驾驶
-        # 舱组、nav_order 8（sx 7 之后）、date 筛选、七卡布局。
+        # 舱组、nav_order 8（sx 7 之后）、date 筛选、七卡布局；同日旧页
+        # 13 个渠道专属面板逐块迁成 21 张 BI 卡追加在后（共 28 卡）。
         qd = configs["qd-channel-sales"]
         self.assertEqual(8, qd.nav_order)
         self.assertEqual("经营驾驶舱", qd.group)
@@ -730,11 +731,26 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             ("kpi_qd_mtd", "kpi_qd_today", "kpi_qd_progress",
              "trend_qd_daily", "bar_qd_channel",
-             "table_qd_store_mtd", "table_qd_unfilled_today"),
+             "table_qd_store_mtd", "table_qd_unfilled_today",
+             "table_qd_monthly_kpi", "table_qd_expense",
+             "table_qd_expense_rate", "table_qd_bill_category",
+             "table_qd_bill_platform", "table_qd_bill_items",
+             "table_qd_product_series", "table_qd_product_bands",
+             "table_qd_product_top", "table_qd_product_summary",
+             "table_qd_refund_reason", "table_qd_gmv_factors",
+             "table_qd_cohort", "table_qd_baijiu_node",
+             "table_qd_channel_daily", "table_qd_hot_items",
+             "table_qd_stock_urgent", "table_qd_stock_oversold",
+             "table_qd_purchase_inbound", "table_qd_order_risk",
+             "table_qd_notes"),
             tuple(placement.card for placement in qd.cards),
         )
         self.assertEqual(
-            (4, 4, 4, 8, 4, 12, 12),
+            (4, 4, 4, 8, 4, 12, 12,
+             12, 6, 6, 4, 4, 4,
+             6, 6, 6, 6, 6, 6,
+             12, 12, 12, 12, 6, 6,
+             12, 12, 12),
             tuple(placement.span for placement in qd.cards),
         )
 

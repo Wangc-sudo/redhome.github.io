@@ -112,6 +112,29 @@ STAGE_B_CARD_IDS = (
     "bar_qd_channel",
     "table_qd_store_mtd",
     "table_qd_unfilled_today",
+    # 渠道旧页板块补齐二十一卡（2026-10-13 裁决：旧 /qudao.html 的 13 个
+    # 渠道专属面板逐块迁成 BI 卡，一板块可拆多卡，不丢信息），共 86 张。
+    "table_qd_monthly_kpi",
+    "table_qd_expense",
+    "table_qd_expense_rate",
+    "table_qd_bill_category",
+    "table_qd_bill_platform",
+    "table_qd_bill_items",
+    "table_qd_product_series",
+    "table_qd_product_bands",
+    "table_qd_product_top",
+    "table_qd_product_summary",
+    "table_qd_refund_reason",
+    "table_qd_gmv_factors",
+    "table_qd_cohort",
+    "table_qd_baijiu_node",
+    "table_qd_channel_daily",
+    "table_qd_hot_items",
+    "table_qd_stock_urgent",
+    "table_qd_stock_oversold",
+    "table_qd_purchase_inbound",
+    "table_qd_order_risk",
+    "table_qd_notes",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -194,6 +217,27 @@ EXPECTED_CHARTS = {
     "bar_qd_channel": "bar",
     "table_qd_store_mtd": "table",
     "table_qd_unfilled_today": "table",
+    "table_qd_monthly_kpi": "table",
+    "table_qd_expense": "table",
+    "table_qd_expense_rate": "table",
+    "table_qd_bill_category": "table",
+    "table_qd_bill_platform": "table",
+    "table_qd_bill_items": "table",
+    "table_qd_product_series": "table",
+    "table_qd_product_bands": "table",
+    "table_qd_product_top": "table",
+    "table_qd_product_summary": "table",
+    "table_qd_refund_reason": "table",
+    "table_qd_gmv_factors": "table",
+    "table_qd_cohort": "table",
+    "table_qd_baijiu_node": "table",
+    "table_qd_channel_daily": "table",
+    "table_qd_hot_items": "table",
+    "table_qd_stock_urgent": "table",
+    "table_qd_stock_oversold": "table",
+    "table_qd_purchase_inbound": "table",
+    "table_qd_order_risk": "table",
+    "table_qd_notes": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -263,6 +307,27 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_qd_channel": queries.run_bar_qd_channel,
     "table_qd_store_mtd": queries.run_table_qd_store_mtd,
     "table_qd_unfilled_today": queries.run_table_qd_unfilled_today,
+    "table_qd_monthly_kpi": queries.run_table_qd_monthly_kpi,
+    "table_qd_expense": queries.run_table_qd_expense,
+    "table_qd_expense_rate": queries.run_table_qd_expense_rate,
+    "table_qd_bill_category": queries.run_table_qd_bill_category,
+    "table_qd_bill_platform": queries.run_table_qd_bill_platform,
+    "table_qd_bill_items": queries.run_table_qd_bill_items,
+    "table_qd_product_series": queries.run_table_qd_product_series,
+    "table_qd_product_bands": queries.run_table_qd_product_bands,
+    "table_qd_product_top": queries.run_table_qd_product_top,
+    "table_qd_product_summary": queries.run_table_qd_product_summary,
+    "table_qd_refund_reason": queries.run_table_qd_refund_reason,
+    "table_qd_gmv_factors": queries.run_table_qd_gmv_factors,
+    "table_qd_cohort": queries.run_table_qd_cohort,
+    "table_qd_baijiu_node": queries.run_table_qd_baijiu_node,
+    "table_qd_channel_daily": queries.run_table_qd_channel_daily,
+    "table_qd_hot_items": queries.run_table_qd_hot_items,
+    "table_qd_stock_urgent": queries.run_table_qd_stock_urgent,
+    "table_qd_stock_oversold": queries.run_table_qd_stock_oversold,
+    "table_qd_purchase_inbound": queries.run_table_qd_purchase_inbound,
+    "table_qd_order_risk": queries.run_table_qd_order_risk,
+    "table_qd_notes": queries.run_table_qd_notes,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -354,6 +419,29 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_qd_channel": {"date": "dates"},
     "table_qd_store_mtd": {"date": "dates"},
     "table_qd_unfilled_today": {"date": "dates"},
+    # 渠道旧页板块补齐二十一卡（2026-10-13）：同一日期锚定（dates 工作日
+    # 值域闸）；全部 table 卡，无 gran。
+    "table_qd_monthly_kpi": {"date": "dates"},
+    "table_qd_expense": {"date": "dates"},
+    "table_qd_expense_rate": {"date": "dates"},
+    "table_qd_bill_category": {"date": "dates"},
+    "table_qd_bill_platform": {"date": "dates"},
+    "table_qd_bill_items": {"date": "dates"},
+    "table_qd_product_series": {"date": "dates"},
+    "table_qd_product_bands": {"date": "dates"},
+    "table_qd_product_top": {"date": "dates"},
+    "table_qd_product_summary": {"date": "dates"},
+    "table_qd_refund_reason": {"date": "dates"},
+    "table_qd_gmv_factors": {"date": "dates"},
+    "table_qd_cohort": {"date": "dates"},
+    "table_qd_baijiu_node": {"date": "dates"},
+    "table_qd_channel_daily": {"date": "dates"},
+    "table_qd_hot_items": {"date": "dates"},
+    "table_qd_stock_urgent": {"date": "dates"},
+    "table_qd_stock_oversold": {"date": "dates"},
+    "table_qd_purchase_inbound": {"date": "dates"},
+    "table_qd_order_risk": {"date": "dates"},
+    "table_qd_notes": {"date": "dates"},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -401,7 +489,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(65, len(REGISTRY))
+        self.assertEqual(86, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

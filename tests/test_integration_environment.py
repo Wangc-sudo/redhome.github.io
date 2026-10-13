@@ -176,9 +176,9 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # 8300 上已切流的旧静态页 URL 各须一座精确 location BI 桥：URL 保留、
         # 内容为 BI 壳，精确匹配优先于 pages-web 切流正则。别名与看板定义在
         # seed/PATH_ALIASES 侧已就绪，缺任一桥时该页静默回落 pages-web 渲染。
-        # 注：/qudao.html 的桥于 2026-10-13 暂撤（qd-channel-sales 初版缺 12
-        # 个渠道板块，回落 pages-web 止血），13 板块补齐后重新挂桥并把
-        # qudao 加回本表。
+        # 注：/qudao.html 的桥 2026-10-13 曾暂撤（qd-channel-sales 初版缺 13
+        # 个渠道板块，回落 pages-web 止血），同日 13 板块逐块迁成 21 张 BI 卡
+        # 后重新挂桥（见下方第四座桥）。
         nginx_conf = (
             REPOSITORY_ROOT / "docker" / "integration" / "nginx" / "pages-cloud.conf"
         ).read_text(encoding="utf-8")
@@ -186,6 +186,7 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             "/hangzhou.html": "hz-offline-sales",
             "/offline_all.html": "offline-all-sales",
             "/shaoxing.html": "sx-offline-sales",
+            "/qudao.html": "qd-channel-sales",
         }
         for page, dashboard_id in bridges.items():
             with self.subTest(page=page):

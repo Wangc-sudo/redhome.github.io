@@ -57,7 +57,23 @@ pattern, mirroring the Hangzhou seven) adds
 channel fact table rather than the offline one) adds seven more
 (``kpi_qd_mtd``/``kpi_qd_today``/``kpi_qd_progress``/``trend_qd_daily``/
 ``bar_qd_channel``/``table_qd_store_mtd``/``table_qd_unfilled_today``)
-for sixty-five.
+for sixty-five.  The same board's legacy pages-web panels
+(2026-10-13, ``common/broadcast/qudao_panels.py``'s thirteen
+channel-specific panels -- the rollback root cause) are migrated one
+panel at a time into twenty-one date-anchored table cards
+(``table_qd_monthly_kpi``/``table_qd_expense``/``table_qd_expense_rate``/
+``table_qd_bill_category``/``table_qd_bill_platform``/
+``table_qd_bill_items``/``table_qd_product_series``/
+``table_qd_product_bands``/``table_qd_product_top``/
+``table_qd_product_summary``/``table_qd_refund_reason``/
+``table_qd_gmv_factors``/``table_qd_cohort``/``table_qd_baijiu_node``/
+``table_qd_channel_daily``/``table_qd_hot_items``/
+``table_qd_stock_urgent``/``table_qd_stock_oversold``/
+``table_qd_purchase_inbound``/``table_qd_order_risk``/
+``table_qd_notes``) for eighty-six.  Panels one through eight write no
+new SQL -- each reuses ``common.broadcast.queries``' existing
+``fetch_*`` outputs; panel nine reuses the channel daily-report
+functions plus the store-granular monthly target source.
 
 The whitelist maps param name -> filter source from
 ``config.KNOWN_FILTER_SOURCES``: the app layer resolves the source to a
@@ -268,6 +284,55 @@ _CARDS = (
           {"date": "dates"}),
     _card("table_qd_unfilled_today", "table",
           queries.run_table_qd_unfilled_today, {"date": "dates"}),
+    # 渠道旧页板块补齐（2026-10-13 运维裁决）：旧 /qudao.html 由 pages-web
+    # 追加 13 个渠道专属面板（common/broadcast/qudao_panels.py），首版切 BI
+    # 只复刻了 7 张离线模板卡，13 个板块丢失故撤桥。本节把 13 个板块逐块
+    # 迁成 21 张表卡（一板块可拆多卡），全部锚定 date；面板 1-8 不新写 SQL，
+    # 全部复用 common.broadcast.queries 既有 fetch_* 的结构化输出，不做二次
+    # 推导；面板 9 复用渠道日报三函数 + 店铺粒度月目标真源。迁移与复用纪律
+    # 详见 queries.py 末尾同名段头注释块。
+    _card("table_qd_monthly_kpi", "table",
+          queries.run_table_qd_monthly_kpi, {"date": "dates"}),
+    _card("table_qd_expense", "table",
+          queries.run_table_qd_expense, {"date": "dates"}),
+    _card("table_qd_expense_rate", "table",
+          queries.run_table_qd_expense_rate, {"date": "dates"}),
+    _card("table_qd_bill_category", "table",
+          queries.run_table_qd_bill_category, {"date": "dates"}),
+    _card("table_qd_bill_platform", "table",
+          queries.run_table_qd_bill_platform, {"date": "dates"}),
+    _card("table_qd_bill_items", "table",
+          queries.run_table_qd_bill_items, {"date": "dates"}),
+    _card("table_qd_product_series", "table",
+          queries.run_table_qd_product_series, {"date": "dates"}),
+    _card("table_qd_product_bands", "table",
+          queries.run_table_qd_product_bands, {"date": "dates"}),
+    _card("table_qd_product_top", "table",
+          queries.run_table_qd_product_top, {"date": "dates"}),
+    _card("table_qd_product_summary", "table",
+          queries.run_table_qd_product_summary, {"date": "dates"}),
+    _card("table_qd_refund_reason", "table",
+          queries.run_table_qd_refund_reason, {"date": "dates"}),
+    _card("table_qd_gmv_factors", "table",
+          queries.run_table_qd_gmv_factors, {"date": "dates"}),
+    _card("table_qd_cohort", "table",
+          queries.run_table_qd_cohort, {"date": "dates"}),
+    _card("table_qd_baijiu_node", "table",
+          queries.run_table_qd_baijiu_node, {"date": "dates"}),
+    _card("table_qd_channel_daily", "table",
+          queries.run_table_qd_channel_daily, {"date": "dates"}),
+    _card("table_qd_hot_items", "table",
+          queries.run_table_qd_hot_items, {"date": "dates"}),
+    _card("table_qd_stock_urgent", "table",
+          queries.run_table_qd_stock_urgent, {"date": "dates"}),
+    _card("table_qd_stock_oversold", "table",
+          queries.run_table_qd_stock_oversold, {"date": "dates"}),
+    _card("table_qd_purchase_inbound", "table",
+          queries.run_table_qd_purchase_inbound, {"date": "dates"}),
+    _card("table_qd_order_risk", "table",
+          queries.run_table_qd_order_risk, {"date": "dates"}),
+    _card("table_qd_notes", "table",
+          queries.run_table_qd_notes, {"date": "dates"}),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,

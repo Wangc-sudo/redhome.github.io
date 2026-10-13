@@ -186,6 +186,73 @@ qd-channel-sales:
     - card: table_qd_unfilled_today
       title: "当日未填报门店"
       span: 12
+    # —— 旧页渠道专属板块补齐（2026-10-13 运维裁决，共 21 卡）——
+    # 旧 /qudao.html 由 pages-web 追加的 13 个渠道专属面板逐块迁成 BI 卡
+    # （一板块可拆多卡，不丢信息）；顺序照旧页自上而下。全部锚定 date。
+    # 面板 1-8 复用 common.broadcast.queries 既有 fetch_*，不新写 SQL。
+    - card: table_qd_monthly_kpi
+      title: "月度经营概览"
+      span: 12
+    - card: table_qd_expense
+      title: "渠道费用"
+      span: 6
+    - card: table_qd_expense_rate
+      title: "渠道费率"
+      span: 6
+    - card: table_qd_bill_category
+      title: "账单费用分类"
+      span: 4
+    - card: table_qd_bill_platform
+      title: "账单平台构成"
+      span: 4
+    - card: table_qd_bill_items
+      title: "账单费用项 TOP"
+      span: 4
+    - card: table_qd_product_series
+      title: "商品系列结构"
+      span: 6
+    - card: table_qd_product_bands
+      title: "价格带结构"
+      span: 6
+    - card: table_qd_product_top
+      title: "商品销售 TOP"
+      span: 6
+    - card: table_qd_product_summary
+      title: "商品集中度"
+      span: 6
+    - card: table_qd_refund_reason
+      title: "退款原因"
+      span: 6
+    - card: table_qd_gmv_factors
+      title: "GMV 归因"
+      span: 6
+    - card: table_qd_cohort
+      title: "客群复购留存"
+      span: 12
+    - card: table_qd_baijiu_node
+      title: "白酒节点弹性"
+      span: 12
+    - card: table_qd_channel_daily
+      title: "渠道日销快报"
+      span: 12
+    - card: table_qd_hot_items
+      title: "热销商品动销"
+      span: 12
+    - card: table_qd_stock_urgent
+      title: "库存告急"
+      span: 6
+    - card: table_qd_stock_oversold
+      title: "超卖与零库存"
+      span: 6
+    - card: table_qd_purchase_inbound
+      title: "采购入库"
+      span: 12
+    - card: table_qd_order_risk
+      title: "订单风险"
+      span: 12
+    - card: table_qd_notes
+      title: "口径说明"
+      span: 12
 l2-region:
   title: "区域下钻"
   icon: "/static/icons/region.svg"
