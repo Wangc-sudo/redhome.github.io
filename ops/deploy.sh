@@ -100,10 +100,19 @@ apply() {
   docker compose -f "$COMPOSE_FILE" up -d
   # nginx conf 真源同步 + 平滑重载（2026-10-13 pages-web cutover）：conf
   # 此前只落 repo，/opt/dops/nginx/pages.conf 不会被更新，nginx 永远跑旧
-  # 配置。HUP 失败不阻断部署（页面兜底链 + health_gate 兜）。
+  # 配置。落盘前先备份 → 再 nginx -t 校验 → 通过才 HUP；校验失败回滚旧
+  # conf 并告警（2026-10-13 实测：正则含 {} 未加引号使 nginx -t emerg 失败，
+  # HUP 静默失效、切流不生效，且 nginx 重启会启动失败——须拦在门内）。
+  NGINX_CONF=/opt/dops/nginx/pages.conf
   if [ -f docker/integration/nginx/pages-cloud.conf ]; then
-    cp docker/integration/nginx/pages-cloud.conf /opt/dops/nginx/pages.conf
-    docker compose -f "$COMPOSE_FILE" kill -s HUP nginx 2>/dev/null || true
+    cp "$NGINX_CONF" "$NGINX_CONF.prev" 2>/dev/null || true
+    cp docker/integration/nginx/pages-cloud.conf "$NGINX_CONF"
+    if docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t >/dev/null 2>&1; then
+      docker compose -f "$COMPOSE_FILE" kill -s HUP nginx 2>/dev/null || true
+    else
+      cp "$NGINX_CONF.prev" "$NGINX_CONF" 2>/dev/null || true
+      log "WARN: nginx conf invalid -> kept previous conf, skipped HUP"
+    fi
   fi
   # 先补迁移、再重启服务（2026-10-12 补齐）：代码经 bind-mount 即时可见，
   # 而「注册了迁移」的功能（如 #62 收件人覆盖的 dim_recipient_override）
