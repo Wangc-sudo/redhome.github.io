@@ -243,6 +243,20 @@ class ParseDashboardConfigTests(unittest.TestCase):
         with self.assertRaises(DashboardConfigError):
             parse_dashboard_config("x", data)
 
+    def test_parses_card_source_and_defaults_to_empty(self):
+        # 数据源出处（2026-10-13）：展示用自由文本，未标注为空串。
+        config = parse_dashboard_config(
+            "x", {"cards": [{"card": "c", "source": "钉钉AI表格 · 渠道日销"}]}
+        )
+        self.assertEqual("钉钉AI表格 · 渠道日销", config.cards[0].source)
+
+        config = parse_dashboard_config("x", {"cards": [{"card": "c"}]})
+        self.assertEqual("", config.cards[0].source)
+
+    def test_rejects_non_string_card_source(self):
+        with self.assertRaises(DashboardConfigError):
+            parse_dashboard_config("x", {"cards": [{"card": "c", "source": 42}]})
+
     def test_underscore_note_keys_are_allowed_and_ignored(self):
         data = _l1_cockpit()
         data["_说明"] = "top-level documentation key"
@@ -753,6 +767,9 @@ class BiSeedFileTests(unittest.TestCase):
              12, 12, 12),
             tuple(placement.span for placement in qd.cards),
         )
+        # 数据源出处（2026-10-13）：渠道板每张卡都要标注来源（前端圆点用），
+        # 否则看板上会出现没有出处的卡。
+        self.assertTrue(all(placement.source for placement in qd.cards))
 
         # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
         # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡
