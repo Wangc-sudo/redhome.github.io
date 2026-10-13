@@ -31,8 +31,14 @@ from datetime import datetime, timezone
 from common.public_data.db import transaction
 
 #: 合法业务范围（scope）：qudao=渠道门店；其余为日报区域；dining=餐饮/部门。
+#: 与组织区域注册表 ``dim_org_region``（迁移 ``mart-ops-region-registry-v1``）
+#: 的 ``region_key`` 并集对齐——本元组是**消费侧兜底的代码镜像**（注册表读失败
+#: 时仍可用），运行态真源仍以 ``dim_org_region`` 为准（2026-10-14 D2 裁决：
+#: 区域清单由注册表派生/校验）。``hq`` / ``other`` 是「其他区域的人无法录目标」
+#: 的直接解法（2026-10-14 代码阶段补齐）。
 SCOPES = (
-    "qudao", "hangzhou", "shaoxing", "junpin", "vanke", "offline_all", "dining",
+    "qudao", "hangzhou", "shaoxing", "junpin", "vanke", "offline_all",
+    "dining", "hq", "other",
 )
 
 #: 合法对象类型：store=门店（渠道）、person=人员（日报）、dept=部门（餐饮）。

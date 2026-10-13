@@ -299,6 +299,37 @@ def fetch_catalog(connection):
     }
 
 
+def fetch_region_keys(connection, *, enabled_only=True):
+    """**区域键真源读**（``dim_org_region``）→ 按 ``sort_order`` 排序的元组。
+
+    消费面（2026-10-14 D2 裁决）：名册/目标的合法 scope、组织树区域顺序、
+    服务名展示一律由此派生，替换原先散落在 ``report_roster.SCOPES`` /
+    ``_ORG_REGION_ORDER`` / ``_REGION_LABELS`` 的硬编码区域清单。
+
+    ``enabled_only=True``（缺省）只取启用区域；读失败（迁移未应用 / DB
+    抖动）→ 记 WARNING 并回空元组（fail-soft），调用方据此回退代码镜像。
+    """
+    sql = "SELECT `region_key` FROM `dim_org_region` "
+    if enabled_only:
+        sql += "WHERE `enabled` = 1 "
+    sql += "ORDER BY `sort_order`, `region_key`"
+    try:
+        rows = _fetch_all(connection, sql)
+    except Exception:
+        logger.warning(
+            "dim_org_region 区域键读取失败（迁移未应用？），回退代码镜像：",
+            exc_info=True,
+        )
+        return ()
+    keys = []
+    for row in rows:
+        key = row.get("region_key") if isinstance(row, dict) else row[0]
+        key = str(key or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
 # ---------------------------------------------------------------------------
 # 写面（ops-web 唯一写方；每次变更与 audit 同事务）
 # ---------------------------------------------------------------------------
