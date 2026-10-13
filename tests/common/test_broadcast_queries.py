@@ -5,6 +5,7 @@ from datetime import date, datetime
 from unittest.mock import Mock, patch
 
 from common.broadcast.queries import (
+    fetch_bill_breakdown,
     fetch_expense_summary,
     fetch_hot_items,
     fetch_inventory_snapshot,
@@ -147,6 +148,87 @@ class ExpenseSummaryTests(unittest.TestCase):
         self.assertIsNone(jd["cells"]["2026-09"]["rate"])  # 无 GMV 不臆造费率
         self.assertEqual(data["rows"][0]["channel"], "拼多多")
         self.assertEqual(data["empty_months"], [])
+
+
+class BillBreakdownTests(unittest.TestCase):
+    """账单费用拆解查询（BI 阶段 4）：类别/平台/项目 + 窗口填充。"""
+
+    def test_grand_total_sorting_shares_and_empty_months(self):
+        by_category = [
+            {"k": "店铺扣点", "amt": 6000.0},
+            {"k": "开票填写负数", "amt": -1500.0},
+            {"k": None, "amt": 100.0},
+        ]
+        by_platform = [
+            {"k": "天猫", "amt": 4000.0},
+            {"k": "抖音", "amt": -500.0},
+            {"k": None, "amt": 100.0},
+        ]
+        by_items = [
+            {"k": "佣金", "amt": 3000.0},
+            {"k": "平台服务费", "amt": -800.0},
+        ]
+        filled = [{"month": "2026-09"}]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[by_category, by_platform, by_items, filled]):
+            data = fetch_bill_breakdown(
+                Mock(), months_back=2, today=date(2026, 9, 23)
+            )
+        # 合计 = 所有费用类别合计（= 平台合计），作占比分母
+        self.assertEqual(data["grand_total"], 4600.0)
+        # 类别：绝对值降序，None 标签恒排最后
+        self.assertEqual(
+            [c["category"] for c in data["by_category"]],
+            ["店铺扣点", "开票填写负数", None],
+        )
+        # 平台：负值（冲销）按绝对值参与排序，None 恒排最后
+        self.assertEqual(
+            [p["platform"] for p in data["by_platform"]], ["天猫", "抖音", None]
+        )
+        self.assertAlmostEqual(data["by_platform"][0]["share"], 4000.0 / 4600.0)
+        self.assertAlmostEqual(data["top_items"][0]["share"], 3000.0 / 4600.0)
+        self.assertEqual(data["top_items"][1]["item"], "平台服务费")
+        self.assertEqual(data["other_items"], {"count": 0, "total": 0.0})
+        # 窗口填充：窗口内未填月显式标注，窗口外月份不参与
+        self.assertEqual(data["months"], ["2026-08", "2026-09"])
+        self.assertEqual(data["filled_months"], ["2026-09"])
+        self.assertEqual(data["empty_months"], ["2026-08"])
+        self.assertEqual(data["as_of"], date(2026, 9, 23))
+
+    def test_top_items_truncated_with_other_bucket(self):
+        by_category = [{"k": "店铺扣点", "amt": 100.0}]
+        by_platform = [{"k": "天猫", "amt": 100.0}]
+        # 12 个项目，金额 20..9 递减 → Top10 后剩 2 项（10+9）
+        by_items = [
+            {"k": f"item{i}", "amt": float(21 - i)} for i in range(1, 13)
+        ]
+        filled = [{"month": "2026-09"}, {"month": "2026-05"}]
+        with patch("common.broadcast.queries._query",
+                   side_effect=[by_category, by_platform, by_items, filled]):
+            data = fetch_bill_breakdown(
+                Mock(), months_back=2, today=date(2026, 9, 23)
+            )
+        self.assertEqual(len(data["top_items"]), 10)   # BILL_TOP_ITEMS
+        self.assertEqual(data["top_items"][0]["item"], "item1")
+        self.assertEqual(data["other_items"], {"count": 2, "total": 19.0})
+        # 窗口外 2026-05 不计入 filled/empty 判定
+        self.assertEqual(data["filled_months"], ["2026-09"])
+        self.assertEqual(data["empty_months"], ["2026-08"])
+
+    def test_share_is_none_when_grand_total_zero(self):
+        with patch("common.broadcast.queries._query",
+                   side_effect=[
+                       [{"k": "店铺扣点", "amt": 0.0}],
+                       [{"k": "天猫", "amt": 0.0}],
+                       [{"k": "佣金", "amt": 0.0}],
+                       [],
+                   ]):
+            data = fetch_bill_breakdown(Mock(), months_back=1,
+                                        today=date(2026, 9, 23))
+        self.assertEqual(data["grand_total"], 0.0)
+        self.assertIsNone(data["by_platform"][0]["share"])   # 不除零、不臆造
+        self.assertIsNone(data["top_items"][0]["share"])
+        self.assertEqual(data["empty_months"], ["2026-09"])
 
 
 class MonthlyKpiTests(unittest.TestCase):

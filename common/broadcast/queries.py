@@ -517,6 +517,9 @@ EXPENSE_PANEL_MONTHS = 6
 #: fact_fin_store_expense 里未挂渠道行的展示名（mart_store_name IS NULL）。
 UNMAPPED_CHANNEL_LABEL = "未挂渠道"
 
+#: 账单费用拆解面板展示的费用项目数，其余合并为「其他」。
+BILL_TOP_ITEMS = 10
+
 
 def _recent_months(today, months_back):
     """返回最近 *months_back* 个月（含当月）的 "YYYY-MM" 列表，升序。"""
@@ -627,6 +630,116 @@ def fetch_expense_summary(connection, *, months_back=EXPENSE_PANEL_MONTHS,
             for r in unmapped_rows if r["store"]
         ),
         "empty_months": [ym for ym in months if ym not in filled_months],
+        "as_of": today,
+    }
+
+
+def fetch_bill_breakdown(connection, *, months_back=EXPENSE_PANEL_MONTHS,
+                         today=None):
+    """账单费用拆解面板：平台账单（店铺扣点）按类别/平台/费用项目拆解。
+
+    数据源固定 ``fact_fin_store_expense WHERE source = 'store_commission'``
+    —— 即钉钉表「电商—店铺扣点费用管理」→ fin_store_commission 投影；
+    ``promotion_recharge``（推广费充值）口径已由费用面板承载，**不进入
+    本函数**（本函数是账单拆解）。
+
+    依次发起 4 次查询：费用类别合计 / 平台合计 / 费用项目合计 /
+    有数据的月份（DISTINCT month）。口径：
+
+    * ``by_category`` / ``by_platform`` / ``top_items`` 一律 **按金额
+      绝对值降序**（含冲销负数；绝对值相同按标签升序）；标签为 ``None``
+      （fee_category / fin_platform / fee_item 为空）**恒排最后，不静默
+      丢弃**。
+    * ``share = total / grand_total``；``grand_total`` 为所有费用类别合计
+      （= 平台合计，作占比分母），``grand_total == 0`` 时 ``share = None``
+      （不臆造、不除零）。``share`` 保留 float 原值，渲染层再格式化。
+    * ``top_items`` 取绝对值最大的 ``BILL_TOP_ITEMS`` 项，其余合并为
+      ``other_items = {"count": 剩余项数, "total": 剩余金额之和}``；
+      无剩余则 count=0、total=0.0。
+    * ``empty_months`` 判定与 :func:`fetch_expense_summary` 一致：仅统计
+      窗口内月份（第 4 次查询命中的月份为 filled，其余为 empty）；窗口外
+      月份不参与。
+
+    返回 ``{"months", "filled_months", "empty_months", "grand_total",
+    "by_category", "by_platform", "top_items", "other_items", "as_of"}``。
+    """
+    today = today or date.today()
+    months = _recent_months(today, months_back)
+    month_set = set(months)
+
+    category_rows = _query(
+        connection,
+        "SELECT `fee_category` AS `k`, SUM(`expense_amount`) AS `amt` "
+        "FROM `fact_fin_store_expense` WHERE `source` = 'store_commission' "
+        "GROUP BY `fee_category`",
+    )
+    platform_rows = _query(
+        connection,
+        "SELECT `fin_platform` AS `k`, SUM(`expense_amount`) AS `amt` "
+        "FROM `fact_fin_store_expense` WHERE `source` = 'store_commission' "
+        "GROUP BY `fin_platform`",
+    )
+    item_rows = _query(
+        connection,
+        "SELECT `fee_item` AS `k`, SUM(`expense_amount`) AS `amt` "
+        "FROM `fact_fin_store_expense` WHERE `source` = 'store_commission' "
+        "GROUP BY `fee_item`",
+    )
+    month_rows = _query(
+        connection,
+        "SELECT DISTINCT `month` FROM `fact_fin_store_expense` "
+        "WHERE `source` = 'store_commission'",
+    )
+
+    def _sorted_pairs(rows):
+        # 金额绝对值降序 → 标签升序 → None 标签恒排最后
+        pairs = [(r["k"], float(r["amt"] or 0)) for r in rows]
+        pairs.sort(
+            key=lambda p: (
+                p[0] is None,
+                -abs(p[1]),
+                "" if p[0] is None else str(p[0]),
+            )
+        )
+        return pairs
+
+    category_pairs = _sorted_pairs(category_rows)
+    platform_pairs = _sorted_pairs(platform_rows)
+    item_pairs = _sorted_pairs(item_rows)
+
+    grand_total = sum(total for _, total in category_pairs)
+
+    def _share(total):
+        return (total / grand_total) if grand_total else None
+
+    top_items = [
+        {"item": item, "total": total, "share": _share(total)}
+        for item, total in item_pairs[:BILL_TOP_ITEMS]
+    ]
+    rest = item_pairs[BILL_TOP_ITEMS:]
+    other_items = {
+        "count": len(rest),
+        "total": sum(total for _, total in rest),
+    }
+
+    filled_months = sorted(
+        r["month"] for r in month_rows if r["month"] in month_set
+    )
+    filled_set = set(filled_months)
+    return {
+        "months": months,
+        "filled_months": filled_months,
+        "empty_months": [ym for ym in months if ym not in filled_set],
+        "grand_total": grand_total,
+        "by_category": [
+            {"category": k, "total": total} for k, total in category_pairs
+        ],
+        "by_platform": [
+            {"platform": k, "total": total, "share": _share(total)}
+            for k, total in platform_pairs
+        ],
+        "top_items": top_items,
+        "other_items": other_items,
         "as_of": today,
     }
 
@@ -1088,6 +1201,7 @@ def fetch_baijiu_node_elasticity(connection, *, months_back=NODE_MONTHS,
 
 __all__ = [
     "BAIJIU_NODE_KEYWORDS",
+    "BILL_TOP_ITEMS",
     "COHORT_MONTHS",
     "DANGER_MONTH_SALES",
     "EXPENSE_PANEL_MONTHS",
@@ -1107,6 +1221,7 @@ __all__ = [
     "UNMAPPED_CHANNEL_LABEL",
     "WINE_KEYWORDS",
     "fetch_baijiu_node_elasticity",
+    "fetch_bill_breakdown",
     "fetch_cohort_retention",
     "fetch_expense_summary",
     "fetch_gmv_factors",
