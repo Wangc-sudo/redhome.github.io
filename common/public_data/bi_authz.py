@@ -14,6 +14,7 @@
 错误纪律同 ``target_seed``：异常消息只含字段名与行索引，绝不含文件内容。
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,11 @@ _SEED_VERSION = 1
 
 #: 合法的 grant 类型（设计稿 §4.2 列注释：'scope' | 'region' | 'admin'）。
 GRANT_TYPES = frozenset({"scope", "region", "admin"})
+
+#: ``scope`` 类授权的 grant_key 形态（2026-10-14 D4 区域分权新增）：
+#: 全局能力 ``<capability>``（roster / org / pipelines…）或区域级能力
+#: ``<capability>:<region>``（如 ``roster:other`` / ``org:hq``）。
+_SCOPE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_]{0,31})?$")
 
 #: admin 记录的占位 grant_key（admin 无对象维度）。
 ADMIN_GRANT_KEY = "-"
@@ -260,6 +266,11 @@ def validate_grant_fields(user_id, grant_type, grant_key, note="", label="grant"
         raise BiAuthzError(f"{label} needs a non-empty grant_key")
     if grant_type == "admin" and grant_key != ADMIN_GRANT_KEY:
         raise BiAuthzError(f"{label} admin grant_key must be '{ADMIN_GRANT_KEY}'")
+    if grant_type == "scope" and not _SCOPE_KEY_RE.match(grant_key.strip()):
+        raise BiAuthzError(
+            f"{label} scope grant_key must be '<capability>' "
+            "or '<capability>:<region>'"
+        )
     if note is None:
         note = ""
     if not isinstance(note, str):

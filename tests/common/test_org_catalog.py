@@ -282,5 +282,34 @@ class MigrationRegistrationTests(unittest.TestCase):
         self.assertEqual(oc.org_catalog_ddl_statements(), statements)
 
 
+class RegionRegistryMigrationTests(unittest.TestCase):
+    """mart-ops-region-registry-v1：运行属性列 + 区域并集回填（D2 区域真源）。"""
+
+    def test_statements_alter_columns_then_insert_all_regions(self):
+        statements = oc.org_catalog_region_run_v1_statements()
+        self.assertEqual(18, len(statements))
+        alters, inserts = statements[:9], statements[9:]
+        for sql in alters:
+            self.assertTrue(sql.startswith("ALTER TABLE `dim_org_region`"))
+        for column in ("display", "table_url", "robot_code",
+                       "open_conversation_id", "remind_hour", "check_hour",
+                       "dept_order", "leaderboard_url", "store_exclude"):
+            self.assertTrue(any(f"`{column}`" in s for s in alters), column)
+        for sql in inserts:
+            self.assertIn("INSERT IGNORE INTO `dim_org_region`", sql)
+        for key in ("hangzhou", "shaoxing", "vanke", "junpin", "qudao",
+                    "offline_all", "dining", "hq", "other"):
+            self.assertTrue(any(f"'{key}'" in s for s in inserts),
+                            f"{key} missing from registry backfill")
+
+    def test_region_registry_migration_registered(self):
+        from common.public_data import live_migrations as lm
+        registered = {v: (t, s) for v, t, s in lm._MIGRATIONS}
+        self.assertIn("mart-ops-region-registry-v1", registered)
+        target, statements = registered["mart-ops-region-registry-v1"]
+        self.assertEqual("mart", target)
+        self.assertEqual(oc.org_catalog_region_run_v1_statements(), statements)
+
+
 if __name__ == "__main__":
     unittest.main()

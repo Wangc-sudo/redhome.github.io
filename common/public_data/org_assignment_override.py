@@ -89,6 +89,35 @@ def org_assignment_override_ddl_statements() -> tuple:
     return (_OVERRIDE_DDL, _AUDIT_DDL)
 
 
+# ---------------------------------------------------------------------------
+# v2（2026-10-14，D2 权威归属基线）：通讯录快照灌入，树升为唯一权威
+# ---------------------------------------------------------------------------
+
+#: 权威归属基线：把当前 ``dim_robot_member``（在职）的 region/dept 快照
+#: **一次性灌入**本表，作为人工长期维护的起点。此后本表即「维护态归属」
+#: 的唯一权威，通讯录仅降级为「发现存在性 + 建议」。
+#: ``INSERT IGNORE`` 纯追加——不覆盖既有的人工例外行（如 2026-10-13 的 3 行）。
+_AUTHORITY_BASELINE_DML = (
+    "INSERT IGNORE INTO `dim_org_assignment_override` "
+    "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, `enabled`, "
+    "`note`, `updated_by`, `updated_at`) "
+    "SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name`, 1, "
+    "'baseline: 通讯录快照灌入（2026-10-14，树升为权威）', "
+    "'migration:org-assignment-baseline', NOW(6) "
+    "FROM `dim_robot_member` WHERE `is_active` = 1"
+)
+
+
+def org_assignment_baseline_statements() -> tuple:
+    """迁移 ``mart-ops-org-assignment-baseline-v1``：权威归属基线灌入。
+
+    把 ``dim_robot_member``（在职）的归属快照灌入 ``dim_org_assignment_override``
+    （≈92 行），使归属不再依赖通讯录派生。幂等（``INSERT IGNORE``），
+    重复应用/重跑只补缺失行。
+    """
+    return (_AUTHORITY_BASELINE_DML,)
+
+
 class OrgAssignmentOverrideError(ValueError):
     """覆盖写面数据无效（消息只含字段名，不含值）。"""
 

@@ -642,5 +642,92 @@ class CarryForwardTargetTests(unittest.TestCase):
                     actor="target-rollover")
 
 
+# -- 目标单位迁移 + Nacos 回填（2026-10-14 D3） --------------------------------
+
+class _Cfg:
+    """最小区域配置替身（只需 monthly_targets）。"""
+
+    def __init__(self, monthly_targets):
+        self.monthly_targets = monthly_targets
+
+
+class TargetUnitWanMigrationTests(unittest.TestCase):
+    def test_statement_divides_by_10000(self):
+        statements = report_roster.report_target_unit_wan_statements()
+        self.assertEqual(1, len(statements))
+        self.assertIn("UPDATE `dim_report_target`", statements[0])
+        self.assertIn("/ 10000", statements[0])
+        self.assertIn("`monthly_target` IS NOT NULL", statements[0])
+
+    def test_registered_in_migrations(self):
+        from common.public_data import live_migrations as lm
+        registered = {v: (t, s) for v, t, s in lm._MIGRATIONS}
+        self.assertIn("mart-ops-target-unit-wan-v1", registered)
+        target, statements = registered["mart-ops-target-unit-wan-v1"]
+        self.assertEqual("mart", target)
+        self.assertEqual(report_roster.report_target_unit_wan_statements(),
+                         statements)
+
+
+class TargetBackfillTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _make_db()
+
+    def test_backfill_converts_to_wan_and_skips_qudao(self):
+        configs = {
+            "vanke": _Cfg({"老张": 300000, "老李": 125000}),
+            "qudao": _Cfg({"天猫": 60000}),  # 渠道按渠道键控，跳过
+            "hangzhou": _Cfg({}),            # 空配置不入结果
+        }
+        summary = report_roster.backfill_targets_from_region_config(
+            self.db, configs, "2026-10", actor="cli")
+        self.assertEqual({"vanke": {"inserted": 2, "skipped": 0}}, summary)
+        self.assertEqual(
+            {"老张": 30.0, "老李": 12.5},
+            report_roster.fetch_person_targets(self.db, "vanke", "2026-10"))
+        backfills = [r for r in report_roster.fetch_roster_audit(self.db)
+                     if r["action"] == "backfill"]
+        self.assertEqual(2, len(backfills))
+
+    def test_backfill_is_idempotent_and_never_overwrites_manual(self):
+        report_roster.upsert_report_target(
+            self.db,
+            report_roster.validate_target_fields(
+                "vanke", "老张", "2026-10", 99.0),
+            actor="admin")
+        configs = {"vanke": _Cfg({"老张": 300000, "老李": 125000})}
+        first = report_roster.backfill_targets_from_region_config(
+            self.db, configs, "2026-10", actor="cli")
+        self.assertEqual({"vanke": {"inserted": 1, "skipped": 1}}, first)
+        # 人工值不被回填覆盖
+        self.assertEqual(99.0, report_roster.fetch_intake_target(
+            self.db, "vanke", "老张", "2026-10"))
+        # 复跑全跳过、零新增审计
+        second = report_roster.backfill_targets_from_region_config(
+            self.db, configs, "2026-10", actor="cli")
+        self.assertEqual({"vanke": {"inserted": 0, "skipped": 2}}, second)
+        backfills = [r for r in report_roster.fetch_roster_audit(self.db)
+                     if r["action"] == "backfill"]
+        self.assertEqual(1, len(backfills))
+
+    def test_backfill_dry_run_writes_nothing(self):
+        configs = {"vanke": _Cfg({"老张": 300000})}
+        summary = report_roster.backfill_targets_from_region_config(
+            self.db, configs, "2026-10", actor="cli", dry_run=True)
+        self.assertEqual({"vanke": {"inserted": 1, "skipped": 0}}, summary)
+        self.assertEqual({}, report_roster.fetch_person_targets(
+            self.db, "vanke", "2026-10"))
+        self.assertEqual([], [
+            r for r in report_roster.fetch_roster_audit(self.db)
+            if r["action"] == "backfill"
+        ])
+
+    def test_backfill_rejects_bad_month(self):
+        with self.assertRaises(ReportRosterError):
+            report_roster.backfill_targets_from_region_config(
+                self.db, {"vanke": _Cfg({"老张": 300000})}, "2026-1",
+                actor="cli")
+
+
 if __name__ == "__main__":
     unittest.main()

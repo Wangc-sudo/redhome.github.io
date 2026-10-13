@@ -824,6 +824,58 @@ def _handle_load_target(args):
         sys.exit(1)
 
 
+def _handle_backfill_region_targets(args):
+    """把 Nacos ``monthlyTargets``（区域个人月目标）回填进 ``dim_report_target``。
+
+    单位为**元**的配置值落库前 ÷10000 转万元。``--dry-run`` 只读不写；真写
+    需 ``--confirm-local-test-write``。区域配置经 ``settings.region_seed_path``
+    + Nacos 覆盖加载（真值不落 git）。
+    """
+    # Safety pre-check: the write-confirmation flag is required BEFORE any work.
+    if not args.dry_run and not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        if settings.region_seed_path is None:
+            _print_failure(code="region_seed_required")
+            sys.exit(1)
+        from common.region_config import (
+            apply_region_overlay,
+            build_nacos_region_overlay,
+            load_region_seed,
+        )
+        configs = apply_region_overlay(
+            load_region_seed(settings.region_seed_path),
+            build_nacos_region_overlay(),
+        )
+        from common.public_data.report_roster import (
+            ReportRosterError,
+            backfill_targets_from_region_config,
+        )
+        mart_conn = connect(settings.mart_database)
+        try:
+            summary = backfill_targets_from_region_config(
+                mart_conn, configs, args.month, actor=args.actor,
+                dry_run=args.dry_run,
+            )
+        except ReportRosterError:
+            _print_failure(code="backfill_targets_invalid")
+            sys.exit(1)
+        inserted = sum(item["inserted"] for item in summary.values())
+        skipped = sum(item["skipped"] for item in summary.values())
+        mode = "dry-run" if args.dry_run else "applied"
+        print(
+            f"backfill mode={mode} regions={len(summary)} "
+            f"inserted={inserted} skipped={skipped} status=completed"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="backfill_targets_error")
+        sys.exit(1)
+
+
 def _handle_load_ops_seed(args):
     # Safety pre-check: the write-confirmation flag is required BEFORE any work.
     if not args.confirm_local_test_write:
@@ -1130,6 +1182,23 @@ def main(argv=None):
         "--confirm-local-test-write", action="store_true", default=False
     )
 
+    # -- backfill-region-targets ---------------------------------------------
+    backfill_targets = subparsers.add_parser(
+        "backfill-region-targets",
+        help="Backfill dim_report_target from region monthlyTargets (万元)",
+    )
+    backfill_targets.add_argument(
+        "--month", required=True, help="target month YYYY-MM"
+    )
+    backfill_targets.add_argument("--actor", default="cli:backfill-targets")
+    backfill_targets.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="report only, do not write",
+    )
+    backfill_targets.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+
     # -- import-manual -------------------------------------------------------
     import_manual = subparsers.add_parser(
         "import-manual", help="Validate and import a manual report file"
@@ -1172,6 +1241,7 @@ def main(argv=None):
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
         "load-ops-seed": _handle_load_ops_seed,
+        "backfill-region-targets": _handle_backfill_region_targets,
         "seed-report-roster": _handle_seed_report_roster,
         "load-channel-target": _handle_load_channel_target,
         "import-manual": _handle_import_manual,
