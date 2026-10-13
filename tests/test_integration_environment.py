@@ -98,6 +98,21 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # 健康门须覆盖同一批长驻容器：force-recreate 后起不来要能触发回滚。
         self.assertIn("--filter name=dops-ops-web", text)
 
+    def test_deploy_script_covers_kb_gateway_for_reload_and_health_gate(self):
+        deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
+        text = deploy_script.read_text(encoding="utf-8")
+
+        # kb-gateway 同为长驻 Stream 进程（代码 bind-mount 只读）：不列入
+        # CODE_SERVICES 时合并 main 后 KB P2 代码不重载（2026-10-13 实测）。
+        code_services = [
+            line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
+        ]
+        self.assertEqual(1, len(code_services))
+        self.assertIn("kb-gateway", code_services[0])
+
+        # 同受健康门约束：force-recreate 后起不来要能触发回滚。
+        self.assertIn("--filter name=kb-gateway", text)
+
     def test_deploy_script_applies_migrations_before_recreating_services(self):
         deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
         text = deploy_script.read_text(encoding="utf-8")

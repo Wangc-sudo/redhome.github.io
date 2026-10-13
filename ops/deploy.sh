@@ -28,8 +28,9 @@ PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）。
 # ops-web 与 bi-web 同为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：
 # 漏在本列表时 git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进
-# main 后不生效（#57/#58/#59 实测，2026-10-12 补齐）。
-CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web}"
+# main 后不生效（#57/#58/#59 实测，2026-10-12 补齐）。kb-gateway 同为长驻
+# Stream 进程 + 只读挂载，漏列时 KB P2 合并后不重载（2026-10-13 补齐）。
+CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web kb-gateway}"
 # 灾备/CI 模式（DOPS_SYNC_ONLY=1，如 dops-ci）：只 git 同步代码到部署分支，
 # 不重建镜像、不重启服务——避免灾备机与生产机重复跑 cron / 抢占 DingTalk stream。
 SYNC_ONLY="${DOPS_SYNC_ONLY:-0}"
@@ -118,7 +119,7 @@ health_gate() {
       # 关键长驻容器均在 Up（bi-web/ops-web 另看各自的 healthz）
       if [ -z "$(docker ps \
           --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
-          --filter name=dops-ops-web \
+          --filter name=dops-ops-web --filter name=kb-gateway \
           --format '{{.Status}}' | grep -v Up)" ]; then
         return 0
       fi
