@@ -154,6 +154,25 @@ def report_roster_v4_ddl_statements() -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# v5（2026-10-14，D3 目标单位统一）：存量月目标 ÷10000 转万元
+# ---------------------------------------------------------------------------
+
+#: 存量 ``dim_report_target.monthly_target`` 单位为**元**（如 996000 = 99.6 万）；
+#: 本迁移一次性 ÷10000 统一为**万元**口径。纯数据迁移、无 DDL；版本跟踪与
+#: 校验和保证只跑一次，不会二次除。
+_TARGET_UNIT_WAN_DML = (
+    "UPDATE `dim_report_target` "
+    "SET `monthly_target` = `monthly_target` / 10000 "
+    "WHERE `monthly_target` IS NOT NULL"
+)
+
+
+def report_target_unit_wan_statements() -> tuple:
+    """迁移 ``mart-ops-target-unit-wan-v1``：存量月目标 ÷10000 转万元口径。"""
+    return (_TARGET_UNIT_WAN_DML,)
+
+
+# ---------------------------------------------------------------------------
 # 写面校验（ops-web 名册表单）
 # ---------------------------------------------------------------------------
 
@@ -635,8 +654,9 @@ def validate_target_fields(scope, person_name, year_month, monthly_target,
                            note=""):
     """校验区域月目标字段，返回规范化的 :class:`ReportTarget`。
 
-    monthly_target 单位为元、可空（空 = 清除该人当月目标）；非法抛
-    :class:`ReportRosterError`（消息只含字段名，不含值）。
+    monthly_target 单位为**万元**（2026-10-14 单位迁移后统一口径）、可空
+    （空 = 清除该人当月目标）；非法抛 :class:`ReportRosterError`
+    （消息只含字段名，不含值）。
     """
     if scope not in SCOPES or scope == "qudao":
         raise ReportRosterError("scope must be a registered region scope")
@@ -822,6 +842,70 @@ def carry_forward_targets(connection, *, from_month, to_month, actor,
     finally:
         cursor.close()
     return {"inserted": inserted, "skipped": skipped}
+
+
+def backfill_targets_from_region_config(connection, configs, year_month, *,
+                                        actor, dry_run=False):
+    """把区域配置的 ``monthlyTargets``（Nacos 真值）回填进 ``dim_report_target``。
+
+    配置里的金额单位为**元**，落库统一换算为**万元**（与 v5 迁移同口径）。
+    *configs* 为 ``{region: RegionConfig}``（``region_config`` 加载种子 + Nacos
+    覆盖后的结果）；``qudao`` 跳过——渠道目标按渠道键控，不属个人区域目标。
+    ``INSERT IGNORE`` 幂等：已有人工录入优先，绝不覆盖。
+
+    返回 ``{region: {"inserted": n, "skipped": m}}``；``dry_run=True`` 只读不写
+    （inserted 为「将会插入」）。每条实际插入同事务落一行审计（action='backfill'）。
+    """
+    if not _YEAR_MONTH_RE.match(year_month or ""):
+        raise ReportRosterError("year_month must be YYYY-MM")
+    summary = {}
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            for region in sorted(configs):
+                if region == "qudao":
+                    continue
+                entries = getattr(configs[region], "monthly_targets", None) or {}
+                if not entries:
+                    continue
+                inserted = skipped = 0
+                for name in sorted(entries):
+                    amount = float(entries[name]) / 10000.0
+                    if dry_run:
+                        cursor.execute(
+                            "SELECT 1 FROM `dim_report_target` "
+                            "WHERE `scope` = %s AND `person_name` = %s "
+                            "AND `year_month` = %s LIMIT 1",
+                            (region, name, year_month),
+                        )
+                        if cursor.fetchone():
+                            skipped += 1
+                        else:
+                            inserted += 1
+                        continue
+                    cursor.execute(
+                        "INSERT IGNORE INTO `dim_report_target` "
+                        "(`scope`, `person_name`, `year_month`, "
+                        "`monthly_target`, `note`, `updated_by`, "
+                        "`updated_at`) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (region, name, year_month, amount,
+                         "Nacos monthlyTargets 回填（万元）", actor,
+                         _utc_now_text()),
+                    )
+                    if getattr(cursor, "rowcount", 0) == 1:
+                        inserted += 1
+                        _insert_audit(
+                            connection, actor, "backfill",
+                            RosterEntry(region, "person", year_month, name),
+                            detail=f"Nacos 回填 月目标={amount:.2f}万",
+                        )
+                    else:
+                        skipped += 1
+                summary[region] = {"inserted": inserted, "skipped": skipped}
+    finally:
+        cursor.close()
+    return summary
 
 
 def fetch_scope_person_names(connection, scope):

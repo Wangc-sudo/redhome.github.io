@@ -101,6 +101,80 @@ def org_catalog_ddl_statements() -> tuple:
     return (_REGION_DDL, _DEPT_DDL, _AUDIT_DDL)
 
 
+# ---------------------------------------------------------------------------
+# v2（2026-10-14，D2 区域真源）：区域运行属性列 + 区域并集回填
+# ---------------------------------------------------------------------------
+
+#: 区域运行属性列——承接此前散落在 ``region_config`` / 常量的运行参数
+#: （display/tableUrl/robotCode/openConversationId/remindHour/checkHour/
+#: deptOrder/leaderboardUrl/storeExclude），使「区域的一切配置一处定义」。
+#: 值可空：真实运行值仍以 Nacos ``region-<region>.yaml`` 为准（避免 DB /
+#: Nacos 双源分叉），本次只落结构。ALTER 无 IF NOT EXISTS，已应用版本靠
+#: 校验和跳过（同 report_roster v2/v3 纪律）。
+_REGION_RUN_ALTERS = (
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `display` VARCHAR(64) DEFAULT NULL AFTER `label`",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `table_url` VARCHAR(255) DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `robot_code` VARCHAR(64) DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `open_conversation_id` VARCHAR(128) DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `remind_hour` TINYINT UNSIGNED DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `check_hour` TINYINT UNSIGNED DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `dept_order` JSON DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `leaderboard_url` VARCHAR(255) DEFAULT NULL",
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `store_exclude` JSON DEFAULT NULL",
+)
+
+#: 区域并集（#1–#6 实测：``report_roster.SCOPES`` ∪ ``app._ORG_REGION_ORDER``
+#: ∪ ``_REGION_LABELS`` ∪ scheduler 常量 ∪ ``region_config`` 种子 ∪
+#: ``dim_robot_member.region`` 真实值）。顺序即 ``sort_order``：常用业务区
+#: 在前、兜底区（hq/other）在后。
+_REGION_REGISTRY_ROWS = (
+    ("hangzhou", "杭州"),
+    ("shaoxing", "绍兴"),
+    ("vanke", "万科&大莲花&团购"),
+    ("junpin", "君品雅院"),
+    ("qudao", "渠道"),
+    ("offline_all", "线下整体"),
+    ("dining", "餐饮"),
+    ("hq", "总部"),
+    ("other", "其他"),
+)
+
+_REGION_REGISTRY_INSERT = (
+    "INSERT IGNORE INTO `dim_org_region` "
+    "(`region_key`, `label`, `sort_order`, `enabled`, `updated_by`, "
+    "`updated_at`) VALUES "
+)
+
+
+def _region_registry_inserts() -> tuple:
+    return tuple(
+        _REGION_REGISTRY_INSERT
+        + f"('{key}', '{label}', {order}, 1, "
+          "'migration:region-registry', NOW(6))"
+        for order, (key, label) in enumerate(_REGION_REGISTRY_ROWS)
+    )
+
+
+def org_catalog_region_run_v1_statements() -> tuple:
+    """迁移 ``mart-ops-region-registry-v1``：区域运行属性列 + 区域并集回填。
+
+    先 ``ADD COLUMN`` 补齐运行属性（结构先落、值留空）；再把 #1–#6 出现过的
+    区域键并集 ``INSERT IGNORE`` 进 ``dim_org_region``（纯追加，**不覆盖**
+    已有人工登记行）——使 ``other`` / ``hq`` / ``dining`` 成为合法区域，
+    这是「其他区域的人无法录目标」的直接解法。
+    """
+    return _REGION_RUN_ALTERS + _region_registry_inserts()
+
+
 class OrgCatalogError(ValueError):
     """目录写面数据无效（消息只含字段名，不含值）。"""
 

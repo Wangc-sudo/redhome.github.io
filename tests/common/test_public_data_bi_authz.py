@@ -92,6 +92,14 @@ class BiAuthzMigrationTests(unittest.TestCase):
         registered = {version: target for version, target, _ in _MIGRATIONS}
         self.assertEqual("mart", registered["mart-ops-bi-authz-v1"])
 
+    def test_region_scope_semantic_version_registered_as_marker(self):
+        # 无表结构变更：仅登记版本作为「区域级 grant_key 已放行」的可核验标记。
+        statements_by_version = {
+            version: statements for version, _, statements in _MIGRATIONS
+        }
+        self.assertIn("mart-ops-authz-region-scope-v1", statements_by_version)
+        self.assertEqual((), statements_by_version["mart-ops-authz-region-scope-v1"])
+
     def test_ddl_uses_create_if_not_exists(self):
         for statement in bi_authz_ddl_statements():
             self.assertTrue(statement.startswith("CREATE TABLE IF NOT EXISTS"))
@@ -217,6 +225,18 @@ class ValidateGrantFieldsTests(unittest.TestCase):
         record = validate_grant_fields(" u1 ", "scope", " fin ")
         self.assertEqual(("u1", "scope", "fin"),
                          (record.user_id, record.grant_type, record.grant_key))
+
+    def test_scope_accepts_global_and_region_capabilities(self):
+        for key in ("roster", "org", "pipelines", "roster:other",
+                    "org:hq", "roster:offline_all"):
+            record = validate_grant_fields("u1", "scope", key)
+            self.assertEqual(key, record.grant_key)
+
+    def test_scope_rejects_malformed_region_capability(self):
+        for key in ("roster:", ":other", "roster:Other", "roster:HQ",
+                    "Roster", "roster:bad:key"):
+            with self.assertRaisesRegex(BiAuthzError, "scope grant_key"):
+                validate_grant_fields("u1", "scope", key)
 
 
 class GrantReadWriteTests(unittest.TestCase):

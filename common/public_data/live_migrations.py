@@ -43,9 +43,11 @@ from common.public_data.ops_control import (
 )
 from common.public_data.org_assignment_override import (
     org_assignment_override_ddl_statements,
+    org_assignment_baseline_statements,
 )
 from common.public_data.org_catalog import (
     org_catalog_ddl_statements,
+    org_catalog_region_run_v1_statements,
 )
 from common.public_data.recipient_override import (
     recipient_override_ddl_statements,
@@ -55,6 +57,7 @@ from common.public_data.report_roster import (
     report_roster_v2_ddl_statements,
     report_roster_v3_ddl_statements,
     report_roster_v4_ddl_statements,
+    report_target_unit_wan_statements,
 )
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -551,6 +554,39 @@ _MIGRATIONS = (
         "mart-ops-org-catalog-v1",
         "mart",
         org_catalog_ddl_statements(),
+    ),
+    (
+        # 区域注册表 v2（2026-10-14 D2 区域真源）：dim_org_region 补运行属性
+        # 列（display/tableUrl/robotCode/openConversationId/remindHour/
+        # checkHour/deptOrder/leaderboardUrl/storeExclude）+ 区域并集回填
+        # （含 hq/other/dining）。INSERT IGNORE 纯追加，不覆盖人工登记行——
+        # 直接消掉「其他区域的人无法录目标」这一实测缺口。
+        "mart-ops-region-registry-v1",
+        "mart",
+        org_catalog_region_run_v1_statements(),
+    ),
+    (
+        # 权威归属基线（2026-10-14 D2）：dim_robot_member 快照灌入
+        # dim_org_assignment_override（≈92 行），树升为唯一权威归属源，
+        # 通讯录降级为「发现存在性 + 建议」。INSERT IGNORE 不覆盖既有例外行。
+        "mart-ops-org-assignment-baseline-v1",
+        "mart",
+        org_assignment_baseline_statements(),
+    ),
+    (
+        # 目标单位统一（2026-10-14 D3）：dim_report_target 存量月目标
+        # ÷10000 转万元口径。纯数据迁移，版本跟踪 + 校验和保证只跑一次。
+        "mart-ops-target-unit-wan-v1",
+        "mart",
+        report_target_unit_wan_statements(),
+    ),
+    (
+        # 区域分权授权语义（2026-10-14 D4）：无表结构变更，仅登记版本作为
+        # 「roster:<r> / org:<r> 等区域级 grant_key 已放行」的可核验标记；
+        # 白名单校验在 bi_authz.validate_grant_fields（_SCOPE_KEY_RE）。
+        "mart-ops-authz-region-scope-v1",
+        "mart",
+        (),
     ),
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),

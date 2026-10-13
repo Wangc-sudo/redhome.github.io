@@ -590,5 +590,52 @@ class MigrateCliTests(unittest.TestCase):
             raw, wdt, mart, manual_connection=None)
 
 
+class BackfillRegionTargetsCliTests(unittest.TestCase):
+    """`backfill-region-targets`：Nacos monthlyTargets → dim_report_target（万元）。"""
+
+    def test_requires_confirmation_before_any_work(self):
+        with patch("common.public_data.cli.load_settings") as settings:
+            with self.assertRaises(SystemExit) as ctx:
+                main(["backfill-region-targets", "--month", "2026-10"])
+        self.assertNotEqual(0, ctx.exception.code)
+        settings.assert_not_called()
+
+    def test_dry_run_reports_without_confirmation(self):
+        output = io.StringIO()
+        settings = Mock(region_seed_path=Path("/seed.json"),
+                        mart_database="mart_ops")
+        conn = Mock()
+        with patch("common.public_data.cli.load_settings",
+                   return_value=settings), \
+             patch("common.public_data.db.connect", return_value=conn), \
+             patch("common.region_config.load_region_seed",
+                   return_value={"vanke": "cfg"}), \
+             patch("common.region_config.build_nacos_region_overlay",
+                   return_value=None), \
+             patch("common.region_config.apply_region_overlay",
+                   return_value={"vanke": "cfg"}), \
+             patch("common.public_data.report_roster.backfill_targets_from_region_config",
+                   return_value={"vanke": {"inserted": 2, "skipped": 0}}) as backfill:
+            with redirect_stdout(output):
+                main(["backfill-region-targets", "--month", "2026-10",
+                      "--dry-run"])
+
+        backfill.assert_called_once_with(
+            conn, {"vanke": "cfg"}, "2026-10",
+            actor="cli:backfill-targets", dry_run=True)
+        self.assertIn("mode=dry-run", output.getvalue())
+        self.assertIn("inserted=2", output.getvalue())
+
+    def test_region_seed_required(self):
+        settings = Mock(region_seed_path=None, mart_database="mart_ops")
+        with patch("common.public_data.cli.load_settings",
+                   return_value=settings), \
+             patch("common.public_data.db.connect") as connect:
+            with self.assertRaises(SystemExit):
+                main(["backfill-region-targets", "--month", "2026-10",
+                      "--confirm-local-test-write"])
+        connect.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

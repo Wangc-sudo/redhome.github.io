@@ -104,6 +104,26 @@ class DdlTests(unittest.TestCase):
             self.assertIn("CREATE TABLE IF NOT EXISTS", sql)
 
 
+class AuthorityBaselineMigrationTests(unittest.TestCase):
+    """mart-ops-org-assignment-baseline-v1：通讯录快照灌入，树升为权威。"""
+
+    def test_baseline_insert_ignore_from_dim_robot_member(self):
+        statements = oa.org_assignment_baseline_statements()
+        self.assertEqual(1, len(statements))
+        sql = statements[0]
+        self.assertIn("INSERT IGNORE INTO `dim_org_assignment_override`", sql)
+        self.assertIn("FROM `dim_robot_member`", sql)
+        self.assertIn("`is_active` = 1", sql)
+
+    def test_baseline_migration_registered(self):
+        from common.public_data import live_migrations as lm
+        registered = {v: (t, s) for v, t, s in lm._MIGRATIONS}
+        self.assertIn("mart-ops-org-assignment-baseline-v1", registered)
+        target, statements = registered["mart-ops-org-assignment-baseline-v1"]
+        self.assertEqual("mart", target)
+        self.assertEqual(oa.org_assignment_baseline_statements(), statements)
+
+
 class FetchOverridesTests(unittest.TestCase):
 
     def test_only_enabled_rows_keyed_by_user_id(self):
