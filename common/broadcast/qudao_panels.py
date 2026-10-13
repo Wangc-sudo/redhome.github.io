@@ -505,6 +505,90 @@ def build_expense_panel(connection, *, today):
 
 
 # ---------------------------------------------------------------------------
+# 0.1.1 账单费用拆解面板——平台账单（店铺扣点）按类别/平台/费用项目拆解
+# ---------------------------------------------------------------------------
+
+def build_platform_bill_panel(connection, *, today):
+    """账单费用拆解面板：平台账单（source=store_commission）三张明细表。
+
+    费用类别 / 平台 / 费用项目 TopN 各一张小表，占比 = 该项 ÷ 账单合计
+    （账单合计为 0 时占比显示「—」，不臆造）。财务未填月份与「推广类型
+    明细缺失」显式标注，不静默、不臆造。
+    """
+    from common.broadcast.queries import fetch_bill_breakdown
+
+    data = fetch_bill_breakdown(connection, today=today)
+    if not data["by_category"] and not data["by_platform"]:
+        return _placeholder_panel(
+            "🧾 账单费用拆解",
+            "暂无账单费用数据（fact_fin_store_expense 的 store_commission 为空）",
+        )
+
+    grand_total = data["grand_total"]
+
+    def _ratio(v):
+        return (v / grand_total) if grand_total else None
+
+    def _share(v):
+        return f"{v * 100:.1f}%" if v is not None else "—"
+
+    def _table(head, trs):
+        return (
+            f'<table><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(trs)}</tbody></table>'
+        )
+
+    category_trs = (
+        f'<tr><td class="strong">{_esc(c["category"])}</td>'
+        f'<td class="num">{_fmt_wan(c["total"])}</td>'
+        f'<td class="num">{_share(_ratio(c["total"]))}</td></tr>'
+        for c in data["by_category"]
+    )
+    platform_trs = (
+        f'<tr><td class="strong">{_esc(p["platform"])}</td>'
+        f'<td class="num">{_fmt_wan(p["total"])}</td>'
+        f'<td class="num">{_share(p["share"])}</td></tr>'
+        for p in data["by_platform"]
+    )
+    top_n = len(data["top_items"])
+    item_trs = [
+        f'<tr><td class="strong">{_esc(i["item"])}</td>'
+        f'<td class="num">{_fmt_wan(i["total"])}</td>'
+        f'<td class="num">{_share(i["share"])}</td></tr>'
+        for i in data["top_items"]
+    ]
+    other = data["other_items"]
+    if other["count"] > 0:
+        item_trs.append(
+            f'<tr><td class="strong">其他 {other["count"]} 项</td>'
+            f'<td class="num">{_fmt_wan(other["total"])}</td>'
+            f'<td class="num">{_share(_ratio(other["total"]))}</td></tr>'
+        )
+    body = (
+        f'<div class="small strong" style="margin:6px 0 2px">费用类别</div>'
+        + _table('<th>费用类别</th><th>金额</th><th>占比</th>', category_trs)
+        + f'<div class="small strong" style="margin:10px 0 2px">平台</div>'
+        + _table('<th>平台</th><th>金额</th><th>占比</th>', platform_trs)
+        + f'<div class="small strong" style="margin:10px 0 2px">费用项目</div>'
+        + _table(
+            f'<th>费用项目 Top{top_n}</th><th>金额</th><th>占比</th>', item_trs
+        )
+    )
+    notes = [
+        "数据源：平台账单（钉钉表「电商—店铺扣点费用管理」→ fin_store_commission"
+        " → fact_fin_store_expense，source=store_commission）",
+        "费用类别（店铺扣点/开票填写负数）对应应缴/实缴口径，待财务确认",
+    ]
+    if data["empty_months"]:
+        notes.append(f'⚠️ 财务未填：{"、".join(data["empty_months"])}')
+    notes.append(
+        "数据缺失：推广类型明细（关键词推广/人群推广/货品全站推）不在账单粒度内，"
+        "需接平台推广后台 API，本期不臆造"
+    )
+    return _panel("🧾 账单费用拆解", body, note=" · ".join(notes))
+
+
+# ---------------------------------------------------------------------------
 # 0.2 商品结构面板——系列/价格带/集中度（材料二 P1 模块）
 # ---------------------------------------------------------------------------
 
@@ -619,6 +703,194 @@ def build_refund_reason_panel(connection, *, today):
 
 
 # ---------------------------------------------------------------------------
+# 0.4 GMV 三因子拆解——买家数 × 人均件数 × 件均价（材料二 P1）
+# ---------------------------------------------------------------------------
+
+def build_gmv_factor_panel(connection, *, today):
+    """GMV 三因子拆解：买家数 × 人均件数 × 件均价 + 环比连环替代归因。
+
+    恒等式 GMV = 买家数 × 人均件数 × 件均价；环比三项贡献（连环替代法）
+    加总恰等于 ΔGMV。买家ID 缺失（拼多多）行不计入买家数，面板附口径说明。
+    """
+    from common.broadcast.queries import fetch_gmv_factors
+
+    data = fetch_gmv_factors(connection)
+    months = data["months"]
+    if not months:
+        return _placeholder_panel(
+            "🧮 GMV 三因子拆解", "暂无订单数据（fact_order_line 为空）"
+        )
+
+    def _int(v):
+        return f"{v:,}" if v else '<span class="muted">—</span>'
+
+    def _num(v, digits=2):
+        return f"{v:,.{digits}f}" if v is not None else '<span class="muted">—</span>'
+
+    def _contrib(v):
+        if v is None:
+            return '<span class="muted">—</span>'
+        cls = "g" if v >= 0 else "r"
+        sign = "+" if v >= 0 else "-"
+        return f'<span class="{cls}">{sign}{_fmt_wan(abs(v))}</span>'
+
+    trs = []
+    for m in months:
+        c = m["contrib"] or {}
+        trs.append(
+            f'<tr><td class="strong">{_esc(m["ym"])}</td>'
+            f'<td class="num">{_fmt_wan(m["gmv"])}</td>'
+            f'<td class="num">{_int(m["buyers"])}</td>'
+            f'<td class="num">{_num(m["qty"], 0)}</td>'
+            f'<td class="num">{_num(m["qty_per_buyer"])}</td>'
+            f'<td class="num">¥{_num(m["unit_price"])}</td>'
+            f'<td class="num">{_contrib(c.get("buyers"))}</td>'
+            f'<td class="num">{_contrib(c.get("qty_per_buyer"))}</td>'
+            f'<td class="num">{_contrib(c.get("unit_price"))}</td>'
+            f'</tr>'
+        )
+    body = (
+        f'<table><thead><tr>'
+        f'<th>月份</th><th>GMV</th><th>买家数</th><th>件数</th>'
+        f'<th>人均件数</th><th>件均价</th>'
+        f'<th>买家数贡献</th><th>人均件数贡献</th><th>件均价贡献</th>'
+        f'</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+    )
+    return _panel(
+        "🧮 GMV 三因子拆解", body,
+        note=(
+            "口径：GMV=Σpaid_amount（剔除取消单，付款时间归月）· "
+            "买家数=COUNT(DISTINCT buyer_id) · 件数=Σquantity · "
+            "人均件数=件数÷买家数 · 件均价=GMV÷件数 · "
+            "恒等式 GMV=买家数×人均件数×件均价 · "
+            "环比贡献=连环替代法（买家数贡献=Δ买家数×上期人均件数×上期件均价；"
+            "人均件数贡献=本期买家数×Δ人均件数×上期件均价；"
+            "件均价贡献=本期买家数×本期人均件数×Δ件均价；三项和=ΔGMV）· "
+            "买家ID缺失行（拼多多按隐私协议不返回）不计入买家数，"
+            "会高估人均件数/件均价"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 0.5 Cohort 留存矩阵——首购月队列 × 首购后第 k 月留存率（材料二 P1）
+# ---------------------------------------------------------------------------
+
+def build_cohort_retention_panel(connection, *, today):
+    """Cohort 留存矩阵：首购月队列 × 首购后第 k 月留存率（M0 恒 100%）。"""
+    from common.broadcast.queries import fetch_cohort_retention
+
+    data = fetch_cohort_retention(connection, today=today)
+    if not data["cohorts"]:
+        return _placeholder_panel(
+            "🔁 Cohort 留存矩阵", "暂无买家数据（buyer_id 全为空）"
+        )
+
+    periods = data["periods"]
+
+    def _pct(v):
+        return f"{v * 100:.0f}%" if v is not None else '<span class="muted">—</span>'
+
+    ths = "".join(f"<th>M{k}</th>" for k in periods)
+    trs = "".join(
+        f'<tr><td class="strong">{_esc(row["cohort"])}</td>'
+        f'<td class="num">{row["size"]:,}</td>'
+        + "".join(
+            f'<td class="num">{_pct(row["retention"].get(k))}</td>'
+            for k in periods
+        )
+        + "</tr>"
+        for row in data["cohorts"]
+    )
+    avg_tds = "".join(
+        f'<td class="num"><b>{_pct(data["avg_retention"].get(k))}</b></td>'
+        for k in periods
+    )
+    body = (
+        f'<table><thead><tr><th>首购月</th><th>队列规模</th>{ths}</tr></thead>'
+        f'<tbody>{trs}</tbody>'
+        f'<tfoot><tr><td class="strong">加权平均</td>'
+        f'<td class="num muted">—</td>{avg_tds}</tr></tfoot></table>'
+    )
+    return _panel(
+        "🔁 Cohort 留存矩阵", body,
+        note=(
+            "口径：队列=买家首购月（MIN(trade_time) 所在月）· "
+            "留存率(Mk)=首购后第 k 月仍有成交的队列买家数÷队列规模（M0 恒 100%）· "
+            f"列覆盖至数据最新月（{_esc(data['last_ym'] or '—')}）· "
+            "加权平均=Σ已满 k 月队列当月活跃买家÷Σ已满 k 月队列规模"
+            "（未满 k 月的队列不计入）· "
+            "无 buyer_id 行（拼多多按隐私协议）不入队列，不臆造"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 0.6 白酒节点弹性——节日节点窗口日均 GMV 相对平日倍数（材料二 P1）
+# ---------------------------------------------------------------------------
+
+def build_baijiu_node_panel(connection, *, today):
+    """白酒节点弹性：节点日均 GMV ÷ 平日日均 GMV（依赖 dim_calendar 节点标记）。
+
+    节点标记来自 dim_calendar.note（holiday-cn 导入的节假日名称）；窗口内
+    无节点标记时显式标注「数据缺失」并给出补数方案，不臆造节点。
+    """
+    from common.broadcast.queries import fetch_baijiu_node_elasticity
+
+    data = fetch_baijiu_node_elasticity(connection, today=today)
+    if not data.get("has_data"):
+        return _placeholder_panel(
+            "🍶 白酒节点弹性", "暂无订单数据（fact_order_line 为空）"
+        )
+
+    def _mult(v):
+        if v is None:
+            return '<span class="muted">—</span>'
+        cls = "g" if v >= 1 else "r"
+        return f'<span class="{cls}">{v:.2f}×</span>'
+
+    baseline = (
+        f'平日基线日均 GMV {_fmt_wan(data["baseline_daily"])}'
+        f'（{data["baseline_days"]} 个非节点日）'
+    )
+    if data["nodes"]:
+        trs = "".join(
+            f'<tr><td class="strong">{_esc(n["node"])}</td>'
+            f'<td class="num">{n["days"]}</td>'
+            f'<td class="num">{_fmt_wan(n["gmv"])}</td>'
+            f'<td class="num">{_fmt_wan(n["daily_avg"])}</td>'
+            f'<td class="num">{_mult(n["elasticity"])}</td></tr>'
+            for n in data["nodes"]
+        )
+        body = (
+            f'<div class="small muted" style="margin:0 0 4px">{baseline}</div>'
+            f'<table><thead><tr><th>节点</th><th>天数</th><th>GMV</th>'
+            f'<th>日均</th><th>弹性</th></tr></thead><tbody>{trs}</tbody></table>'
+        )
+    else:
+        reason = (
+            "日历无记录" if not data["has_calendar"] else "note 无节假日名称"
+        )
+        body = (
+            f'<div class="small" style="color:#b26a00">'
+            f'⚠️ 数据缺失：指定窗口内 dim_calendar 未含节点标记（{reason}），'
+            f'无法拆分节点弹性。补数方案：在 ops-web「工作日历」导入法定节假日，'
+            f'节点标记写入 dim_calendar.note 后自动生效</div>'
+            f'<div class="small muted" style="margin-top:4px">{baseline}</div>'
+        )
+    return _panel(
+        "🍶 白酒节点弹性", body,
+        note=(
+            "口径：节点标记=dim_calendar.note 命中节日关键词（春节/中秋/国庆/元旦/"
+            "端午/清明/劳动节/双十一/618）且 is_workday=0（调休上班日不计）· "
+            "GMV=Σpaid_amount 按 DATE(trade_time) 归日（剔除取消单）· "
+            "弹性=节点日均 GMV÷平日（非节点）日均 GMV（有效窗口=数据首日~数据末日，"
+            "避免空日稀释基线）· >1 表示节点旺"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 装配
 # ---------------------------------------------------------------------------
 
@@ -630,8 +902,12 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
     builders = (
         ("月度核心指标看板", lambda: build_monthly_kpi_panel(connection, today=business_date)),
         ("费用/盈利面板", lambda: build_expense_panel(connection, today=business_date)),
+        ("账单费用拆解", lambda: build_platform_bill_panel(connection, today=business_date)),
         ("商品结构分析", lambda: build_product_structure_panel(connection, today=business_date)),
         ("退款原因分析", lambda: build_refund_reason_panel(connection, today=business_date)),
+        ("GMV 三因子拆解", lambda: build_gmv_factor_panel(connection, today=business_date)),
+        ("Cohort 留存矩阵", lambda: build_cohort_retention_panel(connection, today=business_date)),
+        ("白酒节点弹性", lambda: build_baijiu_node_panel(connection, today=business_date)),
         ("渠道日销快报", lambda: build_channel_daily_panel(
             connection,
             business_date=business_date,
@@ -654,11 +930,15 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
 
 
 __all__ = [
+    "build_baijiu_node_panel",
     "build_channel_daily_panel",
+    "build_cohort_retention_panel",
     "build_expense_panel",
+    "build_gmv_factor_panel",
     "build_hot_items_panel",
     "build_monthly_kpi_panel",
     "build_order_risk_panel",
+    "build_platform_bill_panel",
     "build_product_structure_panel",
     "build_purchase_inbound_panel",
     "build_qudao_panels",

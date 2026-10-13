@@ -711,7 +711,7 @@ class PipelinePageTests(unittest.TestCase):
         self.assertIn("function renderRecipientExplain", body)  # P2 归因
         self.assertIn("口径说明：为什么有人不在名单", body)
         self.assertIn('href="/roster">填报名册', body)   # 名册层深链
-        self.assertIn('href="/">成员与授权', body)       # 在职层深链
+        self.assertIn('href="/member-grants">成员与授权', body)  # 在职层深链
 
     def test_pipelines_page_service_deep_link_opens_drawer(self):
         """P3（2026-10-12）：?service=<id> 深链随页下发自动开抽屉脚本；
@@ -1547,24 +1547,22 @@ class RecipientRulesTests(unittest.TestCase):
         self.assertIn('href="/pipelines"', body)
         self.assertIn('href="/grants"', body)
 
-    def test_three_pages_share_identical_pointer(self):
-        members = self._admin_client().get("/").text
-        grants = self._admin_client().get("/grants").text
+    def test_roster_page_shares_pointer(self):
+        """「填报名册」仍共享口径指针（成员与授权 / 授权现状已停用）。"""
         store = _RosterStore()
         client = self._admin_client()
         with store.patch_fetch(), store.patch_audit():
             roster = client.get("/roster").text
-        for page, body in (("成员与授权", members), ("授权现状", grants),
-                           ("填报名册", roster)):
-            with self.subTest(page=page):
-                self.assertIn(self._POINTER, body)
-                self.assertIn('href="/recipients"', body)
+        self.assertIn(self._POINTER, roster)
+        self.assertIn('href="/recipients"', roster)
 
-    def test_members_page_drops_duplicated_boundary_wording(self):
-        """收口后成员与授权页不再重复边界解释：只留可操作指引 + 指针。"""
-        body = self._admin_client().get("/").text
-        self.assertIn("对象填 roster（名册管理）", body)   # 可操作指引保留
-        self.assertNotIn("与这里互不影响", body)           # 旧边界解释已移除
+    def test_decommissioned_pages_do_not_carry_pointer(self):
+        """「成员与授权」「授权现状」已停用（2026-10-13），不再渲染口径指针。"""
+        members = self._admin_client().get("/member-grants").text
+        grants = self._admin_client().get("/grants").text
+        for page, body in (("成员与授权", members), ("授权现状", grants)):
+            with self.subTest(page=page):
+                self.assertNotIn(self._POINTER, body)
 
 
 class RosterApiTests(unittest.TestCase):
@@ -2106,54 +2104,29 @@ class RosterPublishTests(unittest.TestCase):
 
 
 class MembersPageTests(unittest.TestCase):
-    def test_members_render_grouped_data_escaped(self):
-        connection = _Connection({
-            "dim_robot_member": _MEMBERS + [("u-x", "<script>alert(1)</script>", "hq", None)],
-        })
-        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+    def test_members_page_shows_decommission_notice(self):
+        """「成员与授权」页已停用（2026-10-13），引导跳转组织编排。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
+        body = client.get("/member-grants").text
+        self.assertIn("已合并至", body)
+        self.assertIn('href="/members"', body)
 
-        body = client.get("/").text
-
-        self.assertIn("u-zhang", body)
-        self.assertIn("hangzhou", body)
-        # XSS 插值以转义形态出现，原始 <script> 绝不进 HTML。
-        self.assertNotIn("<script>alert(1)</script>", body)
-        self.assertIn("&lt;script&gt;", body)
-
-    def test_store_failure_is_a_generalized_503(self):
+    def test_members_page_no_longer_reads_db(self):
+        """停用后页面不读成员表，DB 故障不再 503。"""
         client = TestClient(
             _app(viewer=_admin_viewer(), connector_error=RuntimeError("down"))
         )
         _login(client)
-
-        response = client.get("/")
-
-        self.assertEqual(503, response.status_code)
-        self.assertNotIn("down", response.text)
-
-    def test_grant_form_explains_two_systems_and_roster_scope(self):
-        """G3/G6/G4（2026-10-12 断点报告）：授权页显性化两套体系 +
-        scope=roster 引导（治引导死锁）+ 生效延迟提示。
-        P5（2026-10-12，设计稿 §3）：两套体系的边界说明收口到「收件人总览」，
-        本页改为给一条逐字一致的口径指针（不再散落重复表述）。"""
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/").text
-
-        # 口径指针（名册/覆盖/授权各管什么 → 收件人总览）
-        self.assertIn("名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）",
-                      body)
-        self.assertIn('href="/recipients"', body)
-        self.assertIn("对象填 roster", body)     # 名册管理权引导（G6）
-        self.assertIn("约 1 分钟内生效", body)   # ViewerResolver 60s TTL（G4）
+        response = client.get("/member-grants")
+        self.assertEqual(200, response.status_code)
 
     def test_nav_flat_links_are_grouped_by_purpose(self):
-        """任务1（2026-10-12）：顶栏 8 项平铺 → 4 组（日常/权限/系统/记录），
-        治「入口太多、运维不知道点哪」。链接文案与路由保持不变。"""
+        """顶栏分组：日常 / 权限 / 系统 / 记录。
+        「成员与授权」「授权现状」已停用（2026-10-13），权限组仅留组织编排。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/").text
+        body = client.get("/member-grants").text
 
         self.assertEqual(4, body.count('class="nav-group"'))
         for label in ("日常", "权限", "系统", "记录"):
@@ -2163,30 +2136,15 @@ class MembersPageTests(unittest.TestCase):
             tail = body.split(f'nav-label">{label}<', 1)[1]
             return tail.split("</span>", 1)[0]
 
-        # 每组含各自链接（路由不变，仅归位）
         self.assertIn('href="/roster"', group("日常"))
         self.assertIn('href="/calendar"', group("日常"))
-        self.assertIn('href="/"', group("权限"))
-        self.assertIn('href="/grants"', group("权限"))
+        # 权限组仅保留组织编排
+        self.assertIn('href="/members"', group("权限"))
+        self.assertNotIn('href="/member-grants"', group("权限"))
+        self.assertNotIn('href="/grants"', group("权限"))
         self.assertIn('href="/pipelines"', group("系统"))
         self.assertIn('href="/records"', group("记录"))
-        self.assertIn("操作记录", group("记录"))
-        # 结构判据：nav 包裹 + 恰好 4 组（旧平铺无这两者）
         self.assertIn("<nav>", body)
-
-    def test_member_pages_use_plain_chinese_labels(self):
-        """任务2（2026-10-12）：术语清洗——页面不出现 userid/scope/region 黑话。"""
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/").text
-
-        self.assertIn(">账号<", body)             # 表头 userid → 账号
-        self.assertNotIn(">userid<", body)
-        self.assertIn(">看板页面<", body)          # scope（页面）→ 看板页面
-        self.assertIn(">区域数据<", body)          # region（行级）→ 区域数据
-        self.assertNotIn("scope（页面）", body)
-        self.assertNotIn("region（行级）", body)
-        self.assertIn("该区域全员开通区域权限", body)
 
 
 class GrantWriteApiTests(unittest.TestCase):
@@ -2286,21 +2244,13 @@ class RegionBatchTests(unittest.TestCase):
 
 
 class GrantsAndAuditPageTests(unittest.TestCase):
-    def test_grants_page_lists_current_rows(self):
-        connection = _Connection({
-            "bi_authz_grant` ": [
-                ("u-zhang", "scope", "fin", "财务页", ADMIN_USERID,
-                 "2026-09-21 10:00:00.000000"),
-            ],
-        })
-        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+    def test_grants_page_shows_decommission_notice(self):
+        """「授权现状」页已停用（2026-10-13），引导联系管理员。"""
+        client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-
         body = client.get("/grants").text
-
-        self.assertIn("u-zhang", body)
-        self.assertIn("fin", body)
-        self.assertIn("收回", body)
+        self.assertIn("授权管理功能已停用", body)
+        self.assertIn('href="/members"', body)
 
     def test_audit_page_lists_entries_newest_first(self):
         connection = _Connection({
@@ -2826,6 +2776,429 @@ class RecipientOverrideApiTests(unittest.TestCase):
                 json={"service_id": "robot-hangzhou", "mode": "include",
                       "target_type": "user_id", "target_value": "u9"})
         self.assertEqual(503, response.status_code)
+
+
+class _OrgCursor:
+    """组织编排端点假游标：按 SQL 关键字路由行，可设 rowcount 与故障关键字。"""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._last = ""
+        self._rows = []
+        self.rowcount = 0
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        self._last = sql
+        for keyword in self._conn.fail:
+            if keyword in sql:
+                raise RuntimeError("db down")
+        self._rows = self._conn.route(sql)
+        if sql.lstrip().upper().startswith(("UPDATE", "DELETE")):
+            self.rowcount = self._conn.rowcount
+        else:
+            self.rowcount = len(self._rows)
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        pass
+
+
+class _OrgConn:
+    def __init__(self, rows_by_keyword=None, *, rowcount=1, fail=()):
+        self.rows = rows_by_keyword or {}
+        self.rowcount = rowcount
+        self.fail = set(fail)
+        self.executed = []
+        self.commits = 0
+
+    def route(self, sql):
+        for keyword, rows in self.rows.items():
+            if keyword in sql:
+                return list(rows)
+        return []
+
+    def cursor(self):
+        return _OrgCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+_ORG_OVERRIDE_ROW = {
+    "id": 1, "user_id": "u-wang", "name": "王五", "region": "hq",
+    "dept_id": None, "dept_name": "总经办", "enabled": 1, "note": None,
+    "updated_by": "ops", "updated_at": None,
+}
+
+
+class OrgAssignmentApiTests(unittest.TestCase):
+    """组织编排 SPA 后端（2026-10-13 P6）：/members 壳 + /api/org/*。
+
+    覆盖：admin 闸、overview 结构（区域/部门/池）、覆盖读 fail-soft、
+    成员读 503、assign/toggle/delete/reset 落库与审计、参数校验。
+    """
+
+    def _admin_client(self, connection):
+        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+        _login(client)
+        return client
+
+    def _members_conn(self, rows=None, **kwargs):
+        base = {"dim_robot_member": _MEMBERS}
+        base.update(rows or {})
+        return _OrgConn(base, **kwargs)
+
+    # -- / 与 /members（SPA 壳）---------------------------------------------
+
+    def test_root_serves_org_spa_shell(self):
+        """B3（2026-10-13）：登录后首页 / 即「组织编排」SPA 壳（登录即见拖拽树）。"""
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8")
+        handle.write("<!DOCTYPE html><div id=\"app\"></div>")
+        handle.close()
+        try:
+            with mock.patch("common.ops_web.app._ORG_SPA_INDEX", handle.name):
+                client = self._admin_client(_OrgConn({}))
+                response = client.get("/")
+            self.assertEqual(200, response.status_code)
+            self.assertIn("text/html", response.headers["content-type"])
+            self.assertIn("id=\"app\"", response.text)
+        finally:
+            import os
+            os.unlink(handle.name)
+
+    def test_members_spa_requires_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        response = client.get("/members", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+        self.assertIn("reason=login", response.headers["location"])
+
+    def test_members_spa_forbidden_for_non_admin(self):
+        viewer = authz.Viewer(
+            userid="u1", name="张三", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u1")
+        response = client.get("/members", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+        self.assertIn("reason=forbidden", response.headers["location"])
+
+    def test_members_spa_serves_shell_when_built(self):
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".html", delete=False, encoding="utf-8")
+        handle.write("<!DOCTYPE html><div id=\"app\"></div>")
+        handle.close()
+        try:
+            with mock.patch("common.ops_web.app._ORG_SPA_INDEX", handle.name):
+                client = self._admin_client(_OrgConn({}))
+                response = client.get("/members")
+            self.assertEqual(200, response.status_code)
+            self.assertIn("text/html", response.headers["content-type"])
+            self.assertIn("id=\"app\"", response.text)
+        finally:
+            import os
+            os.unlink(handle.name)
+
+    def test_members_spa_503_when_build_missing(self):
+        with mock.patch("common.ops_web.app._ORG_SPA_INDEX",
+                        "Z:/nonexistent/ops-web/dist/index.html"):
+            client = self._admin_client(_OrgConn({}))
+            response = client.get("/members")
+        self.assertEqual(503, response.status_code)
+
+    # -- /api/org/overview --------------------------------------------------
+
+    def test_overview_gate(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.get("/api/org/overview").status_code)
+
+    def test_overview_forbidden_for_non_admin(self):
+        viewer = authz.Viewer(
+            userid="u1", name="张三", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u1")
+        self.assertEqual(403, client.get("/api/org/overview").status_code)
+
+    def test_overview_groups_base_members(self):
+        client = self._admin_client(self._members_conn())
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual("ok", data["status"])
+        regions = {region["key"]: region for region in data["regions"]}
+        hangzhou = {
+            member["name"]
+            for group in regions["hangzhou"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"张三", "王五"}, hangzhou)
+        hq = {
+            member["name"]
+            for group in regions["hq"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"李四"}, hq)
+        self.assertEqual("杭州", regions["hangzhou"]["label"])
+        self.assertEqual("总部", regions["hq"]["label"])
+        self.assertEqual([], data["pool"])
+        self.assertEqual([], data["overrides"])
+
+    def test_overview_applies_override_move_region_and_dept(self):
+        client = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}))
+        data = client.get("/api/org/overview").json()
+
+        regions = {region["key"]: region for region in data["regions"]}
+        hangzhou = {
+            member["user_id"]
+            for group in regions["hangzhou"]["depts"]
+            for member in group["members"]
+        }
+        self.assertEqual({"u-zhang"}, hangzhou)          # 王五已移出杭州
+        hq_groups = {group["dept_name"]: group["members"]
+                     for group in regions["hq"]["depts"]}
+        self.assertEqual({"u-li", "u-wang"},              # 王五移入总部
+                         {m["user_id"] for m in hq_groups["总经办"]})
+        self.assertEqual(1, len(data["overrides"]))
+        self.assertEqual("总部", data["overrides"][0]["region_label"])
+
+    def test_overview_override_region_null_goes_to_pool(self):
+        row = dict(_ORG_OVERRIDE_ROW, user_id="u-li", name="李四",
+                   region=None, dept_name=None)
+        client = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [row]}))
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual(["u-li"], [m["user_id"] for m in data["pool"]])
+        self.assertNotIn("hq", {region["key"] for region in data["regions"]})
+
+    def test_overview_override_read_fails_soft(self):
+        conn = self._members_conn(fail={"dim_org_assignment_override"})
+        client = self._admin_client(conn)
+        response = client.get("/api/org/overview")
+
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertEqual([], data["overrides"])           # 覆盖读失败 = 空
+        self.assertIn("hangzhou",
+                      {region["key"] for region in data["regions"]})
+
+    def test_overview_members_read_503(self):
+        conn = self._members_conn(fail={"dim_robot_member"})
+        client = self._admin_client(conn)
+        self.assertEqual(503, client.get("/api/org/overview").status_code)
+
+    # -- 写面 ---------------------------------------------------------------
+
+    def test_assign_requires_admin(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(
+            401, client.post("/api/org/assign",
+                             json={"user_id": "u-zhang"}).status_code)
+
+    def test_assign_writes_override_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post("/api/org/assign", json={
+            "user_id": "u-zhang", "region": "hq", "dept_id": "d9",
+            "dept_name": "总经办", "name": "张三"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok"}, response.json())
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any(
+            "INSERT INTO `dim_org_assignment_override`" in sql
+            and "ON DUPLICATE KEY UPDATE" in sql for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual(ADMIN_USERID, audit[0])
+        self.assertEqual("assign", audit[1])
+        self.assertEqual(1, conn.commits)                 # 审计同事务
+
+    def test_assign_null_region_moves_out(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-li", "region": None})
+        self.assertEqual(200, response.status_code)
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual("移出全部区域", audit[7])
+
+    def test_assign_rejects_missing_user_id(self):
+        client = self._admin_client(self._members_conn())
+        response = client.post("/api/org/assign", json={"region": "hq"})
+        self.assertEqual(400, response.status_code)
+
+    def test_assign_rejects_bad_region_type(self):
+        client = self._admin_client(self._members_conn())
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-zhang", "region": 5})
+        self.assertEqual(400, response.status_code)
+
+    def test_assign_rejects_illegal_region_key(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/assign", json={"user_id": "u-zhang", "region": "Bad Key"})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_toggle_hit_and_miss(self):
+        rows = {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}
+        hit = self._admin_client(self._members_conn(rows, rowcount=1))
+        self.assertEqual(
+            200, hit.post("/api/org/toggle",
+                          json={"user_id": "u-wang", "enabled": False}
+                          ).status_code)
+        miss = self._admin_client(self._members_conn(rows, rowcount=0))
+        self.assertEqual(
+            400, miss.post("/api/org/toggle",
+                           json={"user_id": "u-wang", "enabled": False}
+                           ).status_code)
+
+    def test_toggle_rejects_bad_body(self):
+        client = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, client.post("/api/org/toggle",
+                             json={"user_id": "u-wang", "enabled": "yes"}
+                             ).status_code)
+
+    def test_delete_hit_and_miss(self):
+        hit = self._admin_client(self._members_conn(
+            {"dim_org_assignment_override": [_ORG_OVERRIDE_ROW]}))
+        self.assertEqual(
+            200, hit.post("/api/org/delete",
+                          json={"user_id": "u-wang"}).status_code)
+        miss = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, miss.post("/api/org/delete",
+                           json={"user_id": "u-wang"}).status_code)
+
+    def test_reset_clears_all(self):
+        conn = self._members_conn(rowcount=3)
+        client = self._admin_client(conn)
+        response = client.post("/api/org/reset", json={})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(3, response.json()["deleted"])
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_assignment_override_audit" in sql)
+        self.assertEqual("reset", audit[1])
+
+    # -- 组织目录（新增区域 / 部门，2026-10-13 P7）-------------------------
+
+    def test_overview_renders_catalog_region_and_dept_without_members(self):
+        conn = self._members_conn({
+            "dim_org_region": [
+                {"region_key": "chengdu", "label": "成都", "sort_order": 0},
+            ],
+            "dim_org_dept": [
+                {"region_key": "hangzhou", "dept_name": "杭州销售部",
+                 "dept_id": None, "sort_order": 0},
+                {"region_key": "chengdu", "dept_name": "成都销售部",
+                 "dept_id": None, "sort_order": 0},
+            ],
+        })
+        data = self._admin_client(conn).get("/api/org/overview").json()
+        regions = {region["key"]: region for region in data["regions"]}
+
+        # 目录登记的新区域（无成员）也出现，label 取目录值。
+        self.assertIn("chengdu", regions)
+        self.assertEqual("成都", regions["chengdu"]["label"])
+        chengdu = {d["dept_name"]: d for d in regions["chengdu"]["depts"]}
+        self.assertEqual([], chengdu["成都销售部"]["members"])
+        # 目录登记的部门（无成员）并入既有区域。
+        hangzhou = {d["dept_name"]: d for d in regions["hangzhou"]["depts"]}
+        self.assertIn("杭州销售部", hangzhou)
+        self.assertEqual([], hangzhou["杭州销售部"]["members"])
+
+    def test_overview_catalog_read_fails_soft(self):
+        conn = self._members_conn(fail={"dim_org_region"})
+        response = self._admin_client(conn).get("/api/org/overview")
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        self.assertIn("hangzhou",
+                      {region["key"] for region in data["regions"]})
+
+    def test_region_add_requires_admin(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(
+            401, client.post("/api/org/region/add",
+                             json={"region_key": "chengdu", "label": "成都"}
+                             ).status_code)
+
+    def test_region_add_writes_catalog_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post("/api/org/region/add",
+                               json={"region_key": "chengdu", "label": "成都"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok"}, response.json())
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any("INSERT INTO `dim_org_region`" in sql
+                            and "ON DUPLICATE KEY UPDATE" in sql
+                            for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_catalog_audit" in sql)
+        self.assertEqual(ADMIN_USERID, audit[0])
+        self.assertEqual("add_region", audit[1])
+        self.assertEqual("chengdu", audit[3])
+        self.assertEqual(1, conn.commits)
+
+    def test_region_add_rejects_bad_body(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        self.assertEqual(
+            400, client.post("/api/org/region/add",
+                             json={"region_key": "Bad Key", "label": "成都"}
+                             ).status_code)
+        self.assertEqual(
+            400, client.post("/api/org/region/add",
+                             json={"region_key": "chengdu", "label": ""}
+                             ).status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_dept_add_writes_catalog_and_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post(
+            "/api/org/dept/add",
+            json={"region_key": "hangzhou", "dept_name": "杭州销售部",
+                  "dept_id": "1050062512"})
+        self.assertEqual(200, response.status_code)
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any("INSERT INTO `dim_org_dept`" in sql
+                            and "ON DUPLICATE KEY UPDATE" in sql
+                            for sql in sqls))
+        audit = next(p for sql, p in conn.executed
+                     if "dim_org_catalog_audit" in sql)
+        self.assertEqual("add_dept", audit[1])
+        self.assertEqual("hangzhou", audit[3])
+        self.assertEqual("1050062512", audit[4])
+        self.assertEqual("杭州销售部", audit[5])
+
+    def test_dept_add_rejects_missing_name(self):
+        client = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, client.post("/api/org/dept/add",
+                             json={"region_key": "hangzhou",
+                                   "dept_name": "  "}).status_code)
 
 
 if __name__ == "__main__":

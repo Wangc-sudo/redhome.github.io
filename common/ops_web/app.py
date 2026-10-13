@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from common.bi_web import auth, authz
 from common.public_data import (
@@ -37,6 +38,8 @@ from common.public_data import (
     calendar_store,
     channel_target,
     ops_control,
+    org_assignment_override,
+    org_catalog,
     recipient_override,
     report_roster,
 )
@@ -507,7 +510,7 @@ function renderRecipientBase(data) {
     list +
     '<p class="hint">下方覆盖只影响本任务（' + esc(_recipientService) + '）；' +
     '要增删整片区域的填报人请去 <a href="/roster">填报名册</a>，' +
-    '要调整在职人员请去 <a href="/">成员与授权</a>。</p></div>';
+    '要调整在职人员请去 <a href="/member-grants">成员与授权</a>。</p></div>';
 }
 function renderRecipientExplain(data) {
   // 「为什么不在名单」归因（P2）：解释「相关但未生效」的人各自去哪改。
@@ -523,7 +526,7 @@ function renderRecipientExplain(data) {
     groups.length + ' 类）</summary><ul>' + lis + '</ul>' +
     '<p class="hint">有效 @ 名单 = （在职成员 ∩ 名册）∪ 追加 − 移除。' +
     '整片区域的资格改 <a href="/roster">填报名册</a>，' +
-    '在职状态查 <a href="/">成员与授权</a>，' +
+    '在职状态查 <a href="/member-grants">成员与授权</a>，' +
     '本任务的例外用下方覆盖。</p></details>';
 }
 function renderRecipientOverride(data) {
@@ -651,8 +654,7 @@ def _page(title, *sections, viewer_name=""):
                 "<a href=\"/recipients\">收件人总览</a>"
                 "<a href=\"/calendar\">工作日历</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">权限</span>"
-        "<a href=\"/\">成员与授权</a>"
-        "<a href=\"/grants\">授权现状</a></span>"
+        "<a href=\"/members\">组织编排</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">系统</span>"
         "<a href=\"/pipelines\">定时任务</a></span>"
         "<span class=\"nav-group\"><span class=\"nav-label\">记录</span>"
@@ -949,6 +951,132 @@ _REGION_LABELS = {
     "qudao": "渠道",
     "offline_all": "线下整体",
 }
+
+#: 「组织编排」SPA 专用区域中文名（_REGION_LABELS 补 hq/other；
+#: 不改 _REGION_LABELS 本身，避免影响服务名/描述既有展示）。
+_ORG_REGION_LABELS = dict(
+    _REGION_LABELS, hq="总部", other="其他",
+)
+
+#: 区域展示顺序（种子优先级风格：常用业务区在前，兜底区在后）。
+_ORG_REGION_ORDER = (
+    "hangzhou", "shaoxing", "vanke", "junpin", "qudao", "offline_all",
+    "hq", "other",
+)
+
+#: 组织编排 SPA 构建产物（Vite 产物提交入库：生产运行时不装 node、不构建）。
+_ORG_SPA_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "static")
+_ORG_SPA_INDEX = os.path.join(_ORG_SPA_DIR, "dist", "index.html")
+
+
+def _org_region_label(region):
+    """区域键 → 中文名（未知键原样返回，空值回「未归类」）。"""
+    if not region:
+        return "未归类"
+    return _ORG_REGION_LABELS.get(region, region)
+
+
+def _build_org_overview(members, overrides, catalog=None):
+    """在职成员 + 有效覆盖 + 组织目录 → 组织编排视图（regions / pool）。
+
+    *members* 是 ``(user_id, name, region, dept_name)`` 元组
+    （``bi_authz.fetch_active_members`` 的产出）；*overrides* 是
+    ``{user_id: row}``（只含启用行；读失败时传空 → 回种子口径）；
+    *catalog* 是 :func:`org_catalog.fetch_catalog` 的产出（登记的区域/部门，
+    缺省空 → 完全等价旧行为）。
+
+    有效归属：覆盖优先、其次种子派生；覆盖 ``region`` 为空 → 「未归类」池。
+    部门分组键取 ``dept_id or dept_name``（基名单只有部门名，覆盖带 id）。
+    目录登记的区域/部门即使**没有成员**也渲染（可作为拖拽归属目标）。
+    """
+    catalog = catalog or {}
+    catalog_regions = {
+        str(row.get("region_key") or "").strip(): row
+        for row in catalog.get("regions") or []
+        if str(row.get("region_key") or "").strip()
+    }
+    catalog_region_labels = {
+        key: (row.get("label") or key) for key, row in catalog_regions.items()
+    }
+
+    grouped = {}        # region -> {dept_key: {dept_id, dept_name, members}}
+    for user_id, name, region, dept_name in members:
+        override = overrides.get(user_id)
+        dept_id = None
+        if override is not None:
+            region = override["region"]
+            dept_id = override["dept_id"]
+            dept_name = override["dept_name"] or dept_name
+        entry = {
+            "user_id": user_id, "name": name,
+            "dept_id": dept_id, "dept_name": dept_name or "",
+            "region": region or None,
+        }
+        if not region:
+            grouped.setdefault(None, []).append(entry)
+            continue
+        depts = grouped.setdefault(region, {})
+        key = dept_id or dept_name or ""
+        group = depts.get(key)
+        if group is None:
+            group = {"dept_id": dept_id, "dept_name": dept_name or "",
+                     "sort_order": 0, "members": []}
+            depts[key] = group
+        group["members"].append(entry)
+
+    # 目录登记（消费侧）：区域/部门即使无成员也播种进分组树。
+    for row in catalog.get("depts") or []:
+        region = str(row.get("region_key") or "").strip()
+        if not region:
+            continue
+        dept_id = row.get("dept_id")
+        dept_name = row.get("dept_name") or ""
+        key = dept_id or dept_name or ""
+        if not key:
+            continue
+        depts = grouped.setdefault(region, {})
+        group = depts.get(key)
+        if group is None:
+            group = {"dept_id": dept_id, "dept_name": dept_name,
+                     "sort_order": 0, "members": []}
+            depts[key] = group
+        group["sort_order"] = int(row.get("sort_order") or 0)
+        if dept_name and not group["dept_name"]:
+            group["dept_name"] = dept_name
+
+    pool = grouped.pop(None, [])
+    pool.sort(key=lambda item: (item["name"], item["user_id"]))
+
+    known = list(_ORG_REGION_ORDER)
+    catalog_order = sorted(
+        (key for key in catalog_regions if key not in known),
+        key=lambda key: (int(catalog_regions[key].get("sort_order") or 0), key),
+    )
+    catalog_extra = set(catalog_order)
+    extra = sorted(
+        key for key in grouped
+        if key not in known and key not in catalog_extra
+    )
+    regions = []
+    for key in known + catalog_order + extra:
+        depts = grouped.get(key) or {}
+        if key not in catalog_regions and not depts:
+            continue
+        groups = sorted(
+            depts.values(),
+            key=lambda g: (g["sort_order"], g["dept_name"],
+                           g["dept_id"] or ""),
+        )
+        for group in groups:
+            group["members"].sort(
+                key=lambda item: (item["name"], item["user_id"]))
+        regions.append({
+            "key": key,
+            "label": catalog_region_labels.get(key) or _org_region_label(key),
+            "depts": groups,
+        })
+    return {"status": "ok", "regions": regions, "pool": pool}
 
 #: 服务标识 → 中文名（策展映射，展示层；robot-/pages- 家族按区域动态生成）。
 _SERVICE_NAMES = {
@@ -1390,7 +1518,7 @@ def _recipients_scope_html(scope, task_ids, *, members_by_region,
         f"<span class=\"hint\">{_esc(_base_source_label(info))}</span>："
         f"{base_cell}"
         "　<a href=\"/roster\">改本范围名册</a>"
-        "　<a href=\"/\">查成员在职</a></p>"
+        "　<a href=\"/member-grants\">查成员在职</a></p>"
     )
     if not task_ids:
         parts.append("<p class=\"hint\">本范围暂无绑定的催办任务。</p>")
@@ -1705,6 +1833,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     app = FastAPI(title="ops-web")
 
+    # 组织编排 SPA 静态托管（Vite 产物提交入库；目录不存在则跳过挂载，
+    # 避免无 dist 的旧检出直接启动失败）。
+    if os.path.isdir(_ORG_SPA_DIR):
+        app.mount("/static", StaticFiles(directory=_ORG_SPA_DIR), name="static")
+
     def _resolve_request_viewer(request: Request) -> authz.Viewer:
         """session → Viewer（各闸共用的解析段；未登录 401/302，解析异常 403）。"""
         raw = request.cookies.get(auth.SESSION_COOKIE)
@@ -1840,94 +1973,366 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return JSONResponse({"status": "ok", "database": "ok"})
 
     # -- 页面 ----------------------------------------------------------------
-    @app.get("/")
+    # 「成员与授权」页已停用（2026-10-13）：在职成员展示与归属管理迁至
+    # 「组织编排」SPA（/members）。路由保留防书签 404，页面引导跳转。
+    @app.get("/member-grants")
     def members_page(request: Request):
         viewer = require_admin(request)
+        notice = (
+            "<h1>成员与授权</h1>"
+            "<div class=\"state\">"
+            "<p>本页功能已合并至<a href=\"/members\">组织编排</a>："
+            "在职成员展示、区域/部门归属调整均在「组织编排」页完成。</p>"
+            "<p>如需管理 BI 看板 / 区域数据授权，请联系系统管理员。</p>"
+            "<a class=\"btn\" href=\"/members\">前往组织编排</a>"
+            "</div>"
+        )
+        return HTMLResponse(_page("成员与授权", notice,
+                                  viewer_name=viewer.name or viewer.userid))
+
+    # -- 「组织编排」SPA（Vue3，区域 → 部门 → 成员拖拽；2026-10-13 P6）-------
+    def _org_spa_shell(request: Request):
+        """SPA 壳：返回 Vite 产物 index.html（数据走 /api/org/*）。"""
+        require_admin(request)
+        if not os.path.isfile(_ORG_SPA_INDEX):
+            _LOGGER.warning("ops-web members SPA build missing: %s",
+                            _ORG_SPA_INDEX)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return FileResponse(
+            _ORG_SPA_INDEX, media_type="text/html",
+            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/")
+    def org_home_page(request: Request):
+        """登录后首页即「组织编排」SPA（B3，2026-10-13）：登录即见拖拽树。"""
+        return _org_spa_shell(request)
+
+    @app.get("/members")
+    def members_spa_page(request: Request):
+        """保留 /members（旧书签与既有测试兼容），与 / 同壳。"""
+        return _org_spa_shell(request)
+
+    @app.get("/api/org/overview")
+    def org_overview(request: Request):
+        """组织树视图：在职成员 ∘ 覆盖 → regions / pool + 覆盖行 + 审计。
+
+        成员读故障 = 503（组织树无从展示）；覆盖读故障 = fail-soft
+        （只丢覆盖，回种子口径，不拖垮整页）。
+        """
+        require_admin(request)
         try:
             with db_connector() as connection:
                 members = bi_authz.fetch_active_members(connection)
         except Exception as exc:
-            _LOGGER.warning("ops-web members load failed: %s", type(exc).__name__)
+            _LOGGER.warning(
+                "ops-web org members load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        rows = "".join(
-            f"<tr><td>{_esc(user_id)}</td><td>{_esc(name)}</td>"
-            f"<td>{_esc(region)}</td><td>{_esc(dept_name)}</td></tr>"
-            for user_id, name, region, dept_name in members
-        )
-        regions = sorted({region for _uid, _n, region, _d in members})
-        region_options = "".join(
-            f"<option value=\"{_esc(region)}\">{_esc(region)}</option>"
-            for region in regions
-        )
-        grant_form = (
-            "<h2>单人授权</h2>"
-            "<form class=\"inline\" onsubmit=\"submitGrant(event)\">"
-            "<input name=\"user_id\" placeholder=\"账号\" required>"
-            "<select name=\"grant_type\">"
-            "<option value=\"scope\">看板页面</option>"
-            "<option value=\"region\">区域数据</option>"
-            "</select>"
-            "<input name=\"grant_key\" placeholder=\"对象：看板名或区域名\" required>"
-            "<input name=\"note\" placeholder=\"备注\">"
-            "<button type=\"submit\">授权</button></form>"
-            # G3/G6/G4（2026-10-12 断点报告）：两套体系显性化 + scope=roster
-            # 引导（原说明只写在需授权才能看到的名册页，引导死锁）+ 生效延迟。
-            # P5（口径收口，设计稿 §3）：边界说明统一到「收件人总览」，本页只
-            # 保留可操作的授权指引，口径指针见页首 _RECIPIENT_RULES_LINK。
-            "<p class=\"hint\">本页授权管 BI 看板与本中心的访问权、以及名册"
-            "管理权（类型选「看板页面」、对象填 roster（名册管理））；"
-            "本页授权约 1 分钟内生效。</p>"
-            "<h2>按区域一键开通</h2>"
-            "<form class=\"inline\" onsubmit=\"grantRegion(event)\">"
-            f"<select name=\"region\">{region_options}</select>"
-            "<button type=\"submit\">该区域全员开通区域权限</button>"
-            "<span class=\"hint\">候选名单即下表在职成员；逐行落审计。</span>"
-            "</form>"
-        )
-        table = (
-            "<h1>在职成员</h1>"
-            "<table><tr><th>账号</th><th>姓名</th><th>区域</th><th>部门</th></tr>"
-            f"{rows}</table>"
-        )
-        return HTMLResponse(_page("成员与授权", table, _RECIPIENT_RULES_LINK,
-                                  grant_form,
-                                  viewer_name=viewer.name or viewer.userid))
+        rows = []
+        try:
+            with db_connector() as connection:
+                rows = org_assignment_override.fetch_all_overrides(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org override read failed: %s", type(exc).__name__)
+        overrides = {row["user_id"]: row for row in rows if row["enabled"]}
+        try:
+            with db_connector() as connection:
+                catalog = org_catalog.fetch_catalog(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org catalog read failed: %s", type(exc).__name__)
+            catalog = {"regions": [], "depts": []}
+        overview = _build_org_overview(members, overrides, catalog)
+        overview["overrides"] = [
+            dict(row, updated_at=_fmt_time(row.get("updated_at")),
+                 region_label=_org_region_label(row.get("region")))
+            for row in rows
+        ]
+        return JSONResponse(overview)
 
+    @app.post("/api/org/assign")
+    async def org_assign(request: Request):
+        """新增/更新一条归属覆盖（``region`` 为 null = 移出全部区域）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        user_id = payload.get("user_id")
+        region = payload.get("region")
+        dept_id = payload.get("dept_id")
+        dept_name = payload.get("dept_name")
+        name = payload.get("name")
+        note = payload.get("note") or ""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if region is not None and not isinstance(region, str):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        for value in (dept_id, dept_name, name, note):
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(
+                    status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_assignment_override.upsert_assignment(
+                    connection, user_id, region, dept_id=dept_id,
+                    dept_name=dept_name, name=name, actor=viewer.userid,
+                    note=note)
+        except org_assignment_override.OrgAssignmentOverrideError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org assign failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/region/add")
+    async def org_region_add(request: Request):
+        """登记一个区域（消费侧组织目录；即使无成员也进树）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        label = payload.get("label")
+        sort_order = payload.get("sort_order")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(label, str) or not label.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if sort_order is not None and (
+                isinstance(sort_order, bool) or not isinstance(sort_order, int)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.upsert_region(
+                    connection, region_key, label,
+                    sort_order=sort_order or 0, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region add failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/add")
+    async def org_dept_add(request: Request):
+        """登记一个区域下的部门（消费侧组织目录；即使无成员也进树）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        dept_id = payload.get("dept_id")
+        sort_order = payload.get("sort_order")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if dept_id is not None and not isinstance(dept_id, str):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if sort_order is not None and (
+                isinstance(sort_order, bool) or not isinstance(sort_order, int)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.upsert_dept(
+                    connection, region_key, dept_name, dept_id=dept_id,
+                    sort_order=sort_order or 0, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept add failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/region/disable")
+    async def org_region_disable(request: Request):
+        """停用一个登记区域（软删：enabled=0）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        enabled = payload.get("enabled", False)
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.set_catalog_enabled(
+                    connection, "region", region_key=region_key,
+                    enabled=enabled, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region disable failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/region/delete")
+    async def org_region_delete(request: Request):
+        """物理删除一个登记区域（级联删除其下部门）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.delete_catalog_entry(
+                    connection, "region", region_key=region_key,
+                    actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org region delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/disable")
+    async def org_dept_disable(request: Request):
+        """停用一个登记部门（软删：enabled=0）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        enabled = payload.get("enabled", False)
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.set_catalog_enabled(
+                    connection, "dept", region_key=region_key,
+                    dept_name=dept_name, enabled=enabled, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept disable failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/dept/delete")
+    async def org_dept_delete(request: Request):
+        """物理删除一个登记部门。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_name = payload.get("dept_name")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_name, str) or not dept_name.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_catalog.delete_catalog_entry(
+                    connection, "dept", region_key=region_key,
+                    dept_name=dept_name, actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org dept delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/toggle")
+    async def org_toggle(request: Request):
+        """停用/启用一条归属覆盖（按天然键 user_id）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        user_id = payload.get("user_id")
+        enabled = payload.get("enabled")
+        if (not isinstance(user_id, str) or not user_id.strip()
+                or not isinstance(enabled, bool)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = org_assignment_override.set_assignment_enabled(
+                    connection, user_id, enabled, actor=viewer.userid)
+        except org_assignment_override.OrgAssignmentOverrideError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org toggle failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/delete")
+    async def org_delete(request: Request):
+        """删除一条归属覆盖（审计留存被删行内容）。"""
+        viewer = require_admin(request)
+        payload = await _json_body(request)
+        user_id = payload.get("user_id")
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                hit = org_assignment_override.delete_assignment(
+                    connection, user_id, actor=viewer.userid)
+        except org_assignment_override.OrgAssignmentOverrideError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not hit:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/reset")
+    async def org_reset(request: Request):
+        """回退总开关：清除全部归属覆盖（回种子口径）。"""
+        viewer = require_admin(request)
+        await _json_body(request)
+        try:
+            with db_connector() as connection:
+                deleted = org_assignment_override.reset_assignments(
+                    connection, actor=viewer.userid)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org reset failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "deleted": deleted})
+
+    # 「授权现状」页已停用（2026-10-13）：授权管理不再通过本页自助操作。
+    # 路由保留防书签 404，页面引导联系管理员。
     @app.get("/grants")
     def grants_page(request: Request):
         viewer = require_admin(request)
-        try:
-            with db_connector() as connection:
-                grants = bi_authz.fetch_all_grants(connection)
-        except Exception as exc:
-            _LOGGER.warning("ops-web grants load failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        rows = []
-        for row in grants:
-            get = (lambda key: row.get(key)) if isinstance(row, dict) else None
-            if get is not None:
-                user_id, grant_type = get("user_id"), get("grant_type")
-                grant_key, note = get("grant_key"), get("note")
-                updated_by, updated_at = get("updated_by"), get("updated_at")
-            else:
-                (user_id, grant_type, grant_key, note,
-                 updated_by, updated_at) = row
-            rows.append(
-                f"<tr><td>{_esc(user_id)}</td>"
-                f"<td>{_esc(_label(_GRANT_TYPE_LABEL, grant_type))}</td>"
-                f"<td>{_esc(grant_key)}</td><td>{_esc(note)}</td>"
-                f"<td>{_esc(updated_by)}</td><td>{_esc(updated_at)}</td>"
-                f"<td><button onclick=\"revokeGrant('{_esc(user_id)}',"
-                f"'{_esc(grant_type)}','{_esc(grant_key)}')\">收回</button></td></tr>"
-            )
-        table = (
+        notice = (
             "<h1>授权现状</h1>"
-            + _RECIPIENT_RULES_LINK
-            + "<table><tr><th>账号</th><th>类型</th><th>对象</th><th>备注</th>"
-            "<th>最后操作人</th><th>更新时间</th><th></th></tr>"
-            + "".join(rows) + "</table>"
+            "<div class=\"state\">"
+            "<p>授权管理功能已停用。如需开通 BI 看板 / 区域数据 / 名册管理"
+            "权限，请联系系统管理员。</p>"
+            "<a class=\"btn\" href=\"/members\">返回组织编排</a>"
+            "</div>"
         )
-        return HTMLResponse(_page("授权现状", table,
+        return HTMLResponse(_page("授权现状", notice,
                                   viewer_name=viewer.name or viewer.userid))
 
     @app.get("/audit")

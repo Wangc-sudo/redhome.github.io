@@ -181,14 +181,23 @@ def fetch_month_facts(connection, *, region, year, month):
 
 
 def fetch_region_members(connection, *, region):
-    """返回该区域在册成员（``dim_robot_member``，按姓名排序）。"""
-    return _fetch_all(
+    """返回该区域**有效**成员（``dim_robot_member`` ∘ 组织归属覆盖，按姓名排序）。
+
+    有效归属 = 种子派生 ∘ 覆盖（2026-10-13 P6）：基名单来自
+    ``dim_robot_member``，再套用 :func:`common.public_data.
+    org_assignment_override.merge_region_members`——移出者剔除、移入者补入、
+    换部门者改部门。覆盖表不可读时 fail-soft 回退种子口径，不拖垮催办。
+    """
+    from common.public_data.org_assignment_override import merge_region_members
+
+    rows = _fetch_all(
         connection,
         "SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name` "
         f"FROM `{MEMBER_TABLE}` "
         "WHERE `region` = %s AND `is_active` = 1 ORDER BY `name`",
         (region,),
     )
+    return merge_region_members(connection, region, rows)
 
 
 def fetch_member(connection, *, user_id):

@@ -11,7 +11,7 @@
       "ccUserIds": [],
       "remindHour": 18,
       "checkHour": 20,
-      "deptOrder": ["杭中", "滨萧", "余杭"],
+      "deptOrder": ["杭中", "滨萧", "余杭", "杭州销售部"],
       "deptLabel": {"杭州运营总监": "运营总监"},
       "broadcastExclude": ["余发兴"],
       "leaderboardUrl": "<榜单页面地址>"

@@ -228,14 +228,69 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(params[2], date(2026, 2, 28))
 
     def test_fetch_region_members_only_active(self):
-        conn = _Conn([{"user_id": "u1", "name": "张三"}])
+        # fetch_region_members 现会在基名单之后套用组织归属覆盖（另发一条
+        # 覆盖表查询）——fake 必须按表名分发，否则会读到基名单行。
+        class _TableCursor(_Cursor):
+            def execute(self, sql, params=None):
+                super().execute(sql, params)
+                self.rows = (
+                    [{"user_id": "u1", "name": "张三", "region": "hangzhou",
+                      "dept_id": "1", "dept_name": "西湖"}]
+                    if "dim_robot_member" in sql else []
+                )
+
+        class _TableConn:
+            def __init__(self):
+                self.cursor_instance = _TableCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+        conn = _TableConn()
         rows = fetch_region_members(conn, region="hangzhou")
 
         sql, params = conn.cursor_instance.executed[0]
         self.assertIn("FROM `dim_robot_member`", sql)
         self.assertIn("`is_active` = 1", sql)
         self.assertEqual(params, ("hangzhou",))
-        self.assertEqual(rows, [{"user_id": "u1", "name": "张三"}])
+        self.assertEqual(rows, [{"user_id": "u1", "name": "张三",
+                                 "region": "hangzhou", "dept_id": "1",
+                                 "dept_name": "西湖"}])
+
+    def test_fetch_region_members_applies_organization_override(self):
+        """覆盖行置顶生效：换区域者从原区域剔除、补入目标区域（P6）。"""
+        class _TableCursor(_Cursor):
+            def execute(self, sql, params=None):
+                super().execute(sql, params)
+                if "dim_org_assignment_override" in sql:
+                    self.rows = [{
+                        "id": 1, "user_id": "u1", "name": "张三",
+                        "region": "shaoxing", "dept_id": "9",
+                        "dept_name": "越城", "enabled": 1, "note": None,
+                        "updated_by": "ops", "updated_at": None,
+                    }]
+                elif "dim_robot_member" in sql:
+                    self.rows = [{"user_id": "u1", "name": "张三",
+                                  "region": "hangzhou", "dept_id": "1",
+                                  "dept_name": "西湖"}]
+                else:
+                    self.rows = []
+
+        class _TableConn:
+            def __init__(self):
+                self.cursor_instance = _TableCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+        conn = _TableConn()
+        self.assertEqual(fetch_region_members(conn, region="hangzhou"), [])
+        moved = fetch_region_members(conn, region="shaoxing")
+        self.assertEqual(
+            moved,
+            [{"user_id": "u1", "name": "张三", "region": "shaoxing",
+              "dept_id": "9", "dept_name": "越城"}],
+        )
 
     def test_fetch_filled_names_returns_a_set(self):
         conn = _Conn([

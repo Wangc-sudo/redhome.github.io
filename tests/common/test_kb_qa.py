@@ -5,12 +5,15 @@ import unittest
 
 from dingtalk_stream import AckMessage
 
+from common.kb_qa import bm25, docs, sync_docs
+from common.kb_qa import llm as llm_module
 from common.kb_qa import media
 from common.kb_qa.app import (
     KbStreamHandler,
     callback_message_id,
     parse_conversation_allowlist,
 )
+from common.kb_qa.llm import LlmError
 from common.kb_qa.products import (
     find_products,
     render_clarify,
@@ -441,6 +444,346 @@ class ReplyChannelTests(unittest.TestCase):
         handler.reply_text = lambda text, incoming: sent.append(text)
         handler._safe_reply(_FakeIncoming(), "答案")
         self.assertEqual(["答案"], sent)
+
+
+class Bm25Tests(unittest.TestCase):
+    """纯 Python BM25：中文 bigram + 英文数字连续串分词。"""
+
+    def test_tokenize_chinese_bigram_and_single(self):
+        self.assertEqual(["酱香", "香酒", "酱", "香", "酒"], bm25.tokenize("酱香酒"))
+        self.assertEqual(["酒"], bm25.tokenize("酒"))
+
+    def test_tokenize_alnum_and_mixed(self):
+        self.assertEqual(["ab12", "习酒", "习", "酒", "34"],
+                         bm25.tokenize("AB12习酒34"))
+        self.assertEqual(["1998"], bm25.tokenize("1998"))
+
+    def test_topk_drops_zero_score_docs(self):
+        index = bm25.Bm25Index(["酱香型白酒工艺", "咖啡豆研磨", "酱香酒的介绍"])
+        hits = index.topk("酱香酒", k=3)
+        docs_hit = [doc for doc, _ in hits]
+        self.assertNotIn(1, docs_hit)   # 零分文档不返回
+        self.assertEqual(2, docs_hit[0])  # 命中最多者排第一
+
+    def test_topk_empty_index(self):
+        self.assertEqual([], bm25.Bm25Index([]).topk("任意"))
+
+
+class DocSearchTests(unittest.TestCase):
+    """kb_doc_chunks 全量读出 + 进程内 TTL 缓存。"""
+
+    def setUp(self):
+        docs.reset_cache()
+
+    def tearDown(self):
+        docs.reset_cache()
+
+    def _chunk(self, doc_id, title, content):
+        return {"doc_id": doc_id, "doc_title": title,
+                "chunk_index": 0, "content": content}
+
+    def test_search_ranks_chunks(self):
+        conn = _FakeConn([[
+            self._chunk("d1", "习酒产品手册", "三同两不同指原料产地工艺相同"),
+            self._chunk("d2", "红酒手册", "咖啡豆研磨度"),
+        ]])
+        hits = docs.search_docs(conn, "三同两不同", k=3, now=1000.0)
+        self.assertEqual(1, len(hits))
+        self.assertEqual("d1", hits[0]["doc_id"])
+
+    def test_empty_table_returns_empty(self):
+        conn = _FakeConn([[]])
+        self.assertEqual([], docs.search_docs(conn, "任意", now=1000.0))
+
+    def test_cache_avoids_reload_within_ttl(self):
+        conn = _FakeConn([[]])
+        docs.search_docs(conn, "a", now=1000.0)
+        docs.search_docs(conn, "b", now=1100.0)     # TTL 内：不重载
+        self.assertEqual(1, len(conn.cursor_instance.executed))
+        docs.search_docs(conn, "c", now=2000.0)     # TTL 过期：重载
+        self.assertEqual(2, len(conn.cursor_instance.executed))
+
+
+class ChunkTextTests(unittest.TestCase):
+    """手册正文按字切片：固定窗口 + 重叠，末窗保留。"""
+
+    def test_empty_and_blank(self):
+        self.assertEqual([], sync_docs.chunk_text(""))
+        self.assertEqual([], sync_docs.chunk_text("   "))
+
+    def test_short_text_single_chunk(self):
+        self.assertEqual(["你好"], sync_docs.chunk_text("你好"))
+
+    def test_long_text_windows_with_overlap(self):
+        text = "".join(str(i % 10) for i in range(25))
+        chunks = sync_docs.chunk_text(text, size=10, overlap=2)
+        self.assertEqual(text[:10], chunks[0])
+        self.assertEqual(10, len(chunks[1]))
+        self.assertEqual(chunks[0][8:10], chunks[1][:2])   # 重叠 2 字
+        self.assertTrue(chunks[-1].endswith(text[-1]))
+
+    def test_invalid_window_arguments(self):
+        with self.assertRaises(ValueError):
+            sync_docs.chunk_text("abc", size=5, overlap=5)
+        with self.assertRaises(ValueError):
+            sync_docs.chunk_text("abc", size=0)
+
+
+class SyncDocsTests(unittest.TestCase):
+    """kb-sync-docs 归一化 / 幂等写入 / 导入统计。"""
+
+    def test_normalize_doc(self):
+        self.assertEqual(
+            ("d1", "标题", "正文"),
+            sync_docs.normalize_doc(
+                {"doc_id": "d1", "doc_title": "标题", "content": "正文"}
+            ),
+        )
+        self.assertEqual(("d1", None, "正文"),
+                         sync_docs.normalize_doc({"doc_id": "d1", "content": "正文"}))
+        self.assertIsNone(sync_docs.normalize_doc({"doc_id": "d1"}))
+        self.assertIsNone(sync_docs.normalize_doc({"content": "正文"}))
+        self.assertIsNone(
+            sync_docs.normalize_doc({"doc_id": "d1", "content": "   "})
+        )
+        self.assertIsNone(sync_docs.normalize_doc("nope"))
+
+    def test_upsert_chunks_sql_and_params(self):
+        conn = _FakeConn([1, 1])
+        written = sync_docs.upsert_chunks(conn, "d1", "标题", ["片段一", "片段二"])
+        self.assertEqual(2, written)
+        sql, params = conn.cursor_instance.executed[0]
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+        self.assertEqual(("d1", "标题", 0, "片段一"), params[:4])
+        self.assertEqual(0, params[2])
+        self.assertEqual("片段一", params[3])
+
+    def test_import_docs_counts_and_skips(self):
+        conn = _FakeConn([1])
+        stats = sync_docs.import_docs(conn, [
+            {"doc_id": "d1", "doc_title": "标题", "content": "正文"},
+            {"doc_id": "d2", "content": "   "},   # 空正文 → skip
+            "bad",                                 # 非 dict → skip
+        ])
+        self.assertEqual(1, stats["docs"])
+        self.assertEqual(1, stats["chunks"])
+        self.assertEqual(2, stats["skipped"])
+
+
+class LlmClientTests(unittest.TestCase):
+    """天翼 DeepSeek 客户端：OpenAI 兼容 + fail-open 配置。"""
+
+    def test_chat_returns_stripped_content(self):
+        captured = {}
+
+        def request(payload):
+            captured.update(payload)
+            return {"choices": [{"message": {"content": " 答案 "}}]}
+
+        client = llm_module.LlmClient("http://x", "k", "m", request=request)
+        self.assertEqual("答案",
+                         client.chat([{"role": "user", "content": "hi"}]))
+        self.assertEqual("m", captured["model"])
+
+    def test_chat_wraps_failure_as_llm_error(self):
+        def request(payload):
+            raise RuntimeError("boom")
+
+        client = llm_module.LlmClient("http://x", "k", "m", request=request)
+        with self.assertRaises(LlmError):
+            client.chat([{"role": "user", "content": "hi"}])
+
+    def test_from_environment_missing_returns_none(self):
+        self.assertIsNone(llm_module.from_environment({}))
+        self.assertIsNone(
+            llm_module.from_environment({"KB_LLM_BASE_URL": "u"})
+        )
+        self.assertIsNone(llm_module.from_environment(
+            {"KB_LLM_BASE_URL": "u", "KB_LLM_API_KEY": "k"}
+        ))
+
+    def test_from_environment_full_builds_client(self):
+        client = llm_module.from_environment({
+            "KB_LLM_BASE_URL": "u", "KB_LLM_API_KEY": "k",
+            "KB_LLM_MODEL": "m", "KB_LLM_TIMEOUT": "9",
+        })
+        self.assertIsInstance(client, llm_module.LlmClient)
+
+
+class LlmCallPointTests(unittest.TestCase):
+    """三个业务调用点的提示词装配与解析（无网络）。"""
+
+    def _client(self, response):
+        prompts = []
+
+        def request(payload):
+            prompts.append(payload["messages"][0]["content"])
+            return {"choices": [{"message": {"content": response}}]}
+
+        return llm_module.LlmClient("u", "k", "m", request=request), prompts
+
+    def test_extract_query_parses_json(self):
+        client, _ = self._client(
+            '前缀 {"category": "DOC_QA", "keyword": " 三同两不同 "} 后缀'
+        )
+        self.assertEqual(("DOC_QA", "三同两不同"),
+                         llm_module.extract_query(client, "三同两不同是啥"))
+
+    def test_extract_query_bad_json_raises(self):
+        client, _ = self._client("不是 JSON")
+        with self.assertRaises(LlmError):
+            llm_module.extract_query(client, "问题")
+
+    def test_extract_query_missing_fields_raises(self):
+        client, _ = self._client('{"category": "DOC_QA"}')
+        with self.assertRaises(LlmError):
+            llm_module.extract_query(client, "问题")
+
+    def test_render_product_answer_injects_row_fields(self):
+        client, prompts = self._client("口语化答案")
+        rows = [_product_row(), _product_row(extra_field="不进上下文")]
+        self.assertEqual(
+            "口语化答案",
+            llm_module.render_product_answer(client, "箱规", rows),
+        )
+        self.assertIn("习酒窖藏1998", prompts[0])
+        self.assertIn("box_qty", prompts[0])
+
+    def test_render_doc_answer_marks_source(self):
+        client, prompts = self._client("答案")
+        chunks = [{"doc_title": "习酒产品手册", "content": "三同两不同…"}]
+        self.assertEqual(
+            "答案", llm_module.render_doc_answer(client, "问题", chunks)
+        )
+        self.assertIn("习酒产品手册", prompts[0])
+
+
+class _ScriptedLlm:
+    """脚本化假 LLM：每次 chat 依次弹出一个响应（元素可为 LlmError 实例）。"""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.prompts = []
+
+    def chat(self, messages, **kwargs):
+        self.prompts.append(messages[0]["content"])
+        value = self._responses.pop(0) if self._responses else ""
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+class HandlerP2Tests(unittest.TestCase):
+    """app.py P2 接线：LLM 渲染 / 二次解析挽回 / DOC_QA 三态，全 fail-open。"""
+
+    def _handler(self, script=None, *, llm=None, doc_search=None):
+        conn = _FakeConn(script or [])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=llm, doc_search=doc_search,
+        )
+        return handler, conn
+
+    def test_product_llm_answer_used(self):
+        llm = _ScriptedLlm("箱规是 6 瓶/箱。【商品资料】")
+        handler, _ = self._handler([[_product_row()]], llm=llm)
+        reply, intent, matched = handler._answer(
+            handler._connection_factory(), "习酒窖藏1998 箱规"
+        )
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertEqual("rec1", matched)
+        self.assertIn("箱规是 6 瓶", reply)
+
+    def test_product_llm_failure_falls_back_to_template(self):
+        llm = _ScriptedLlm(LlmError("model_not_activated"))
+        handler, _ = self._handler([[_product_row()]], llm=llm)
+        reply, _, _ = handler._answer(
+            handler._connection_factory(), "习酒窖藏1998 箱规"
+        )
+        self.assertIn("箱规：6", reply)
+        self.assertIn("【商品资料】", reply)
+
+    def test_reparse_recovers_product_miss(self):
+        llm = _ScriptedLlm(
+            '{"category": "PRODUCT_PARAM", "keyword": "习酒窖藏1998"}',
+            "口语化答案",
+        )
+        # 首次整词 3 段 + 分词 3 段全 miss → 二次解析换关键词 → 首段即命中
+        handler, _ = self._handler(
+            [[], [], [], [], [], [], [_product_row()]], llm=llm
+        )
+        reply, _, matched = handler._answer(
+            handler._connection_factory(), "习酒窖藏1998 箱规"
+        )
+        self.assertEqual("rec1", matched)
+        self.assertEqual("口语化答案", reply)
+
+    def test_miss_without_llm_returns_not_found(self):
+        handler, _ = self._handler([[], [], []])
+        reply, _, matched = handler._answer(
+            handler._connection_factory(), "习酒窖藏1998 箱规"
+        )
+        self.assertIsNone(matched)
+        self.assertIn("换个说法", reply)
+
+    def test_reparse_failure_returns_not_found(self):
+        handler, _ = self._handler([[], [], []], llm=_ScriptedLlm(LlmError("bad")))
+        reply, _, matched = handler._answer(
+            handler._connection_factory(), "习酒窖藏1998 箱规"
+        )
+        self.assertIsNone(matched)
+        self.assertIn("换个说法", reply)
+
+    def test_multi_param_still_clarifies_with_llm(self):
+        rows = [_product_row(), _product_row(record_id="rec2", name="习酒窖藏1988")]
+        llm = _ScriptedLlm("不该被调用")
+        handler, _ = self._handler([rows], llm=llm)
+        reply, _, _ = handler._answer(handler._connection_factory(), "习酒 箱规")
+        self.assertIn("你要问的是哪一个", reply)
+        self.assertEqual([], llm.prompts)
+
+    def _doc_chunks(self):
+        return [{"doc_id": "d1", "doc_title": "习酒产品手册",
+                 "chunk_index": 0, "content": "三同两不同指的是原料、产地、工艺相同。"}]
+
+    def test_doc_qa_with_llm(self):
+        llm = _ScriptedLlm("三同两不同是指……【引自《习酒产品手册》】")
+        handler, _ = self._handler(
+            [], llm=llm, doc_search=lambda conn, q, k=3: self._doc_chunks()
+        )
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥"
+        )
+        self.assertEqual(DOC_QA, intent)
+        self.assertIn("引自《习酒产品手册》", reply)
+
+    def test_doc_qa_without_llm_returns_excerpt(self):
+        handler, _ = self._handler(
+            [], doc_search=lambda conn, q, k=3: self._doc_chunks()
+        )
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥"
+        )
+        self.assertEqual(DOC_QA, intent)
+        self.assertIn("习酒产品手册", reply)
+        self.assertIn("三同两不同指的是", reply)
+
+    def test_doc_qa_llm_failure_returns_excerpt(self):
+        handler, _ = self._handler(
+            [], llm=_ScriptedLlm(LlmError("boom")),
+            doc_search=lambda conn, q, k=3: self._doc_chunks(),
+        )
+        reply, _, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥"
+        )
+        self.assertIn("习酒产品手册", reply)
+
+    def test_doc_qa_no_chunks_falls_back(self):
+        handler, _ = self._handler([], doc_search=lambda conn, q, k=3: [])
+        reply, _, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥"
+        )
+        self.assertIn("接入中", reply)
 
 
 if __name__ == "__main__":
