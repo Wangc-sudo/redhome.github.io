@@ -194,6 +194,16 @@ class FakeConnection:
         "fact_fin_prepayment_invoice",  # ⑩ 预付与未到票
         "fact_fin_store_funds",  # ⑩ 店铺资金余额
         "fact_fin_offline_deposit",  # ⑩ 保证金（线下+平台 UNION ALL）
+        # 渠道旧页板块迁移二十一卡（2026-10-13）：broadcast fetch_* 命中的
+        # 事实/维表（smoke 测试识别用，避免 _table_of 落到 None）。
+        "fact_fin_store_expense",  # 平台账单（费用拆解）
+        "fact_inventory_sku_daily",  # 库存快照（热卖/库存告急）
+        "fact_sales_daily",  # 商品结构/GMV 归因
+        "fact_purchase_inbound",  # 采购入库
+        "dim_product",  # 商品系列维表
+        "fact_refund_line",  # 退款原因
+        "fact_order_cancel_line",  # 订单风险
+        "fact_channel_store_target",  # 渠道店铺月目标真源
     )
 
     def __init__(self, scalars=None, rowsets=None):
@@ -3321,6 +3331,489 @@ class QdDashboardTests(unittest.TestCase):
             ["京东自营店", "天猫旗舰店"],
             [row["store"] for row in payload["rows"]],
         )
+
+    # —— 旧页 13 个渠道专属面板迁移卡 smoke（2026-10-13，共 21 卡）——
+    # 面板 1-8 不新写 SQL：mock 掉 common.broadcast.queries 的既有 fetch_*，
+    # 只验证载荷映射（列定义 + 行值 + date）不丢信息、不二次推导。
+
+    def _assert_table(self, payload, anchor_iso="2026-08-04"):
+        self.assertEqual("table", payload["chart"])
+        self.assertEqual(anchor_iso, payload["date"])
+        self.assertIn("columns", payload)
+        self.assertIn("rows", payload)
+
+    def test_table_qd_monthly_kpi_maps_months(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        month = {
+            "ym": "2026-08", "gmv": 1.0, "mom": 0.1, "orders": 2,
+            "aov": 3.0, "buyers": 4, "new_buyers": 1, "repeat_rate": 0.75,
+            "cancel_orders": 0, "cancel_rate": 0.0, "refund_amt": 0.5,
+            "refund_rate_amt": 0.5, "net_gmv": 0.5, "promo": 0.1, "roi": 5.0,
+        }
+        with mock.patch.object(
+            bq, "fetch_monthly_kpi", return_value={"months": [month]}
+        ):
+            payload = bi_web_queries.run_table_qd_monthly_kpi(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual("月份", payload["columns"][0]["title"])
+        self.assertEqual([{"ym": "2026-08", "gmv": 1.0, "mom": 0.1,
+                           "orders": 2, "aov": 3.0, "buyers": 4,
+                           "new_buyers": 1, "repeat_rate": 0.75,
+                           "cancel_orders": 0, "cancel_rate": 0.0,
+                           "refund_amt": 0.5, "refund_rate_amt": 0.5,
+                           "net_gmv": 0.5, "promo": 0.1, "roi": 5.0}],
+                         payload["rows"])
+
+    def _expense_data(self):
+        return {
+            "months": ["2026-08"],
+            "rows": [
+                {"channel": "天猫", "total": 10.0,
+                 "cells": {"2026-08": {"total": 10.0, "rate": 0.2}}},
+            ],
+            "empty_months": [],
+            "unmapped_stores": [],
+        }
+
+    def test_table_qd_expense_maps_channel_cells(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_expense_summary", return_value=self._expense_data()
+        ):
+            payload = bi_web_queries.run_table_qd_expense(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            ["channel", "2026-08", "total"],
+            [c["key"] for c in payload["columns"]],
+        )
+        self.assertEqual(
+            [{"channel": "天猫", "2026-08": 10.0, "total": 10.0}],
+            payload["rows"],
+        )
+
+    def test_table_qd_expense_rate_maps_channel_cells(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_expense_summary", return_value=self._expense_data()
+        ):
+            payload = bi_web_queries.run_table_qd_expense_rate(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            [{"channel": "天猫", "2026-08": 0.2}], payload["rows"])
+        self.assertEqual("percent", payload["columns"][1]["format"])
+
+    def _bill_data(self):
+        return {
+            "months": ["2026-08"],
+            "by_category": [{"category": "店铺扣点", "total": 6.0}],
+            "by_platform": [{"platform": "天猫", "total": 6.0, "share": 0.6}],
+            "top_items": [{"item": "佣金", "total": 4.0, "share": 0.4}],
+            "other_items": {"count": 3, "total": 2.0},
+            "grand_total": 10.0,
+            "empty_months": [],
+        }
+
+    def test_table_qd_bill_category_share(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_bill_breakdown", return_value=self._bill_data()
+        ):
+            payload = bi_web_queries.run_table_qd_bill_category(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            [{"category": "店铺扣点", "total": 6.0, "share": 0.6}],
+            payload["rows"],
+        )
+
+    def test_table_qd_bill_platform_maps_share(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_bill_breakdown", return_value=self._bill_data()
+        ):
+            payload = bi_web_queries.run_table_qd_bill_platform(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            [{"platform": "天猫", "total": 6.0, "share": 0.6}],
+            payload["rows"],
+        )
+
+    def test_table_qd_bill_items_appends_other_count(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_bill_breakdown", return_value=self._bill_data()
+        ):
+            payload = bi_web_queries.run_table_qd_bill_items(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            [{"item": "佣金", "total": 4.0, "share": 0.4},
+             {"item": "其他 3 项", "total": 2.0, "share": 0.2}],
+            payload["rows"],
+        )
+
+    def test_table_qd_bill_items_skips_other_when_zero(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = self._bill_data()
+        data["other_items"] = {"count": 0, "total": 0.0}
+        with mock.patch.object(bq, "fetch_bill_breakdown", return_value=data):
+            payload = bi_web_queries.run_table_qd_bill_items(
+                FakeConnection(), {"date": "2026-08-04"})
+        self.assertEqual(1, len(payload["rows"]))
+
+    def _product_data(self):
+        return {
+            "series": [{"series": "酱香", "gmv": 5.0, "share": 0.5}],
+            "price_bands": [{"band": "300-500", "gmv": 5.0, "share": 0.5}],
+            "top_products": [{"goods_name": "XX", "spec_no": "S1",
+                              "series_name": "酱香", "gmv": 3.0, "share": 0.3}],
+            "total_gmv": 10.0,
+            "top10_share": 0.9,
+            "hhi": 0.2,
+        }
+
+    def test_table_qd_product_cards_map_structure(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with mock.patch.object(
+            bq, "fetch_product_structure", return_value=self._product_data()
+        ):
+            series = bi_web_queries.run_table_qd_product_series(
+                FakeConnection(), {"date": "2026-08-04"})
+            bands = bi_web_queries.run_table_qd_product_bands(
+                FakeConnection(), {"date": "2026-08-04"})
+            top = bi_web_queries.run_table_qd_product_top(
+                FakeConnection(), {"date": "2026-08-04"})
+            summary = bi_web_queries.run_table_qd_product_summary(
+                FakeConnection(), {"date": "2026-08-04"})
+        for payload in (series, bands, top, summary):
+            self._assert_table(payload)
+        self.assertEqual(
+            [{"series": "酱香", "gmv": 5.0, "share": 0.5}], series["rows"])
+        self.assertEqual(
+            [{"band": "300-500", "gmv": 5.0, "share": 0.5}], bands["rows"])
+        self.assertEqual("XX", top["rows"][0]["goods_name"])
+        self.assertEqual(
+            [{"total_gmv": 10.0, "top10_share": 0.9, "hhi": 0.2}],
+            summary["rows"],
+        )
+
+    def test_table_qd_product_top_falls_back_to_spec_no(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = self._product_data()
+        data["top_products"][0]["goods_name"] = None
+        with mock.patch.object(bq, "fetch_product_structure", return_value=data):
+            payload = bi_web_queries.run_table_qd_product_top(
+                FakeConnection(), {"date": "2026-08-04"})
+        self.assertEqual("S1", payload["rows"][0]["goods_name"])
+
+    def test_table_qd_refund_reason_maps(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {"reasons": [{"reason": "质量问题", "amount": 1.0,
+                             "orders": 2, "share": 0.5}]}
+        with mock.patch.object(bq, "fetch_refund_reason", return_value=data):
+            payload = bi_web_queries.run_table_qd_refund_reason(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(data["reasons"], payload["rows"])
+
+    def test_table_qd_gmv_factors_maps_contrib(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {"months": [{
+            "ym": "2026-08", "gmv": 10.0, "buyers": 4, "qty": 8,
+            "qty_per_buyer": 2.0, "unit_price": 1.25,
+            "contrib": {"buyers": 0.1, "qty_per_buyer": 0.2,
+                        "unit_price": 0.3},
+        }, {
+            "ym": "2026-07", "gmv": 9.0, "buyers": 3, "qty": 6,
+            "qty_per_buyer": 2.0, "unit_price": 1.5, "contrib": None,
+        }]}
+        with mock.patch.object(bq, "fetch_gmv_factors", return_value=data):
+            payload = bi_web_queries.run_table_qd_gmv_factors(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(0.1, payload["rows"][0]["c_buyers"])
+        self.assertIsNone(payload["rows"][1]["c_buyers"])
+
+    def test_table_qd_cohort_appends_weighted_average_row(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {
+            "periods": [0, 1],
+            "cohorts": [{"cohort": "2026-07", "size": 10,
+                         "retention": {0: 1.0, 1: 0.5}}],
+            "avg_retention": {0: 1.0, 1: 0.6},
+            "last_ym": "2026-08",
+        }
+        with mock.patch.object(bq, "fetch_cohort_retention", return_value=data):
+            payload = bi_web_queries.run_table_qd_cohort(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual("加权平均", payload["rows"][-1]["cohort"])
+        self.assertEqual(0.6, payload["rows"][-1]["m1"])
+        self.assertIsNone(payload["rows"][-1]["size"])
+
+    def test_table_qd_baijiu_node_maps(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {"nodes": [{"node": "中秋", "days": 3, "gmv": 9.0,
+                           "daily_avg": 3.0, "elasticity": 1.5}]}
+        with mock.patch.object(
+            bq, "fetch_baijiu_node_elasticity", return_value=data
+        ):
+            payload = bi_web_queries.run_table_qd_baijiu_node(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(data["nodes"], payload["rows"])
+
+    def _channel_conn(self, month_facts, channel_date, targets):
+        from unittest import mock
+
+        connection = FakeConnection()
+        patches = [
+            mock.patch(
+                "common.daily_robot.channel_daily.fetch_channel_month_facts",
+                return_value=month_facts,
+            ),
+            mock.patch(
+                "common.daily_robot.channel_daily.resolve_channel_business_date",
+                return_value=channel_date,
+            ),
+            mock.patch(
+                "common.metrics.daily_report.fetch_channel_monthly_targets",
+                return_value=targets,
+            ),
+        ]
+        return connection, patches
+
+    def test_table_qd_channel_daily_empty_when_no_business_date(self):
+        connection, patches = self._channel_conn({}, None, {})
+        for patch in patches:
+            patch.start()
+        try:
+            payload = bi_web_queries.run_table_qd_channel_daily(
+                connection, {"date": "2026-08-04"})
+        finally:
+            for patch in patches:
+                patch.stop()
+        self._assert_table(payload)
+        self.assertEqual([], payload["rows"])
+
+    def test_table_qd_channel_daily_reuses_collect_rows(self):
+        from unittest import mock
+
+        connection, patches = self._channel_conn(
+            {"天猫": {date(2026, 8, 1): 5.0, date(2026, 8, 2): 7.0}},
+            date(2026, 8, 2),
+            {"天猫": 20.0},
+        )
+        collected = (12.0, [{"channel": "天猫", "sales": 7.0, "mom": 0.4,
+                             "mom_txt": "+40.0%", "target_txt": "--",
+                             "rate_txt": "--"}])
+        patches.append(mock.patch(
+            "common.daily_robot.channel_daily.collect_channel_rows",
+            return_value=collected,
+        ))
+        for patch in patches:
+            patch.start()
+        try:
+            payload = bi_web_queries.run_table_qd_channel_daily(
+                connection, {"date": "2026-08-04"})
+        finally:
+            for patch in patches:
+                patch.stop()
+        self._assert_table(payload)
+        # 表体不含「全渠道」行（避免前端 wan 列合计 footer 重复计一次）；
+        # 合计见 run_table_qd_notes 的文字披露。
+        tianmao = payload["rows"][0]
+        self.assertEqual("天猫", tianmao["channel"])
+        self.assertEqual(7.0, tianmao["sales"])
+        self.assertEqual(20.0, tianmao["target"])
+        self.assertAlmostEqual(12.0 / 20.0, tianmao["rate"])
+
+    def test_table_qd_hot_items_translates_state(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {"items": [
+            {"goods_name": "A", "spec_no": "S1", "available_qty": -1,
+             "days_left": 0, "qty_30d": 9, "purchase_intransit_qty": 1,
+             "stock_state": "OVERSOLD"},
+            {"goods_name": "B", "spec_no": "S2", "available_qty": 2,
+             "days_left": 3, "qty_30d": 4, "purchase_intransit_qty": 0,
+             "stock_state": "URGENT"},
+            {"goods_name": "C", "spec_no": "S3", "available_qty": 9,
+             "days_left": 30, "qty_30d": 1, "purchase_intransit_qty": 0,
+             "stock_state": "OK"},
+        ]}
+        with mock.patch.object(bq, "fetch_hot_items", return_value=data):
+            payload = bi_web_queries.run_table_qd_hot_items(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(
+            ["断货", "偏低", "正常"],
+            [row["state"] for row in payload["rows"]],
+        )
+
+    def test_table_qd_stock_oversold_splits_oversold_and_zero(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {
+            "urgent": [{"goods_name": "U", "spec_no": "SU",
+                        "available_qty": 1, "daily_avg": 0.5,
+                        "days_left": 2}],
+            "oversold": [{"goods_name": "O", "spec_no": "SO",
+                          "available_qty": -3, "daily_avg": 1.0}],
+            "zero_stock": [{"goods_name": "Z", "spec_no": "SZ",
+                            "daily_avg": 2.0}],
+        }
+        with mock.patch.object(bq, "fetch_stock_alerts", return_value=data):
+            urgent = bi_web_queries.run_table_qd_stock_urgent(
+                FakeConnection(), {"date": "2026-08-04"})
+            oversold = bi_web_queries.run_table_qd_stock_oversold(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(urgent)
+        self.assertEqual(data["urgent"], urgent["rows"])
+        self._assert_table(oversold)
+        self.assertEqual(
+            [{"goods_name": "O", "spec_no": "SO", "qty": 3.0,
+              "daily_avg": 1.0, "state": "超卖"},
+             {"goods_name": "Z", "spec_no": "SZ", "qty": 0,
+              "daily_avg": 2.0, "state": "零库存在售"}],
+            oversold["rows"],
+        )
+
+    def test_table_qd_purchase_inbound_flattens_groups(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {"groups": [{
+            "warehouse_name": "总仓",
+            "specs": [{"spec_no": "S1", "goods_name": "A", "qty": 5}],
+        }]}
+        with mock.patch.object(bq, "fetch_purchase_inbound", return_value=data) as f:
+            payload = bi_web_queries.run_table_qd_purchase_inbound(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        # 忽略日期筛选：取数用真实时钟（now=datetime.now()）。
+        self.assertIsNotNone(f.call_args.kwargs["now"])
+        self.assertEqual(
+            [{"warehouse": "总仓", "spec_no": "S1",
+              "goods_name": "A", "qty": 5}], payload["rows"])
+
+    def test_table_qd_order_risk_flattens_areas_with_anchor_minus_one(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        data = {
+            "groups": [{"shop_name": "店A", "platform": "天猫",
+                        "areas": [{"area": "杭州", "count": 6}]}],
+            "incomplete_groups": [{"shop_name": "店B", "platform": "拼多多",
+                                   "areas": [{"area": "", "count": 3}]}],
+            "threshold": 5,
+            "pdd_no_area_count": 2,
+        }
+        with mock.patch.object(bq, "fetch_order_risk", return_value=data) as f:
+            payload = bi_web_queries.run_table_qd_order_risk(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(date(2026, 8, 3), f.call_args.kwargs["business_date"])
+        self.assertEqual("", payload["rows"][0]["mark"])
+        self.assertEqual(
+            "地区字段不全（仅供参考）", payload["rows"][1]["mark"])
+
+    def test_table_qd_notes_renders_sections(self):
+        from unittest import mock
+
+        from common.broadcast import queries as bq
+
+        with (
+            mock.patch.object(bq, "fetch_expense_summary", return_value={
+                "months": ["2026-08"], "rows": [],
+                "empty_months": [], "unmapped_stores": []}),
+            mock.patch.object(bq, "fetch_bill_breakdown", return_value={
+                "by_category": [], "by_platform": [], "top_items": [],
+                "other_items": {"count": 0, "total": 0.0},
+                "grand_total": 0.0, "empty_months": []}),
+            mock.patch.object(bq, "fetch_cohort_retention", return_value={
+                "periods": [0], "cohorts": [],
+                "avg_retention": {0: 1.0}, "last_ym": "2026-08"}),
+            mock.patch.object(bq, "fetch_hot_items", return_value={
+                "items": [], "moving_window_days": 15}),
+            mock.patch.object(bq, "fetch_stock_alerts", return_value={
+                "urgent": [], "oversold": [], "zero_stock": [],
+                "moving_window_days": 15}),
+            mock.patch.object(bq, "fetch_purchase_inbound", return_value={
+                "groups": [], "total_qty": 0.0, "total_lines": 0,
+                "total_specs": 0, "total_orders": 0}),
+            mock.patch.object(bq, "fetch_order_risk", return_value={
+                "groups": [], "incomplete_groups": [], "threshold": 5,
+                "pdd_no_area_count": 0}),
+            mock.patch(
+                "common.daily_robot.channel_daily.fetch_channel_month_facts",
+                return_value={}),
+            mock.patch(
+                "common.daily_robot.channel_daily."
+                "resolve_channel_business_date",
+                return_value=None),
+        ):
+            payload = bi_web_queries.run_table_qd_notes(
+                FakeConnection(), {"date": "2026-08-04"})
+        self._assert_table(payload)
+        self.assertEqual(["section", "note"],
+                         [c["key"] for c in payload["columns"]])
+        sections = [row["section"] for row in payload["rows"]]
+        for expected in ("月度核心指标", "费用/盈利", "账单费用拆解",
+                         "商品结构", "退款原因", "GMV 三因子",
+                         "Cohort 留存", "白酒节点弹性", "渠道日销快报",
+                         "热卖品监控", "库存补货提醒", "采购入库（近24小时）",
+                         "订单风险防控"):
+            self.assertIn(expected, sections)
 
 
 class _PeopleFakeConnection(FakeConnection):
