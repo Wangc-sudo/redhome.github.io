@@ -5,7 +5,11 @@ import {
   addDept,
   addRegion,
   assignMember,
+  deleteDept,
   deleteOverride,
+  deleteRegion,
+  disableDept,
+  disableRegion,
   getOverview,
   resetOverrides,
   toggleOverride,
@@ -337,6 +341,88 @@ async function submitDept() {
   }
 }
 
+// -- 折叠 / 停用 / 删除 ----------------------------------------------------
+const collapsed = ref(new Set());    // 折叠的区域 key 集合
+
+function toggleCollapse(regionKey) {
+  const next = new Set(collapsed.value);
+  if (next.has(regionKey)) next.delete(regionKey);
+  else next.add(regionKey);
+  collapsed.value = next;
+}
+
+function isCollapsed(regionKey) {
+  return collapsed.value.has(regionKey);
+}
+
+async function onDisableRegion(region, enabled) {
+  const action = enabled ? '启用' : '停用';
+  if (!enabled && !window.confirm(
+    `停用区域「${region.label}」后，该区域及下挂部门将不在树中显示（可重新启用）。是否继续？`,
+  )) return;
+  busy.value = true;
+  try {
+    await disableRegion({ region_key: region.key, enabled });
+    showFlash('ok', `已${action}区域「${region.label}」`);
+    await load({ silent: true });
+  } catch (err) {
+    showFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onDeleteRegion(region) {
+  if (!window.confirm(
+    `删除区域「${region.label}」将级联删除其下所有登记部门（已归属该区域的成员回种子口径）。此操作不可撤销，是否继续？`,
+  )) return;
+  busy.value = true;
+  try {
+    await deleteRegion({ region_key: region.key });
+    showFlash('ok', `已删除区域「${region.label}」`);
+    await load({ silent: true });
+  } catch (err) {
+    showFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onDisableDept(region, dept, enabled) {
+  const action = enabled ? '启用' : '停用';
+  if (!enabled && dept.members.length && !window.confirm(
+    `部门「${dept.dept_name}」下有 ${dept.members.length} 名成员，停用后成员将回未归类池。是否继续？`,
+  )) return;
+  busy.value = true;
+  try {
+    await disableDept({
+      region_key: region.key, dept_name: dept.dept_name, enabled,
+    });
+    showFlash('ok', `已${action}部门「${dept.dept_name}」`);
+    await load({ silent: true });
+  } catch (err) {
+    showFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onDeleteDept(region, dept) {
+  if (!window.confirm(
+    `删除部门「${dept.dept_name}」后，其下成员将回未归类池。此操作不可撤销，是否继续？`,
+  )) return;
+  busy.value = true;
+  try {
+    await deleteDept({ region_key: region.key, dept_name: dept.dept_name });
+    showFlash('ok', `已删除部门「${dept.dept_name}」`);
+    await load({ silent: true });
+  } catch (err) {
+    showFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
 onMounted(() => load());
 </script>
 
@@ -441,18 +527,44 @@ onMounted(() => load());
           class="region-card"
         >
           <div class="region-head">
-            <h3>{{ region.label }}</h3>
+            <span
+              class="collapse-arrow"
+              :class="{ collapsed: isCollapsed(region.key) }"
+              @click="toggleCollapse(region.key)"
+            >▶</span>
+            <h3 @click="toggleCollapse(region.key)" class="region-title">
+              {{ region.label }}
+            </h3>
             <span class="region-key">{{ region.key }}</span>
-            <button
-              class="btn mini"
-              :disabled="busy || loading"
-              :title="`在 ${region.label} 登记一个部门（即使暂无成员也会出现在树里）`"
-              @click="openDeptDrawer(region)"
-            >
-              + 新增部门
-            </button>
+            <div class="region-actions">
+              <button
+                class="btn mini"
+                :disabled="busy || loading"
+                :title="`在 ${region.label} 登记一个部门（即使暂无成员也会出现在树里）`"
+                @click="openDeptDrawer(region)"
+              >
+                + 部门
+              </button>
+              <button
+                class="btn mini ghost"
+                :disabled="busy || loading"
+                title="停用该区域（可重新启用）"
+                @click="onDisableRegion(region, false)"
+              >
+                停用
+              </button>
+              <button
+                class="btn mini danger"
+                :disabled="busy || loading"
+                title="删除该区域（级联删除其下部门）"
+                @click="onDeleteRegion(region)"
+              >
+                删除
+              </button>
+            </div>
           </div>
           <draggable
+            v-show="!isCollapsed(region.key)"
             class="dept-drop"
             :list="region.depts"
             :group="deptGroup"
@@ -468,6 +580,22 @@ onMounted(() => load());
                   <span class="dept-name">{{ dept.dept_name || '未命名部门' }}</span>
                   <span class="dept-id">{{ dept.dept_id || '无ID' }}</span>
                   <span class="dept-count">{{ dept.members.length }} 人</span>
+                  <button
+                    class="btn mini ghost"
+                    :disabled="busy || loading"
+                    title="停用该部门（可重新启用）"
+                    @click.stop="onDisableDept(region, dept, false)"
+                  >
+                    停用
+                  </button>
+                  <button
+                    class="btn mini danger"
+                    :disabled="busy || loading"
+                    title="删除该部门"
+                    @click.stop="onDeleteDept(region, dept)"
+                  >
+                    删除
+                  </button>
                 </div>
                 <draggable
                   class="members-drop"
@@ -841,12 +969,35 @@ onMounted(() => load());
   margin: 0;
   font-size: 14px;
 }
-.region-head .btn {
-  margin-left: auto;
-}
 .region-key {
   color: #9ca3af;
   font-size: 11px;
+}
+.region-title {
+  cursor: pointer;
+  user-select: none;
+}
+.region-title:hover {
+  color: #2563eb;
+}
+.collapse-arrow {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  color: #9ca3af;
+  cursor: pointer;
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+  user-select: none;
+}
+.collapse-arrow.collapsed {
+  transform: rotate(0deg);
+}
+.region-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  align-items: center;
 }
 .dept-drop {
   display: flex;

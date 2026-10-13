@@ -187,6 +187,90 @@ class WriteTests(unittest.TestCase):
         self.assertEqual(("hangzhou", "1050062512", "杭州销售部", 0), result)
 
 
+class ToggleDeleteTests(unittest.TestCase):
+
+    def test_disable_region_writes_audit(self):
+        conn = _Conn(affected=1)
+        affected = oc.set_catalog_enabled(
+            conn, "region", region_key="hangzhou", enabled=False, actor="ops")
+        self.assertEqual(1, affected)
+        sqls = [s for s, _ in conn.executed]
+        self.assertTrue(any("UPDATE `dim_org_region`" in s
+                            and "`enabled` = %s" in s for s in sqls))
+        audit = _audit_params(conn)
+        self.assertEqual("ops", audit[0])
+        self.assertEqual("disable_region", audit[1])
+        self.assertEqual("region", audit[2])
+        self.assertEqual("hangzhou", audit[3])
+
+    def test_enable_region_action_label(self):
+        conn = _Conn(affected=1)
+        oc.set_catalog_enabled(
+            conn, "region", region_key="hangzhou", enabled=True, actor="ops")
+        audit = _audit_params(conn)
+        self.assertEqual("enable_region", audit[1])
+
+    def test_disable_dept_requires_dept_name(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.set_catalog_enabled(
+                conn, "dept", region_key="hangzhou", enabled=False,
+                actor="ops")
+        self.assertEqual(0, conn.commits)
+
+    def test_disable_dept_writes_audit(self):
+        conn = _Conn(affected=1)
+        oc.set_catalog_enabled(
+            conn, "dept", region_key="hangzhou", dept_name="杭州销售部",
+            enabled=False, actor="ops")
+        sqls = [s for s, _ in conn.executed]
+        self.assertTrue(any("UPDATE `dim_org_dept`" in s for s in sqls))
+        audit = _audit_params(conn)
+        self.assertEqual("disable_dept", audit[1])
+        self.assertEqual("hangzhou", audit[3])
+        self.assertEqual("杭州销售部", audit[5])
+
+    def test_delete_region_cascades_depts(self):
+        conn = _Conn(affected=1)
+        oc.delete_catalog_entry(
+            conn, "region", region_key="chengdu", actor="ops")
+        sqls = [s for s, _ in conn.executed]
+        # 先删该区域下部门，再删区域
+        dept_del = next(i for i, s in enumerate(sqls)
+                        if "DELETE FROM `dim_org_dept`" in s
+                        and "region_key" in s)
+        region_del = next(i for i, s in enumerate(sqls)
+                          if "DELETE FROM `dim_org_region`" in s)
+        self.assertLess(dept_del, region_del)
+        audit = _audit_params(conn)
+        self.assertEqual("delete_region", audit[1])
+        self.assertEqual("chengdu", audit[3])
+
+    def test_delete_dept_requires_name(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.delete_catalog_entry(
+                conn, "dept", region_key="hangzhou", actor="ops")
+        self.assertEqual(0, conn.commits)
+
+    def test_delete_dept_writes_audit(self):
+        conn = _Conn(affected=1)
+        oc.delete_catalog_entry(
+            conn, "dept", region_key="hangzhou", dept_name="杭州销售部",
+            actor="ops")
+        audit = _audit_params(conn)
+        self.assertEqual("delete_dept", audit[1])
+        self.assertEqual("hangzhou", audit[3])
+        self.assertEqual("杭州销售部", audit[5])
+
+    def test_invalid_target_type_rejected(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.set_catalog_enabled(
+                conn, "bogus", region_key="hangzhou", enabled=False,
+                actor="ops")
+
+
 class MigrationRegistrationTests(unittest.TestCase):
 
     def test_catalog_migration_registered(self):

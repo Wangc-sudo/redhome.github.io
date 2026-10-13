@@ -307,3 +307,98 @@ def upsert_dept(connection, region_key, dept_name, *, dept_id=None, actor,
                 region_key=region_key, dept_id=dept_id, dept_name=dept_name,
             )
     return region_key, dept_id, dept_name, sort_order
+
+
+def _check_region_key(region_key):
+    region_key = region_key.strip() if isinstance(region_key, str) else region_key
+    if not region_key or not isinstance(region_key, str) \
+            or not _REGION_RE.match(region_key):
+        raise OrgCatalogError("region_key must be a region key")
+    return region_key
+
+
+def set_catalog_enabled(connection, target_type, *, region_key, dept_name=None,
+                        enabled, actor):
+    """停用 / 启用一个区域或部门（软删：``enabled`` 置 0/1）。
+
+    *target_type* 为 ``'region'`` 或 ``'dept'``；停用部门需传 ``dept_name``。
+    停用区域时**不级联**停用其下部门（重新启用区域即可恢复）。
+    返回受影响行数。
+    """
+    region_key = _check_region_key(region_key)
+    enabled = 1 if enabled else 0
+    if target_type == "region":
+        sql = ("UPDATE `dim_org_region` SET `enabled` = %s, "
+               "`updated_by` = %s, `updated_at` = %s "
+               "WHERE `region_key` = %s")
+        params = (enabled, actor, _utc_now_text(), region_key)
+        action = "enable_region" if enabled else "disable_region"
+        dept_name_audit = None
+    elif target_type == "dept":
+        if not dept_name or not isinstance(dept_name, str) \
+                or not dept_name.strip():
+            raise OrgCatalogError("dept_name required for dept target")
+        dept_name = dept_name.strip()
+        sql = ("UPDATE `dim_org_dept` SET `enabled` = %s, "
+               "`updated_by` = %s, `updated_at` = %s "
+               "WHERE `region_key` = %s AND `dept_name` = %s")
+        params = (enabled, actor, _utc_now_text(), region_key, dept_name)
+        action = "enable_dept" if enabled else "disable_dept"
+        dept_name_audit = dept_name
+    else:
+        raise OrgCatalogError("target_type must be 'region' or 'dept'")
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            cursor.execute(sql, params)
+            affected = cursor.rowcount
+            if affected:
+                _insert_audit(
+                    connection, actor, action, target_type=target_type,
+                    region_key=region_key, dept_name=dept_name_audit,
+                )
+    return affected
+
+
+def delete_catalog_entry(connection, target_type, *, region_key, dept_name=None,
+                         actor):
+    """物理删除一个区域或部门。
+
+    删除区域时**级联**删除其下所有部门（孤儿部门无意义）。返回受影响行数。
+    """
+    region_key = _check_region_key(region_key)
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            if target_type == "region":
+                cursor.execute(
+                    "DELETE FROM `dim_org_dept` WHERE `region_key` = %s",
+                    (region_key,),
+                )
+                cursor.execute(
+                    "DELETE FROM `dim_org_region` WHERE `region_key` = %s",
+                    (region_key,),
+                )
+                affected = cursor.rowcount
+                _insert_audit(
+                    connection, actor, "delete_region", target_type="region",
+                    region_key=region_key,
+                )
+            elif target_type == "dept":
+                if not dept_name or not isinstance(dept_name, str) \
+                        or not dept_name.strip():
+                    raise OrgCatalogError("dept_name required for dept target")
+                dept_name = dept_name.strip()
+                cursor.execute(
+                    "DELETE FROM `dim_org_dept` "
+                    "WHERE `region_key` = %s AND `dept_name` = %s",
+                    (region_key, dept_name),
+                )
+                affected = cursor.rowcount
+                if affected:
+                    _insert_audit(
+                        connection, actor, "delete_dept",
+                        target_type="dept", region_key=region_key,
+                        dept_name=dept_name,
+                    )
+            else:
+                raise OrgCatalogError("target_type must be 'region' or 'dept'")
+    return affected

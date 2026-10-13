@@ -118,3 +118,47 @@ export function addDept(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+/**
+ * 停用 / 启用一个登记区域。
+ * @param {{region_key:string, enabled:boolean}} payload
+ */
+export function disableRegion(payload) {
+  return request('/api/org/region/disable', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 物理删除一个登记区域（级联删除其下部门）。
+ * @param {{region_key:string}} payload
+ */
+export function deleteRegion(payload) {
+  return request('/api/org/region/delete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 停用 / 启用一个登记部门。
+ * @param {{region_key:string, dept_name:string, enabled:boolean}} payload
+ */
+export function disableDept(payload) {
+  return request('/api/org/dept/disable', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 物理删除一个登记部门。
+ * @param {{region_key:string, dept_name:string}} payload
+ */
+export function deleteDept(payload) {
+  return request('/api/org/dept/delete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
