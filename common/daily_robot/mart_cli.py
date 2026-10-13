@@ -852,8 +852,73 @@ def _handle_calendar_watch(args):
         sys.exit(1)
 
 
+def render_leaderboard_page(conn, *, region, cfg, business_date, now, output):
+    """渲染并双写 current+archive 榜单页；返回 ``(page_html, stats)``。
+
+    渲染核心（2026-10-13 pages-web 解耦）：不含 pipeline 开关/确认闸——
+    那是 cron 通道职责，pages-web 请求时渲染恒走本函数。仍引用本模块
+    的 lazy wrapper（test_mart_cli 按模块属性 patch，勿迁出本模块）。
+    """
+    output = Path(output)
+    archive_stem = output.stem
+    # 日期选择月历（2026-10-09 运维裁决「日历点日期，蓝为工作日」）：
+    # 存档页 <stem>-YYYY-MM-DD.html 与榜单同目录，可点日期 = 已存在
+    # 存档的工作日（含本页）；offline_all 走独立构建器，只写存档不
+    # 嵌月历（其页内已有日/周/月维度）。
+    available_dates = scan_archive_dates(output.parent, archive_stem)
+    available_dates.add(business_date)
+    if region == "offline_all":
+        # 线下整体无 region=offline_all 的事实行：板块榜由
+        # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
+        page = build_offline_all_page(
+            conn, cfg, business_date=business_date, now=now
+        )
+        stats = "scopes=5"
+    else:
+        data = mart_collect_data(conn, region=region, business_date=business_date)
+        view = build_view(
+            cfg, data.workdays,
+            year=business_date.year, month=business_date.month,
+        )
+        date_nav = build_date_nav_panel(
+            page_date=business_date,
+            workday_dates=data.workdays,
+            available_dates=available_dates,
+            archive_stem=archive_stem,
+        )
+
+        # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
+        # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
+        # 照常产出（详见 common.broadcast.qudao_panels）。
+        extra_panels = None
+        if region in _PANEL_REGIONS:
+            extra_panels = build_qudao_panels_html(
+                conn,
+                business_date=business_date,
+                now=now,
+                workdays=data.workdays,
+                monthly_targets=channel_monthly_targets(conn, region, cfg),
+            )
+        page = build_html_page(
+            view, now, list(data.elapsed), list(data.people),
+            extra_panels=extra_panels,
+            dept_overrides=channel_dept_overrides(conn, region, data),
+            date_nav=date_nav,
+        )
+        stats = f"people={len(data.people)}" + (
+            f" panels={len(extra_panels)}" if extra_panels is not None else ""
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(page, encoding="utf-8")
+    archive_path = output.with_name(archive_name(archive_stem, business_date))
+    if archive_path != output:
+        archive_path.write_text(page, encoding="utf-8")
+    return page, stats
+
+
 def _handle_leaderboard_html(args):
-    """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（发布通道维持现状）。"""
+    """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（cron 通道）。"""
     if not args.confirm_local_test_write:
         sys.exit(1)
 
@@ -886,62 +951,12 @@ def _handle_leaderboard_html(args):
         business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
-        # 日期选择月历（2026-10-09 运维裁决「日历点日期，蓝为工作日」）：
-        # 存档页 <stem>-YYYY-MM-DD.html 与榜单同目录，可点日期 = 已存在
-        # 存档的工作日（含本页）；offline_all 走独立构建器，只写存档不
-        # 嵌月历（其页内已有日/周/月维度）。
         output = Path(args.output)
-        archive_stem = output.stem
-        available_dates = scan_archive_dates(output.parent, archive_stem)
-        available_dates.add(business_date)
-        if region == "offline_all":
-            # 线下整体无 region=offline_all 的事实行：板块榜由
-            # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
-            page = build_offline_all_page(
-                conn, cfg, business_date=business_date, now=now
-            )
-            stats = "scopes=5"
-        else:
-            data = mart_collect_data(conn, region=region, business_date=business_date)
-            view = build_view(
-                cfg, data.workdays,
-                year=business_date.year, month=business_date.month,
-            )
-            date_nav = build_date_nav_panel(
-                page_date=business_date,
-                workday_dates=data.workdays,
-                available_dates=available_dates,
-                archive_stem=archive_stem,
-            )
-
-            # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
-            # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
-            # 照常产出（详见 common.broadcast.qudao_panels）。
-            extra_panels = None
-            if region in _PANEL_REGIONS:
-                extra_panels = build_qudao_panels_html(
-                    conn,
-                    business_date=business_date,
-                    now=now,
-                    workdays=data.workdays,
-                    monthly_targets=channel_monthly_targets(conn, region, cfg),
-                )
-            page = build_html_page(
-                view, now, list(data.elapsed), list(data.people),
-                extra_panels=extra_panels,
-                dept_overrides=channel_dept_overrides(conn, region, data),
-                date_nav=date_nav,
-            )
-            stats = f"people={len(data.people)}" + (
-                f" panels={len(extra_panels)}" if extra_panels is not None else ""
-            )
-
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(page, encoding="utf-8")
-        archive_path = output.with_name(archive_name(archive_stem,
-                                                     business_date))
-        if archive_path != output:
-            archive_path.write_text(page, encoding="utf-8")
+        _page, stats = render_leaderboard_page(
+            conn, region=region, cfg=cfg, business_date=business_date,
+            now=now, output=output,
+        )
+        archive_path = output.with_name(archive_name(output.stem, business_date))
         print(
             f"service={service_id} region={region} kind=leaderboard-html "
             f"status=written archive={archive_path.name} {stats}"

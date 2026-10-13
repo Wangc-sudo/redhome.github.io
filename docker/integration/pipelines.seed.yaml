@@ -69,7 +69,8 @@ robot-check-hangzhou:
 pages-hangzhou:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "hangzhou leaderboard HTML page generation"
@@ -101,28 +102,32 @@ robot-check-vanke:
 pages-vanke:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "vanke leaderboard HTML page generation"
 pages-shaoxing:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "shaoxing leaderboard HTML page generation"
 pages-junpin:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "junpin leaderboard HTML page generation"
 pages-qudao:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8,15,17 * * *"
   reads: [mart_ops]
   description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
@@ -162,7 +167,8 @@ pages-qudao-t1:
 pages-offline_all:
   kind: business
   category: 页面
-  enabled: true
+  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
+  enabled: false
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "offline_all scope leaderboard HTML page generation"
