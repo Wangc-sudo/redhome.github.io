@@ -13,37 +13,48 @@ l1-cockpit:
   cards:
     - card: kpi_offline_mtd
       title: "线下本月累计销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_channel_mtd
       title: "电商渠道本月累计销售"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: kpi_annual_progress
       title: "年度目标达成进度"
+      source: "钉钉AI表格 + 人工报表 + 目标表"
       span: 4
     - card: trend_region_daily
       title: "区域日销趋势"
+      source: "钉钉AI表格 · 销售日报"
       span: 8
     - card: bar_channel_mtd
       title: "渠道本月排行"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
     - card: table_channel_mtd
       title: "渠道本月对比"
+      source: "钉钉AI表格 · 渠道日销"
       span: 12
     - card: pie_sku_mtd
       title: "电商 SKU 本月销售占比"
+      source: "WDT · 交易单"
       span: 6
     # 派生口径（CubeSchema §2）由后端算：缺口/所需日均/四级告警，前端只渲染。
     - card: anomaly_top
       title: "今日跟进（缺口 TOP10）"
+      source: "钉钉AI表格 · 销售日报"
       span: 6
     - card: kpi_shortfall
       title: "目标缺口与告警"
+      source: "钉钉AI表格 · 销售日报"
       span: 6
     - card: kpi_offline_dod
       title: "线下日环比"
+      source: "钉钉AI表格 · 销售日报"
       span: 3
     - card: kpi_channel_dod
       title: "电商渠道日环比"
+      source: "钉钉AI表格 · 渠道日销"
       span: 3
 # 杭州线下销售BI看板（2026-10-09 运维裁决：8300/hangzhou.html 静态榜单页
 # 切 BI，URL 保留走 nginx 反代方案 A——仅此看板经 8300 暴露，其余看板仍锁
@@ -62,25 +73,32 @@ hz-offline-sales:
   cards:
     - card: kpi_hz_mtd
       title: "本月累计销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_hz_today
       title: "当日销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_hz_progress
       title: "时间进度"
+      source: "维度 · 工作日历"
       span: 4
     - card: trend_hz_daily
       title: "杭州日销趋势"
+      source: "钉钉AI表格 · 销售日报"
       span: 8
     - card: bar_hz_dept
       title: "部门本月排行"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: table_hz_people_progress
       title: "个人完成率榜"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
     # 当日未填报人（2026-10-10 运维反馈新增；与催办同真源）
     - card: table_hz_unfilled_today
       title: "当日未填报人"
+      source: "钉钉AI表格 · 销售日报 + 通讯录"
       span: 12
 # 线下整体销售BI看板（2026-10-10 运维裁决：8300/offline_all.html 静态榜
 # 单页切 BI，URL 保留走 nginx 反代方案 A——同 hangzhou.html 先例，仅此
@@ -101,24 +119,31 @@ offline-all-sales:
   cards:
     - card: kpi_oa_mtd
       title: "本月累计销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_oa_today
       title: "当日销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_oa_progress
       title: "时间进度"
+      source: "维度 · 工作日历"
       span: 4
     - card: trend_oa_daily
       title: "区域日销趋势"
+      source: "钉钉AI表格 · 销售日报"
       span: 8
     - card: bar_oa_dept
       title: "部门本月排行"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: table_oa_scopes
       title: "板块日/周/月总览"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
     - card: table_oa_people_progress
       title: "个人完成率榜"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
 # 绍兴线下销售BI看板（2026-10-10 运维裁决：8300/shaoxing.html 静态榜
 # 单页切 BI，URL 保留走 nginx 反代方案 A——与杭州看板同构，区域钉绍
@@ -136,24 +161,31 @@ sx-offline-sales:
   cards:
     - card: kpi_sx_mtd
       title: "本月累计销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_sx_today
       title: "当日销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_sx_progress
       title: "时间进度"
+      source: "维度 · 工作日历"
       span: 4
     - card: trend_sx_daily
       title: "绍兴日销趋势"
+      source: "钉钉AI表格 · 销售日报"
       span: 8
     - card: bar_sx_dept
       title: "部门本月排行"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: table_sx_people_progress
       title: "个人完成率榜"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
     - card: table_sx_unfilled_today
       title: "当日未填报人"
+      source: "钉钉AI表格 · 销售日报 + 通讯录"
       span: 12
 qd-channel-sales:
   title: "渠道销售BI看板"
@@ -297,12 +329,15 @@ l2-region:
   cards:
     - card: kpi_region_mtd
       title: "区域本月累计销售"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: trend_region_daily
       title: "区域日销趋势"
+      source: "钉钉AI表格 · 销售日报"
       span: 8
     - card: bar_department_mtd
       title: "部门本月排行"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
 l2-channel:
   title: "渠道明细"
@@ -317,16 +352,20 @@ l2-channel:
   cards:
     - card: bar_channel_mtd
       title: "渠道本月排行"
+      source: "钉钉AI表格 · 渠道日销"
       span: 4
       on_click: {param: channel}
     - card: trend_channel_daily
       title: "渠道日销趋势"
+      source: "钉钉AI表格 · 渠道日销"
       span: 8
     - card: table_channel_mtd
       title: "渠道本月对比"
+      source: "钉钉AI表格 · 渠道日销"
       span: 6
     - card: table_store_mtd
       title: "店铺本月排行"
+      source: "钉钉AI表格 · 渠道日销"
       span: 6
 # 电商人员业绩：负责人来自钉钉 AI 表 user[] 集合（≤3 人，可随时变），
 # 整店日销售额/月目标归集合内每位负责人（集合归属，不切分、不均摊），
@@ -344,12 +383,15 @@ l2-ecom-people:
   cards:
     - card: table_people_leaderboard
       title: "电商人员业绩榜"
+      source: "钉钉AI表格 · 渠道日销"
       span: 12
     - card: anomaly_top
       title: "今日跟进（电商人员缺口 TOP10）"
+      source: "钉钉AI表格 · 渠道日销"
       span: 6
     - card: kpi_shortfall
       title: "电商人员目标缺口与告警"
+      source: "钉钉AI表格 · 渠道日销"
       span: 6
 # 商品动销（商渠明细）：结果（总榜）→ 分组比较（分品牌/分渠道）→ 异常
 # （环比下滑）同页可达；筛选按月、品牌、店铺渠道。
@@ -367,15 +409,19 @@ l2-product:
   cards:
     - card: kpi_sku_mtd
       title: "本月商品累计销售"
+      source: "WDT · 交易单"
       span: 4
     - card: table_sku_hot_total
       title: "热销商品总榜"
+      source: "WDT · 交易单"
       span: 8
     - card: table_sku_hot_brand
       title: "分品牌热销商品"
+      source: "WDT · 交易单"
       span: 6
     - card: table_sku_hot_channel
       title: "分渠道热销商品"
+      source: "WDT · 交易单"
       span: 6
 l2-people:
   title: "人员榜"
@@ -390,15 +436,19 @@ l2-people:
   cards:
     - card: kpi_people_count
       title: "参与人数"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_people_completed
       title: "本月完成额"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: kpi_people_rate
       title: "总达成率"
+      source: "钉钉AI表格 · 销售日报"
       span: 4
     - card: table_people_leaderboard
       title: "人员销售榜"
+      source: "钉钉AI表格 · 销售日报"
       span: 12
 # 资金安全（需求⑩）：五张 fact_fin_* 真卡，编排照 fund-safety-draft §4；
 # 派生口径（>60 天差额桶/挂账天数/severity）全部后端算（fin_derived）。
@@ -420,18 +470,23 @@ l2-fund-safety:
   cards:
     - card: kpi_fin_receivables_overdue
       title: "应收逾期总览"
+      source: "财务AI表格 · 应收账款账龄"
       span: 4
     - card: trend_fin_store_funds_entity
       title: "店铺资金余额趋势"
+      source: "财务AI表格 · 店铺资金余额"
       span: 12
     - card: table_fin_receivables_aging
       title: "应收账龄明细"
+      source: "财务AI表格 · 应收账款账龄"
       span: 12
     - card: table_fin_prepayment_uninvoiced
       title: "预付与未到票"
+      source: "财务AI表格 · 预付与发票"
       span: 6
     - card: table_fin_deposit_status
       title: "保证金状态"
+      source: "财务AI表格 · 保证金"
       span: 6
 # ④ 电商月报 / ⑤ 餐饮月报 / ⑪ 体验馆月报：真卡（人工报表窄表），
 # 未首填期间自然挂零（空行）；month 参数待月份值域重叠确认后追加。
@@ -445,6 +500,7 @@ l2-ecom:
   cards:
     - card: table_manual_ecommerce_monthly
       title: "电商月度经营对比"
+      source: "人工报表 · 月度经营"
       span: 12
 l2-dining:
   title: "餐饮月度经营"
@@ -456,6 +512,7 @@ l2-dining:
   cards:
     - card: table_manual_restaurant_monthly
       title: "餐饮月度经营对比"
+      source: "人工报表 · 月度经营"
       span: 12
 l2-hall:
   title: "体验馆月度经营"
@@ -467,6 +524,7 @@ l2-hall:
   cards:
     - card: table_manual_showroom_monthly
       title: "体验馆月度经营对比"
+      source: "人工报表 · 月度经营"
       span: 12
 # 以下五页为 0 占位（待接入）：结构卡 rows=[] + has_fact=false 挂零语义
 # （应接入未接入），不建临时表；filters 只挂月份（卡片 params_schema

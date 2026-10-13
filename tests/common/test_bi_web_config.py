@@ -771,6 +771,20 @@ class BiSeedFileTests(unittest.TestCase):
         # 否则看板上会出现没有出处的卡。
         self.assertTrue(all(placement.source for placement in qd.cards))
 
+        # 数据源出处扩面（2026-10-13 晚）：除 5 张「待接入」占位页（占位卡
+        # 无真实取数，标来源反而是假出处）外，所有看板每张卡都必须标注来源。
+        placeholder_pages = {
+            "l2-inventory", "l2-warehouse", "l2-quarter", "l2-yoy", "l2-contract",
+        }
+        for dashboard_id, config in configs.items():
+            if dashboard_id in placeholder_pages:
+                continue
+            for placement in config.cards:
+                self.assertTrue(
+                    placement.source,
+                    f"{dashboard_id}/{placement.card} missing source",
+                )
+
         # 资金安全页（需求⑩，编排照 fund-safety-draft §4）：四张真卡 + 店铺
         # 资金余额趋势的主体参数化卡（2026-09-17 P2：主体会变，4 张分屏卡
         # 收敛为 1 张），页面级挂「公司主体」筛选。
