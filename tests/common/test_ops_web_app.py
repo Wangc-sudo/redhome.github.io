@@ -1993,6 +1993,27 @@ class GrantWriteApiTests(unittest.TestCase):
         self.assertEqual(ADMIN_USERID, audit_params[0])
         self.assertEqual(1, connection.commits)
 
+    def test_region_scoped_scope_key_is_accepted(self):
+        """G4 D4：`scope='roster:other'` 区域级键经 _SCOPE_KEY_RE 放行并落 audit。"""
+        connection = _Connection()
+        client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
+        _login(client)
+
+        response = client.post("/api/grants", json={
+            "user_id": "u-other", "grant_type": "scope",
+            "grant_key": "roster:other", "note": "其他区域名册",
+        })
+
+        self.assertEqual(200, response.status_code)
+        executed = connection.cursor_instance.executed
+        sql = "\n".join(q for q, _ in executed)
+        self.assertIn("INSERT INTO `bi_authz_grant`", sql)
+        self.assertIn("INSERT INTO `bi_authz_grant_audit`", sql)
+        grant_params = [
+            p for q, p in executed if q.startswith("INSERT INTO `bi_authz_grant` ")
+        ]
+        self.assertIn("roster:other", grant_params[0])
+
     def test_grant_rejects_bad_fields(self):
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
@@ -3158,6 +3179,18 @@ class RegionScopeGateTests(unittest.TestCase):
             })
         self.assertEqual(200, ok.status_code)
         self.assertEqual(403, bad.status_code)
+
+    def test_scoped_viewer_cannot_touch_grants(self):
+        """G4：受限 viewer（仅 `roster:other`）无授权写面/读面（fail-closed）。"""
+        client = self._scoped_client("other")
+        payload = {
+            "user_id": "u-x", "grant_type": "scope", "grant_key": "roster:hq",
+        }
+        self.assertEqual(403, client.get("/api/grants").status_code)
+        self.assertEqual(403, client.post("/api/grants", json=payload).status_code)
+        self.assertEqual(
+            403, client.post("/api/grants/delete", json=payload).status_code
+        )
 
     def test_roster_read_filters_to_authorized_regions(self):
         store = _RosterStore()

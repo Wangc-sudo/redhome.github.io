@@ -1,25 +1,65 @@
 <script setup>
 /**
- * 授权现状（/grants，别名 /audit）——迁移自旧 SSR 页面（保真：app.py 旧 grants_page
- * + audit_page）。写面已停用，本页只读：
+ * 授权现状（/grants，别名 /audit）——G4 区域分权自助写面（2026-10-14）。
+ *
+ * 读面：
  *   GET /api/grants → {grants:[{user_id,grant_type,grant_type_label,grant_key,note,created_at}]}
  *   GET /api/audit  → {rows:[{created_at,actor,action,action_label,user_id,
  *                            grant_type,grant_type_label,grant_key,note}]}
+ * 写面（仅 admin，deny-by-default）：
+ *   POST /api/grants         → 新增一条授权（grant + audit 事务两写）
+ *   POST /api/grants/delete  → 删除一条授权
+ *
+ * grant_key 语义（bi_authz._SCOPE_KEY_RE 已放行 region 级形态）：
+ *   scope  → `<capability>`（全局）或 `<capability>:<region>`（限该区域，如 roster:other）
+ *   region → `<region>`（看板区域数据查看，bi-web 侧消费）
+ *   admin  → `-`（占位，admin 无对象维度）
+ *
  * ?user= 供 /records 深链而来，用于过滤/高亮某账号。
+ * 区域清单源 `me.all_regions`（dim_org_region 真源，禁硬编码）。
  */
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { getGrants, getAudit } from '../api.js';
+import { getGrants, getAudit, addGrant, deleteGrant } from '../api.js';
+import { me } from '../store/me.js';
 
 const route = useRoute();
 const router = useRouter();
+
+//: 能力枚举（与后端 CAPABILITY_* 对齐）；`region` 说明见 §注释。
+const CAPABILITIES = [
+  { key: 'roster', label: '名册与目标' },
+  { key: 'org', label: '组织编排（区域级暂按全局生效）' },
+  { key: 'pipelines', label: '定时任务' },
+  { key: 'audit', label: '操作记录' },
+  { key: 'calendar', label: '工作日历' },
+];
 
 const grants = ref([]);
 const audit = ref([]);
 const loading = ref(false);
 const error = ref('');
 
+//: 写面表单状态。
+const form = ref({ user_id: '', grant_type: 'scope', note: '' });
+const scopeCap = ref('roster');
+const scopeRegion = ref(''); //: '' = 全局；否则为区域 key → `<cap>:<region>`
+const regionKey = ref('');
+const submitting = ref(false);
+const flash = ref(null); //: { type:'ok'|'err', text }
+
+const allRegions = computed(() => (me.value && me.value.all_regions) || []);
+const hasRegions = computed(() => allRegions.value.length > 0);
+
 const activeUser = computed(() => route.query.user || '');
+
+/** 构造 grant_key：admin→'-'；region→<region>；scope→<cap> 或 <cap>:<region>。 */
+const grantKey = computed(() => {
+  if (form.value.grant_type === 'admin') return '-';
+  if (form.value.grant_type === 'region') return regionKey.value;
+  const cap = scopeCap.value;
+  return scopeRegion.value ? `${cap}:${scopeRegion.value}` : cap;
+});
 
 const visibleGrants = computed(() => {
   const user = activeUser.value;
@@ -46,20 +86,117 @@ async function load() {
   }
 }
 
-watch(() => route.query.user, load, { immediate: true });
+async function submitGrant() {
+  flash.value = null;
+  if (!form.value.user_id.trim()) {
+    flash.value = { type: 'err', text: '请填写账号（钉钉 userid）' };
+    return;
+  }
+  if (!grantKey.value) {
+    flash.value = { type: 'err', text: '请选择授权对象' };
+    return;
+  }
+  submitting.value = true;
+  try {
+    await addGrant({
+      user_id: form.value.user_id.trim(),
+      grant_type: form.value.grant_type,
+      grant_key: grantKey.value,
+      note: form.value.note,
+    });
+    flash.value = { type: 'ok', text: `已新增授权：${grantKey.value}` };
+    form.value.user_id = '';
+    form.value.note = '';
+    await load();
+  } catch (err) {
+    flash.value = {
+      type: 'err',
+      text: err.status === 400 ? '字段非法（类型 / 对象不匹配）' : err.message,
+    };
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function removeGrant(row) {
+  flash.value = null;
+  const target = `${row.user_id} · ${row.grant_type_label} · ${row.grant_key}`;
+  if (!window.confirm(`确认删除该授权？\n${target}`)) return;
+  try {
+    await deleteGrant({
+      user_id: row.user_id,
+      grant_type: row.grant_type,
+      grant_key: row.grant_key,
+    });
+    flash.value = { type: 'ok', text: '已删除该授权' };
+    await load();
+  } catch (err) {
+    flash.value = { type: 'err', text: err.message };
+  }
+}
 
 function clearUser() {
   router.replace({ query: {} });
 }
+
+watch(() => route.query.user, load, { immediate: true });
 </script>
 
 <template>
   <div class="page">
-    <h1>授权现状</h1>
-    <p class="note">
-      授权管理功能已停用，本页为只读视图。如需开通 BI 看板 / 区域数据 /
-      名册管理权限，请联系系统管理员。
-    </p>
+    <div class="head">
+      <div class="head-main">
+        <h1>授权管理</h1>
+        <p class="note">
+          能力 × 范围自助授权（区域清单来自组织注册表 <code>dim_org_region</code>）。
+          区域级键形如 <code>roster:other</code>，仅限该区域；未授权一律 fail-closed。
+        </p>
+      </div>
+    </div>
+
+    <form class="inline grant-form" @submit.prevent="submitGrant">
+      <input
+        v-model="form.user_id"
+        class="search"
+        placeholder="账号（钉钉 userid）"
+      />
+      <select v-model="form.grant_type">
+        <option value="scope">能力（scope）</option>
+        <option value="region">看板区域数据（region）</option>
+        <option value="admin">管理员（admin）</option>
+      </select>
+
+      <template v-if="form.grant_type === 'admin'">
+        <span class="hint">对象固定为 “-”</span>
+      </template>
+      <template v-else-if="form.grant_type === 'region'">
+        <select v-if="hasRegions" v-model="regionKey">
+          <option value="">— 选择区域 —</option>
+          <option v-for="r in allRegions" :key="r" :value="r">{{ r }}</option>
+        </select>
+        <input v-else v-model="regionKey" placeholder="区域 key" />
+      </template>
+      <template v-else>
+        <select v-model="scopeCap">
+          <option v-for="c in CAPABILITIES" :key="c.key" :value="c.key">
+            {{ c.label }}
+          </option>
+        </select>
+        <select v-if="hasRegions" v-model="scopeRegion">
+          <option value="">全局</option>
+          <option v-for="r in allRegions" :key="r" :value="r">限区域：{{ r }}</option>
+        </select>
+        <input v-else v-model="scopeRegion" placeholder="区域 key（留空=全局）" />
+      </template>
+
+      <input v-model="form.note" class="search" placeholder="备注（可选）" />
+      <button type="submit" class="btn primary" :disabled="submitting">
+        {{ submitting ? '提交中…' : '新增授权' }}
+      </button>
+      <span class="hint">将写入：<code>{{ grantKey || '—' }}</code></span>
+    </form>
+
+    <div v-if="flash" class="flash" :class="flash.type">{{ flash.text }}</div>
 
     <p v-if="activeUser" class="user-filter">
       仅显示账号 <strong>{{ activeUser }}</strong> 的授权
@@ -73,7 +210,7 @@ function clearUser() {
       <h2>授权现状</h2>
       <table>
         <tr>
-          <th>账号</th><th>类型</th><th>对象</th><th>备注</th><th>更新时间</th>
+          <th>账号</th><th>类型</th><th>对象</th><th>备注</th><th>更新时间</th><th>操作</th>
         </tr>
         <tr v-for="(row, i) in visibleGrants" :key="i">
           <td>{{ row.user_id }}</td>
@@ -81,9 +218,14 @@ function clearUser() {
           <td>{{ row.grant_key }}</td>
           <td>{{ row.note }}</td>
           <td>{{ row.created_at }}</td>
+          <td>
+            <button type="button" class="btn mini danger" @click="removeGrant(row)">
+              删除
+            </button>
+          </td>
         </tr>
         <tr v-if="!visibleGrants.length">
-          <td colspan="5" class="hint">暂无授权</td>
+          <td colspan="6" class="hint">暂无授权</td>
         </tr>
       </table>
 
@@ -111,6 +253,14 @@ function clearUser() {
 </template>
 
 <style scoped>
+.grant-form {
+  align-items: center;
+}
+.grant-form code {
+  background: #f0f2f5;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
 .user-filter {
   margin: 10px 0;
   padding: 6px 10px;
