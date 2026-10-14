@@ -25,7 +25,9 @@ warnings.filterwarnings(
 from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
-from common.ops_web.app import create_app
+from common.ops_web.app import (
+    ALL_CAPABILITIES, capability_allows, capability_has_scoped, create_app,
+)
 from common.public_data import (
     bi_authz, calendar_store, channel_target, ops_control,
     recipient_override, report_roster,
@@ -1945,7 +1947,7 @@ class RosterRegionTemplateTests(unittest.TestCase):
 
         # 与渠道门店同构的统一表头（聚合列靠左：月目标在店铺之后）
         self.assertIn(
-            "<th>渠道/地区</th><th>店铺/对象</th><th>月目标（元）</th>"
+            "<th>渠道/地区</th><th>店铺/对象</th><th>月目标（万元）</th>"
             "<th>负责人</th><th>代填报人</th>"
             "<th>状态</th><th>备注</th><th>更新</th><th>操作</th>",
             body,
@@ -3209,6 +3211,192 @@ class OrgAssignmentApiTests(unittest.TestCase):
             400, client.post("/api/org/dept/add",
                              json={"region_key": "hangzhou",
                                    "dept_name": "  "}).status_code)
+
+
+class CapabilityModelTests(unittest.TestCase):
+    """D4（2026-10-14）：能力×范围闸的纯函数语义。"""
+
+    def test_admin_passes_every_capability(self):
+        for capability in ALL_CAPABILITIES:
+            self.assertTrue(capability_allows(_admin_viewer(), capability))
+
+    def test_denied_viewer_fails_closed(self):
+        viewer = authz.denied_viewer("u-x")
+        for capability in ALL_CAPABILITIES:
+            self.assertFalse(capability_allows(viewer, capability))
+            self.assertFalse(capability_has_scoped(viewer, capability))
+
+    def test_region_scope_only_matches_its_region(self):
+        viewer = authz.Viewer(
+            userid="u-other", name="名册", scopes=frozenset({"roster:other"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        self.assertTrue(capability_allows(viewer, "roster", "other"))
+        self.assertFalse(capability_allows(viewer, "roster", "hq"))
+        # 区域级键不隐式授予全局能力
+        self.assertFalse(capability_allows(viewer, "roster"))
+        self.assertTrue(capability_has_scoped(viewer, "roster"))
+        self.assertFalse(capability_has_scoped(viewer, "org"))
+
+    def test_global_capability_covers_all_regions(self):
+        viewer = authz.Viewer(
+            userid="u-r", name="名册", scopes=frozenset({"roster"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        self.assertTrue(capability_allows(viewer, "roster", "hq"))
+        self.assertTrue(capability_allows(viewer, "roster", "other"))
+
+
+class MeApiTests(unittest.TestCase):
+    """/api/me（D1 SPA 启动契约）：能力＋可见区域自述。"""
+
+    def test_requires_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.get("/api/me").status_code)
+
+    def test_non_admitted_is_forbidden(self):
+        client = TestClient(_app(viewer=authz.denied_viewer("u-x")))
+        _login(client, "u-x")
+        self.assertEqual(403, client.get("/api/me").status_code)
+
+    def test_admin_reports_all_capabilities_and_regions(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        data = client.get("/api/me").json()
+        self.assertTrue(data["is_admin"])
+        self.assertEqual(list(ALL_CAPABILITIES), data["capabilities"])
+        self.assertEqual({}, data["scoped_capabilities"])
+        self.assertIn("other", data["regions"])   # SCOPES 兜底含 hq/other
+
+    def test_scoped_viewer_reports_region_only(self):
+        viewer = authz.Viewer(
+            userid="u-other", name="名册", scopes=frozenset({"roster:other"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-other")
+        data = client.get("/api/me").json()
+        self.assertFalse(data["is_admin"])
+        self.assertEqual([], data["capabilities"])
+        self.assertEqual({"roster": ["other"]}, data["scoped_capabilities"])
+        self.assertEqual(["other"], data["regions"])
+
+
+class RegionScopeGateTests(unittest.TestCase):
+    """D4 区域分权（§7 验收第 6 条）：roster:<region> 只能改本区域。"""
+
+    def _scoped_client(self, scope):
+        viewer = authz.Viewer(
+            userid="u-other", name="名册", scopes=frozenset({f"roster:{scope}"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-other")
+        return client
+
+    def test_targets_read_is_region_scoped(self):
+        client = self._scoped_client("other")
+        with mock.patch.object(
+                report_roster, "fetch_person_targets",
+                lambda conn, scope, ym: {"李树军": 93.0}):
+            ok = client.get("/api/roster/targets", params={"scope": "other"})
+            bad = client.get("/api/roster/targets", params={"scope": "hq"})
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual("other", ok.json()["scope"])
+        self.assertEqual(93.0, ok.json()["targets"][0]["monthly_target"])
+        self.assertEqual(403, bad.status_code)
+
+    def test_region_targets_write_is_region_scoped(self):
+        client = self._scoped_client("other")
+        with mock.patch.object(
+                report_roster, "upsert_report_target",
+                lambda conn, entry, *, actor: None):
+            ok = client.post("/api/roster/region-targets", json={
+                "scope": "other",
+                "rows": [{"person_name": "李树军", "monthly_target": 93}],
+            })
+            bad = client.post("/api/roster/region-targets", json={
+                "scope": "hq",
+                "rows": [{"person_name": "谢坚钰", "monthly_target": 219.5}],
+            })
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual(403, bad.status_code)
+
+    def test_roster_read_filters_to_authorized_regions(self):
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=1, scope="other", entity_type="person",
+                        entity_key="线下运营中心", person_name="李树军"),
+            _roster_row(id=2, scope="hq", entity_type="person",
+                        entity_key="总经办", person_name="谢坚钰"),
+        ]
+        client = self._scoped_client("other")
+        with store.patch_fetch(), mock.patch.object(
+                report_roster, "fetch_person_targets",
+                lambda conn, scope, ym: {}):
+            data = client.get("/api/roster").json()
+        self.assertEqual(["other"], [r["region_key"] for r in data["regions"]])
+        self.assertEqual({"other"}, {row["scope"] for row in data["roster"]})
+
+    def test_plain_member_cannot_touch_roster_targets(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        self.assertEqual(403, client.get(
+            "/api/roster/targets", params={"scope": "other"}).status_code)
+        self.assertEqual(403, client.post(
+            "/api/roster/region-targets",
+            json={"scope": "other", "rows": []}).status_code)
+
+
+class RegionsApiTests(unittest.TestCase):
+    """/api/regions（D2 真源读）。"""
+
+    def test_requires_session(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.get("/api/regions").status_code)
+
+    def test_forbidden_without_org_or_roster(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        self.assertEqual(403, client.get("/api/regions").status_code)
+
+    def test_org_capability_reads_catalog(self):
+        viewer = authz.Viewer(
+            userid="u-org", name="组织", scopes=frozenset({"org"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-org")
+        data = client.get("/api/regions").json()
+        self.assertEqual("ok", data["status"])
+        self.assertIn("regions", data)
+        self.assertIn("depts", data)
+
+
+class RecordsApiTests(unittest.TestCase):
+    """/api/records（D1 操作记录读面）。"""
+
+    def test_requires_audit_capability(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        self.assertEqual(403, client.get("/api/records").status_code)
+
+    def test_returns_collected_records(self):
+        viewer = authz.Viewer(
+            userid="u-audit", name="审计", scopes=frozenset({"audit"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-audit")
+        with mock.patch(
+                "common.ops_web.app._collect_records",
+                lambda conn: [(datetime(2026, 10, 14, 1, 0, 0), "填报名册",
+                               "u-other", "新增", "其他 李树军", "月目标=93")]):
+            data = client.get("/api/records").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual(1, len(data["records"]))
+        self.assertEqual("填报名册", data["records"][0]["source"])
+        self.assertIn("填报名册", data["sources"])
 
 
 if __name__ == "__main__":

@@ -875,15 +875,87 @@ _SCOPE_LABEL = {
     "vanke": "万科&大莲花&团购",
     "offline_all": "线下整体",
     "dining": "餐饮/部门",
+    "hq": "总部",
+    "other": "其他",
 }
 _ENTITY_LABEL = {"store": "门店", "person": "人员", "dept": "部门"}
 
 #: 名册角色中文标签（v3：负责人/代填报人；仅 store 类型有 deputy）。
 _ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
 
-#: 名册管理能力对应的 bi_authz scope 授权键（成员与授权页单人授权：
-#: grant_type=scope、grant_key=roster；admin 隐式持有）。
-ROSTER_MANAGE_SCOPE = "roster"
+#: 能力（capability）枚举（2026-10-14 D4 能力×范围权限模型）：一个用户对某
+#: 业务面的操作权 = ``<capability>``（全局）或 ``<capability>:<region>``（限该
+#: 区域）。由 bi_authz ``grant_type='scope'`` 承载（``_SCOPE_KEY_RE`` 已放行
+#: ``<capability>:<region>`` 形态），admin 恒持有全部能力。
+CAPABILITY_ORG = "org"          # 组织编排（归属/区域/部门）
+CAPABILITY_ROSTER = "roster"    # 填报名册（资格 + 区域/个人月目标）
+CAPABILITY_PIPELINES = "pipelines"  # 定时任务（注册/开关/立即运行/收件人覆盖）
+CAPABILITY_AUDIT = "audit"      # 操作记录（六源聚合审计读面）
+CAPABILITY_CALENDAR = "calendar"  # 工作日历（可编辑的工作日集合）
+
+#: 全部能力枚举（/api/me 逐项回报；SPA 菜单与路由守卫据此渲染）。
+ALL_CAPABILITIES = (
+    CAPABILITY_ORG, CAPABILITY_ROSTER, CAPABILITY_PIPELINES,
+    CAPABILITY_AUDIT, CAPABILITY_CALENDAR,
+)
+
+
+def capability_allows(viewer, capability, region=None):
+    """纯函数：*viewer* 是否持有 *capability*（可选限定到 *region*）。
+
+    admin 恒过；全局键 ``<capability>`` 覆盖全部区域；区域级键
+    ``<capability>:<region>`` 只在 *region* 匹配时命中。未准入/fail-closed
+    viewer 一律 False。
+    """
+    if viewer is None or not viewer.admitted:
+        return False
+    if viewer.is_admin:
+        return True
+    scopes = viewer.scopes
+    if capability in scopes:
+        return True
+    if region is not None and f"{capability}:{region}" in scopes:
+        return True
+    return False
+
+
+def capability_has_scoped(viewer, capability):
+    """纯函数：viewer 是否持有 *capability* 的**任一**区域级授权
+    （``<capability>:<region>``）——用于「列表页」这类无单区域上下文的闸。"""
+    if viewer is None or not viewer.admitted:
+        return False
+    prefix = f"{capability}:"
+    return any(scope.startswith(prefix) for scope in viewer.scopes)
+
+
+def visible_region_scopes(viewer, scopes):
+    """*scopes*（区域键列表）中该 viewer 可操作（或其区域级授权覆盖）的子集。
+
+    admin / 全局 ``roster`` → 全量；仅持 ``roster:<r>`` → 只留授权区域。
+    未准入 → 空（fail-closed）。"""
+    return [s for s in scopes if capability_allows(viewer, CAPABILITY_ROSTER, s)]
+
+
+def _region_scope_pairs(connection):
+    """区域注册表（``dim_org_region``）→ 有序 ``[(region_key, label)]``。
+
+    真源读；注册表为空（迁移未应用 / DB 抖动）→ 回退代码镜像
+    :data:`report_roster.SCOPES`（fail-soft，不拖垮名册页）。顺序即
+    ``sort_order``——与组织编排树同序。
+    """
+    try:
+        regions = org_catalog.fetch_catalog(connection).get("regions") or []
+    except Exception:
+        regions = []
+    pairs = []
+    for row in regions:
+        key = str(row.get("region_key") or "").strip()
+        if key and all(key != existing for existing, _ in pairs):
+            pairs.append((key, row.get("label") or _label(_SCOPE_LABEL, key)))
+    if not pairs:
+        pairs = [(scope, _label(_SCOPE_LABEL, scope))
+                 for scope in report_roster.SCOPES]
+    return pairs
 
 #: 「口径收口」（P5，2026-10-12，设计稿 §3）：名册 / 覆盖 / 授权三条边界裁决
 #: 的唯一权威表述，只在「收件人总览」页完整渲染一次；其余三页统一引用
@@ -2083,12 +2155,12 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         request.state.viewer = viewer
         return viewer
 
-    def require_roster_manager(request: Request) -> authz.Viewer:
-        """名册管理闸（2026-10-07 运维裁决）：admin 或持 ``scope='roster'``
-        授权（成员与授权页单人授权分配）——名册的新增/删除/状态修改绑定
-        该授权，不再是 admin 的隐式全集。"""
+    def require_capability(request: Request, capability, region=None
+                           ) -> authz.Viewer:
+        """能力闸（2026-10-14 D4 能力×范围）：admin 或持 ``<capability>`` /
+        ``<capability>:<region>`` 授权；其余提示页 / 403。"""
         viewer = _resolve_request_viewer(request)
-        if not (viewer.is_admin or ROSTER_MANAGE_SCOPE in viewer.scopes):
+        if not capability_allows(viewer, capability, region):
             _forbidden(request)
         request.state.viewer = viewer
         return viewer
@@ -2181,6 +2253,49 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok", "database": "ok"})
 
+    # -- 能力×范围自述（SPA 启动拉取：驱动路由守卫与菜单渲染）---------------
+    @app.get("/api/me")
+    def api_me(request: Request):
+        """当前会话的能力×范围视图（2026-10-14 D4；SPA 启动时调用）。
+
+        返回：全局能力列表 *capabilities*、区域级能力映射
+        *scoped_capabilities*、可操作区域 *regions*、全量区域 *all_regions*。
+        未准入 → 403（deny-by-default）。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not viewer.admitted:
+            _forbidden(request)
+        request.state.viewer = viewer
+        try:
+            with db_connector() as connection:
+                registry = [key for key, _ in _region_scope_pairs(connection)]
+        except Exception as exc:
+            _LOGGER.warning("ops-web me region read failed: %s", type(exc).__name__)
+            registry = list(report_roster.SCOPES)
+        capabilities = []
+        scoped = {}
+        for capability in ALL_CAPABILITIES:
+            if capability_allows(viewer, capability):
+                capabilities.append(capability)
+                continue
+            keys = sorted(
+                scope.split(":", 1)[1]
+                for scope in viewer.scopes
+                if scope.startswith(f"{capability}:") and ":" in scope
+            )
+            if keys:
+                scoped[capability] = keys
+        return JSONResponse({
+            "status": "ok",
+            "userid": viewer.userid,
+            "name": viewer.name,
+            "is_admin": viewer.is_admin,
+            "capabilities": capabilities,
+            "scoped_capabilities": scoped,
+            "regions": visible_region_scopes(viewer, registry),
+            "all_regions": registry,
+        })
+
     # -- 页面 ----------------------------------------------------------------
     # 「成员与授权」页已停用（2026-10-13）：在职成员展示与归属管理迁至
     # 「组织编排」SPA（/members）。路由保留防书签 404，页面引导跳转。
@@ -2202,7 +2317,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     # -- 「组织编排」SPA（Vue3，区域 → 部门 → 成员拖拽；2026-10-13 P6）-------
     def _org_spa_shell(request: Request):
         """SPA 壳：返回 Vite 产物 index.html（数据走 /api/org/*）。"""
-        require_admin(request)
+        require_capability(request, CAPABILITY_ORG)
         if not os.path.isfile(_ORG_SPA_INDEX):
             _LOGGER.warning("ops-web members SPA build missing: %s",
                             _ORG_SPA_INDEX)
@@ -2228,7 +2343,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         成员读故障 = 503（组织树无从展示）；覆盖读故障 = fail-soft
         （只丢覆盖，回种子口径，不拖垮整页）。
         """
-        require_admin(request)
+        require_capability(request, CAPABILITY_ORG)
         try:
             with db_connector() as connection:
                 members = bi_authz.fetch_active_members(connection)
@@ -2262,7 +2377,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/assign")
     async def org_assign(request: Request):
         """新增/更新一条归属覆盖（``region`` 为 null = 移出全部区域）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         region = payload.get("region")
@@ -2297,7 +2412,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/region/add")
     async def org_region_add(request: Request):
         """登记一个区域（消费侧组织目录；即使无成员也进树）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         label = payload.get("label")
@@ -2327,7 +2442,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/dept/add")
     async def org_dept_add(request: Request):
         """登记一个区域下的部门（消费侧组织目录；即使无成员也进树）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         dept_name = payload.get("dept_name")
@@ -2360,7 +2475,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/region/disable")
     async def org_region_disable(request: Request):
         """停用一个登记区域（软删：enabled=0）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         enabled = payload.get("enabled", False)
@@ -2386,7 +2501,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/region/delete")
     async def org_region_delete(request: Request):
         """物理删除一个登记区域（级联删除其下部门）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         if not isinstance(region_key, str) or not region_key.strip():
@@ -2409,7 +2524,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/dept/disable")
     async def org_dept_disable(request: Request):
         """停用一个登记部门（软删：enabled=0）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         dept_name = payload.get("dept_name")
@@ -2438,7 +2553,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/dept/delete")
     async def org_dept_delete(request: Request):
         """物理删除一个登记部门。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         region_key = payload.get("region_key")
         dept_name = payload.get("dept_name")
@@ -2464,7 +2579,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/toggle")
     async def org_toggle(request: Request):
         """停用/启用一条归属覆盖（按天然键 user_id）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         enabled = payload.get("enabled")
@@ -2490,7 +2605,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/delete")
     async def org_delete(request: Request):
         """删除一条归属覆盖（审计留存被删行内容）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         if not isinstance(user_id, str) or not user_id.strip():
@@ -2514,7 +2629,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/reset")
     async def org_reset(request: Request):
         """回退总开关：清除全部归属覆盖（回种子口径）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_ORG)
         await _json_body(request)
         try:
             with db_connector() as connection:
@@ -2527,6 +2642,33 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web org reset failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "deleted": deleted})
+
+    # -- 区域注册表真源读（D2，2026-10-14）-----------------------------------
+    @app.get("/api/regions")
+    def api_regions(request: Request):
+        """区域/部门目录真源读（``dim_org_region`` / ``dim_org_dept``，启用行）。
+
+        组织编排（``org``）与填报名册（``roster``）两域共用；持有二者任一
+        能力（全局或区域级）即可读。目录读失败 → 503（收敛失败语义）。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not (capability_allows(viewer, CAPABILITY_ORG)
+                or capability_has_scoped(viewer, CAPABILITY_ORG)
+                or capability_allows(viewer, CAPABILITY_ROSTER)
+                or capability_has_scoped(viewer, CAPABILITY_ROSTER)):
+            _forbidden(request)
+        request.state.viewer = viewer
+        try:
+            with db_connector() as connection:
+                catalog = org_catalog.fetch_catalog(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web regions load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok",
+            "regions": catalog.get("regions") or [],
+            "depts": catalog.get("depts") or [],
+        })
 
     # 「授权现状」页已停用（2026-10-13）：授权管理不再通过本页自助操作。
     # 路由保留防书签 404，页面引导联系管理员。
@@ -2584,7 +2726,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         """统一「操作记录」：5 处分散审计（授权/任务/名册/日历/收件人覆盖）
         + 定时运行流水归一到一页，按来源/操作人/动作/起始日期筛选
         （任务3 2026-10-12）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_AUDIT)
         source_q = (request.query_params.get("source") or "").strip()
         actor_q = (request.query_params.get("actor") or "").strip()
         action_q = (request.query_params.get("action") or "").strip()
@@ -2646,6 +2788,48 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         )
         return HTMLResponse(_page("操作记录", table,
                                   viewer_name=viewer.name or viewer.userid))
+
+    @app.get("/api/records")
+    def api_records(request: Request):
+        """六源聚合审计读面（JSON；/records 页数据源，2026-10-14 D1）。
+
+        查询：``source``（来源枚举）、``actor``（操作人，子串）、``action``
+        （动作，子串）、``from``/``to``（``YYYY-MM-DD``，含端点）。时间
+        倒序，最多 200 条。
+        """
+        require_capability(request, CAPABILITY_AUDIT)
+        source_q = (request.query_params.get("source") or "").strip()
+        actor_q = (request.query_params.get("actor") or "").strip()
+        action_q = (request.query_params.get("action") or "").strip()
+        from_q = (request.query_params.get("from") or "").strip()
+        to_q = (request.query_params.get("to") or "").strip()
+        if source_q not in _RECORD_SOURCES:
+            source_q = ""
+        try:
+            with db_connector() as connection:
+                rows = _collect_records(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web records load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if source_q:
+            rows = [r for r in rows if r[1] == source_q]
+        if actor_q:
+            rows = [r for r in rows if actor_q in (r[2] or "")]
+        if action_q:
+            rows = [r for r in rows if action_q in (r[3] or "")]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_q):
+            rows = [r for r in rows if _fmt_time(r[0])[:10] >= from_q]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", to_q):
+            rows = [r for r in rows if _fmt_time(r[0])[:10] <= to_q]
+        records = [
+            {"created_at": _fmt_time(r[0]), "source": r[1], "actor": r[2],
+             "action": r[3], "target": r[4], "detail": r[5]}
+            for r in rows[:200]
+        ]
+        return JSONResponse({
+            "status": "ok", "sources": list(_RECORD_SOURCES),
+            "records": records,
+        })
 
     # -- 写 API（事务内两写：grant + audit；actor 来自 session）--------------
     @app.post("/api/grants")
@@ -2734,7 +2918,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/pipelines")
     def pipelines_page(request: Request):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         # 「按管理群」视角（2026-10-12 裁决；2026-10-13 收敛为唯一视角）：
         # 同群任务聚合，一眼看清这个群会收到哪些任务。
         service_ids = _fleet()
@@ -3048,7 +3232,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/pipelines/audit")
     def pipeline_audit_page(request: Request):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         try:
             with db_connector() as connection:
                 entries = ops_control.fetch_pipeline_audit(connection)
@@ -3087,7 +3271,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/pipelines/history")
     def pipeline_history_page(request: Request, service_id: str = ""):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         service_filter = service_id.strip()
         try:
             with db_connector() as connection:
@@ -3135,7 +3319,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/pipelines/toggle")
     async def pipeline_toggle(request: Request):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         if config_publisher is None:
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         payload = await _json_body(request)
@@ -3182,7 +3366,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         18:00」「每月 1 日」这类形态不被抹平成每天；多时点回写为 ``;`` 分隔
         的多段 cron（调度器按并集触发）。
         """
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         if config_publisher is None:
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         payload = await _json_body(request)
@@ -3253,7 +3437,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/pipelines/add")
     async def pipeline_add(request: Request):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         if config_publisher is None:
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         payload = await _json_body(request)
@@ -3296,7 +3480,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/pipelines/run-once")
     async def pipeline_run_once(request: Request):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         payload = await _json_body(request)
         service_id = payload.get("service_id")
         if not ops_control.SERVICE_ID_RE.match(service_id or ""):
@@ -3324,13 +3508,23 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/roster")
     def roster_page(request: Request):
-        viewer = require_roster_manager(request)
+        viewer = _resolve_request_viewer(request)
+        if not (capability_allows(viewer, CAPABILITY_ROSTER)
+                or capability_has_scoped(viewer, CAPABILITY_ROSTER)):
+            _forbidden(request)
+        request.state.viewer = viewer
         try:
             with db_connector() as connection:
                 entries = report_roster.fetch_roster(connection)
                 audits = report_roster.fetch_roster_audit(connection, limit=20)
                 qudao_targets = channel_target.fetch_store_targets(connection)
                 qudao_numbers = report_roster.fetch_store_numbers(connection)
+                # 区域清单真源（2026-10-14 D2）：合法 scope 由 dim_org_region 派生，
+                # 无注册表时 fail-soft 回退代码镜像 SCOPES。
+                scope_pairs = _region_scope_pairs(connection)
+                scopes = [key for key, _ in scope_pairs]
+                # 区域分权（D4）：仅渲染该 viewer 授权（或全局）的区域。
+                visible_scopes = visible_region_scopes(viewer, scopes)
                 # 区域个人月目标（dim_report_target，「所有数据入库」）：
                 # 默认当月（北京时间），?month=YYYY-MM 可切到下月提前
                 # 录入（与 target-rollover 结转管道配合：人工已录入的键
@@ -3345,13 +3539,14 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 region_targets = {
                     scope: report_roster.fetch_person_targets(
                         connection, scope, selected_month)
-                    for scope in report_roster.SCOPES if scope != "qudao"
+                    for scope in visible_scopes if scope != "qudao"
                 }
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
 
-        by_scope = {scope: [] for scope in report_roster.SCOPES}
+        scope_labels = dict(scope_pairs)
+        by_scope = {scope: [] for scope in scopes}
         for row in entries:
             by_scope.setdefault(row["scope"], []).append(row)
 
@@ -3404,7 +3599,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning("ops-web roster backlink load failed: %s",
                             type(exc).__name__)
             scope_backlinks = {}
-        for scope in report_roster.SCOPES:
+        for scope in visible_scopes:
             rows = by_scope.get(scope) or []
             backlinks = _backlinks_html(scope_backlinks.get(scope) or [])
             if scope == "qudao":
@@ -3413,7 +3608,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                                    sort=sort, backlinks_html=backlinks)
                 )
                 continue
-            scope_label = _label(_SCOPE_LABEL, scope)
+            scope_label = scope_labels.get(scope) or _label(_SCOPE_LABEL, scope)
             sections.append(f"<h2>{_esc(scope_label)}"
                             f"<span class=\"hint\">（{len(rows)} 条）</span></h2>")
             sections.append(backlinks)
@@ -3476,7 +3671,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     f"data-scope=\"{_esc(scope)}\" "
                     f"data-name=\"{_esc(row['person_name'])}\" "
                     f"value=\"{_esc(target_value)}\" "
-                    f"placeholder=\"目标（元）\"></td>"
+                    f"placeholder=\"目标（万元）\"></td>"
                     f"{owner_cell}{deputy_cell}"
                     f"<td>{_status_select_html(row)}</td>"
                     f"<td>{_esc(row.get('note'))}</td>"
@@ -3486,19 +3681,21 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 body.append("<tr>" + "".join(cells) + "</tr>")
             sections.append(
                 "<table><tr><th>渠道/地区</th><th>店铺/对象</th>"
-                "<th>月目标（元）</th><th>负责人</th><th>代填报人</th>"
+                "<th>月目标（万元）</th><th>负责人</th><th>代填报人</th>"
                 "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
                 + "".join(body) + "</table>"
                 f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}', "
                 f"'{_esc(selected_month)}')\">"
                 f"保存{_esc(scope_label)}{_esc(selected_month)}月目标</button>"
-                "<span class=\"hint\">（单位：元，空白 = 清除该人当月目标；"
+                "<span class=\"hint\">（单位：万元，空白 = 清除该人当月目标；"
                 "保存即生效——机器人报数快照同步读取，逐条落审计）</span></p>"
             )
 
         scope_options = "".join(
-            f"<option value=\"{_esc(scope)}\">{_esc(_label(_SCOPE_LABEL, scope))}</option>"
-            for scope in report_roster.SCOPES
+            f"<option value=\"{_esc(scope)}\">"
+            f"{_esc(scope_labels.get(scope) or _label(_SCOPE_LABEL, scope))}"
+            "</option>"
+            for scope in visible_scopes
         )
         entity_options = "".join(
             f"<option value=\"{_esc(entity)}\">{_esc(_label(_ENTITY_LABEL, entity))}</option>"
@@ -3562,6 +3759,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         """
         viewer = require_admin(request)
         configs = []
+        # 区域清单真源（D2）：注册表读失败 fail-soft 回代码镜像。
+        scope_pairs = [(scope, _label(_SCOPE_LABEL, scope))
+                       for scope in report_roster.SCOPES]
         try:
             if fleet_source is not None and config_source is not None:
                 for service_id in _fleet():
@@ -3601,10 +3801,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 uid_to_name = {}
                 for uid, name, _reg, _dept in members:
                     uid_to_name.setdefault(uid, name)
+                scope_pairs = _region_scope_pairs(connection)
                 roster_by_region = {
                     scope: report_roster.fetch_scope_person_names(
                         connection, scope)
-                    for scope in report_roster.SCOPES if scope != "qudao"
+                    for scope, _label_ in scope_pairs if scope != "qudao"
                 }
                 qudao_owners = report_roster.fetch_store_owner_map(
                     connection, "qudao", roles=("owner",))
@@ -3635,11 +3836,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "<p class=\"hint\">本页只读、为展示口径：改名单请到「填报名册」，"
             "或到定时任务页对应任务的「收件人…」抽屉做单条微调。</p>",
         ]
-        for scope in report_roster.SCOPES:
+        for scope, scope_label in scope_pairs:
             tasks = scope_tasks.get(scope) or []
             if context is None:
                 sections.append(
-                    f"<h2>{_esc(_label(_SCOPE_LABEL, scope))}</h2>"
+                    f"<h2>{_esc(scope_label)}</h2>"
                     "<p class=\"hint\">名单读取失败，请稍后重试。</p>")
                 continue
             try:
@@ -3655,16 +3856,112 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return HTMLResponse(_page("收件人总览", "".join(sections),
                                   viewer_name=viewer.name or viewer.userid))
 
+    # -- 填报名册读面（JSON，2026-10-14 D1：替代 SSR 页数据）----------------
+    @app.get("/api/roster")
+    def api_roster(request: Request):
+        """名册 + 区域个人月目标读面。
+
+        ``?month=YYYY-MM`` 指定目标月份（缺省当月）。仅返回 viewer 授权
+        （或全局）区域的记录与目标（D4 区域分权）；qudao 渠道门店目标
+        不在本 API（另一存储、另一概念）。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not (capability_allows(viewer, CAPABILITY_ROSTER)
+                or capability_has_scoped(viewer, CAPABILITY_ROSTER)):
+            _forbidden(request)
+        request.state.viewer = viewer
+        current_month = _current_year_month()
+        selected_month = (request.query_params.get("month") or current_month)
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", selected_month):
+            selected_month = current_month
+        try:
+            with db_connector() as connection:
+                entries = report_roster.fetch_roster(connection)
+                scope_pairs = _region_scope_pairs(connection)
+                scopes = [key for key, _ in scope_pairs]
+                visible_scopes = visible_region_scopes(viewer, scopes)
+                targets = {
+                    scope: report_roster.fetch_person_targets(
+                        connection, scope, selected_month)
+                    for scope in visible_scopes if scope != "qudao"
+                }
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        labels = dict(scope_pairs)
+        allowed = set(visible_scopes)
+        roster = [
+            dict(row, scope_label=labels.get(row.get("scope"))
+                 or _label(_SCOPE_LABEL, row.get("scope")))
+            for row in entries if row.get("scope") in allowed
+        ]
+        return JSONResponse({
+            "status": "ok",
+            "month": selected_month,
+            "regions": [
+                {"region_key": key, "label": label}
+                for key, label in scope_pairs if key in allowed
+            ],
+            "roster": roster,
+            "targets": targets,
+        })
+
+    @app.get("/api/roster/targets")
+    def api_roster_targets(request: Request):
+        """某区域当月个人月目标读面（``dim_report_target``，万元）。
+
+        ``?scope=<region>&month=YYYY-MM``（缺省当月）。区域分权：仅该
+        scope 的全局 / 区域级 roster 授权可读；qudao 走门店目标表不在此。
+        """
+        viewer = _resolve_request_viewer(request)
+        scope = (request.query_params.get("scope") or "").strip()
+        if not capability_allows(viewer, CAPABILITY_ROSTER, scope):
+            _forbidden(request)
+        request.state.viewer = viewer
+        if not scope or scope == "qudao":
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        month = (request.query_params.get("month") or _current_year_month())
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
+            month = _current_year_month()
+        try:
+            with db_connector() as connection:
+                registered = org_catalog.fetch_region_keys(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web roster region read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if registered and scope not in registered:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                targets = report_roster.fetch_person_targets(
+                    connection, scope, month)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web roster targets load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok", "scope": scope, "month": month,
+            "targets": [
+                {"person_name": name, "monthly_target": value}
+                for name, value in sorted(targets.items())
+            ],
+        })
+
     @app.post("/api/roster/add")
     async def roster_add(request: Request):
-        viewer = require_roster_manager(request)
+        viewer = _resolve_request_viewer(request)
         payload = await _json_body(request)
         aliases = payload.get("aliases") or []
         if not isinstance(aliases, list):
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        scope = payload.get("scope")
+        # 区域分权（D4）：全局 roster 或该 scope 的区域级授权。
+        if not capability_allows(viewer, CAPABILITY_ROSTER, scope):
+            _forbidden(request)
         try:
             entry = report_roster.validate_roster_fields(
-                payload.get("scope"),
+                scope,
                 payload.get("entity_type"),
                 payload.get("entity_key"),
                 payload.get("person_name"),
@@ -3673,6 +3970,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 role=payload.get("role") or "owner",
             )
         except report_roster.ReportRosterError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                registered = org_catalog.fetch_region_keys(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web roster region read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 区域真源校验（D2）：scope 必须是注册表已登记区域；注册表空 → fail-soft。
+        if registered and scope not in registered:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         try:
             with db_connector() as connection:
@@ -3686,7 +3993,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/toggle")
     async def roster_toggle(request: Request):
-        viewer = require_roster_manager(request)
+        viewer = require_capability(request, CAPABILITY_ROSTER)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         enabled = payload.get("enabled")
@@ -3707,7 +4014,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/roster/delete")
     async def roster_delete(request: Request):
-        viewer = require_roster_manager(request)
+        viewer = require_capability(request, CAPABILITY_ROSTER)
         payload = await _json_body(request)
         roster_id = payload.get("id")
         if isinstance(roster_id, bool) or not isinstance(roster_id, int):
@@ -3728,12 +4035,26 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     async def roster_region_targets(request: Request):
         """保存某区域当月个人月目标（dim_report_target，「所有数据入库」）：
         逐条校验+upsert+审计；空白（null）= 清除该人当月目标。"""
-        viewer = require_roster_manager(request)
+        viewer = _resolve_request_viewer(request)
         payload = await _json_body(request)
         scope = payload.get("scope")
         rows = payload.get("rows")
-        if scope not in report_roster.SCOPES or scope == "qudao" \
-                or not isinstance(rows, list):
+        # 区域分权（D4）：全局 roster 或该 scope 的区域级授权。
+        if not capability_allows(viewer, CAPABILITY_ROSTER, scope):
+            _forbidden(request)
+        if (not isinstance(scope, str)
+                or scope not in report_roster.SCOPES
+                or scope == "qudao" or not isinstance(rows, list)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                registered = org_catalog.fetch_region_keys(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web roster region read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 区域真源校验（D2）：scope 必须是注册表已登记区域；注册表空 → fail-soft。
+        if registered and scope not in registered:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         # 目标月份（2026-10-09 起可指定下月提前录入；缺省当月，非法回退当月）
         year_month = payload.get("year_month") or _current_year_month()
@@ -3829,7 +4150,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/calendar")
     def calendar_page(request: Request, month: str = ""):
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_CALENDAR)
         month = (month or "").strip()
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
             month = _current_year_month()
@@ -3951,7 +4272,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/calendar/toggle")
     async def calendar_toggle(request: Request):
         """点日期改 上班/休息：写 manual 覆盖 + 即时重写当月 + 审计。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_CALENDAR)
         payload = await _json_body(request)
         note = payload.get("note") or ""
         is_workday = payload.get("is_workday")
@@ -3982,7 +4303,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/calendar/import-year")
     async def calendar_import_year(request: Request):
         """一键导入法定节假日（该年 holiday_cn 行整年替换 + 全年重写）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_CALENDAR)
         payload = await _json_body(request)
         year = payload.get("year")
         if isinstance(year, bool) or not isinstance(year, int) \
@@ -4015,7 +4336,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/calendar/reset-month")
     async def calendar_reset_month(request: Request):
         """本月恢复规则：清除 manual 覆盖（法定导入保留）+ 即时重写。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_CALENDAR)
         payload = await _json_body(request)
         month = str(payload.get("month") or "")
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
@@ -4049,7 +4370,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         抽屉据此展示「有效名单 = 基名单 ∪ include − exclude」三层来源
         （方案 A，2026-10-12；归因为 P2 展示口径）。
         """
-        require_admin(request)
+        require_capability(request, CAPABILITY_PIPELINES)
         service_id = (request.query_params.get("service_id") or "").strip()
         if not _service_id_re.match(service_id):
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
@@ -4095,7 +4416,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/pipelines/recipient-override/add")
     async def recipient_override_add(request: Request):
         """新增/重启用一条覆盖：先解析姓名快照，再落库（同事务审计）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         payload = await _json_body(request)
         service_id = payload.get("service_id")
         mode = payload.get("mode")
@@ -4140,7 +4461,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/pipelines/recipient-override/toggle")
     async def recipient_override_toggle(request: Request):
         """停用/启用一条覆盖（按主键 id）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         payload = await _json_body(request)
         override_id = payload.get("id")
         enabled = payload.get("enabled")
@@ -4163,7 +4484,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/pipelines/recipient-override/delete")
     async def recipient_override_delete(request: Request):
         """删除一条覆盖（审计留存被删行内容）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         payload = await _json_body(request)
         override_id = payload.get("id")
         if isinstance(override_id, bool) or not isinstance(override_id, int):
@@ -4184,7 +4505,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/pipelines/recipient-override/reset")
     async def recipient_override_reset(request: Request):
         """回退总开关：清空某条服务线全部覆盖（回名册口径）。"""
-        viewer = require_admin(request)
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
         payload = await _json_body(request)
         service_id = payload.get("service_id")
         if not isinstance(service_id, str) \
