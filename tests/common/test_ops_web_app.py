@@ -1356,6 +1356,34 @@ class RosterPageTests(unittest.TestCase):
         self.assertIn("小饶", row["aliases"])                # aliases JSON 原样透出
         self.assertEqual(["admin"], [a["actor"] for a in data["audits"]])
 
+    def test_roster_api_normalizes_datetime_fields(self):
+        """updated_at / created_at 为 datetime 时须归一（2026-10-14 线上 500 回归）。
+
+        pymysql 返回 datetime 对象，未过 _fmt_time 直接进 JSONResponse 会
+        json.dumps 失败 → 整接口 500、/roster 页数据面全挂。
+        """
+        import datetime as _dt
+
+        store = _RosterStore()
+        store.rows = [_roster_row(updated_at=_dt.datetime(2026, 10, 6, 3, 0, 0))]
+        store.audit_rows = [{
+            "actor": "admin", "action": "target", "scope": "other",
+            "entity_type": "person", "entity_key": "other",
+            "person_name": "谢坚钰", "detail": "219.5",
+            "created_at": _dt.datetime(2026, 10, 6, 3, 0, 0),
+        }]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit():
+            resp = client.get("/api/roster")
+
+        self.assertEqual(200, resp.status_code)
+        data = resp.json()
+        # UTC 03:00 → 北京 11:00，证明确实走了 _fmt_time（而非原样透传）。
+        row = next(r for r in data["roster"] if r["entity_key"] == "JD购喝")
+        self.assertEqual("2026-10-06 11:00:00", row["updated_at"])
+        self.assertEqual("2026-10-06 11:00:00", data["audits"][0]["created_at"])
+
     def test_roster_api_requires_admin(self):
         # 壳路由放行（前端 Router 守卫）；数据面 fail-closed。
         client = TestClient(_app(viewer=_admin_viewer()))
