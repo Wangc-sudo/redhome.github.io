@@ -621,13 +621,22 @@ watch(() => route.query, () => applyAnchor());
                 + 月目标
               </button>
               <router-link
-                v-if="hasCapability('pipelines') && pipelineCount(region.key) !== null"
+                v-if="hasCapability('pipelines') && pipelineCount(region.key) > 0"
                 class="down-link"
                 :to="{ path: '/pipelines', query: { region: region.key } }"
                 :title="`该区域下游定时任务（点开定时任务页并按区域高亮）`"
               >
                 下游 {{ pipelineCount(region.key) }} 项
               </router-link>
+              <!-- 0 任务区域无对应分组（#group-<key> 不存在），跳过去会静默失效，
+                   故只显示不可点的灰字，不给死链。 -->
+              <span
+                v-else-if="hasCapability('pipelines') && pipelineCount(region.key) === 0"
+                class="down-link is-zero"
+                title="该区域暂无下游定时任务"
+              >
+                下游 0 项
+              </span>
               <button
                 class="btn mini"
                 :disabled="busy || loading"
@@ -1296,5 +1305,12 @@ watch(() => route.query, () => applyAnchor());
 }
 .down-link:hover {
   text-decoration: underline;
+}
+.down-link.is-zero {
+  color: #9ca3af;
+  cursor: default;
+}
+.down-link.is-zero:hover {
+  text-decoration: none;
 }
 </style>
