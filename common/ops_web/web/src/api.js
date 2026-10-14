@@ -46,12 +46,34 @@ async function request(path, options = {}) {
   }
 
   if (!resp.ok) {
-    if (resp.status === 401 || resp.status === 403) {
-      throw new Error('登录已过期或无权限，请重新登录');
-    }
-    throw new Error(readableDetail(data && data.detail, resp.status));
+    const err = new Error(
+      resp.status === 401 || resp.status === 403
+        ? '登录已过期或无权限，请重新登录'
+        : readableDetail(data && data.detail, resp.status),
+    );
+    // 携带 HTTP 状态码，供 router 守卫区分 401/403（跳登录）与其它错误。
+    err.status = resp.status;
+    throw err;
   }
   return data;
+}
+
+/** 拼查询串：跳过 undefined / null / 空串；值统一 URL 编码。 */
+function queryString(params = {}) {
+  const parts = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  }
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
+/** POST JSON 快捷封装。 */
+function post(path, payload) {
+  return request(path, {
+    method: 'POST',
+    body: JSON.stringify(payload || {}),
+  });
 }
 
 /** 组织树总览：regions / pool / overrides。 */
@@ -161,4 +183,198 @@ export function deleteDept(payload) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+// ---------------------------------------------------------------------------
+// 全 SPA 迁移（C 阶段）：全域读写端点。函数名即后续页面调用契约，勿改名。
+// POST 字段名以 app.py 各 handler 的 payload.get(...) 为准。
+// ---------------------------------------------------------------------------
+
+// -- 读 ---------------------------------------------------------------------
+
+/** 当前会话能力×范围视图（SPA 启动/守卫用）。 */
+export function getMe() {
+  return request('/api/me', { method: 'GET' });
+}
+
+/** 区域/部门目录真源。 */
+export function getRegions() {
+  return request('/api/regions', { method: 'GET' });
+}
+
+/** 六源聚合审计读面。params: {source, actor, action, from, to}。 */
+export function getRecords(params = {}) {
+  const qs = queryString({
+    source: params.source,
+    actor: params.actor,
+    action: params.action,
+    from: params.from,
+    to: params.to,
+  });
+  return request(`/api/records${qs}`, { method: 'GET' });
+}
+
+/** 名册 + 区域个人月目标读面。{month} 缺省当月。 */
+export function getRoster({ month } = {}) {
+  return request(`/api/roster${queryString({ month })}`, { method: 'GET' });
+}
+
+/** 某区域当月个人月目标读面。{scope, month}。 */
+export function getRosterTargets({ scope, month } = {}) {
+  return request(
+    `/api/roster/targets${queryString({ scope, month })}`,
+    { method: 'GET' },
+  );
+}
+
+/** 渠道门店一体读面（qudao 段）。 */
+export function getRosterQudao() {
+  return request('/api/roster/qudao', { method: 'GET' });
+}
+
+/** 定时任务读面（分组/行装配）。 */
+export function getPipelines() {
+  return request('/api/pipelines', { method: 'GET' });
+}
+
+/** 定时任务审计读面。 */
+export function getPipelinesAudit() {
+  return request('/api/pipelines/audit', { method: 'GET' });
+}
+
+/** 定时任务执行流水读面（可按 serviceId 过滤）。 */
+export function getPipelinesHistory(serviceId) {
+  return request(
+    `/api/pipelines/history${queryString({ service_id: serviceId })}`,
+    { method: 'GET' },
+  );
+}
+
+/** 某条服务线的收件人覆盖行 + 基名单 + 归因。 */
+export function getRecipientOverride(serviceId) {
+  return request(
+    `/api/pipelines/recipient-override${queryString({ service_id: serviceId })}`,
+    { method: 'GET' },
+  );
+}
+
+/** 工作日历读面（整月天 + 最近修正）。month = 'YYYY-MM'。 */
+export function getCalendar(month) {
+  return request(`/api/calendar${queryString({ month })}`, { method: 'GET' });
+}
+
+/** 收件人总览读面（rules_html + 各 scope 分节 html）。 */
+export function getRecipients() {
+  return request('/api/recipients', { method: 'GET' });
+}
+
+/** 授权现状只读读面。 */
+export function getGrants() {
+  return request('/api/grants', { method: 'GET' });
+}
+
+/** 授权审计只读读面。 */
+export function getAudit() {
+  return request('/api/audit', { method: 'GET' });
+}
+
+// -- 写 ---------------------------------------------------------------------
+
+/** 新增/更新一条名册项。payload: {scope, entity_type, entity_key, person_name,
+ *  aliases?, note?, role?}。 */
+export function addRosterEntry(payload) {
+  return post('/api/roster/add', payload);
+}
+
+/** 停用/启用一条名册项。payload: {id, enabled}。 */
+export function toggleRosterEntry(payload) {
+  return post('/api/roster/toggle', payload);
+}
+
+/** 删除一条名册项。payload: {id}。 */
+export function deleteRosterEntry(payload) {
+  return post('/api/roster/delete', payload);
+}
+
+/** 保存某区域当月个人月目标。payload: {scope, rows:[{person_name,
+ *  monthly_target}], year_month?}。 */
+export function saveRegionTargets(payload) {
+  return post('/api/roster/region-targets', payload);
+}
+
+/** 发布月度目标快照。payload: {rows:[...]}。 */
+export function publishSnapshot(payload) {
+  return post('/api/roster/publish-snapshot', payload);
+}
+
+/** 启用/停用一条定时任务。payload: {service_id, enabled}。 */
+export function togglePipeline(payload) {
+  return post('/api/pipelines/toggle', payload);
+}
+
+/** 改播报时间。payload: {service_id, times:[{hour, minute}]}。 */
+export function updatePipelineTimes(payload) {
+  return post('/api/pipelines/update', payload);
+}
+
+/** 新增一条定时任务。payload: {service_id, kind, schedule, enabled?,
+ *  description?, depends_on?, category?}。 */
+export function addPipeline(payload) {
+  return post('/api/pipelines/add', payload);
+}
+
+/** 立即运行一次。payload: {service_id}。 */
+export function runPipelineOnce(payload) {
+  return post('/api/pipelines/run-once', payload);
+}
+
+/** 新增/重启用一条收件人覆盖。payload: {service_id, mode, target_type,
+ *  target_value, note?}。 */
+export function addRecipientOverride(payload) {
+  return post('/api/pipelines/recipient-override/add', payload);
+}
+
+/** 停用/启用一条收件人覆盖。payload: {id, enabled}。 */
+export function toggleRecipientOverride(payload) {
+  return post('/api/pipelines/recipient-override/toggle', payload);
+}
+
+/** 删除一条收件人覆盖。payload: {id}。 */
+export function deleteRecipientOverride(payload) {
+  return post('/api/pipelines/recipient-override/delete', payload);
+}
+
+/** 清空某条服务线全部覆盖。payload: {service_id}。 */
+export function resetRecipientOverride(payload) {
+  return post('/api/pipelines/recipient-override/reset', payload);
+}
+
+/** 点日期改上班/休息。payload: {date:'YYYY-MM-DD', is_workday, note?}。 */
+export function toggleCalendarDay(payload) {
+  return post('/api/calendar/toggle', payload);
+}
+
+/** 一键导入该年法定节假日。payload: {year}。 */
+export function importCalendarYear(payload) {
+  return post('/api/calendar/import-year', payload);
+}
+
+/** 清除当月人工裁决。payload: {month:'YYYY-MM'}。 */
+export function resetCalendarMonth(payload) {
+  return post('/api/calendar/reset-month', payload);
+}
+
+/** 新增一条授权。payload: {user_id, grant_type, grant_key, note?}。 */
+export function addGrant(payload) {
+  return post('/api/grants', payload);
+}
+
+/** 删除一条授权。payload: {user_id, grant_type, grant_key}。 */
+export function deleteGrant(payload) {
+  return post('/api/grants/delete', payload);
+}
+
+/** 按区域一键开通。payload: {region}。 */
+export function regionGrant(payload) {
+  return post('/api/grants/region', payload);
 }

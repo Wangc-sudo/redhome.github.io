@@ -2300,41 +2300,38 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     # 「成员与授权」页已停用（2026-10-13）：在职成员展示与归属管理迁至
     # 「组织编排」SPA（/members）。路由保留防书签 404，页面引导跳转。
     @app.get("/member-grants")
-    def members_page(request: Request):
-        viewer = require_admin(request)
-        notice = (
-            "<h1>成员与授权</h1>"
-            "<div class=\"state\">"
-            "<p>本页功能已合并至<a href=\"/members\">组织编排</a>："
-            "在职成员展示、区域/部门归属调整均在「组织编排」页完成。</p>"
-            "<p>如需管理 BI 看板 / 区域数据授权，请联系系统管理员。</p>"
-            "<a class=\"btn\" href=\"/members\">前往组织编排</a>"
-            "</div>"
-        )
-        return HTMLResponse(_page("成员与授权", notice,
-                                  viewer_name=viewer.name or viewer.userid))
+    def members_page():
+        """旧书签兼容：与 /grants 同壳（Router 渲染只读授权页）。"""
+        return _spa_shell()
 
-    # -- 「组织编排」SPA（Vue3，区域 → 部门 → 成员拖拽；2026-10-13 P6）-------
-    def _org_spa_shell(request: Request):
-        """SPA 壳：返回 Vite 产物 index.html（数据走 /api/org/*）。"""
-        require_capability(request, CAPABILITY_ORG)
+    # -- 全 SPA 单壳（Vue3 + Router；2026-10-14 D1 全量迁移）------------------
+    def _spa_shell():
+        """SPA 单壳：返回 Vite 产物 index.html。
+
+        不设应用层能力闸：未登录 / 无权限由前端启动 ``/api/me`` → 401/403
+        → 跳登录；数据 API 仍 fail-closed（deny-by-default）。产物缺失 → 503。
+        """
         if not os.path.isfile(_ORG_SPA_INDEX):
-            _LOGGER.warning("ops-web members SPA build missing: %s",
-                            _ORG_SPA_INDEX)
+            _LOGGER.warning("ops-web SPA build missing: %s", _ORG_SPA_INDEX)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return FileResponse(
             _ORG_SPA_INDEX, media_type="text/html",
             headers={"Cache-Control": "no-cache"})
 
     @app.get("/")
-    def org_home_page(request: Request):
-        """登录后首页即「组织编排」SPA（B3，2026-10-13）：登录即见拖拽树。"""
-        return _org_spa_shell(request)
+    def spa_home_page():
+        """登录后首页 = SPA（Router 渲染总览）。"""
+        return _spa_shell()
+
+    @app.get("/org")
+    def spa_org_page():
+        """组织编排页壳（Router 渲染）。"""
+        return _spa_shell()
 
     @app.get("/members")
-    def members_spa_page(request: Request):
-        """保留 /members（旧书签与既有测试兼容），与 / 同壳。"""
-        return _org_spa_shell(request)
+    def members_spa_page():
+        """旧书签兼容：与 /、/org 同壳。"""
+        return _spa_shell()
 
     @app.get("/api/org/overview")
     def org_overview(request: Request):
@@ -2673,121 +2670,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     # 「授权现状」页已停用（2026-10-13）：授权管理不再通过本页自助操作。
     # 路由保留防书签 404，页面引导联系管理员。
     @app.get("/grants")
-    def grants_page(request: Request):
-        viewer = require_admin(request)
-        notice = (
-            "<h1>授权现状</h1>"
-            "<div class=\"state\">"
-            "<p>授权管理功能已停用。如需开通 BI 看板 / 区域数据 / 名册管理"
-            "权限，请联系系统管理员。</p>"
-            "<a class=\"btn\" href=\"/members\">返回组织编排</a>"
-            "</div>"
-        )
-        return HTMLResponse(_page("授权现状", notice,
-                                  viewer_name=viewer.name or viewer.userid))
+    def grants_page():
+        """授权现状页壳（Router 渲染只读授权 + 审计；写面按 2026-10-13 裁决关闭）。"""
+        return _spa_shell()
 
     @app.get("/audit")
-    def audit_page(request: Request):
-        viewer = require_admin(request)
-        try:
-            with db_connector() as connection:
-                entries = bi_authz.fetch_audit_rows(connection)
-        except Exception as exc:
-            _LOGGER.warning("ops-web audit load failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        rows = []
-        for row in entries:
-            if isinstance(row, dict):
-                values = (row.get("actor"), row.get("action"), row.get("user_id"),
-                          row.get("grant_type"), row.get("grant_key"),
-                          row.get("note"), row.get("created_at"))
-            else:
-                values = row
-            actor, action, user_id, grant_type, grant_key, note, created_at = values
-            rows.append(
-                f"<tr><td>{_esc(created_at)}</td><td>{_esc(actor)}</td>"
-                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
-                f"<td>{_esc(user_id)}</td>"
-                f"<td>{_esc(_label(_GRANT_TYPE_LABEL, grant_type))}</td>"
-                f"<td>{_esc(grant_key)}</td>"
-                f"<td>{_esc(note)}</td></tr>"
-            )
-        table = (
-            "<h1>审计流水</h1>"
-            "<table><tr><th>时间</th><th>操作人</th><th>动作</th><th>账号</th>"
-            "<th>类型</th><th>对象</th><th>备注</th></tr>"
-            + "".join(rows) + "</table>"
-        )
-        return HTMLResponse(_page("审计流水", table,
-                                  viewer_name=viewer.name or viewer.userid))
+    def audit_page():
+        """授权审计页壳（Router 渲染）。"""
+        return _spa_shell()
 
     @app.get("/records")
-    def records_page(request: Request):
-        """统一「操作记录」：5 处分散审计（授权/任务/名册/日历/收件人覆盖）
-        + 定时运行流水归一到一页，按来源/操作人/动作/起始日期筛选
-        （任务3 2026-10-12）。"""
-        viewer = require_capability(request, CAPABILITY_AUDIT)
-        source_q = (request.query_params.get("source") or "").strip()
-        actor_q = (request.query_params.get("actor") or "").strip()
-        action_q = (request.query_params.get("action") or "").strip()
-        since_q = (request.query_params.get("since") or "").strip()
-        if source_q not in _RECORD_SOURCES:
-            source_q = ""
-        try:
-            with db_connector() as connection:
-                rows = _collect_records(connection)
-        except Exception as exc:
-            _LOGGER.warning("ops-web records load failed: %s",
-                            type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-
-        if source_q:
-            rows = [r for r in rows if r[1] == source_q]
-        if actor_q:
-            rows = [r for r in rows if actor_q in (r[2] or "")]
-        if action_q:
-            rows = [r for r in rows if action_q in (r[3] or "")]
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", since_q):
-            rows = [r for r in rows if _fmt_time(r[0])[:10] >= since_q]
-        rows = rows[:200]
-
-        options = "".join(
-            f"<option value=\"{_esc(s)}\""
-            f"{' selected' if s == source_q else ''}>{_esc(s)}</option>"
-            for s in _RECORD_SOURCES
-        )
-        form = (
-            "<form class=\"inline\" method=\"get\" action=\"/records\">"
-            "<select name=\"source\"><option value=\"\">全部来源</option>"
-            + options + "</select>"
-            f"<input name=\"actor\" placeholder=\"操作人（可空）\" "
-            f"value=\"{_esc(actor_q)}\">"
-            f"<input name=\"action\" placeholder=\"动作（可空）\" "
-            f"value=\"{_esc(action_q)}\">"
-            f"<input name=\"since\" type=\"date\" value=\"{_esc(since_q)}\">"
-            "<button type=\"submit\">筛选</button>"
-            "<a href=\"/records\" style=\"margin-left:8px\">重置</a></form>"
-        )
-        body_rows = "".join(
-            f"<tr><td>{_esc(_fmt_time(r[0]))}</td><td>{_esc(r[1])}</td>"
-            f"<td>{_esc(r[2])}</td><td>{_esc(r[3])}</td>"
-            f"<td>{_esc(r[4])}</td><td>{_esc(r[5])}</td></tr>"
-            for r in rows
-        )
-        table = (
-            "<h1>操作记录</h1>"
-            + form
-            + "<table><tr><th>时间</th><th>来源</th><th>操作人</th><th>动作</th>"
-            "<th>对象</th><th>详情</th></tr>"
-            + (body_rows
-               or "<tr><td colspan=\"6\" class=\"hint\">暂无记录</td></tr>")
-            + "</table>"
-            "<p class=\"hint\">汇总授权 / 定时任务变更 / 填报名册 / 工作日历"
-            "/ 收件人覆盖五类人工操作，加定时运行流水；按时间倒序，最多 200 条。"
-            "时间为北京时间。</p>"
-        )
-        return HTMLResponse(_page("操作记录", table,
-                                  viewer_name=viewer.name or viewer.userid))
+    def records_page():
+        """操作记录页壳（Router 渲染）。"""
+        return _spa_shell()
 
     @app.get("/api/records")
     def api_records(request: Request):
@@ -2830,6 +2725,66 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "status": "ok", "sources": list(_RECORD_SOURCES),
             "records": records,
         })
+
+    # -- 授权只读面（JSON；/grants 页数据源，2026-10-14 D1）------------------
+    @app.get("/api/grants")
+    def api_grants(request: Request):
+        require_admin(request)
+        try:
+            with db_connector() as connection:
+                grants = bi_authz.fetch_all_grants(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web grants load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        rows = []
+        for row in grants:
+            if isinstance(row, dict):
+                get = row.get
+            else:
+                get = lambda key, r=row: r[(
+                    "user_id", "grant_type", "grant_key", "note",
+                    "updated_by", "updated_at").index(key)]
+            grant_type = get("grant_type")
+            rows.append({
+                "user_id": get("user_id"),
+                "grant_type": grant_type,
+                "grant_type_label": _label(_GRANT_TYPE_LABEL, grant_type),
+                "grant_key": get("grant_key"),
+                "note": get("note"),
+                "created_at": _fmt_time(get("updated_at")),
+            })
+        return JSONResponse({"status": "ok", "grants": rows})
+
+    @app.get("/api/audit")
+    def api_audit(request: Request):
+        require_admin(request)
+        try:
+            with db_connector() as connection:
+                entries = bi_authz.fetch_audit_rows(connection, limit=200)
+        except Exception as exc:
+            _LOGGER.warning("ops-web audit load failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        rows = []
+        for row in entries:
+            if isinstance(row, dict):
+                values = (row.get("actor"), row.get("action"), row.get("user_id"),
+                          row.get("grant_type"), row.get("grant_key"),
+                          row.get("note"), row.get("created_at"))
+            else:
+                values = row
+            actor, action, user_id, grant_type, grant_key, note, created_at = values
+            rows.append({
+                "created_at": _fmt_time(created_at),
+                "actor": actor,
+                "action": action,
+                "action_label": _label(_ACTION_LABEL, action),
+                "user_id": user_id,
+                "grant_type": grant_type,
+                "grant_type_label": _label(_GRANT_TYPE_LABEL, grant_type),
+                "grant_key": grant_key,
+                "note": note,
+            })
+        return JSONResponse({"status": "ok", "rows": rows})
 
     # -- 写 API（事务内两写：grant + audit；actor 来自 session）--------------
     @app.post("/api/grants")
@@ -2916,21 +2871,22 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning("ops-web fleet load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
 
-    @app.get("/pipelines")
-    def pipelines_page(request: Request):
-        viewer = require_capability(request, CAPABILITY_PIPELINES)
-        # 「按管理群」视角（2026-10-12 裁决；2026-10-13 收敛为唯一视角）：
-        # 同群任务聚合，一眼看清这个群会收到哪些任务。
+    def _pipelines_view():
+        """定时任务视图装配（JSON；/api/pipelines 数据源，2026-10-14 D1）。
+
+        注册表（Nacos）为真源：单条畸形按默认配置兜底不拖垮整页；最近运行取
+        ``ops_control.fetch_recent_requests``（id DESC 首见即最新）；催办行
+        「收受影响人」fail-soft（名册/通讯录读失败只该列为空口径）。
+        返回 ``(groups, group_order, supported_categories)``。
+        """
         service_ids = _fleet()
         configs = []
         for service_id in service_ids:
             try:
                 configs.append(config_source.get_pipeline(service_id))
             except Exception as exc:
-                # 单条注册表项畸形不拖垮整页：按默认配置展示。
                 _LOGGER.warning(
-                    "ops-web pipeline config parse failed: %s", type(exc).__name__
-                )
+                    "ops-web pipeline config parse failed: %s", type(exc).__name__)
                 configs.append(PipelineConfig(service_id))
         try:
             with db_connector() as connection:
@@ -2940,11 +2896,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         latest = {}
         for row in recent:  # fetch 按 id DESC，首见即最新
-            service_id = row.get("service_id") if isinstance(row, dict) else row[1]
-            if service_id not in latest:
-                latest[service_id] = row
-        # 收受影响人（催办行）：附属信息 fail-soft——名册/通讯录读取故障
-        # 只影响本列，不拖垮整页（注册表才是本页真源）。
+            sid = row.get("service_id") if isinstance(row, dict) else row[1]
+            if sid not in latest:
+                latest[sid] = row
+        # 收受影响人（催办行）：附属信息 fail-soft——名册/通讯录读取故障只影响
+        # 本列，不拖垮整页。
         reminder_cells = {}
         reminder_ids = [
             config.service_id for config in configs
@@ -2964,8 +2920,6 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     }
                     if robot_regions:
                         members = bi_authz.fetch_active_members(connection)
-                        # 组织归属覆盖（2026-10-13 联动组织编排）：读失败
-                        # fail-soft 回种子口径，不让整列「读取失败」。
                         try:
                             org_overrides = \
                                 org_assignment_override.fetch_overrides(
@@ -2989,8 +2943,6 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                         qudao_owners = report_roster.fetch_store_owner_map(
                             connection, "qudao", roles=("owner",))
                     for sid in reminder_ids:
-                        # 覆盖表是本期新表：未迁移/读失败只回退名册口径，
-                        # 不让整列「读取失败」。
                         try:
                             overrides_by_service[sid] = \
                                 recipient_override.fetch_overrides(
@@ -3014,274 +2966,123 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for sid in reminder_ids:
                     reminder_cells[sid] = (
                         "<span class=\"hint\">读取失败</span>")
-        # 桶：按区域 key 分组（None=平台/无群）；分组键为 _service_region。
         buckets = {}
         for config in configs:
             request_row = latest.get(config.service_id)
-            if request_row is None:
-                request_cell = "—"
-            else:
-                get = (
-                    (lambda key: request_row.get(key))
-                    if isinstance(request_row, dict)
-                    else (lambda key: request_row[
+            latest_out = None
+            if request_row is not None:
+                if isinstance(request_row, dict):
+                    get = request_row.get
+                else:
+                    get = lambda key, r=request_row: r[
                         ("id", "service_id", "requested_by", "status", "note",
-                         "exit_code", "created_at", "finished_at").index(key)])
-                )
-                request_cell = (
-                    f"{_esc(_label(_RUN_STATUS_LABEL, get('status')))}"
-                    f"<span class=\"hint\">（{_esc(get('requested_by'))} "
-                    f"{_esc(_fmt_time(get('created_at')))}）</span>"
-                )
-            template = (
-                "✓" if has_command(config.service_id)
-                else "<span class=\"hint\">无模板</span>"
-            )
-            toggle_label = "停用" if config.enabled else "启用"
-            run_option = (
-                "<option value=\"runonce\">运行一次</option>"
-                if has_command(config.service_id) else ""
-            )
-            action_cell = (
-                f"<select data-service=\"{_esc(config.service_id)}\" "
-                f"data-enabled=\"{'1' if config.enabled else '0'}\" "
-                f"data-schedule=\"{_esc(config.schedule or '')}\" "
-                "onchange=\"pipelineAction(this)\">"
-                "<option value=\"\">操作…</option>"
-                f"<option value=\"toggle\">{toggle_label}</option>"
-                "<option value=\"schedule\">改播报时间</option>"
-                f"{run_option}</select>"
-            )
-            # 群维度已升为分组头，行内不再重复。
-            head = f"<tr><td>{_service_name_cell(config.service_id)}</td>"
-            row = (
-                head
-                + f"<td>{reminder_cells.get(config.service_id, '<span class=\"hint\">—</span>')}</td>"
-                f"<td>{'✓' if config.enabled else '—'}</td>"
-                f"<td>{_schedule_cell(config.schedule)}</td>"
-                f"<td>{_esc(', '.join(config.depends_on))}</td>"
-                f"<td>{_esc(_service_label(config.service_id, config.description))}</td>"
-                f"<td>{template}</td>"
-                f"<td>{request_cell}</td>"
-                f"<td>{action_cell}</td></tr>"
-            )
-            buckets.setdefault(
-                _service_region(config.service_id), []).append(row)
-        group_header = (
-            "<tr><th>服务标识</th>"
-            "<th>收受影响人</th><th>启用</th>"
-            "<th>播报时间</th><th>依赖</th><th>描述</th><th>模板</th>"
-            "<th>最近运行</th><th>操作</th></tr>"
-        )
-        confirm_mask = (
-            "<div id=\"confirm-mask\" class=\"modal-mask\">"
-            "<div class=\"modal-box\"><div id=\"confirm-text\"></div>"
-            "<div class=\"modal-btns\">"
-            "<button onclick=\"confirmOk()\">确定</button>"
-            "<button onclick=\"closeConfirm()\">取消</button>"
-            "</div></div></div>"
-            # 收件人覆盖抽屉（方案 B，2026-10-12）：只改 @ 名单
-            "<div id=\"recipient-mask\" class=\"modal-mask\">"
-            "<div class=\"modal-box\" style=\"max-width:600px\">"
-            "<div id=\"recipient-msg\" class=\"flash err\" "
-            "style=\"display:none\"></div>"
-            "<div id=\"recipient-body\"></div>"
-            "<div class=\"modal-btns\">"
-            "<button onclick=\"closeRecipientOverride()\">关闭</button>"
-            "</div></div></div>"
-        )
-        # 改播报时间弹窗（2026-10-13）：顶部显示当前规则（中文+原表达式），
-        # 下方按「≤3 个 HH:MM 时点」增删槽并实时预览改后规则；非「每天固定
-        # 时刻」形态（或已超 3 个时点）不支持按播报时间编辑。
-        schedule_mask = (
-            "<div id=\"schedule-mask\" class=\"modal-mask\">"
-            "<div class=\"modal-box\">"
-            "修改 <b id=\"schedule-edit-service\"></b> 的播报时间"
-            "<div>当前播报时间：<span id=\"schedule-edit-rule\"></span></div>"
-            "<div class=\"hint\">原表达式：<span id=\"schedule-edit-cron\"></span>"
-            "（只改时/分，工作日/每月几号等形态保留；最多 3 个时点）</div>"
-            "<div id=\"schedule-edit-times\"></div>"
-            "<div><button type=\"button\" id=\"schedule-edit-add\" "
-            "onclick=\"addScheduleSlot()\">＋时点</button></div>"
-            "<div class=\"hint\" id=\"schedule-edit-unsupported\" "
-            "style=\"display:none\">该任务非「每天固定时刻」形态（或已超 3 个"
-            "时点），不支持按播报时间编辑。</div>"
-            "<div class=\"modal-btns\">"
-            "<button id=\"schedule-edit-ok\" "
-            "onclick=\"submitScheduleEdit()\">确定</button>"
-            "<button onclick=\"closeScheduleEdit()\">取消</button>"
-            "</div>"
-            "<div class=\"hint\" id=\"schedule-edit-preview\"></div>"
-            "</div></div>"
-        )
-        table = ["<h1>定时任务（管道注册表）</h1>"]
-        # 分组顺序：城市区域 → 跨区域线（渠道/线下整体）→ 未登记区域
-        # → 平台/无群（恒置末位）；不得丢行。
+                         "exit_code", "created_at", "finished_at").index(key)]
+                latest_out = {
+                    "status": get("status"),
+                    "status_label": _label(_RUN_STATUS_LABEL, get("status")),
+                    "requested_by": get("requested_by"),
+                    "created_at": _fmt_time(get("created_at")),
+                }
+            category = resolve_category(config.service_id, config.category)
+            buckets.setdefault(_service_region(config.service_id), []).append({
+                "service_id": config.service_id,
+                "service_name": _service_name(config.service_id),
+                "service_label": _service_label(
+                    config.service_id, config.description),
+                "category_label": _category_label(config),
+                "is_reminder": category == "催办",
+                "reminder_html": reminder_cells.get(config.service_id),
+                "enabled": bool(config.enabled),
+                "schedule": config.schedule or "",
+                "schedule_zh": _cron_zh(config.schedule) or "",
+                "depends_on": list(config.depends_on or []),
+                "description": config.description or "",
+                "has_command": bool(has_command(config.service_id)),
+                "latest": latest_out,
+            })
+        # 分组顺序：城市区域 → 跨区域线 → 未登记区域 → 平台/无群（恒置末位）。
         ordered = [r for r in _GROUP_ORDER if buckets.get(r)]
         ordered += sorted(
             r for r in buckets
             if r is not None and r not in _GROUP_ORDER and buckets[r])
         if buckets.get(None):
             ordered.append(None)
-        for region in ordered:
-            rows = buckets[region]
-            table.append(
-                f"<details class=\"group\" open><summary>"
-                f"{_esc(_pipeline_group_title(region))}（{len(rows)} 项）"
-                f"</summary><table>{group_header}"
-                + "".join(rows) + "</table></details>"
-            )
-        table.append(
-            "<p class=\"hint\">按管理群视角：同一区域的服务归为一组，"
-            "一眼看清「这个群会收到哪些任务」；「渠道」「线下整体」为"
-            "跨区域线，单独成组；无绑定区域的应用线/平台服务归入"
-            "「平台 / 无群」。点分组标题可折叠。「播报时间」= 该任务的"
-            "定时规则（中文为主、原 cron 小字备查；用行内「操作」→"
-            "「改播报时间」可改，最多 3 个 HH:MM 时点）。配置存 Nacos"
-            "注册表（PIPELINES 组），开关与新增在下一个调度轮询"
-            "（≤30 秒）生效；「模板」= 调度器能否把该服务标识翻译成"
-            "可执行命令；「收受影响人」= 催办覆盖面（日报机器人=名册"
-            "在册人员，名册未登记则该区域在册填报人全员兜底，按部门"
-            "归组展示；渠道到齐=名册店铺负责人），非催办行无。</p>"
-            + confirm_mask + schedule_mask
-        )
-        table = "".join(table)
-        add_form = (
-            "<h2>新增定时任务</h2>"
-            "<form class=\"inline\" id=\"pipeline-add-form\" "
-            "onsubmit=\"addPipeline(event)\">"
-            "<input name=\"service_id\" placeholder=\"服务标识（小写字母/数字/-/_）\" required>"
-            "<select name=\"kind\">"
-            "<option value=\"business\">业务线</option>"
-            "<option value=\"apps\">应用线</option>"
-            "</select>"
-            "<select name=\"category\">"
-            "<option value=\"\">功能（留空按标识推导）</option>"
-            + "".join(
-                f"<option value=\"{_esc(c)}\">{_esc(c)}</option>"
-                for c in SUPPORTED_CATEGORIES
-            )
-            + "</select>"
-            # 定时构建器（2026-10-10 裁决：预设+时点选择，不手写 cron；
-            # 提交时由 JS 合成 cron，服务端 croniter 校验兜底；「自定义」
-            # 仍开 cron 原文输入并实时中文预览——展示安全、改错即见）。
-            "<select name=\"schedule_preset\" "
-            "onchange=\"schedulePresetChange(this.form)\">"
-            "<option value=\"daily\">每天</option>"
-            "<option value=\"weekday\">工作日（周一至周五）</option>"
-            "<option value=\"weekly\">每周</option>"
-            "<option value=\"monthly\">每月</option>"
-            "<option value=\"hourly\">每小时整点</option>"
-            "<option value=\"custom\">自定义 cron</option>"
-            "</select>"
-            "<select name=\"schedule_hour\" "
-            "onchange=\"updateSchedulePreview(this.form)\">"
-            + "".join(
-                f"<option value=\"{h}\"{' selected' if h == 18 else ''}>"
-                f"{h:02d}</option>"
-                for h in range(24)
-            )
-            + "</select><span class=\"hint\">时</span>"
-            "<select name=\"schedule_minute\" "
-            "onchange=\"updateSchedulePreview(this.form)\">"
-            + "".join(
-                f"<option value=\"{m}\"{' selected' if m == 0 else ''}>"
-                f"{m:02d}</option>"
-                for m in range(60)
-            )
-            + "</select><span class=\"hint\">分</span>"
-            "<select name=\"schedule_dow\" style=\"display:none\" "
-            "onchange=\"updateSchedulePreview(this.form)\">"
-            "<option value=\"1\">周一</option><option value=\"2\">周二</option>"
-            "<option value=\"3\">周三</option><option value=\"4\">周四</option>"
-            "<option value=\"5\">周五</option><option value=\"6\">周六</option>"
-            "<option value=\"0\">周日</option>"
-            "</select>"
-            "<input name=\"schedule_dom\" type=\"number\" min=\"1\" max=\"31\" "
-            "value=\"1\" style=\"display:none;width:64px\" "
-            "onchange=\"updateSchedulePreview(this.form)\">"
-            "<input name=\"schedule\" placeholder=\"cron（分 时 日 月 周）\" "
-            "style=\"display:none\" "
-            "oninput=\"updateSchedulePreview(this.form)\">"
-            "<span class=\"hint\" id=\"schedule-preview\"></span>"
-            "<label><input type=\"checkbox\" name=\"enabled\" checked> 启用</label>"
-            "<input name=\"depends_on\" placeholder=\"依赖的服务标识，逗号分隔（可空）\">"
-            "<input name=\"description\" placeholder=\"描述\">"
-            "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">robot-&lt;区域&gt;（填报提醒）/ "
-            "robot-check-&lt;区域&gt;（催办未填+DING）/ pages-&lt;区域&gt; / "
-            "leaderboard-&lt;区域&gt; "
-            "家族自动按后缀解析区域，注册即可调度；其他任意标识也可注册，"
-            "但需先在调度器命令表加命令模板后才能触发（本页「模板」列可"
-            "自查）。已存在的标识请用「操作」列开关，不可重复新增。</p>"
-        )
-        # 名册页反向索引深链（P3，2026-10-12）：``/pipelines?service=<id>``
-        # 打开即自动弹出该行收件人抽屉，免去在群视角里翻找（服务标识受
-        # 注册表约束，此处再白名单校验后内联，防注入）。
-        deep_link = (request.query_params.get("service") or "").strip()
-        deep_link_script = ""
-        if deep_link in service_ids and re.fullmatch(
-                r"[A-Za-z0-9._:-]{1,64}", deep_link):
-            deep_link_script = (
-                "<script>document.addEventListener('DOMContentLoaded',"
-                "function(){openRecipientOverride('"
-                + deep_link + "');});</script>"
-            )
-        return HTMLResponse(_page("定时任务", table, add_form, deep_link_script,
-                                  viewer_name=viewer.name or viewer.userid))
+        groups = [
+            {"region": region,
+             "title": _pipeline_group_title(region),
+             "count": len(buckets[region]),
+             "services": buckets[region]}
+            for region in ordered
+        ]
+        return groups, list(_GROUP_ORDER), list(SUPPORTED_CATEGORIES)
 
-    @app.get("/pipelines/audit")
-    def pipeline_audit_page(request: Request):
-        viewer = require_capability(request, CAPABILITY_PIPELINES)
+    @app.get("/api/pipelines")
+    def api_pipelines(request: Request):
+        """定时任务读面（JSON；替代 SSR /pipelines 页数据，2026-10-14 D1）。"""
+        require_capability(request, CAPABILITY_PIPELINES)
+        groups, group_order, supported = _pipelines_view()
+        return JSONResponse({
+            "status": "ok",
+            "groups": groups,
+            "group_order": group_order,
+            "supported_categories": supported,
+        })
+
+    @app.get("/pipelines")
+    def pipelines_page():
+        """定时任务页壳（Router 渲染）。"""
+        return _spa_shell()
+
+    @app.get("/api/pipelines/audit")
+    def api_pipelines_audit(request: Request):
+        """定时任务审计读面（JSON；替代 SSR /pipelines/audit 页，2026-10-14 D1）。"""
+        require_capability(request, CAPABILITY_PIPELINES)
         try:
             with db_connector() as connection:
                 entries = ops_control.fetch_pipeline_audit(connection)
         except Exception as exc:
-            _LOGGER.warning("ops-web pipeline audit load failed: %s", type(exc).__name__)
+            _LOGGER.warning("ops-web pipeline audit load failed: %s",
+                            type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         rows = []
-        for row in entries:
-            if isinstance(row, dict):
-                values = (row.get("actor"), row.get("action"),
-                          row.get("service_id"), row.get("detail"),
-                          row.get("created_at"))
+        for entry in entries:
+            if isinstance(entry, dict):
+                values = (entry.get("actor"), entry.get("action"),
+                          entry.get("service_id"), entry.get("detail"),
+                          entry.get("created_at"))
             else:
-                values = row
+                values = entry
             actor, action, service_id, detail, created_at = values
-            rows.append(
-                f"<tr><td>{_esc(_fmt_time(created_at))}</td><td>{_esc(actor)}</td>"
-                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
-                f"<td>{_esc(service_id)}</td>"
-                f"<td>{_esc(detail)}</td></tr>"
-            )
-        table = (
-            "<h1>定时任务审计流水</h1>"
-            "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
-            "<th>服务标识</th><th>详情</th></tr>"
-            + "".join(rows) + "</table>"
-            "<p class=\"hint\">本表只记注册表变更（开关/新增）；每次实际"
-            "运行（定时与「立即运行一次」见「执行流水」页）。"
-            # G2（2026-10-12 断点报告）：审计分散四页的交叉索引，防误判漏审。
-            "其他审计：<a href=\"/roster\">填报名册</a>页底=名册变更流水、"
-            "<a href=\"/audit\">授权审计</a>=成员授权变更、"
-            "<a href=\"/calendar\">工作日历</a>页底=日历改判流水。</p>"
-        )
-        return HTMLResponse(_page("任务审计", table,
-                                  viewer_name=viewer.name or viewer.userid))
+            rows.append({
+                "created_at": _fmt_time(created_at),
+                "actor": actor,
+                "action": action,
+                "action_label": _label(_ACTION_LABEL, action),
+                "service_id": service_id,
+                "service_name": _service_name(service_id),
+                "detail": detail,
+            })
+        return JSONResponse({"status": "ok", "rows": rows})
 
-    @app.get("/pipelines/history")
-    def pipeline_history_page(request: Request, service_id: str = ""):
-        viewer = require_capability(request, CAPABILITY_PIPELINES)
-        service_filter = service_id.strip()
+    @app.get("/pipelines/audit")
+    def pipeline_audit_page():
+        """任务审计页壳（Router 渲染）。"""
+        return _spa_shell()
+
+    @app.get("/api/pipelines/history")
+    def api_pipelines_history(request: Request):
+        """定时任务执行流水读面（JSON；替代 SSR /pipelines/history 页）。"""
+        require_capability(request, CAPABILITY_PIPELINES)
+        service_filter = (request.query_params.get("service_id") or "").strip()
         try:
             with db_connector() as connection:
                 entries = ops_control.fetch_run_history(
-                    connection, service_id=service_filter or None
-                )
+                    connection, service_id=service_filter or None)
         except ops_control.OpsControlError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         except Exception as exc:
-            _LOGGER.warning("ops-web run history load failed: %s", type(exc).__name__)
+            _LOGGER.warning("ops-web run history load failed: %s",
+                            type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         history_keys = ("id", "service_id", "trigger_type", "status",
                         "exit_code", "note", "started_at", "finished_at")
@@ -3291,31 +3092,25 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 get = row.get
             else:
                 get = lambda key, r=row: r[history_keys.index(key)]
-            exit_code = get("exit_code")
-            rows.append(
-                f"<tr><td>{_esc(_fmt_time(get('started_at')))}</td>"
-                f"<td>{_service_name_cell(get('service_id'))}</td>"
-                f"<td>{_esc(_label(_TRIGGER_LABEL, get('trigger_type')))}</td>"
-                f"<td>{_esc(_label(_RUN_STATUS_LABEL, get('status')))}</td>"
-                f"<td>{'—' if exit_code is None else _esc(exit_code)}</td>"
-                f"<td>{_esc(_fmt_time(get('finished_at')))}</td>"
-                f"<td>{_esc(get('note'))}</td></tr>"
-            )
-        table = (
-            "<h1>定时任务执行流水</h1>"
-            "<form class=\"inline\" method=\"get\" action=\"/pipelines/history\">"
-            "<input name=\"service_id\" placeholder=\"按服务标识过滤（可空）\""
-            f" value=\"{_esc(service_filter)}\">"
-            "<button type=\"submit\">过滤</button></form>"
-            "<table><tr><th>开始时间</th><th>服务标识</th><th>触发</th>"
-            "<th>状态</th><th>退出码</th><th>结束时间</th><th>备注</th></tr>"
-            + "".join(rows) + "</table>"
-            "<p class=\"hint\">调度器每次实际点火（定时与「立即运行一次」同"
-            "路径）落一行；锁被占用/运行异常记为失败且无退出码。依赖未满足"
-            "的暂缓与非法 cron 不是运行，只走调度器日志。时间为北京时间。</p>"
-        )
-        return HTMLResponse(_page("执行流水", table,
-                                  viewer_name=viewer.name or viewer.userid))
+            rows.append({
+                "service_id": get("service_id"),
+                "service_name": _service_name(get("service_id")),
+                "trigger_type": get("trigger_type"),
+                "trigger_label": _label(_TRIGGER_LABEL, get("trigger_type")),
+                "status": get("status"),
+                "status_label": _label(_RUN_STATUS_LABEL, get("status")),
+                "exit_code": get("exit_code"),
+                "started_at": _fmt_time(get("started_at")),
+                "finished_at": _fmt_time(get("finished_at")),
+                "note": get("note"),
+            })
+        return JSONResponse({
+            "status": "ok", "service_id": service_filter, "rows": rows})
+
+    @app.get("/pipelines/history")
+    def pipeline_history_page():
+        """执行流水页壳（Router 渲染）。"""
+        return _spa_shell()
 
     @app.post("/api/pipelines/toggle")
     async def pipeline_toggle(request: Request):
@@ -3507,259 +3302,20 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     # -- 填报名册（dim_report_roster，ops-web 唯一写方）---------------------
 
     @app.get("/roster")
-    def roster_page(request: Request):
-        viewer = _resolve_request_viewer(request)
-        if not (capability_allows(viewer, CAPABILITY_ROSTER)
-                or capability_has_scoped(viewer, CAPABILITY_ROSTER)):
-            _forbidden(request)
-        request.state.viewer = viewer
-        try:
-            with db_connector() as connection:
-                entries = report_roster.fetch_roster(connection)
-                audits = report_roster.fetch_roster_audit(connection, limit=20)
-                qudao_targets = channel_target.fetch_store_targets(connection)
-                qudao_numbers = report_roster.fetch_store_numbers(connection)
-                # 区域清单真源（2026-10-14 D2）：合法 scope 由 dim_org_region 派生，
-                # 无注册表时 fail-soft 回退代码镜像 SCOPES。
-                scope_pairs = _region_scope_pairs(connection)
-                scopes = [key for key, _ in scope_pairs]
-                # 区域分权（D4）：仅渲染该 viewer 授权（或全局）的区域。
-                visible_scopes = visible_region_scopes(viewer, scopes)
-                # 区域个人月目标（dim_report_target，「所有数据入库」）：
-                # 默认当月（北京时间），?month=YYYY-MM 可切到下月提前
-                # 录入（与 target-rollover 结转管道配合：人工已录入的键
-                # 结转时不覆盖）。
-                current_month = _current_year_month()
-                selected_month = (
-                    request.query_params.get("month") or current_month
-                )
-                if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])",
-                                    selected_month):
-                    selected_month = current_month
-                region_targets = {
-                    scope: report_roster.fetch_person_targets(
-                        connection, scope, selected_month)
-                    for scope in visible_scopes if scope != "qudao"
-                }
-        except Exception as exc:
-            _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-
-        scope_labels = dict(scope_pairs)
-        by_scope = {scope: [] for scope in scopes}
-        for row in entries:
-            by_scope.setdefault(row["scope"], []).append(row)
-
-        sort = request.query_params.get("sort") or "channel"
-        if sort not in _QUDAO_SORTS:
-            sort = "channel"
-        sections = ["<h1>填报名册（谁可以填哪些店/区域）</h1>"]
-        # 目标月份导航（2026-10-09 月目标结转配套 + 运维反馈改日历选择器）：
-        # 快捷链接（本月/下月）+ <input type="month"> 任意月直达——历史月
-        # 核对、未来月提前录入都可；渠道门店目标不带月份键，不受此切换影响。
-        next_month = _shift_year_month(current_month, 1)
-        month_links = []
-        for value, tag in ((current_month, "本月"), (next_month, "下月")):
-            label = f"{value}（{tag}）"
-            month_links.append(
-                f"<strong>{_esc(label)}</strong>"
-                if value == selected_month
-                else f"<a href=\"/roster?month={_esc(value)}\">{_esc(label)}</a>"
-            )
-        sections.append(
-            "<p>区域个人月目标的目标月份：" + " ｜ ".join(month_links)
-            + "　<form method=\"get\" action=\"/roster\" "
-              "style=\"display:inline\">"
-            f"<input type=\"month\" name=\"month\" "
-            f"value=\"{_esc(selected_month)}\" required>"
-            "<button type=\"submit\">切换</button></form>"
-            + "<span class=\"hint\">（每月 1 日 06:00 上月目标自动结转到当月，"
-              "人工已录入的不覆盖；渠道门店目标不带月份，常年有效）</span></p>"
-        )
-        # 口径收口（P5）：名册页给一条与成员/授权页逐字一致的口径指针。
-        sections.append(_RECIPIENT_RULES_LINK)
-        # 名册页反向索引（P3，2026-10-12）：scope → 被该范围名册催办的任务。
-        # 舰队清单是附属信息：读取故障只省略该行，不影响名册管理主功能
-        # （与定时任务页「收受影响人」列同款 fail-soft）。
-        scope_backlinks: dict = {}
-        try:
-            if fleet_source is not None:
-                backlink_configs = []
-                for service_id in _fleet():
-                    try:
-                        backlink_configs.append(
-                            config_source.get_pipeline(service_id))
-                    except Exception as exc:
-                        _LOGGER.warning(
-                            "ops-web roster backlink config parse failed: %s",
-                            type(exc).__name__)
-                        backlink_configs.append(PipelineConfig(service_id))
-                scope_backlinks = _scope_backlinks(backlink_configs)
-        except Exception as exc:
-            _LOGGER.warning("ops-web roster backlink load failed: %s",
-                            type(exc).__name__)
-            scope_backlinks = {}
-        for scope in visible_scopes:
-            rows = by_scope.get(scope) or []
-            backlinks = _backlinks_html(scope_backlinks.get(scope) or [])
-            if scope == "qudao":
-                sections.append(
-                    _qudao_section(rows, qudao_targets, qudao_numbers,
-                                   sort=sort, backlinks_html=backlinks)
-                )
-                continue
-            scope_label = scope_labels.get(scope) or _label(_SCOPE_LABEL, scope)
-            sections.append(f"<h2>{_esc(scope_label)}"
-                            f"<span class=\"hint\">（{len(rows)} 条）</span></h2>")
-            sections.append(backlinks)
-            if not rows:
-                sections.append("<p class=\"hint\">暂无记录"
-                                + ("——该范围当前不拦截（没登记就不限制填报，维持现状）。"
-                                   if scope != "qudao" else
-                                   "——渠道机器人自动回退读门店月目标表。")
-                                + "</p>")
-                continue
-            # 统一链接行模板（2026-10-07 运维裁决，与渠道门店同构）：
-            # 渠道/地区 | 店铺/对象 | 负责人 | 代填报人 | 月目标（元）|
-            # 状态 | 备注 | 更新 | 操作。地区列整段合并、对象列按值合并；
-            # 月目标取区域 Nacos monthlyTargets（个人粒度，无则 —）。
-            person_targets = region_targets.get(scope) or {}
-            sorted_rows = sorted(
-                rows,
-                key=lambda r: (str(r["entity_key"]),
-                               1 if r.get("role") == "deputy" else 0,
-                               str(r["person_name"]), int(r["id"])),
-            )
-            spans: dict = {}
-            for row in sorted_rows:
-                key = str(row["entity_key"])
-                spans[key] = spans.get(key, 0) + 1
-            seen: set = set()
-            body = []
-            for position, row in enumerate(sorted_rows):
-                cells = []
-                if position == 0:
-                    cells.append(
-                        f"<td rowspan=\"{len(sorted_rows)}\">"
-                        f"{_esc(scope_label)}</td>"
-                        if len(sorted_rows) > 1
-                        else f"<td>{_esc(scope_label)}</td>"
-                    )
-                key = str(row["entity_key"])
-                if key not in seen:
-                    seen.add(key)
-                    cells.append(
-                        f"<td rowspan=\"{spans[key]}\">{_esc(key)}</td>"
-                        if spans[key] > 1 else f"<td>{_esc(key)}</td>"
-                    )
-                personal_target = person_targets.get(row["person_name"])
-                target_value = (
-                    f"{float(personal_target):.0f}"
-                    if personal_target is not None else ""
-                )
-                updated = _fmt_time(row.get("updated_at")) or "—"
-                name_html = _link_name_html(row)
-                # 按 role 分列（2026-10-08 修复：人员段此前忽略 role，
-                # 代填人全显示在负责人列——与 qudao 段同构）。
-                owner_cell, deputy_cell = (
-                    ("<td></td>", f"<td>{name_html}</td>")
-                    if row.get("role") == "deputy"
-                    else (f"<td>{name_html}</td>", "<td></td>")
-                )
-                cells.append(
-                    f"<td><input class=\"person-target\" "
-                    f"data-scope=\"{_esc(scope)}\" "
-                    f"data-name=\"{_esc(row['person_name'])}\" "
-                    f"value=\"{_esc(target_value)}\" "
-                    f"placeholder=\"目标（万元）\"></td>"
-                    f"{owner_cell}{deputy_cell}"
-                    f"<td>{_status_select_html(row)}</td>"
-                    f"<td>{_esc(row.get('note'))}</td>"
-                    f"<td><span class=\"hint\">{_esc(updated)}</span></td>"
-                    f"<td>{_delete_btn_html(row)}</td>"
-                )
-                body.append("<tr>" + "".join(cells) + "</tr>")
-            sections.append(
-                "<table><tr><th>渠道/地区</th><th>店铺/对象</th>"
-                "<th>月目标（万元）</th><th>负责人</th><th>代填报人</th>"
-                "<th>状态</th><th>备注</th><th>更新</th><th>操作</th></tr>"
-                + "".join(body) + "</table>"
-                f"<p><button onclick=\"saveRegionTargets('{_esc(scope)}', "
-                f"'{_esc(selected_month)}')\">"
-                f"保存{_esc(scope_label)}{_esc(selected_month)}月目标</button>"
-                "<span class=\"hint\">（单位：万元，空白 = 清除该人当月目标；"
-                "保存即生效——机器人报数快照同步读取，逐条落审计）</span></p>"
-            )
-
-        scope_options = "".join(
-            f"<option value=\"{_esc(scope)}\">"
-            f"{_esc(scope_labels.get(scope) or _label(_SCOPE_LABEL, scope))}"
-            "</option>"
-            for scope in visible_scopes
-        )
-        entity_options = "".join(
-            f"<option value=\"{_esc(entity)}\">{_esc(_label(_ENTITY_LABEL, entity))}</option>"
-            for entity in report_roster.ENTITY_TYPES
-        )
-        add_form = (
-            "<h2>新增名册记录</h2>"
-            "<form class=\"inline\" onsubmit=\"addRoster(event)\">"
-            f"<select name=\"scope\">{scope_options}</select>"
-            f"<select name=\"entity_type\">{entity_options}</select>"
-            "<input name=\"entity_key\" placeholder=\"对象（店名/部门名/区域）\" required>"
-            "<input name=\"person_name\" placeholder=\"填报人姓名\" required>"
-            "<select name=\"role\">"
-            "<option value=\"owner\">负责人</option>"
-            "<option value=\"deputy\">代填报人</option>"
-            "</select>"
-            "<input name=\"aliases\" placeholder=\"别名，逗号分隔（可空）\">"
-            "<input name=\"note\" placeholder=\"备注（可空）\">"
-            "<button type=\"submit\">新增</button></form>"
-            "<p class=\"hint\">渠道门店（qudao）：管理「谁可以填哪些店」，渠道机器人"
-            "实时生效；日报区域（杭州/绍兴等）：该范围一旦有人名记录即启用白名单"
-            "（只准在册人员填报），无记录则不拦截；餐饮/部门先登记，机器人后续接入。"
-            "「删除」会留审计，日常调整建议用「停用」。"
-            "<strong>人名一律用通讯录本名（不用花名/昵称）</strong>；"
-            "别名仅用于群昵称与本名不一致的匹配容错。"
-            "角色：负责人占业绩归属，代填报人仅可填报不占业绩；"
-            "改角色 = 用新角色重新「新增」同人同对象（覆盖生效）。"
-            "本页新增/删除/状态修改需「名册管理」授权"
-            "（成员与授权页单人授权：scope = roster）。</p>"
-        )
-        audit_rows = "".join(
-            f"<tr><td>{_esc(_fmt_time(row['created_at']))}</td>"
-            f"<td>{_esc(row['actor'])}</td>"
-            f"<td>{_esc(_label(_ACTION_LABEL, row['action']))}</td>"
-            f"<td>{_esc(_label(_SCOPE_LABEL, row['scope']))}</td>"
-            f"<td>{_esc(row['entity_key'])}</td>"
-            f"<td>{_esc(row['person_name'])}</td>"
-            f"<td>{_esc(row.get('detail'))}</td></tr>"
-            for row in audits
-        )
-        audit_table = (
-            "<h2>名册变更流水（最近 20 条）</h2>"
-            "<table><tr><th>时间</th><th>操作人</th><th>动作</th><th>范围</th>"
-            "<th>对象</th><th>填报人</th><th>详情</th></tr>"
-            + (audit_rows or "<tr><td colspan=\"7\" class=\"hint\">暂无变更</td></tr>")
-            + "</table>"
-        )
-        return HTMLResponse(_page("填报名册", "".join(sections), add_form,
-                                  audit_table,
-                                  viewer_name=viewer.name or viewer.userid))
+    def roster_page():
+        """填报名册页壳（Router 渲染）。"""
+        return _spa_shell()
 
     # -- 收件人总览（P4，2026-10-12；只读，无写面）--------------------------
 
-    @app.get("/recipients")
-    def recipients_page(request: Request):
-        """按区域/scope 一屏展示「在职 ∩ 名册 ∪/∖ 覆盖」的层层结果。
+    @app.get("/api/recipients")
+    def api_recipients(request: Request):
+        """收件人总览读面（JSON；替代 SSR /recipients 页数据，2026-10-14 D1）。
 
-        只读、无写面：所有值均为展示口径（与 ``/pipelines`` 列、抽屉 API 同源），
-        不承诺与某次运行逐位一致；调整入口深链回「填报名册」与定时任务页。
-        舰队清单/只读上下文均 fail-soft：单区块故障只缺该块，不整页 503。
+        只读展示口径；舰队清单/只读上下文均 fail-soft（单块故障只缺该块）。
         """
-        viewer = require_admin(request)
+        require_admin(request)
         configs = []
-        # 区域清单真源（D2）：注册表读失败 fail-soft 回代码镜像。
         scope_pairs = [(scope, _label(_SCOPE_LABEL, scope))
                        for scope in report_roster.SCOPES]
         try:
@@ -3768,7 +3324,6 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     try:
                         configs.append(config_source.get_pipeline(service_id))
                     except Exception as exc:
-                        # 单条注册表项畸形不拖垮整页：按默认配置展示。
                         _LOGGER.warning(
                             "ops-web recipients config parse failed: %s",
                             type(exc).__name__)
@@ -3777,17 +3332,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _LOGGER.warning("ops-web recipients fleet load failed: %s",
                             type(exc).__name__)
             configs = []
-        # 复用 P3 反查口径（只收「催办」类且绑定区域的任务）→ {区域: [...]}。
         scope_tasks = _scope_backlinks(configs)
         reminder_ids = sorted({sid for ids in scope_tasks.values()
                                for sid in ids})
         overrides_by_service = {}
         context = None
+        context_error = False
         try:
             with db_connector() as connection:
                 members = bi_authz.fetch_active_members(connection)
-                # 组织归属覆盖（2026-10-13 联动组织编排）：读失败 fail-soft
-                # 回种子口径，不让整块「读取失败」。
                 try:
                     org_overrides = org_assignment_override.fetch_overrides(
                         connection)
@@ -3810,7 +3363,6 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 qudao_owners = report_roster.fetch_store_owner_map(
                     connection, "qudao", roles=("owner",))
                 for service_id in reminder_ids:
-                    # 覆盖表是本期新表：未迁移/读失败按无名册口径，不整块失败。
                     try:
                         overrides_by_service[service_id] = \
                             recipient_override.fetch_overrides(
@@ -3829,32 +3381,34 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web recipients context load failed: %s",
                             type(exc).__name__)
-        sections = [
-            "<h1>收件人总览（谁会被催办）</h1>",
-            # 口径收口（P5）：三条边界的唯一权威表述，全站只此一处完整渲染。
-            _RECIPIENT_RULES_HTML,
-            "<p class=\"hint\">本页只读、为展示口径：改名单请到「填报名册」，"
-            "或到定时任务页对应任务的「收件人…」抽屉做单条微调。</p>",
-        ]
+            context_error = True
+        sections = []
         for scope, scope_label in scope_pairs:
-            tasks = scope_tasks.get(scope) or []
             if context is None:
-                sections.append(
-                    f"<h2>{_esc(scope_label)}</h2>"
-                    "<p class=\"hint\">名单读取失败，请稍后重试。</p>")
+                sections.append({
+                    "scope": scope, "label": scope_label,
+                    "html": "<p class=\"hint\">名单读取失败，请稍后重试。</p>"})
                 continue
             try:
-                sections.append(_recipients_scope_html(
-                    scope, tasks, overrides_by_service=overrides_by_service,
-                    **context))
+                html = _recipients_scope_html(
+                    scope, scope_tasks.get(scope) or [],
+                    overrides_by_service=overrides_by_service, **context)
             except Exception as exc:
                 _LOGGER.warning("ops-web recipients scope failed: %s",
                                 type(exc).__name__)
-                sections.append(
-                    f"<h2>{_esc(_label(_SCOPE_LABEL, scope))}</h2>"
-                    "<p class=\"hint\">读取失败，请稍后重试。</p>")
-        return HTMLResponse(_page("收件人总览", "".join(sections),
-                                  viewer_name=viewer.name or viewer.userid))
+                html = "<p class=\"hint\">读取失败，请稍后重试。</p>"
+            sections.append({"scope": scope, "label": scope_label, "html": html})
+        return JSONResponse({
+            "status": "ok",
+            "rules_html": _RECIPIENT_RULES_HTML,
+            "sections": sections,
+            "context_error": context_error,
+        })
+
+    @app.get("/recipients")
+    def recipients_page():
+        """收件人总览页壳（Router 渲染）。"""
+        return _spa_shell()
 
     # -- 填报名册读面（JSON，2026-10-14 D1：替代 SSR 页数据）----------------
     @app.get("/api/roster")
@@ -3877,6 +3431,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         try:
             with db_connector() as connection:
                 entries = report_roster.fetch_roster(connection)
+                audits = report_roster.fetch_roster_audit(connection, limit=20)
                 scope_pairs = _region_scope_pairs(connection)
                 scopes = [key for key, _ in scope_pairs]
                 visible_scopes = visible_region_scopes(viewer, scopes)
@@ -3904,6 +3459,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             ],
             "roster": roster,
             "targets": targets,
+            "audits": audits,
         })
 
     @app.get("/api/roster/targets")
@@ -3947,6 +3503,54 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 for name, value in sorted(targets.items())
             ],
         })
+
+    @app.get("/api/roster/qudao")
+    def api_roster_qudao(request: Request):
+        """渠道门店一体读面（JSON；替代 SSR 名册页 qudao 段，2026-10-14 D1）。
+
+        门店目标走 raw 通道（单位元，与区域个人月目标「万元」不同口径）；
+        含负责人/代填报人名册链接、店铺编号与渠道。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not capability_allows(viewer, CAPABILITY_ROSTER, "qudao"):
+            _forbidden(request)
+        request.state.viewer = viewer
+        try:
+            with db_connector() as connection:
+                entries = report_roster.fetch_roster(connection)
+                targets = channel_target.fetch_store_targets(connection)
+                numbers = report_roster.fetch_store_numbers(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster qudao load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        rows = [row for row in entries if row.get("scope") == "qudao"]
+        store_rows = {}
+        for row in rows:
+            store_rows.setdefault(row["entity_key"], []).append(row)
+        all_stores = sorted(set(store_rows) | set(targets.keys()))
+        stores = []
+        for store in all_stores:
+            channel, target = targets.get(
+                store, (numbers.get(store, ("", None))[0], None))
+            links = store_rows.get(store, [])
+            stores.append({
+                "store": store,
+                "channel": channel or "",
+                "target": target,
+                "store_no": numbers.get(store, (None, None))[1],
+                "owners": sorted(r["person_name"] for r in links
+                                 if r.get("role") != "deputy"),
+                "deputies": sorted(r["person_name"] for r in links
+                                   if r.get("role") == "deputy"),
+                "links": [dict(r, updated_at=_fmt_time(r.get("updated_at")))
+                          for r in sorted(
+                              links,
+                              key=lambda r: (
+                                  1 if r.get("role") == "deputy" else 0,
+                                  r["person_name"], int(r["id"])))],
+            })
+        return JSONResponse({"status": "ok", "stores": stores})
 
     @app.post("/api/roster/add")
     async def roster_add(request: Request):
@@ -4149,9 +3753,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return seed_path
 
     @app.get("/calendar")
-    def calendar_page(request: Request, month: str = ""):
-        viewer = require_capability(request, CAPABILITY_CALENDAR)
-        month = (month or "").strip()
+    def calendar_page():
+        """工作日历页壳（Router 渲染）。"""
+        return _spa_shell()
+
+    @app.get("/api/calendar")
+    def api_calendar(request: Request):
+        """工作日历读面（JSON；替代 SSR /calendar 页数据，2026-10-14 D1）。"""
+        require_capability(request, CAPABILITY_CALENDAR)
+        month = (request.query_params.get("month") or "").strip()
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
             month = _current_year_month()
         year, mon = (int(part) for part in month.split("-"))
@@ -4162,112 +3772,57 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web calendar load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-
         cells = {day.day: (day, is_workday, source, note)
                  for day, is_workday, source, note in days}
         today = datetime.now(_BJT).date()
-        first_weekday = date(year, mon, 1).weekday()  # 周一=0
-        row = ['<td class="cal-empty"></td>'] * first_weekday
-        grid_rows = []
         import calendar as _pycal
+        out_days = []
         for day_no in range(1, _pycal.monthrange(year, mon)[1] + 1):
             info = cells.get(day_no)
             if info is None:
-                row.append(f'<td class="cal-empty">{day_no}</td>')
-            else:
-                day, is_workday, source, note = info
-                cls = "cal-day " + ("cal-rest" if not is_workday else "cal-work")
-                if day == today:
-                    cls += " cal-today"
-                badge = _CAL_SOURCE_BADGE.get(source, "")
-                title = html.escape(note or "", quote=True)
-                row.append(
-                    f'<td class="{cls}" title="{title}" '
-                    f"onclick=\"calendarToggle('{day.isoformat()}', "
-                    f"{'true' if is_workday else 'false'})\">"
-                    f"{day_no}{badge}</td>"
-                )
-            if len(row) == 7:
-                grid_rows.append("<tr>" + "".join(row) + "</tr>")
-                row = []
-        if row:
-            row += ['<td class="cal-empty"></td>'] * (7 - len(row))
-            grid_rows.append("<tr>" + "".join(row) + "</tr>")
-
-        prev_month = _shift_year_month(month, -1)
-        next_month = _shift_year_month(month, 1)
-        nav = (
-            '<div class="cal-nav">'
-            f'<a href="/calendar?month={prev_month}">← 上一月</a>'
-            f"<strong>{year} 年 {mon} 月</strong>"
-            f'<a href="/calendar?month={next_month}">下一月 →</a>'
-            f'<a href="/calendar">本月</a>'
-            '<input type="month" '
-            f'value="{month}" '
-            'onchange="if(this.value)location.href=\'/calendar?month=\'+this.value">'
-            "</div>"
-        )
-        legend = (
-            '<p class="hint">蓝底=休息 · 白底=上班 · 徽标：法=法定节假日导入 / '
-            "裁=人工裁决 / 兜=规则兜底（种子未覆盖月，法定假未知按工作日计）"
-            " · 点任意日期可切换 上班/休息（立即重写当月日历，全部操作留审计）"
-            "</p>"
-        )
-        grid = (
-            '<table class="cal-table"><tr><th>一</th><th>二</th><th>三</th>'
-            "<th>四</th><th>五</th><th>六</th><th>日</th></tr>"
-            + "".join(grid_rows) + "</table>"
-        )
-        import_form = (
-            "<h2>导入法定节假日（holiday-cn 官方转录）</h2>"
-            '<form class="inline" onsubmit="calendarImportYear(event)">'
-            f'<input name="year" type="number" min="2020" max="2100" '
-            f'value="{year + 1 if mon >= 10 else year}" required>'
-            "<button type=\"submit\">一键导入该年法定假日</button>"
-            '<span class="hint">该年法定导入行整年替换，人工裁决（裁）不动；'
-            "随后按当前口径重写全年日历。国务院一般 10-11 月发布次年安排。"
-            "</span></form>"
-            "<h2>恢复规则</h2>"
-            '<form class="inline" onsubmit="calendarResetMonth('
-            f"'{month}');return false"
-            '">'
-            f"<button type=\"submit\">清除 {month} 人工裁决</button>"
-            '<span class="hint">只清「裁」行（法定导入「法」保留），'
-            "当月回到规则基线口径。</span></form>"
-        )
+                out_days.append({"day": day_no, "is_workday": None,
+                                 "source": None, "note": "", "is_today": False})
+                continue
+            day, is_workday, source, note = info
+            out_days.append({
+                "day": day_no,
+                "is_workday": bool(is_workday),
+                "source": source,
+                "note": note or "",
+                "is_today": day == today,
+            })
         audit_rows = []
         for entry in audits:
-            get = entry.get if isinstance(entry, dict) else None
-            if get is not None:
-                actor = get("actor")
-                action = get("action")
-                biz_date = get("business_date")
-                yr = get("year")
-                mon2 = get("month")
-                detail = get("detail")
-                created = get("created_at")
+            if isinstance(entry, dict):
+                get = entry.get
             else:
-                actor, action, biz_date, yr, mon2, detail, created = entry
+                get = lambda key, r=entry: r[(
+                    "actor", "action", "business_date", "year", "month",
+                    "detail", "created_at").index(key)]
+            biz_date = get("business_date")
+            yr, mon2 = get("year"), get("month")
             when = biz_date.isoformat() if isinstance(biz_date, date) else (
-                f"{yr}-{int(mon2):02d}" if yr and mon2 else "—"
-            )
-            audit_rows.append(
-                f"<tr><td>{_esc(_fmt_time(created))}</td><td>{_esc(actor)}</td>"
-                f"<td>{_esc(_label(_ACTION_LABEL, action))}</td>"
-                f"<td>{_esc(when)}</td><td>{_esc(detail)}</td></tr>"
-            )
-        audit_table = (
-            "<h2>最近修正记录</h2>"
-            "<table><tr><th>时间</th><th>操作人</th><th>动作</th>"
-            "<th>日期</th><th>详情</th></tr>"
-            + "".join(audit_rows) + "</table>"
-        )
-        return HTMLResponse(_page(
-            "工作日历",
-            f"<h1>工作日历（{year} 年 {mon} 月）</h1>",
-            nav, legend, grid, import_form, audit_table,
-            viewer_name=viewer.name or viewer.userid,
-        ))
+                f"{yr}-{int(mon2):02d}" if yr and mon2 else "—")
+            audit_rows.append({
+                "created_at": _fmt_time(get("created_at")),
+                "actor": get("actor"),
+                "action": get("action"),
+                "action_label": _label(_ACTION_LABEL, get("action")),
+                "when": when,
+                "detail": get("detail"),
+            })
+        return JSONResponse({
+            "status": "ok",
+            "month": month,
+            "year": year,
+            "month_no": mon,
+            "first_weekday": date(year, mon, 1).weekday(),
+            "days": out_days,
+            "audits": audit_rows,
+            "prev_month": _shift_year_month(month, -1),
+            "next_month": _shift_year_month(month, 1),
+            "today_iso": today.isoformat(),
+        })
 
     @app.post("/api/calendar/toggle")
     async def calendar_toggle(request: Request):
@@ -4525,6 +4080,13 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "deleted": deleted})
+
+    # -- SPA 单壳 catch-all（注册在最后：未匹配 GET 返回壳；API 等前缀 404）-
+    @app.get("/{path:path}")
+    def spa_fallback(request: Request, path: str):
+        if path.startswith(("api/", "auth/", "static/", "healthz")):
+            raise HTTPException(status_code=404, detail="not_found")
+        return _spa_shell()
 
     return app
 

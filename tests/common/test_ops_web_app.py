@@ -154,6 +154,15 @@ def _login(client, userid=ADMIN_USERID):
     )
 
 
+def assert_spa_shell(resp):
+    """断言响应是 SPA 单壳（dist/index.html）。"""
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    body = resp.text
+    assert '<div id="app">' in body
+    assert "/static/dist/assets/index-" in body
+
+
 class FactoryTests(unittest.TestCase):
     def test_session_secret_is_mandatory(self):
         with self.assertRaises(ValueError):
@@ -164,13 +173,14 @@ class FactoryTests(unittest.TestCase):
 class AdminGateTests(unittest.TestCase):
     """应用层闸（铁律 8 的第二闸）：session + admin 缺一不可。"""
 
-    def test_no_session_page_redirects_to_login(self):
+    def test_no_session_serves_spa_shell(self):
+        # 2026-10-14 全 SPA 迁移：壳路由不设应用层闸（未登录由前端启动
+        # /api/me → 401 跳登录）；数据 API 仍 fail-closed（见下用例）。
         client = TestClient(_app(viewer=_admin_viewer()))
 
-        response = client.get("/", follow_redirects=False)
+        assert_spa_shell(client.get("/", follow_redirects=False))
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/auth/entry?reason=login", response.headers["location"])
+        self.assertEqual(401, client.get("/api/me").status_code)
 
     def test_no_session_api_answers_401(self):
         client = TestClient(_app(viewer=_admin_viewer()))
@@ -188,19 +198,19 @@ class AdminGateTests(unittest.TestCase):
         client = TestClient(_app(viewer=viewer))
         _login(client, "u1")
 
-        page = client.get("/", follow_redirects=False)
-        self.assertEqual(302, page.status_code)
-        self.assertIn("reason=forbidden", page.headers["location"])
+        # 壳路由放行（权限由前端 Router 守卫）；数据面仍 403 fail-closed。
+        assert_spa_shell(client.get("/", follow_redirects=False))
         self.assertEqual(
             403, client.post("/api/grants", json={"user_id": "u"}).status_code
         )
 
     def test_resolver_failure_is_fail_closed(self):
-        # 铁律 2：Viewer 解析异常 = 403，绝不放行。
+        # 铁律 2：Viewer 解析异常在数据面 = 403，绝不放行。
         client = TestClient(_app(resolver_error=RuntimeError("mart down")))
         _login(client)
 
-        self.assertEqual(403, client.get("/").status_code)
+        # 壳路由不解析 Viewer，照常返回壳；解析异常只影响数据面。
+        assert_spa_shell(client.get("/", follow_redirects=False))
         self.assertEqual(
             403, client.post("/api/grants", json={"user_id": "u"}).status_code
         )
@@ -412,7 +422,22 @@ def _fleet_app(*, viewer=None, fleet=("robot-hangzhou",), configs=None,
 
 
 class PipelinePageTests(unittest.TestCase):
-    def test_pipelines_page_lists_fleet_with_template_and_run_button(self):
+    """定时任务面（2026-10-14 全 SPA 迁移）。
+
+    旧 SSR 页的纯呈现细节（表单 id / 内联 onclick / 视图 tab / 弹窗挂载点 /
+    行内列序 / 交叉导航链接）已迁至 Vue 页（AppShell + 定时任务页），相应
+    用例删除；数据与权限断言改钉 JSON 读面 /api/pipelines（+ audit/history）。
+    """
+
+    def _pick(self, data, service_id):
+        """从 /api/pipelines 的 groups 中取指定 service 行。"""
+        for group in data["groups"]:
+            for service in group["services"]:
+                if service["service_id"] == service_id:
+                    return service
+        self.fail(f"/api/pipelines 未含 {service_id}")
+
+    def test_pipelines_api_lists_fleet_with_schedule_and_latest(self):
         store = _PipelineStore()
         store.recent = [{
             "service_id": "robot-hangzhou", "requested_by": "王城",
@@ -422,50 +447,19 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_recent():
-            # 群视角是唯一视角（2026-10-13 收敛）：不带 view 即按管理群分组。
-            body = client.get("/pipelines").text
+            data = client.get("/api/pipelines").json()
 
-        self.assertIn("robot-hangzhou", body)    # 原始 id 小字备查
-        self.assertIn("杭州", body)              # 服务中文名（区域中文化）
-        self.assertIn("0 2 * * *", body)         # 原表达式作小字备查
-        self.assertIn("每天 02:00", body)        # cron 人性化
-        self.assertIn("填报提醒", body)          # robot- 家族中文说明（动态生成）
-        self.assertIn("运行一次", body)          # 有命令模板 → 可运行
-        self.assertIn("成功", body)              # 最近运行（finished 中文化）
-        self.assertIn("新增定时任务", body)
-        self.assertIn("应用线", body)            # kind=apps 中文化
-        self.assertIn("服务标识", body)          # 表头中文化
-        self.assertIn("按管理群", body)          # 唯一视角（无功能类别 tab）
-        self.assertIn("「杭州」群", body)        # 管理群（robot- 家族区域映射）
-        self.assertIn("<details", body)          # 群分组原生折叠
-        self.assertIn("<summary", body)
-        self.assertIn("操作…", body)             # 操作列改下拉
-        self.assertIn('data-service="robot-hangzhou"', body)
-        self.assertIn('data-schedule="0 2 * * *"', body)   # 行内带原 cron 供改播报时间
-        self.assertIn("改播报时间", body)        # 操作列「改播报时间」
-        self.assertIn("<th>播报时间</th>", body)     # 列头改名
-        self.assertIn('id="confirm-mask"', body)     # 弹窗确认挂载点
-        self.assertIn('id="confirm-text"', body)
-        self.assertIn('id="schedule-mask"', body)     # 改播报时间弹窗挂载点
-        self.assertIn('id="schedule-edit-times"', body)      # 时点槽容器
-        self.assertIn('id="schedule-edit-add"', body)        # ＋时点
-        self.assertIn('id="schedule-edit-ok"', body)         # 确定
-        self.assertIn('id="schedule-edit-unsupported"', body)  # 非时刻型提示
-        self.assertNotIn('id="schedule-edit-hour"', body)     # 旧单时点控件已删
-        self.assertNotIn('id="schedule-edit-minute"', body)
-        # 弹窗内一并显示「当前播报时间」并实时预览改后结果
-        self.assertIn("当前播报时间", body)
-        self.assertIn('id="schedule-edit-rule"', body)
-        self.assertIn('id="schedule-edit-preview"', body)
-        self.assertIn("function parseBroadcastTimes", body)
-        self.assertIn("function buildBroadcastCron", body)
-        self.assertNotIn("function rewriteCronTime", body)  # 旧实现已删
-        self.assertIn("function updateScheduleEditPreview", body)
-        self.assertNotIn(">finished<", body)     # 英文状态值不外显
-        self.assertIn("2026-09-30 18:00:00", body)   # UTC 存储 → 北京时间
-        self.assertNotIn("10:00:00", body)           # UTC 原文不外显
+        self.assertEqual("ok", data["status"])
+        row = self._pick(data, "robot-hangzhou")
+        self.assertEqual("0 2 * * *", row["schedule"])       # 原表达式备查
+        self.assertEqual("每天 02:00", row["schedule_zh"])   # cron 人性化
+        self.assertIn("填报提醒", row["service_label"])       # robot- 家族中文说明
+        self.assertTrue(row["enabled"])
+        self.assertEqual("成功", row["latest"]["status_label"])  # finished 中文化
+        self.assertEqual("2026-09-30 18:00:00",
+                         row["latest"]["created_at"])            # UTC → 北京时
 
-    def test_pipelines_page_group_and_function_classification(self):
+    def test_pipelines_api_group_and_function_classification(self):
         """群视角分组：家族后缀/显式区域映射、跨区域线与平台线归组。"""
         fleet = (
             "leaderboard-hangzhou",   # 家族：播报 + 「杭州」群
@@ -476,29 +470,16 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
 
-        self.assertIn("「杭州」群（1 项）", body)   # leaderboard- 家族区域映射
-        self.assertIn("「渠道」群（2 项）", body)   # 两条渠道线同群聚为一组
-        self.assertIn("平台 / 无群（2 项）", body)  # sync-wdt + dingtalk-gateway
-        self.assertIn("榜单播报", body)            # leaderboard- 家族中文名
+        by_title = {g["title"]: g["count"] for g in data["groups"]}
+        self.assertEqual(1, by_title["「杭州」群"])    # leaderboard- 区域映射
+        self.assertEqual(2, by_title["「渠道」群"])    # 两条渠道线同群聚组
+        self.assertEqual(2, by_title["平台 / 无群"])   # sync-wdt + dingtalk-gateway
+        self.assertIn("榜单群播报",
+                      self._pick(data, "leaderboard-hangzhou")["service_label"])
 
-    def test_pipelines_page_view_tabs_default_group(self):
-        """群视角唯一（2026-10-13 收敛）：无「按功能类别」tab、无 ?view=class。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines").text
-
-        self.assertIn("按管理群", body)
-        self.assertNotIn("按功能类别", body)
-        self.assertNotIn('href="/pipelines?view=group"', body)
-        self.assertNotIn('href="/pipelines?view=class"', body)
-        self.assertNotIn('class="tabs"', body)
-        # 群视角：分组头 + 项数；不再是功能分表
-        self.assertIn("「杭州」群（1 项）", body)
-        self.assertNotIn("<h2>催办</h2>", body)
-
-    def test_pipelines_page_group_view_places_platform_last_keeps_rows(self):
+    def test_pipelines_api_group_order_places_platform_last(self):
         """群视角：按区域分组、平台/无群恒置末位、任一行不丢。"""
         fleet = (
             "robot-hangzhou",        # 「杭州」群
@@ -508,23 +489,16 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(_pipeline_app(viewer=_admin_viewer(), fleet=fleet))
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
 
-        self.assertIn("「杭州」群（1 项）", body)
-        self.assertIn("「渠道」群（1 项）", body)
-        self.assertIn("平台 / 无群（2 项）", body)
-        # 顺序：区域组在前，平台/无群收尾
-        self.assertLess(body.index("「杭州」群（1 项）"),
-                        body.index("「渠道」群（1 项）"))
-        self.assertLess(body.index("「渠道」群（1 项）"),
-                        body.index("平台 / 无群（2 项）"))
-        # 每行都在（不得因分组丢行）
-        for sid in fleet:
-            self.assertIn(sid, body)
-        # 群视角行内不再重复「管理群」列
-        self.assertNotIn("<th>管理群</th>", body)
+        regions = [g["region"] for g in data["groups"]]
+        self.assertLess(regions.index("hangzhou"), regions.index("qudao"))
+        self.assertLess(regions.index("qudao"), regions.index(None))
+        ids = [s["service_id"] for g in data["groups"] for s in g["services"]]
+        for sid in fleet:          # 每行都在（不得因分组丢行）
+            self.assertIn(sid, ids)
 
-    def test_pipelines_page_reminder_targets(self):
+    def test_pipelines_api_reminder_targets(self):
         """收受影响人列：robot=名册在册人员（绑定）；渠道到齐=名册店铺负责人。"""
         connection = _Connection({
             "dim_robot_member": [
@@ -543,18 +517,19 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(
             viewer=_admin_viewer(), fleet=fleet, connection=connection))
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
 
-        self.assertIn("收受影响人", body)     # 新列表头
-        self.assertIn("张三", body)
-        self.assertIn("（1 人 · 名册）", body)  # robot- 名册绑定：只列在册的张三
-        self.assertNotIn("李四", body)         # 非在册成员不收影响
-        self.assertIn("赵六、钱七", body)      # 渠道名册负责人（去重排序）
-        self.assertIn("（2 人 · 2 店）", body)
-        self.assertNotIn("王五", body)         # 无 robot-shaoxing 行不展示
-        self.assertNotIn("读取失败", body)
+        robot = self._pick(data, "robot-hangzhou")["reminder_html"]
+        self.assertIn("张三", robot)
+        self.assertIn("（1 人 · 名册）", robot)   # robot- 名册绑定：只列在册的张三
+        self.assertNotIn("李四", robot)           # 非在册成员不收影响
+        self.assertNotIn("王五", robot)           # 无 robot-shaoxing 行不展示
+        self.assertNotIn("读取失败", robot)
+        qudao = self._pick(data, "channel-missing-check")["reminder_html"]
+        self.assertIn("赵六、钱七", qudao)        # 渠道名册负责人（去重排序）
+        self.assertIn("（2 人 · 2 店）", qudao)
 
-    def test_pipelines_page_reminder_targets_with_overrides(self):
+    def test_pipelines_api_reminder_targets_with_overrides(self):
         """任务级覆盖（方案 B）：有效名单 = 名册 ± include/exclude，带徽标。"""
         connection = _Connection({
             "dim_robot_member": [
@@ -577,16 +552,17 @@ class PipelinePageTests(unittest.TestCase):
             viewer=_admin_viewer(), fleet=("robot-hangzhou",),
             connection=connection))
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
+        html = self._pick(data, "robot-hangzhou")["reminder_html"]
 
-        self.assertIn("张三", body)
-        self.assertNotIn("李四", body)      # exclude 按姓名移除
-        self.assertIn("u9", body)           # include 追加（未知 id 回显）
-        self.assertIn("（2 人 · 名册）", body)
-        self.assertIn("+1 覆盖", body)
-        self.assertIn("−1 移除", body)
+        self.assertIn("张三", html)
+        self.assertNotIn("李四", html)      # exclude 按姓名移除
+        self.assertIn("u9", html)           # include 追加（未知 id 回显）
+        self.assertIn("（2 人 · 名册）", html)
+        self.assertIn("+1 覆盖", html)
+        self.assertIn("−1 移除", html)
 
-    def test_pipelines_page_reminder_override_read_fail_soft(self):
+    def test_pipelines_api_reminder_override_read_fail_soft(self):
         """覆盖表未迁移/读失败 → 回退名册口径，本列不整体「读取失败」。"""
         connection = _Connection({
             "dim_robot_member": [("u1", "张三", "hangzhou", "门店一部")],
@@ -597,11 +573,12 @@ class PipelinePageTests(unittest.TestCase):
         _login(client)
         with mock.patch.object(recipient_override, "fetch_overrides",
                                side_effect=RuntimeError("no table")):
-            body = client.get("/pipelines").text
-        self.assertIn("张三", body)
-        self.assertNotIn("读取失败", body)
+            data = client.get("/api/pipelines").json()
+        html = self._pick(data, "robot-hangzhou")["reminder_html"]
+        self.assertIn("张三", html)
+        self.assertNotIn("读取失败", html)
 
-    def test_pipelines_page_reminder_targets_fail_open_all_members(self):
+    def test_pipelines_api_reminder_targets_fail_open_all_members(self):
         """名册无记录 → 区域在册填报人全员兜底（与机器人 fail-open 同语义）；
         跨多部门时按部门归组展示（2026-10-13 联动组织编排）。"""
         connection = _Connection({
@@ -614,21 +591,23 @@ class PipelinePageTests(unittest.TestCase):
             viewer=_admin_viewer(), fleet=("robot-hangzhou",),
             connection=connection))
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
+        html = self._pick(data, "robot-hangzhou")["reminder_html"]
 
-        self.assertIn("门店一部：张三", body)   # 按部门归组（非旧的「、」连接）
-        self.assertIn("门店二部：李四", body)
-        self.assertIn("（2 人 · 全员兜底）", body)
+        self.assertIn("门店一部：张三", html)   # 按部门归组（非旧的「、」连接）
+        self.assertIn("门店二部：李四", html)
+        self.assertIn("（2 人 · 全员兜底）", html)
 
-    def test_pipelines_page_reminder_targets_empty_roster_hint(self):
+    def test_pipelines_api_reminder_targets_empty_roster_hint(self):
         """渠道名册未登记 → 如实标注机器人自动回退读门店月目标表。"""
         client = TestClient(_pipeline_app(
             viewer=_admin_viewer(), fleet=("channel-missing-check",)))
         _login(client)
-        body = client.get("/pipelines").text
-        self.assertIn("自动回退读门店月目标表", body)
+        data = client.get("/api/pipelines").json()
+        html = self._pick(data, "channel-missing-check")["reminder_html"]
+        self.assertIn("自动回退读门店月目标表", html)
 
-    def test_pipelines_page_reminder_targets_fail_soft(self):
+    def test_pipelines_api_reminder_targets_fail_soft(self):
         """收受影响人读取故障 → 本列「读取失败」，整页不拖垮。"""
         def _boom(conn):
             raise RuntimeError("db down")
@@ -636,43 +615,12 @@ class PipelinePageTests(unittest.TestCase):
             viewer=_admin_viewer(), fleet=("robot-hangzhou",)))
         _login(client)
         with mock.patch.object(bi_authz, "fetch_active_members", _boom):
-            response = client.get("/pipelines")
+            response = client.get("/api/pipelines")
         self.assertEqual(200, response.status_code)
-        self.assertIn("读取失败", response.text)
-        self.assertIn("robot-hangzhou", response.text)
+        html = self._pick(response.json(), "robot-hangzhou")["reminder_html"]
+        self.assertIn("读取失败", html)
 
-    def test_pipelines_page_recipient_drawer_shows_base_block(self):
-        """P1（2026-10-12）：抽屉脚本随页下发「本线基名单」区块 + 去名册深链，
-        并区分「本任务覆盖」与「整片区域名册」两层。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines").text
-
-        self.assertIn("function renderRecipientBase", body)
-        self.assertIn("本线基名单", body)
-        self.assertIn("function renderRecipientExplain", body)  # P2 归因
-        self.assertIn("口径说明：为什么有人不在名单", body)
-        self.assertIn('href="/roster">填报名册', body)   # 名册层深链
-        self.assertIn('href="/member-grants">成员与授权', body)  # 在职层深链
-
-    def test_pipelines_page_service_deep_link_opens_drawer(self):
-        """P3（2026-10-12）：?service=<id> 深链随页下发自动开抽屉脚本；
-        未知/非法标识不注入。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines",
-                          params={"service": "robot-hangzhou"}).text
-        self.assertIn("openRecipientOverride('robot-hangzhou')", body)
-
-        # 不在舰队清单里的标识：不注入（避免无意义开抽屉）。
-        other = client.get("/pipelines", params={"service": "nope"}).text
-        self.assertNotIn("openRecipientOverride('nope')", other)
-        # 非法字符（防注入）：不注入。
-        bad = client.get("/pipelines",
-                         params={"service": "x');alert(1)//"}).text
-        self.assertNotIn("alert(1)", bad)
-
-    def test_pipelines_page_category_truth_overrides_derivation(self):
+    def test_pipelines_api_category_truth_overrides_derivation(self):
         """category 真源优先：注册表配 category=催办 时，即便 service_id 推导为
         「同步」，该行仍按催办装载（收受影响人列走催办取值域）。"""
         configs = {"sync-wdt": {"schedule": "0 2 * * *", "category": "催办"}}
@@ -694,57 +642,12 @@ class PipelinePageTests(unittest.TestCase):
             return ()
 
         with mock.patch.object(recipient_override, "fetch_overrides", _spy):
-            body = client.get("/pipelines").text
+            data = client.get("/api/pipelines").json()
 
         self.assertEqual(["sync-wdt"], seen)   # 真源 = 催办 → 催办装载被触发
-        self.assertIn("收受影响人", body)     # 催办行入口（列）仍在
-        self.assertIn("sync-wdt", body)       # 群视角仍在（平台 / 无群）
+        self.assertTrue(self._pick(data, "sync-wdt")["is_reminder"])
 
-    def test_pipelines_page_add_form_offers_category_select(self):
-        """新增表单带 category 下拉：空值=按标识推导，七值可选。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines").text
-
-        self.assertIn('name="category"', body)
-        self.assertIn("功能（留空按标识推导）", body)
-        for category in ("同步", "加工", "播报", "催办", "页面", "钉钉", "平台"):
-            self.assertIn(f'<option value="{category}">{category}</option>', body)
-
-    def test_pipelines_page_schedule_builder_form(self):
-        """定时构建器（2026-10-10 裁决）：预设+时点选择+自定义 cron+预览，
-        非技术同学不手写 cron。"""
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/pipelines").text
-
-        self.assertIn('id="pipeline-add-form"', body)
-        self.assertIn('name="schedule_preset"', body)
-        for preset in ('value="daily"', 'value="weekday"', 'value="weekly"',
-                       'value="monthly"', 'value="hourly"', 'value="custom"'):
-            self.assertIn(preset, body)
-        # 时点选择拆为「时(0-23)」「分(0-59)」两维下拉（2026-10-13 裁决：
-        # 分维开放全量 0..59，非仅 00/30）。
-        self.assertIn('name="schedule_hour"', body)
-        self.assertIn('name="schedule_minute"', body)
-        self.assertNotIn('name="schedule_time"', body)
-        self.assertNotIn('type="time"', body)
-        for hour in range(24):
-            self.assertIn(f'<option value="{hour}"', body)
-        self.assertIn('<option value="0" selected>00</option>', body)  # 分默认 0
-        self.assertIn('<option value="30">30</option>', body)
-        self.assertIn('<option value="59">59</option>', body)          # 分上限
-        self.assertIn('name="schedule_dow"', body)     # 每周（默认隐藏）
-        self.assertIn('name="schedule_dom"', body)     # 每月（默认隐藏）
-        self.assertIn('name="schedule"', body)         # 自定义 cron（默认隐藏）
-        self.assertIn('id="schedule-preview"', body)
-        # cron 输入不再 required（隐藏态不参与提交校验，由 JS 合成）
-        self.assertNotIn(
-            'name="schedule" placeholder="cron（分 时 日 月 周）" required',
-            body,
-        )
-
-    def test_pipelines_page_weekday_cron_is_humanized(self):
+    def test_pipelines_api_weekday_cron_is_humanized(self):
         """工作日区间 cron（1-5）人性化：与构建器「工作日」预设同形。"""
         configs = {"sync-wdt": {"schedule": "0 18 * * 1-5"}}
         app = create_app(
@@ -758,12 +661,12 @@ class PipelinePageTests(unittest.TestCase):
         )
         client = TestClient(app)
         _login(client)
-        body = client.get("/pipelines").text
+        data = client.get("/api/pipelines").json()
+        row = self._pick(data, "sync-wdt")
+        self.assertEqual("工作日（周一至周五）18:00", row["schedule_zh"])
+        self.assertEqual("0 18 * * 1-5", row["schedule"])   # 原表达式备查
 
-        self.assertIn("工作日（周一至周五）18:00", body)
-        self.assertIn("0 18 * * 1-5", body)   # 原表达式小字备查
-
-    def test_pipeline_audit_page_renders_entries(self):
+    def test_pipeline_audit_api_lists_entries(self):
         store = _PipelineStore()
         store.audit_rows = [
             ("admin", "add", "robot-x", "0 2 * * *", "2026-09-30 10:00:00"),
@@ -773,31 +676,19 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_audit_rows():
-            body = client.get("/pipelines/audit").text
+            rows = client.get("/api/pipelines/audit").json()["rows"]
 
-        self.assertIn("robot-x", body)
-        self.assertIn("新增", body)  # action=add 中文化
-        self.assertIn("改定时", body)  # action=schedule 中文化
-        self.assertIn("30 20 * * 1-5", body)
-
-    def test_pipeline_audit_page_has_cross_links(self):
-        """G2（2026-10-12 断点报告）：审计分散四页，任务审计页给交叉索引。"""
-        store = _PipelineStore()
-        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
-        _login(client)
-        with store.patch_audit_rows():
-            body = client.get("/pipelines/audit").text
-
-        self.assertIn('href="/roster"', body)     # 名册变更流水
-        self.assertIn('href="/audit"', body)      # 授权审计
-        self.assertIn('href="/calendar"', body)   # 日历改判流水
+        self.assertIn("robot-x", [r["service_id"] for r in rows])
+        self.assertEqual("新增", rows[0]["action_label"])    # action=add 中文化
+        self.assertEqual("改定时", rows[1]["action_label"])  # action=schedule 中文化
+        self.assertEqual("30 20 * * 1-5", rows[1]["detail"])
 
     def test_action_label_covers_target(self):
         """G1：名册月目标保存动作中文化（原回退英文原文 target）。"""
         from common.ops_web.app import _ACTION_LABEL, _label
         self.assertEqual("月目标", _label(_ACTION_LABEL, "target"))
 
-    def test_pipeline_history_page_renders_entries(self):
+    def test_pipeline_history_api_renders_entries(self):
         store = _PipelineStore()
         store.history_rows = [
             {"id": 2, "service_id": "robot-hangzhou", "trigger_type": "cron",
@@ -811,16 +702,16 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_history_rows():
-            body = client.get("/pipelines/history").text
+            data = client.get("/api/pipelines/history").json()
 
-        self.assertIn("robot-hangzhou", body)
-        self.assertIn("sync-wdt", body)
-        self.assertIn("定时", body)          # trigger=cron 中文化
-        self.assertIn("手动", body)          # trigger=run_once 中文化
-        self.assertIn("失败", body)
-        self.assertIn("成功", body)
+        by_id = {r["service_id"]: r for r in data["rows"]}
+        self.assertEqual({"robot-hangzhou", "sync-wdt"}, set(by_id))
+        self.assertEqual("定时", by_id["robot-hangzhou"]["trigger_label"])   # cron
+        self.assertEqual("手动", by_id["sync-wdt"]["trigger_label"])          # run_once
+        self.assertEqual("失败", by_id["robot-hangzhou"]["status_label"])
+        self.assertEqual("成功", by_id["sync-wdt"]["status_label"])
 
-    def test_pipeline_history_page_filters_by_service_id(self):
+    def test_pipeline_history_api_filters_by_service_id(self):
         store = _PipelineStore()
         store.history_rows = [
             {"id": 1, "service_id": "sync-wdt", "trigger_type": "cron",
@@ -833,12 +724,13 @@ class PipelinePageTests(unittest.TestCase):
         client = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_history_rows():
-            body = client.get(
-                "/pipelines/history", params={"service_id": "sync-wdt"}
-            ).text
+            data = client.get(
+                "/api/pipelines/history", params={"service_id": "sync-wdt"}
+            ).json()
 
-        self.assertIn("sync-wdt", body)
-        self.assertNotIn("robot-hangzhou<", body)
+        self.assertEqual("sync-wdt", data["service_id"])
+        self.assertEqual(["sync-wdt"],
+                         [r["service_id"] for r in data["rows"]])
 
 
 class ZhLabelTests(unittest.TestCase):
@@ -1344,7 +1236,14 @@ def _roster_row(**kw):
 
 
 class RosterPageTests(unittest.TestCase):
-    def test_roster_page_groups_by_scope_with_chinese_labels(self):
+    """填报名册面（2026-10-14 全 SPA 迁移）。
+
+    SSR 名册页呈现（负责人/代填报人分列、状态下拉、scope 反向索引深链、
+    空范围提示）已迁至 Vue 页，相应纯呈现用例删除；数据/权限断言改钉
+    JSON 读面 /api/roster（渠道门店明细另见 RosterSortTests 的 qudao 读面）。
+    """
+
+    def test_roster_api_groups_by_scope_with_chinese_labels(self):
         store = _RosterStore()
         store.rows = [_roster_row()]
         store.audit_rows = [{
@@ -1356,85 +1255,32 @@ class RosterPageTests(unittest.TestCase):
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         with store.patch_fetch(), store.patch_audit():
-            body = client.get("/roster").text
+            data = client.get("/api/roster").json()
 
-        self.assertIn("填报名册", body)
-        self.assertIn("渠道门店", body)          # scope 中文化
-        self.assertIn("门店", body)              # entity_type 中文化
-        self.assertIn("JD购喝", body)
-        self.assertIn("饶佳君", body)
-        self.assertIn("小饶", body)              # aliases JSON 展开
-        self.assertIn("停用", body)              # 操作按钮
-        self.assertIn("新增名册记录", body)
-        self.assertIn("暂无记录", body)          # 空 scope 分组提示
-        self.assertIn("不拦截", body)            # 名册空范围提示（原 fail-open 术语）
-        self.assertIn("2026-10-06 19:00:00", body)  # 审计时间转北京时
+        self.assertEqual("ok", data["status"])
+        labels = {r["region_key"]: r["label"] for r in data["regions"]}
+        self.assertEqual("渠道门店", labels.get("qudao"))    # scope 中文化
+        row = next(r for r in data["roster"] if r["entity_key"] == "JD购喝")
+        self.assertEqual("饶佳君", row["person_name"])
+        self.assertEqual("渠道门店", row["scope_label"])
+        self.assertIn("小饶", row["aliases"])                # aliases JSON 原样透出
+        self.assertEqual(["admin"], [a["actor"] for a in data["audits"]])
 
-    def test_roster_page_requires_admin(self):
+    def test_roster_api_requires_admin(self):
+        # 壳路由放行（前端 Router 守卫）；数据面 fail-closed。
         client = TestClient(_app(viewer=_admin_viewer()))
-        response = client.get("/roster", follow_redirects=False)
-        self.assertEqual(302, response.status_code)
+        assert_spa_shell(client.get("/roster", follow_redirects=False))
+        self.assertEqual(401, client.get("/api/roster").status_code)
 
-    def test_roster_page_splits_owner_deputy_columns_with_status_select(self):
-        # 2026-10-07 运维裁决：负责人/代填报人分两列；启用/停用改下拉
-        store = _RosterStore()
-        store.rows = [
-            _roster_row(id=1, entity_key="TM习酒旗舰店", person_name="卢雅玲",
-                        aliases=None, note=""),
-            _roster_row(id=2, entity_key="TM习酒旗舰店", person_name="卢雅莹",
-                        aliases=None, note="", role="deputy"),
-        ]
+        member = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(member, "u-plain")
+        self.assertEqual(403, member.get("/api/roster").status_code)
+
+    def test_roster_shell_renders_without_fleet(self):
+        """无舰队清单（fleet_source=None）时 /roster 壳路由照常返回。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        with store.patch_fetch(), store.patch_audit():
-            body = client.get("/roster").text
-
-        self.assertIn('href="?sort=owner">负责人', body)   # 两列可排序表头
-        self.assertIn('href="?sort=deputy">代填报人', body)
-        self.assertIn("卢雅玲", body)
-        self.assertIn("卢雅莹", body)
-        # 负责人链接：状态下拉（当前值即链接状态）+ 删除按钮
-        self.assertIn('setRosterStatus(1, this.value)', body)
-        self.assertIn('<option value="1" selected>启用</option>', body)
-        # 代填报人店铺格只读（2026-10-07 裁决：授权不在此办理）——
-        # 代填人（id=2）无状态下拉、无删除按钮
-        self.assertNotIn('setRosterStatus(2, this.value)', body)
-        self.assertNotIn("deleteRoster(2)", body)
-        self.assertNotIn("toggleRoster", body)
-
-    def test_roster_page_scope_backlinks_to_pipelines_drawer(self):
-        """P3（2026-10-12）：名册 scope 区块显示「被这些任务催办」，并把
-        任务名深链到定时任务页对应行的抽屉（service_id → scope 反查）。"""
-        store = _RosterStore()
-        configs = {
-            "robot-hangzhou": {}, "robot-check-hangzhou": {},
-            "channel-missing-check": {}, "sync-wdt": {},
-        }
-        client = TestClient(_fleet_app(
-            viewer=_admin_viewer(), fleet=tuple(configs), configs=configs))
-        _login(client)
-        with store.patch_fetch(), store.patch_audit():
-            body = client.get("/roster").text
-
-        self.assertIn("被这些任务催办", body)
-        # 杭州 scope：两条区域催办任务，深链到 /pipelines?service=...
-        self.assertIn('href="/pipelines?service=robot-hangzhou"', body)
-        self.assertIn('href="/pipelines?service=robot-check-hangzhou"', body)
-        # 渠道 scope：channel-missing-check（_service_region == qudao）
-        self.assertIn('href="/pipelines?service=channel-missing-check"', body)
-        # 非催办任务（同步类）不进反向索引
-        self.assertNotIn('href="/pipelines?service=sync-wdt"', body)
-
-    def test_roster_page_backlinks_fail_soft_without_fleet(self):
-        """无舰队清单（fleet_source=None）时名册页照常渲染，仅省略反向索引行。"""
-        store = _RosterStore()
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        with store.patch_fetch(), store.patch_audit():
-            body = client.get("/roster").text
-        self.assertIn("填报名册", body)
-        self.assertIn("新增名册记录", body)
-        self.assertNotIn("被这些任务催办（改本范围名册会波及）", body)
+        assert_spa_shell(client.get("/roster", follow_redirects=False))
 
 
 class RecipientsOverviewTests(unittest.TestCase):
@@ -1453,7 +1299,7 @@ class RecipientsOverviewTests(unittest.TestCase):
         _login(client)
         return client
 
-    def test_overview_groups_by_scope_base_and_effective_with_badge(self):
+    def test_overview_api_groups_by_scope_base_and_effective_with_badge(self):
         def _roster_names(conn, scope=None):
             return frozenset({"张三", "王五"}) if scope == "hangzhou" else None
 
@@ -1476,75 +1322,82 @@ class RecipientsOverviewTests(unittest.TestCase):
                                   lambda conn, scope, roles=None: owners), \
                 mock.patch.object(recipient_override, "fetch_overrides",
                                   _overrides):
-            response = self._client().get("/recipients")
+            response = self._client().get("/api/recipients")
 
         self.assertEqual(200, response.status_code)
-        body = response.text
-        self.assertIn("收件人总览", body)
+        data = response.json()
+        self.assertEqual("ok", data["status"])
+        self.assertFalse(data["context_error"])
+        scopes = {s["scope"]: s for s in data["sections"]}
+        html = "".join(s["html"] for s in data["sections"])
+        self.assertEqual("杭州", scopes["hangzhou"]["label"])
         # 杭州：基名单 = 在职(张三/王五) ∩ 名册(张三/王五)，来源人话。
-        self.assertIn("<h2>杭州", body)
-        self.assertIn("名册（hangzhou）∩ 在职成员", body)
-        self.assertIn("张三、王五", body)
-        self.assertIn("（2 条催办任务）", body)
+        self.assertIn("名册（hangzhou）∩ 在职成员", html)
+        self.assertIn("张三、王五", html)
+        self.assertIn("（2 条催办任务）", html)
         # 有效名单叠加覆盖（+1 覆盖），任务深链回定时任务页抽屉。
-        self.assertIn("+1 覆盖", body)
-        self.assertIn("u9", body)
-        self.assertIn('href="/pipelines?service=robot-hangzhou"', body)
-        self.assertIn('href="/pipelines?service=robot-check-hangzhou"', body)
+        self.assertIn("+1 覆盖", html)
+        self.assertIn("u9", html)
+        self.assertIn('href="/pipelines?service=robot-hangzhou"', html)
+        self.assertIn('href="/pipelines?service=robot-check-hangzhou"', html)
         # 渠道：基名单 = 名册 qudao·owner，带门店数徽标。
-        self.assertIn("店铺负责人（名册 qudao·owner）", body)
-        self.assertIn("张三、李四", body)
-        self.assertIn("2 店", body)
-        self.assertIn('href="/pipelines?service=channel-missing-check"', body)
+        self.assertIn("店铺负责人（名册 qudao·owner）", html)
+        self.assertIn("张三、李四", html)
+        self.assertIn("2 店", html)
+        self.assertIn('href="/pipelines?service=channel-missing-check"', html)
         # 非催办任务不进总览（与 P3 反查同一取值域）。
-        self.assertNotIn('href="/pipelines?service=sync-wdt"', body)
+        self.assertNotIn('href="/pipelines?service=sync-wdt"', html)
         # 空 scope 给一句人话，不留空。
-        self.assertIn("本范围暂无绑定的催办任务。", body)
+        self.assertIn("本范围暂无绑定的催办任务。", html)
 
-    def test_overview_fail_soft_when_context_load_fails(self):
-        """只读上下文装载故障：各区块给提示，页面仍 200（不整页 503）。"""
+    def test_overview_api_fail_soft_when_context_load_fails(self):
+        """只读上下文装载故障：各区块给提示，读面仍 200（不整页 503）。"""
         def _boom(conn):
             raise RuntimeError("members down")
 
         with mock.patch.object(bi_authz, "fetch_active_members", _boom):
-            response = self._client().get("/recipients")
+            response = self._client().get("/api/recipients")
 
         self.assertEqual(200, response.status_code)
-        body = response.text
-        self.assertIn("收件人总览", body)
-        self.assertIn("名单读取失败，请稍后重试。", body)
+        data = response.json()
+        self.assertTrue(data["context_error"])
+        html = "".join(s["html"] for s in data["sections"])
+        self.assertIn("名单读取失败，请稍后重试。", html)
 
-    def test_overview_renders_without_fleet(self):
+    def test_overview_api_renders_without_fleet(self):
         """无舰队清单：仍按 scope 展示基名单，只是无催办任务行。"""
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        response = client.get("/recipients")
+        response = client.get("/api/recipients")
         self.assertEqual(200, response.status_code)
-        body = response.text
-        self.assertIn("收件人总览", body)
-        self.assertIn("本范围暂无绑定的催办任务。", body)
-        self.assertNotIn('href="/pipelines?service=', body)
+        data = response.json()
+        self.assertTrue(data["sections"])
+        html = "".join(s["html"] for s in data["sections"])
+        self.assertIn("本范围暂无绑定的催办任务。", html)
+        self.assertNotIn('href="/pipelines?service=', html)
 
-    def test_overview_requires_admin(self):
+    def test_overview_api_requires_admin(self):
         client = TestClient(_fleet_app(viewer=_admin_viewer()))
-        response = client.get("/recipients", follow_redirects=False)
-        self.assertEqual(302, response.status_code)
+        assert_spa_shell(client.get("/recipients", follow_redirects=False))
+        self.assertEqual(401, client.get("/api/recipients").status_code)
 
 
 class RecipientRulesTests(unittest.TestCase):
     """口径收口（P5，2026-10-12，设计稿 §3）：名册 / 覆盖 / 授权三条边界
-    只在「收件人总览」完整渲染一处；成员与授权 / 填报名册 / 授权现状三页
-    复用逐字一致的口径指针，避免同一套话散落多页各说各话。"""
+    只在「收件人总览」完整渲染一处。
 
-    _POINTER = "名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）"
+    2026-10-14 全 SPA 迁移：权威口径区改由 /api/recipients 的 ``rules_html``
+    下发；SSR 名册页的共用指针（``_RECIPIENT_RULES_LINK``）随旧页下线而不再
+    渲染，故删除 `test_roster_page_shares_pointer`。
+    """
 
     def _admin_client(self):
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         return client
 
-    def test_overview_renders_canonical_boundary_block(self):
-        body = self._admin_client().get("/recipients").text
+    def test_overview_api_renders_canonical_boundary_block(self):
+        body = self._admin_client().get("/api/recipients").json()["rules_html"]
         self.assertIn("口径说明：名册 / 覆盖 / 授权各管什么", body)
         self.assertIn("（在职成员 ∩ 名册）∪ 任务级覆盖 − 移除", body)
         # 三条边界的关键裁决点都在权威区里（与设计稿 §3 逐条对应）
@@ -1559,22 +1412,14 @@ class RecipientRulesTests(unittest.TestCase):
         self.assertIn('href="/pipelines"', body)
         self.assertIn('href="/grants"', body)
 
-    def test_roster_page_shares_pointer(self):
-        """「填报名册」仍共享口径指针（成员与授权 / 授权现状已停用）。"""
-        store = _RosterStore()
-        client = self._admin_client()
-        with store.patch_fetch(), store.patch_audit():
-            roster = client.get("/roster").text
-        self.assertIn(self._POINTER, roster)
-        self.assertIn('href="/recipients"', roster)
-
     def test_decommissioned_pages_do_not_carry_pointer(self):
         """「成员与授权」「授权现状」已停用（2026-10-13），不再渲染口径指针。"""
+        pointer = "名册定资格、覆盖定单条例外、授权定系统访问（与催办无关）"
         members = self._admin_client().get("/member-grants").text
         grants = self._admin_client().get("/grants").text
         for page, body in (("成员与授权", members), ("授权现状", grants)):
             with self.subTest(page=page):
-                self.assertNotIn(self._POINTER, body)
+                self.assertNotIn(pointer, body)
 
 
 class RosterApiTests(unittest.TestCase):
@@ -1719,10 +1564,9 @@ class RosterManageGateTests(unittest.TestCase):
         store = _RosterStore()
         client = TestClient(_app(viewer=viewer))
         _login(client, userid="u-plain")
-        page = client.get("/roster", follow_redirects=False)
-        self.assertEqual(302, page.status_code)
-        self.assertEqual("/auth/entry?reason=forbidden",
-                         page.headers["location"])
+        # 壳路由放行（前端 Router 守卫）；数据面 fail-closed。
+        assert_spa_shell(client.get("/roster", follow_redirects=False))
+        self.assertEqual(403, client.get("/api/roster").status_code)
         for path, payload in (
             ("/api/roster/add", {"scope": "qudao", "entity_type": "store",
                                  "entity_key": "店", "person_name": "张三"}),
@@ -1745,7 +1589,12 @@ class RosterManageGateTests(unittest.TestCase):
 
 
 class RosterSortTests(unittest.TestCase):
-    """渠道门店表排序与渠道聚合（2026-10-07 运维裁决）。"""
+    """渠道门店读面 /api/roster/qudao（2026-10-14 全 SPA 迁移）。
+
+    SSR 名册页的排序（``?sort=`` 链接）、渠道 rowspan 聚合与列序等呈现细节
+    已迁至 Vue 页，相应纯呈现用例删除；数据面（负责人/代填报人拆分与排序、
+    channel/store_no/门店目标元口径）改钉 JSON 读面。
+    """
 
     def _rows(self):
         return [
@@ -1759,7 +1608,7 @@ class RosterSortTests(unittest.TestCase):
                         aliases=None, note="", role="deputy"),
         ]
 
-    def _page(self, store, sort=None):
+    def _qudao(self, store):
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
         targets = {
@@ -1772,103 +1621,38 @@ class RosterSortTests(unittest.TestCase):
             "TM旗舰A": ("天猫", 1),
             "TM旗舰B": ("天猫", 2),
         }
-        url = "/roster" + (f"?sort={sort}" if sort else "")
         with store.patch_fetch(), store.patch_audit(), \
              mock.patch.object(channel_target, "fetch_store_targets",
                                lambda conn: targets), \
              mock.patch.object(report_roster, "fetch_store_numbers",
                                lambda conn: numbers):
-            return client.get(url).text
+            return client.get("/api/roster/qudao").json()
 
-    def test_default_channel_sort_aggregates_with_rowspan(self):
+    def test_qudao_api_splits_roles_and_reports_channel_target_number(self):
         store = _RosterStore()
         store.rows = self._rows()
-        body = self._page(store)
+        data = self._qudao(store)
 
-        # 行 = 负责人链接（代填聚进店铺格）：天猫 2 店各 1 负责人 →
-        # 渠道格 rowspan=2；单负责人店铺（TM旗舰A 虽有代填）店铺格不聚合
-        self.assertIn('<td rowspan="2">天猫</td>', body)
-        self.assertIn('<td>TM旗舰A</td>', body)
-        # 代填张瑾萱在同行代填报人格内（只读：无状态下拉与删除）
-        self.assertIn("张瑾萱", body)
-        self.assertNotIn("setRosterStatus(4, this.value)", body)
-        self.assertNotIn("deleteRoster(4)", body)
-        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
-        # 渠道序按 CHANNELS canonical：京东（idx 2）在天猫（idx 3）前
-        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
-        # 默认表头带当前排序标记
-        self.assertIn('href="?sort=channel">渠道/地区 ▾', body)
+        self.assertEqual("ok", data["status"])
+        by_store = {s["store"]: s for s in data["stores"]}
+        self.assertEqual({"JD购喝", "TM旗舰A", "TM旗舰B"}, set(by_store))
+        tm = by_store["TM旗舰A"]
+        self.assertEqual("天猫", tm["channel"])
+        self.assertEqual(1, tm["store_no"])
+        self.assertEqual(3000000, tm["target"])       # 门店目标（元口径）
+        self.assertEqual(["钟甜"], tm["owners"])       # 负责人
+        self.assertEqual(["张瑾萱"], tm["deputies"])   # 代填报人分列
+        # 链接序：负责人在前、代填在后（读面确定性）
+        self.assertEqual(["钟甜", "张瑾萱"],
+                         [link["person_name"] for link in tm["links"]])
+        jd = by_store["JD购喝"]
+        self.assertEqual("京东", jd["channel"])
+        self.assertEqual(1500000, jd["target"])
+        self.assertEqual(["娄灿斌"], jd["owners"])
+        self.assertEqual([], jd["deputies"])
+        self.assertEqual(2, by_store["TM旗舰B"]["store_no"])
 
-    def test_sort_by_target_descending(self):
-        store = _RosterStore()
-        store.rows = self._rows()
-        body = self._page(store, sort="target")
-
-        # 目标降序：300万 TM旗舰A > 200万 TM旗舰B > 150万 JD购喝
-        self.assertLess(body.index("TM旗舰A"), body.index("TM旗舰B"))
-        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
-        # 非渠道序渠道格不合并（天猫 2 行 = 两店各 1 负责人行）
-        self.assertEqual(2, body.count("<td>天猫</td>"))
-
-    def test_sort_by_owner_and_deputy(self):
-        store = _RosterStore()
-        store.rows = self._rows()
-        body = self._page(store, sort="owner")
-        # 负责人首名升序（Unicode）：周嘉炜 < 娄灿斌 < 钟甜
-        self.assertLess(body.index("TM旗舰B"), body.index("JD购喝"))
-        self.assertLess(body.index("JD购喝"), body.index("TM旗舰A"))
-
-        body = self._page(store, sort="deputy")
-        # 仅 TM旗舰A 有代填（张瑾萱）排最前
-        self.assertLess(body.index("TM旗舰A"),
-                        min(body.index("TM旗舰B"), body.index("JD购喝")))
-
-    def test_invalid_sort_falls_back_to_channel(self):
-        store = _RosterStore()
-        store.rows = self._rows()
-        body = self._page(store, sort="bogus")
-        self.assertIn('<td rowspan="2">天猫</td>', body)
-
-    def _assert_grid_balance(self, body, table_index=0, columns=9):
-        """模拟 rowspan 布局，逐行校验有效列数（防聚合错位）。"""
-        tables = re.findall(r"<table>(.*?)</table>", body, re.S)
-        rows = re.findall(r"<tr>(.*?)</tr>", tables[table_index], re.S)
-        pending = [0] * columns  # 每列被上行 rowspan 占用的剩余行数
-        for row_html in rows[1:]:  # 跳过表头
-            cells = re.findall(r'<td(?: rowspan="(\d+)")?[^>]*>', row_html)
-            col = 0
-            for span in cells:
-                while col < columns and pending[col] > 0:
-                    pending[col] -= 1
-                    col += 1
-                span_n = int(span) if span else 1
-                if span_n > 1:
-                    pending[col] = span_n - 1
-                col += 1
-            while col < columns and pending[col] > 0:
-                pending[col] -= 1
-                col += 1
-            self.assertEqual(
-                columns, col, f"行有效列数≠{columns}：{row_html[:100]}"
-            )
-
-    def test_grid_balance_all_sorts_and_region_table(self):
-        # 渠道区数据：TM旗舰A 2 链接（1 负责人+1 代填）、TM旗舰B 1、JD购喝 1
-        store = _RosterStore()
-        store.rows = self._rows()
-        for sort in (None, "store", "owner", "deputy", "target"):
-            body = self._page(store, sort=sort)
-            self._assert_grid_balance(body, table_index=0, columns=9)
-        # 单负责人店铺（含代填）整行无聚合（2026-10-07 运维裁决）：
-        # 店铺格/月目标格均无 rowspan，代填聚在同行的代填报人格
-        body = self._page(store)
-        self.assertIn('<td>TM旗舰A</td>', body)
-        self.assertIn('<td><input class="roster-target" data-store="TM旗舰A"',
-                      body)
-        self.assertEqual(1, body.count('data-store="TM旗舰A"'))
-
-    def test_aggregation_only_for_multi_owner_stores(self):
-        # 多负责人才聚合：PDD共管店 2 负责人 → 店铺格/月目标格 rowspan=2
+    def test_qudao_api_multi_owner_store_lists_all_owners_sorted(self):
         store = _RosterStore()
         store.rows = self._rows() + [
             _roster_row(id=5, entity_key="PDD共管店", person_name="侯仙姚",
@@ -1876,53 +1660,22 @@ class RosterSortTests(unittest.TestCase):
             _roster_row(id=6, entity_key="PDD共管店", person_name="杨美聪",
                         aliases=None, note=""),
         ]
-        body = self._page(store)
-        self.assertIn('<td rowspan="2">PDD共管店</td>', body)
-        self.assertIn(
-            '<td rowspan="2"><input class="roster-target" data-store="PDD共管店"',
-            body,
-        )
-        self._assert_grid_balance(body, table_index=0, columns=9)
-
-    def test_data_cells_follow_header_column_order(self):
-        # 单元格内容序 = 表头列序（2026-10-07 列序调整回归：
-        # 月目标格必须出现在负责人格之前，而非仅表头换序）
-        store = _RosterStore()
-        store.rows = self._rows()
-        body = self._page(store)
-        first_row = re.search(
-            r"<tr><td>京东</td>(.*?)</tr>", body, re.S
-        ).group(1)
-        self.assertLess(
-            first_row.index('data-store="JD购喝"'),   # 月目标格
-            first_row.index("娄灿斌"),                 # 负责人格
-        )
-
-        # 区域表（绍兴 3 链接）同样平衡
-        store2 = _RosterStore()
-        store2.rows = [
-            _roster_row(id=11, scope="shaoxing", entity_type="person",
-                        entity_key="绍兴项目部", person_name="潘良峰",
-                        aliases=None, note=""),
-            _roster_row(id=12, scope="shaoxing", entity_type="person",
-                        entity_key="绍兴项目部", person_name="洪强",
-                        aliases=None, note=""),
-            _roster_row(id=13, scope="shaoxing", entity_type="person",
-                        entity_key="诸暨项目部", person_name="周亚平",
-                        aliases=None, note=""),
-        ]
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        with store2.patch_fetch(), store2.patch_audit():
-            body2 = client.get("/roster").text
-        self._assert_grid_balance(body2, table_index=1, columns=9)
+        data = self._qudao(store)
+        pdd = {s["store"]: s for s in data["stores"]}["PDD共管店"]
+        # 多负责人全在 owners（升序）、deputies 为空
+        self.assertEqual(["侯仙姚", "杨美聪"], pdd["owners"])
+        self.assertEqual([], pdd["deputies"])
 
 
 class RosterRegionTemplateTests(unittest.TestCase):
-    """区域区段统一链接行模板 + 个人月目标列（2026-10-07 运维裁决，
-    目标真源 dim_report_target 入库）。"""
+    """区域名册 + 个人月目标读面 /api/roster（2026-10-14 全 SPA 迁移）。
 
-    def test_region_section_unified_template_with_personal_targets(self):
+    SSR 名册页的区域表模板（统一表头、rowspan 合并、可编辑目标输入框、
+    月份选择器、状态下拉）已迁至 Vue 页，相关呈现用例删除；数据面
+    （区域个人月目标「万元」口径 + 名册行）改钉 JSON 读面。
+    """
+
+    def test_roster_api_reports_region_person_targets_in_wan(self):
         store = _RosterStore()
         store.rows = [
             _roster_row(id=11, scope="shaoxing", entity_type="person",
@@ -1943,53 +1696,16 @@ class RosterRegionTemplateTests(unittest.TestCase):
                  lambda conn, scope, ym: (
                      {"潘良峰": 383000.0, "洪强": 351000.0}
                      if scope == "shaoxing" else {})):
-            body = client.get("/roster").text
+            data = client.get("/api/roster").json()
 
-        # 与渠道门店同构的统一表头（聚合列靠左：月目标在店铺之后）
-        self.assertIn(
-            "<th>渠道/地区</th><th>店铺/对象</th><th>月目标（万元）</th>"
-            "<th>负责人</th><th>代填报人</th>"
-            "<th>状态</th><th>备注</th><th>更新</th><th>操作</th>",
-            body,
-        )
-        # 地区整段合并（3 行）、对象按部门合并（绍兴项目部 2 行）
-        self.assertIn('<td rowspan="3">绍兴</td>', body)
-        self.assertIn('<td rowspan="2">绍兴项目部</td>', body)
-        # 个人月目标为可编辑输入（入库真源），含保存按钮
-        self.assertIn('class="person-target"', body)
-        self.assertIn('data-name="潘良峰" value="383000"', body)
-        # 保存按钮带目标月份（2026-10-09 月份切换：默认当月，可 ?month= 切下月）
-        self.assertIn("saveRegionTargets('shaoxing', '", body)
-        self.assertIn("区域个人月目标的目标月份：", body)
-        # 日历选择器（任意月直达）+ 本月/下月快捷链接
-        self.assertIn('<input type="month" name="month"', body)
-        self.assertRegex(body, r"/roster\?month=20\d{2}-\d{2}")
-        # 停用链接：下拉当前值=停用
-        self.assertIn('setRosterStatus(12, this.value)', body)
-        self.assertIn('<option value="0" selected>停用</option>', body)
-
-    def test_region_section_splits_deputy_into_deputy_column(self):
-        # 2026-10-08 修复：区域段此前忽略 role——代填人全显示在负责人
-        # 列（宣卓萍/郑洁佩 诸暨门店实例）；应按 role 分列且负责人在前。
-        store = _RosterStore()
-        store.rows = [
-            _roster_row(id=21, scope="shaoxing", entity_type="person",
-                        entity_key="诸暨门店", person_name="郑洁佩",
-                        aliases=None, note="", role="deputy"),
-            _roster_row(id=22, scope="shaoxing", entity_type="person",
-                        entity_key="诸暨门店", person_name="蒋丽兰",
-                        aliases=None, note=""),
-        ]
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        with store.patch_fetch(), store.patch_audit():
-            body = client.get("/roster").text
-
-        # 负责人在负责人列（代填报人列空），且排在代填人之前
-        self.assertIn("<td>蒋丽兰</td><td></td>", body)
-        # 代填人在代填报人列（负责人列空）
-        self.assertIn("<td></td><td>郑洁佩</td>", body)
-        self.assertLess(body.index("蒋丽兰"), body.index("郑洁佩"))
+        # 个人月目标「万元」口径（停用的洪强仍挂在其名字键下）
+        self.assertEqual({"潘良峰": 383000.0, "洪强": 351000.0},
+                         data["targets"]["shaoxing"])
+        rows = {r["person_name"]: r for r in data["roster"]
+                if r["scope"] == "shaoxing"}
+        self.assertEqual({"潘良峰", "洪强", "周亚平"}, set(rows))
+        self.assertEqual("绍兴", rows["潘良峰"]["scope_label"])
+        self.assertEqual("person", rows["潘良峰"]["entity_type"])
 
 
 class RegionTargetsApiTests(unittest.TestCase):
@@ -2116,13 +1832,15 @@ class RosterPublishTests(unittest.TestCase):
 
 
 class MembersPageTests(unittest.TestCase):
-    def test_members_page_shows_decommission_notice(self):
-        """「成员与授权」页已停用（2026-10-13），引导跳转组织编排。"""
+    def test_member_grants_serves_spa_shell(self):
+        """「成员与授权」已停用（2026-10-13），旧书签路由与 /grants 同壳。
+
+        2026-10-14 全 SPA 迁移：停用引导提示（「已合并至…」+ 链接）已由
+        Vue 页承载，SSR 提示删除，仅钉壳路由。
+        """
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/member-grants").text
-        self.assertIn("已合并至", body)
-        self.assertIn('href="/members"', body)
+        assert_spa_shell(client.get("/member-grants", follow_redirects=False))
 
     def test_members_page_no_longer_reads_db(self):
         """停用后页面不读成员表，DB 故障不再 503。"""
@@ -2133,30 +1851,8 @@ class MembersPageTests(unittest.TestCase):
         response = client.get("/member-grants")
         self.assertEqual(200, response.status_code)
 
-    def test_nav_flat_links_are_grouped_by_purpose(self):
-        """顶栏分组：日常 / 权限 / 系统 / 记录。
-        「成员与授权」「授权现状」已停用（2026-10-13），权限组仅留组织编排。"""
-        client = TestClient(_app(viewer=_admin_viewer()))
-        _login(client)
-        body = client.get("/member-grants").text
-
-        self.assertEqual(4, body.count('class="nav-group"'))
-        for label in ("日常", "权限", "系统", "记录"):
-            self.assertIn(f'nav-label">{label}<', body)
-
-        def group(label):
-            tail = body.split(f'nav-label">{label}<', 1)[1]
-            return tail.split("</span>", 1)[0]
-
-        self.assertIn('href="/roster"', group("日常"))
-        self.assertIn('href="/calendar"', group("日常"))
-        # 权限组仅保留组织编排
-        self.assertIn('href="/members"', group("权限"))
-        self.assertNotIn('href="/member-grants"', group("权限"))
-        self.assertNotIn('href="/grants"', group("权限"))
-        self.assertIn('href="/pipelines"', group("系统"))
-        self.assertIn('href="/records"', group("记录"))
-        self.assertIn("<nav>", body)
+    # test_nav_flat_links_are_grouped_by_purpose：2026-10-14 全 SPA 迁移：
+    # 顶栏分组（日常/权限/系统/记录）已由 Vue AppShell 承载，故删。
 
 
 class GrantWriteApiTests(unittest.TestCase):
@@ -2256,15 +1952,17 @@ class RegionBatchTests(unittest.TestCase):
 
 
 class GrantsAndAuditPageTests(unittest.TestCase):
-    def test_grants_page_shows_decommission_notice(self):
-        """「授权现状」页已停用（2026-10-13），引导联系管理员。"""
+    def test_grants_page_serves_spa_shell(self):
+        """「授权现状」已停用（2026-10-13）；旧书签路由与 SPA 同壳。
+
+        2026-10-14 全 SPA 迁移：停用提示（「授权管理功能已停用」+ 链接）
+        已由 Vue 页承载，SSR 提示删除；数据面另钉 /api/grants。
+        """
         client = TestClient(_app(viewer=_admin_viewer()))
         _login(client)
-        body = client.get("/grants").text
-        self.assertIn("授权管理功能已停用", body)
-        self.assertIn('href="/members"', body)
+        assert_spa_shell(client.get("/grants", follow_redirects=False))
 
-    def test_audit_page_lists_entries_newest_first(self):
+    def test_audit_api_lists_entries_with_chinese_labels(self):
         connection = _Connection({
             "bi_authz_grant_audit`": [
                 (ADMIN_USERID, "grant", "u-zhang", "scope", "fin", "",
@@ -2274,11 +1972,14 @@ class GrantsAndAuditPageTests(unittest.TestCase):
         client = TestClient(_app(viewer=_admin_viewer(), connection=connection))
         _login(client)
 
-        body = client.get("/audit").text
+        data = client.get("/api/audit").json()
 
-        self.assertIn("授权", body)       # 动作中文化（原 "grant"）
-        self.assertIn("看板页面", body)   # 类型中文化（原 "scope"）
-        self.assertIn("u-zhang", body)
+        self.assertEqual("ok", data["status"])
+        row = data["rows"][0]
+        self.assertEqual("授权", row["action_label"])        # grant 中文化
+        self.assertEqual("看板页面", row["grant_type_label"])  # scope 中文化
+        self.assertEqual("u-zhang", row["user_id"])
+        self.assertEqual("fin", row["grant_key"])
 
 
 class RecordsPageTests(unittest.TestCase):
@@ -2337,59 +2038,67 @@ class RecordsPageTests(unittest.TestCase):
         _login(client)
         return client
 
-    def test_records_merges_all_five_sources(self):
+    def test_records_api_merges_all_sources(self):
         with self._patched():
-            body = self._client().get("/records").text
+            data = self._client().get("/api/records").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual(["授权", "定时任务", "填报名册", "工作日历",
+                          "收件人覆盖", "定时运行"], data["sources"])
+        sources = {r["source"] for r in data["records"]}
         for source in ("授权", "定时任务", "填报名册", "工作日历", "定时运行"):
-            self.assertIn(source, body)
-        self.assertIn("fin", body)       # 授权对象
-        self.assertIn("张三", body)      # 名册对象
-        self.assertIn("系统", body)      # 运行流水操作人
+            self.assertIn(source, sources)
+        targets = [r["target"] for r in data["records"]]
+        self.assertIn("fin", targets)          # 授权对象（grant_key）
+        self.assertIn("杭州 A店", targets)      # 名册对象（scope 中文化 + entity_key）
+        details = [r["detail"] for r in data["records"]]
+        self.assertIn("张三", details)         # 名册详情（person_name）
+        actors = [r["actor"] for r in data["records"]]
+        self.assertIn("系统", actors)          # 运行流水操作人
 
-    def test_records_filters_by_source(self):
+    def test_records_api_filters_by_source(self):
         with self._patched():
-            body = self._client().get(
-                "/records", params={"source": "填报名册"}).text
-        self.assertIn("张三", body)
-        self.assertNotIn("fin", body)    # 授权行已被来源过滤
+            data = self._client().get(
+                "/api/records", params={"source": "填报名册"}).json()
+        self.assertTrue(data["records"])       # 非空
+        self.assertTrue(all(r["source"] == "填报名册"
+                            for r in data["records"]))
+        details = [r["detail"] for r in data["records"]]
+        self.assertIn("张三", details)
+        self.assertNotIn("fin", [r["target"] for r in data["records"]])
 
-    def test_write_feedback_banner_present(self):
-        """任务3：写入后有成功/失败中文提示（替换静默 reload）。"""
-        with self._patched():
-            body = self._client().get("/records").text
-        self.assertIn('id="flash"', body)
-        self.assertIn("showFlash", body)
-        self.assertIn("操作成功", body)
+    # test_write_feedback_banner_present：2026-10-14 全 SPA 迁移：写入成功
+    # /失败提示（id="flash" / showFlash）已由 Vue 页承载，故删。
 
-    def test_records_includes_recipient_override_source(self):
+    def test_records_api_includes_recipient_override_source(self):
         """方案 B：收件人覆盖审计并入操作记录（来源/动作/对象中文化）。"""
         with self._patched(), mock.patch.object(
                 recipient_override, "fetch_recent_audits",
                 lambda conn, limit=200: list(self._RECIPIENT)):
-            body = self._client().get("/records").text
-        self.assertIn("收件人覆盖", body)
-        self.assertIn("robot-hangzhou", body)
-        self.assertIn("追加", body)     # mode=include 中文化
-        self.assertIn("账号", body)     # target_type=user_id 中文化
-        self.assertIn("u9", body)
+            data = self._client().get("/api/records").json()
+        override = [r for r in data["records"] if r["source"] == "收件人覆盖"]
+        self.assertEqual(1, len(override))
+        # 对象 = service_id +（mode 中文化 + target_type 中文化 + 值）
+        self.assertEqual("robot-hangzhou 追加 账号 u9", override[0]["target"])
 
-    def test_records_fails_soft_when_override_audit_read_fails(self):
+    def test_records_api_fails_soft_when_override_audit_read_fails(self):
         """缺表（迁移未跑）或读异常：只跳过该来源，不整页 503。
 
         #62 上线后曾实测踩到：deploy 不跑迁移，dim_recipient_override_audit
         缺失时 /records 整页 503。此用例钉住 fail-soft 口径——其余来源照常
-        展示，来源筛选项不因该来源读失败而出现「读取失败」。
+        展示，且不因该来源读失败而出现「读取失败」。
         """
         def _boom(*_args, **_kwargs):
             raise RuntimeError("table missing")
 
         with self._patched(), mock.patch.object(
                 recipient_override, "fetch_recent_audits", _boom):
-            body = self._client().get("/records").text
-        self.assertIn("授权", body)       # 其余来源仍正常展示
-        self.assertIn("定时运行", body)
-        self.assertNotIn("读取失败", body)
-        self.assertNotIn("Traceback", body)
+            response = self._client().get("/api/records")
+        self.assertEqual(200, response.status_code)
+        data = response.json()
+        sources = {r["source"] for r in data["records"]}
+        self.assertIn("授权", sources)         # 其余来源仍正常展示
+        self.assertIn("定时运行", sources)
+        self.assertNotIn("读取失败", [r["detail"] for r in data["records"]])
 
 
 class CalendarPageTests(unittest.TestCase):
@@ -2404,7 +2113,10 @@ class CalendarPageTests(unittest.TestCase):
             viewer_resolver=_StaticViewerResolver(_admin_viewer()),
         )
 
-    def test_page_renders_grid_with_source_badges(self):
+    def test_api_renders_month_grid_with_source_badges(self):
+        """2026-10-14 全 SPA 迁移：日历格呈现（cal-src-* 徽标 / 内联
+        calendarToggle / 导入按钮）已迁至 Vue 页，改钉 JSON 读面
+        /api/calendar 的网格、来源标记与审计动作中文标签。"""
         connection = _Connection(rows_by_keyword={
             # 审计查询的表名包含 dim_calendar，必须先于月份查询命中
             "dim_calendar_override_audit": [
@@ -2422,15 +2134,21 @@ class CalendarPageTests(unittest.TestCase):
         client = TestClient(self._calendar_app(connection))
         _login(client)
 
-        page = client.get("/calendar?month=2026-10")
+        data = client.get("/api/calendar", params={"month": "2026-10"}).json()
 
-        self.assertEqual(200, page.status_code)
-        self.assertIn("工作日历", page.text)
-        self.assertIn("cal-src-holiday_cn", page.text)   # 法 徽标
-        self.assertIn("cal-src-manual", page.text)       # 裁 徽标
-        self.assertIn("calendarToggle('2026-10-07', true)", page.text)
-        self.assertIn("法定导入", page.text)             # 审计动作中文标签
-        self.assertIn("一键导入该年法定假日", page.text)
+        self.assertEqual("ok", data["status"])
+        self.assertEqual("2026-10", data["month"])
+        self.assertEqual(31, len(data["days"]))                    # 十月 31 天
+        self.assertEqual(date(2026, 10, 1).weekday(), data["first_weekday"])
+        self.assertEqual("2026-09", data["prev_month"])
+        self.assertEqual("2026-11", data["next_month"])
+        by_day = {d["day"]: d for d in data["days"]}
+        self.assertEqual("holiday_cn", by_day[6]["source"])        # 法定来源
+        self.assertFalse(by_day[6]["is_workday"])
+        self.assertEqual("国庆", by_day[6]["note"])
+        self.assertEqual("manual", by_day[7]["source"])            # 人工裁定
+        self.assertTrue(by_day[7]["is_workday"])
+        self.assertEqual("法定导入", data["audits"][0]["action_label"])
 
     def test_page_falls_back_to_current_month_on_bad_param(self):
         client = TestClient(self._calendar_app(_Connection()))
@@ -2858,8 +2576,9 @@ _ORG_OVERRIDE_ROW = {
 class OrgAssignmentApiTests(unittest.TestCase):
     """组织编排 SPA 后端（2026-10-13 P6）：/members 壳 + /api/org/*。
 
-    覆盖：admin 闸、overview 结构（区域/部门/池）、覆盖读 fail-soft、
-    成员读 503、assign/toggle/delete/reset 落库与审计、参数校验。
+    覆盖：/api/org/* admin 闸、overview 结构（区域/部门/池）、覆盖读
+    fail-soft、成员读 503、assign/toggle/delete/reset 落库与审计、参数校验。
+    /members 壳路由不设闸（2026-10-14 全 SPA 迁移）。
     """
 
     def _admin_client(self, connection):
@@ -2892,22 +2611,22 @@ class OrgAssignmentApiTests(unittest.TestCase):
             import os
             os.unlink(handle.name)
 
-    def test_members_spa_requires_session(self):
+    def test_members_spa_serves_shell_without_session(self):
+        """2026-10-14 全 SPA 迁移：壳路由不设应用层闸（前端 Router 经
+        /api/me 跳登录），未登录亦返回单壳 200；数据面 /api/org/* 仍
+        fail-closed（另有 overview 闸用例覆盖）。"""
         client = TestClient(_app(viewer=_admin_viewer()))
-        response = client.get("/members", follow_redirects=False)
-        self.assertEqual(302, response.status_code)
-        self.assertIn("reason=login", response.headers["location"])
+        assert_spa_shell(client.get("/members", follow_redirects=False))
 
-    def test_members_spa_forbidden_for_non_admin(self):
+    def test_members_spa_serves_shell_for_non_admin(self):
+        """同上：非 admin 亦得壳 200；页面级 forbidden 302 已随 SSR 下线。"""
         viewer = authz.Viewer(
             userid="u1", name="张三", scopes=frozenset(),
             allowed_regions=frozenset(), is_admin=False, admitted=True,
         )
         client = TestClient(_app(viewer=viewer))
         _login(client, "u1")
-        response = client.get("/members", follow_redirects=False)
-        self.assertEqual(302, response.status_code)
-        self.assertIn("reason=forbidden", response.headers["location"])
+        assert_spa_shell(client.get("/members", follow_redirects=False))
 
     def test_members_spa_serves_shell_when_built(self):
         import tempfile
@@ -3397,6 +3116,95 @@ class RecordsApiTests(unittest.TestCase):
         self.assertEqual(1, len(data["records"]))
         self.assertEqual("填报名册", data["records"][0]["source"])
         self.assertIn("填报名册", data["sources"])
+
+
+class SpaJsonApiContractTests(unittest.TestCase):
+    """全 SPA 单壳契约（2026-10-14 D1 全量迁移）。
+
+    三组契约：
+    * 旧 HTML 页路由（``/`` ``/org`` … ``/calendar``）一律返回同一 SPA 单壳；
+    * 无会话时所有数据面 ``/api/*`` GET 一律 401（fail-closed），壳路由不设闸；
+    * catch-all：未知非 API 路径回壳 200，未知 ``api/`` ``auth/`` 前缀 → 404。
+    """
+
+    #: 旧 SSR 页路由 → 现均回同一单壳。
+    _SHELL_PAGES = (
+        "/", "/org", "/members", "/member-grants", "/grants", "/audit",
+        "/records", "/pipelines", "/pipelines/audit", "/pipelines/history",
+        "/roster", "/recipients", "/calendar",
+    )
+
+    #: 数据面 GET 读面（无会话一律 fail-closed）。
+    _READ_APIS = (
+        "/api/me", "/api/org/overview", "/api/regions",
+        "/api/records", "/api/grants", "/api/audit",
+        "/api/pipelines", "/api/pipelines/audit", "/api/pipelines/history",
+        "/api/recipients", "/api/roster", "/api/roster/targets",
+        "/api/roster/qudao", "/api/calendar",
+        "/api/pipelines/recipient-override?service_id=robot-hangzhou",
+    )
+
+    def test_legacy_page_routes_all_serve_the_same_shell(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        for path in self._SHELL_PAGES:
+            with self.subTest(path=path):
+                assert_spa_shell(client.get(path, follow_redirects=False))
+
+    def test_no_session_api_reads_are_fail_closed(self):
+        """壳路由不设闸；数据面 deny-by-default，无会话一律 401。"""
+        client = TestClient(_app())
+        for path in self._READ_APIS:
+            with self.subTest(path=path):
+                self.assertEqual(401, client.get(path).status_code)
+
+    def test_admin_session_json_reads_answer_ok(self):
+        admin = TestClient(_app(viewer=_admin_viewer()))
+        _login(admin)
+
+        me = admin.get("/api/me").json()
+        self.assertEqual("ok", me["status"])
+        self.assertTrue(me["is_admin"])
+        self.assertIn("capabilities", me)
+
+        for path, key in (
+            ("/api/regions", "regions"),
+            ("/api/roster", "roster"),
+            ("/api/roster/qudao", "stores"),
+            ("/api/audit", "rows"),
+            ("/api/grants", "grants"),
+            ("/api/pipelines/audit", "rows"),
+            ("/api/pipelines/history", "rows"),
+            ("/api/calendar", "days"),
+        ):
+            with self.subTest(path=path):
+                data = admin.get(path).json()
+                self.assertEqual("ok", data["status"])
+                self.assertIn(key, data)
+
+        with mock.patch("common.ops_web.app._collect_records", lambda conn: []):
+            records = admin.get("/api/records").json()
+        self.assertEqual("ok", records["status"])
+        self.assertEqual(6, len(records["sources"]))
+
+        pipelines = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(pipelines)
+        pl = pipelines.get("/api/pipelines").json()
+        self.assertEqual("ok", pl["status"])
+        self.assertIn("groups", pl)
+
+    def test_catch_all_unknown_page_serves_shell(self):
+        client = TestClient(_app())
+        assert_spa_shell(client.get("/deep/unknown/page", follow_redirects=False))
+
+    def test_catch_all_unknown_api_prefix_returns_404(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        for path in ("/api/no-such-endpoint", "/auth/no-such-token"):
+            with self.subTest(path=path):
+                resp = client.get(path)
+                self.assertEqual(404, resp.status_code)
+                self.assertEqual("not_found", resp.json()["detail"])
 
 
 if __name__ == "__main__":
