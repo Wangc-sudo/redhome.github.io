@@ -15,6 +15,14 @@ const router = useRouter();
 //: 六源集合（顺序即下拉顺序）——与后端 _RECORD_SOURCES 一致，作兜底。
 const DEFAULT_SOURCES = ['授权', '定时任务', '填报名册', '工作日历', '收件人覆盖', '定时运行'];
 
+//: 名册记录 target 首词是 scope 中文标签（后端 _SCOPE_LABEL 渲染），
+//: 深链需反查回 region key（否则 `?region=其他` 匹配不到 `sec-other`）。
+const SCOPE_KEY_BY_LABEL = {
+  '渠道门店': 'qudao', '杭州': 'hangzhou', '绍兴': 'shaoxing', '君品雅院': 'junpin',
+  '万科&大莲花&团购': 'vanke', '线下整体': 'offline_all', '餐饮/部门': 'dining',
+  '总部': 'hq', '其他': 'other',
+};
+
 const records = ref([]);
 const sources = ref(DEFAULT_SOURCES.slice());
 const loading = ref(false);
@@ -98,7 +106,8 @@ function deepLink(row) {
     return user ? { path: '/grants', query: { user } } : { path: '/grants' };
   }
   if (src === '填报名册') {
-    return first ? { path: '/roster', query: { region: first } } : { path: '/roster' };
+    const key = SCOPE_KEY_BY_LABEL[first] || first;
+    return key ? { path: '/roster', query: { region: key } } : { path: '/roster' };
   }
   if (src === '工作日历') {
     const ym = target.slice(0, 7);

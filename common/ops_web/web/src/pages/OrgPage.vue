@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import draggable from 'vuedraggable';
 import {
   addDept,
@@ -11,10 +12,14 @@ import {
   disableDept,
   disableRegion,
   getOverview,
+  getPipelines,
   resetOverrides,
   toggleOverride,
 } from '../api.js';
-import { setFlash } from '../store/me.js';
+import { hasCapability, setFlash } from '../store/me.js';
+import TargetEditor from '../components/TargetEditor.vue';
+
+const route = useRoute();
 
 // -- 数据状态 -------------------------------------------------------------
 const pool = ref([]);        // 未归类（有效区域为空）成员
@@ -24,6 +29,54 @@ const loading = ref(true);
 const loadError = ref('');
 const busy = ref(false);     // 有接口在途：暂停拖拽与操作按钮，防止并发写入
 const query = ref('');
+
+// -- 统一锚点（spec §5：region / user）+ 下游影响数 -----------------------
+const anchorRegion = computed(() =>
+  typeof route.query.region === 'string' ? route.query.region : '',
+);
+const anchorUser = computed(() =>
+  typeof route.query.user === 'string' ? route.query.user : '',
+);
+
+//: 区域 key → 该区域下游定时任务数（`/api/pipelines` 分组）；null = 无权限/未加载。
+const pipelineCounts = ref(null);
+
+function pipelineCount(regionKey) {
+  const map = pipelineCounts.value;
+  if (!map) return null;
+  return Object.prototype.hasOwnProperty.call(map, regionKey)
+    ? map[regionKey]
+    : 0;
+}
+
+/** 读定时任务分组，派生「区域 → 任务数」；无 pipelines 能力静默跳过。 */
+async function loadPipelines() {
+  if (!hasCapability('pipelines')) {
+    pipelineCounts.value = null;
+    return;
+  }
+  try {
+    const data = await getPipelines();
+    const map = {};
+    for (const g of (data && data.groups) || []) {
+      if (g && g.region) map[g.region] = g.count || 0;
+    }
+    pipelineCounts.value = map;
+  } catch (err) {
+    pipelineCounts.value = null;
+  }
+}
+
+/** 落点高亮：有锚点时滚动到对应成员/区域（树加载完成后调用）。 */
+async function applyAnchor() {
+  if (!anchorRegion.value && !anchorUser.value) return;
+  if (anchorUser.value) query.value = anchorUser.value;
+  await nextTick();
+  const el = document.getElementById(
+    anchorUser.value ? `member-${anchorUser.value}` : `region-${anchorRegion.value}`,
+  );
+  if (el) el.scrollIntoView({ block: 'center' });
+}
 
 // -- 覆盖行索引 -----------------------------------------------------------
 const overrideMap = computed(() => {
@@ -101,6 +154,7 @@ async function load({ silent = false } = {}) {
   } finally {
     if (!silent) loading.value = false;
   }
+  await applyAnchor();
 }
 
 function regionLabel(key) {
@@ -263,12 +317,18 @@ function openDetail(member) {
   detailUserId.value = member.user_id;
 }
 
-// -- 新增区域 / 部门抽屉 --------------------------------------------------
-const drawer = ref(null);            // null | 'region' | 'dept'
+// -- 新增区域 / 部门 / 就地录月目标 抽屉 ---------------------------------
+const drawer = ref(null);            // null | 'region' | 'dept' | 'target'
 const drawerError = ref('');
 const drawerBusy = ref(false);
 const regionForm = ref({ region_key: '', label: '' });
 const deptForm = ref({ region_key: '', dept_name: '', dept_id: '' });
+//: 就地操作抽屉的目标区域（'target' 模式）与目标月份。
+const targetScope = ref('');
+const currentMonth = (() => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+})();
 
 function openRegionDrawer() {
   regionForm.value = { region_key: '', label: '' };
@@ -280,6 +340,21 @@ function openDeptDrawer(region) {
   deptForm.value = { region_key: region.key, dept_name: '', dept_id: '' };
   drawerError.value = '';
   drawer.value = 'dept';
+}
+
+/** 就地操作：区域头「+ 月目标」→ 右侧抽屉内嵌 TargetEditor。 */
+function openTargetDrawer(region) {
+  targetScope.value = region.key;
+  drawerError.value = '';
+  drawer.value = 'target';
+}
+
+/** TargetEditor 保存成功：原地 flash + 关抽屉 + 刷新下游影响数。 */
+async function onTargetSaved() {
+  const label = regionLabel(targetScope.value);
+  setFlash('ok', `已保存「${label}」${currentMonth} 月目标`);
+  closeDrawer();
+  await Promise.all([load({ silent: true }), loadPipelines()]);
 }
 
 function closeDrawer() {
@@ -412,7 +487,10 @@ async function onDeleteDept(region, dept) {
   }
 }
 
-onMounted(() => load());
+onMounted(async () => {
+  await Promise.all([load(), loadPipelines()]);
+});
+watch(() => route.query, () => applyAnchor());
 </script>
 
 <template>
@@ -466,8 +544,9 @@ onMounted(() => load());
           <template #item="{ element }">
             <div
               v-show="match(element)"
+              :id="'member-' + element.user_id"
               class="chip"
-              :class="{ 'is-override': hasOverride(element.user_id) }"
+              :class="{ 'is-override': hasOverride(element.user_id), 'anchor-hit': anchorUser === element.user_id }"
               @click="openDetail(element)"
             >
               <span class="chip-name">{{ element.name || element.user_id }}</span>
@@ -508,8 +587,10 @@ onMounted(() => load());
         <div
           v-for="region in regions"
           v-show="regionVisible(region)"
+          :id="'region-' + region.key"
           :key="region.key"
           class="region-card"
+          :class="{ 'anchor-hit': anchorRegion === region.key }"
         >
           <div class="region-head">
             <span
@@ -522,6 +603,31 @@ onMounted(() => load());
             </h3>
             <span class="region-key">{{ region.key }}</span>
             <div class="region-actions">
+              <router-link
+                v-if="hasCapability('roster', region.key)"
+                class="btn mini"
+                :to="{ path: '/roster', query: { region: region.key } }"
+                title="去名册页登记/查看该区域的填报人"
+              >
+                填报名册
+              </router-link>
+              <button
+                v-if="hasCapability('roster', region.key)"
+                class="btn mini primary"
+                :disabled="busy || loading"
+                title="就地录入该区域当月个人月目标（万元）"
+                @click="openTargetDrawer(region)"
+              >
+                + 月目标
+              </button>
+              <router-link
+                v-if="hasCapability('pipelines') && pipelineCount(region.key) !== null"
+                class="down-link"
+                :to="{ path: '/pipelines', query: { region: region.key } }"
+                :title="`该区域下游定时任务（点开定时任务页并按区域高亮）`"
+              >
+                下游 {{ pipelineCount(region.key) }} 项
+              </router-link>
               <button
                 class="btn mini"
                 :disabled="busy || loading"
@@ -594,8 +700,9 @@ onMounted(() => load());
                   <template #item="{ element: member }">
                     <div
                       v-show="match(member)"
+                      :id="'member-' + member.user_id"
                       class="chip"
-                      :class="{ 'is-override': hasOverride(member.user_id) }"
+                      :class="{ 'is-override': hasOverride(member.user_id), 'anchor-hit': anchorUser === member.user_id }"
                       @click="openDetail(member)"
                     >
                       <span class="chip-name">{{ member.name || member.user_id }}</span>
@@ -665,8 +772,30 @@ onMounted(() => load());
       </div>
     </div>
 
+    <!-- 就地操作抽屉：录该区域当月个人月目标（内嵌 TargetEditor） -->
+    <div v-if="drawer === 'target'" class="drawer-mask" @click.self="closeDrawer">
+      <aside class="drawer">
+        <h3 class="drawer-title">
+          录入「{{ regionLabel(targetScope) }}」{{ currentMonth }} 月目标
+        </h3>
+        <p class="drawer-note">
+          就地操作：录入该区域个人月目标（万元），保存即落
+          <code>dim_report_target</code> 并逐条记审计；提交后可在定时任务页按区域高亮查看下游影响。
+        </p>
+        <TargetEditor
+          :scope="targetScope"
+          :month="currentMonth"
+          :label="regionLabel(targetScope)"
+          @saved="onTargetSaved"
+        />
+        <div class="drawer-actions">
+          <button class="btn ghost" @click="closeDrawer">关闭</button>
+        </div>
+      </aside>
+    </div>
+
     <!-- 新增区域 / 部门抽屉（右侧滑入） -->
-    <div v-if="drawer" class="drawer-mask" @click.self="closeDrawer">
+    <div v-if="drawer === 'region' || drawer === 'dept'" class="drawer-mask" @click.self="closeDrawer">
       <aside class="drawer">
         <h3 class="drawer-title">
           {{ drawer === 'region' ? '新增区域' : '新增部门' }}
@@ -1146,5 +1275,26 @@ onMounted(() => load());
   justify-content: flex-end;
   gap: 8px;
   margin-top: 20px;
+}
+.drawer code {
+  background: #f0f2f5;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* 统一锚点落点高亮（?region= / ?user=） */
+.region-card.anchor-hit,
+.chip.anchor-hit {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px #bfdbfe;
+}
+.down-link {
+  color: #2563eb;
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.down-link:hover {
+  text-decoration: underline;
 }
 </style>
