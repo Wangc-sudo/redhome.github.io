@@ -2546,10 +2546,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         labels = dict(scope_pairs)
         allowed = set(visible_scopes)
+        # updated_at / created_at 是 DB DATETIME（pymysql 返回 datetime 对象），
+        # 不经 _fmt_time 归一直接进 JSONResponse 会 json.dumps 失败 → 整接口
+        # 500、/roster 页数据面全挂（2026-10-14 带会话线上实测）。出口统一为
+        # 北京时间字符串，与 records / overrides 同口径。
         roster = [
             dict(row, scope_label=labels.get(row.get("scope"))
-                 or _label(_SCOPE_LABEL, row.get("scope")))
+                 or _label(_SCOPE_LABEL, row.get("scope")),
+                 updated_at=_fmt_time(row.get("updated_at")))
             for row in entries if row.get("scope") in allowed
+        ]
+        audits = [
+            dict(row, created_at=_fmt_time(row.get("created_at")))
+            for row in audits
         ]
         return JSONResponse({
             "status": "ok",
