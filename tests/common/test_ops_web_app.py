@@ -2662,7 +2662,7 @@ class _OrgCursor:
         for keyword in self._conn.fail:
             if keyword in sql:
                 raise RuntimeError("db down")
-        self._rows = self._conn.route(sql)
+        self._rows = self._conn.route(sql, params)
         if sql.lstrip().upper().startswith(("UPDATE", "DELETE")):
             self.rowcount = self._conn.rowcount
         else:
@@ -2686,9 +2686,11 @@ class _OrgConn:
         self.executed = []
         self.commits = 0
 
-    def route(self, sql):
+    def route(self, sql, params=None):
         for keyword, rows in self.rows.items():
             if keyword in sql:
+                if callable(rows):
+                    return rows(sql, params)
                 return list(rows)
         return []
 
@@ -2970,6 +2972,142 @@ class OrgAssignmentApiTests(unittest.TestCase):
         audit = next(p for sql, p in conn.executed
                      if "dim_org_assignment_override_audit" in sql)
         self.assertEqual("reset", audit[1])
+
+    # -- /api/org/move（归属搬迁原子复合写，2026-10-15 闭环画布）---------------
+
+    _ROSTER_SQL_KEY = "ORDER BY `scope`, `entity_type`"
+    _PERSON_NAMES_SQL_KEY = "`entity_type` = 'person' AND `enabled` = 1"
+    _ROSTER_BY_ID_SQL_KEY = "WHERE `id` = %s"
+
+    @staticmethod
+    def _roster_row(row_id, scope, person_name, entity_key="门店一部"):
+        return {
+            "id": row_id, "scope": scope, "entity_type": "person",
+            "entity_key": entity_key, "person_name": person_name,
+            "aliases": None, "enabled": 1, "note": None, "channel": None,
+            "store_no": None, "role": "owner", "updated_by": "ops",
+            "updated_at": None,
+        }
+
+    def test_move_syncs_both_roster_sides_atomically(self):
+        """hangzhou→hq：覆盖写 + 删旧区名册 + 补新区名册，单事务一次 commit。"""
+        from_roster = [self._roster_row(7, "hangzhou", "王五", "门店二部")]
+
+        def roster_router(sql, params):
+            scope = params[0] if params else None
+            return from_roster if scope == "hangzhou" else []
+
+        conn = self._members_conn({
+            "dim_org_region": [{"region_key": "hangzhou"},
+                               {"region_key": "hq"}],
+            self._ROSTER_SQL_KEY: roster_router,
+            self._PERSON_NAMES_SQL_KEY: [{"person_name": "李四"}],
+            self._ROSTER_BY_ID_SQL_KEY: from_roster,
+        })
+        response = self._admin_client(conn).post("/api/org/move", json={
+            "user_id": "u-wang", "to_region": "hq", "person_name": "王五",
+            "from_region": "hangzhou", "dept_name": "总经办"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"status": "ok", "moved": True,
+             "roster": {"from_removed": True, "to_added": True}, "audit": True},
+            response.json())
+        sqls = [sql for sql, _ in conn.executed]
+        self.assertTrue(any("INSERT INTO `dim_report_roster`" in s for s in sqls))
+        self.assertTrue(any("DELETE FROM `dim_report_roster`" in s for s in sqls))
+        override_audit = next(
+            p for s, p in conn.executed
+            if "dim_org_assignment_override_audit" in s)
+        self.assertEqual("assign", override_audit[1])
+        roster_audit = [
+            p for s, p in conn.executed if "dim_report_roster_audit" in s]
+        self.assertEqual(2, len(roster_audit))            # 删 + 增 各一行审计
+        self.assertEqual(1, conn.commits)                 # 复合写单事务一次 commit
+
+    def test_move_to_pool_clears_region(self):
+        conn = self._members_conn({
+            "dim_org_region": [{"region_key": "hangzhou"}]})
+        response = self._admin_client(conn).post("/api/org/move", json={
+            "user_id": "u-wang", "to_region": None,
+            "person_name": "王五", "from_region": "hangzhou"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {"status": "ok", "moved": True,
+             "roster": {"from_removed": False, "to_added": False},
+             "audit": True},
+            response.json())
+        audit = next(p for s, p in conn.executed
+                     if "dim_org_assignment_override_audit" in s)
+        self.assertEqual("移出全部区域", audit[7])
+        self.assertFalse(any("INSERT INTO `dim_report_roster`" in s
+                             for s, _ in conn.executed))
+
+    def test_move_skips_add_when_target_has_no_roster_system(self):
+        """目标区无启用 person 名册体系 → 不补录（避免凭空造白名单）。"""
+        conn = self._members_conn({
+            "dim_org_region": [{"region_key": "hangzhou"},
+                               {"region_key": "dining"}]})
+        response = self._admin_client(conn).post("/api/org/move", json={
+            "user_id": "u-wang", "to_region": "dining", "person_name": "王五",
+            "from_region": "hangzhou"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"from_removed": False, "to_added": False},
+                         response.json()["roster"])
+        self.assertFalse(any("INSERT INTO `dim_report_roster`" in s
+                             for s, _ in conn.executed))
+
+    def test_move_skips_add_when_already_in_target_roster(self):
+        existing = [self._roster_row(9, "hq", "王五", "总经办")]
+
+        def roster_router(sql, params):
+            scope = params[0] if params else None
+            return existing if scope == "hq" else []
+
+        conn = self._members_conn({
+            "dim_org_region": [{"region_key": "hangzhou"},
+                               {"region_key": "hq"}],
+            self._ROSTER_SQL_KEY: roster_router,
+            self._PERSON_NAMES_SQL_KEY: [{"person_name": "王五"}],
+        })
+        response = self._admin_client(conn).post("/api/org/move", json={
+            "user_id": "u-wang", "to_region": "hq", "person_name": "王五",
+            "from_region": "hangzhou"})
+
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.json()["roster"]["to_added"])
+        self.assertFalse(any("INSERT INTO `dim_report_roster`" in s
+                             for s, _ in conn.executed))
+
+    def test_move_rejects_unregistered_target_region(self):
+        conn = self._members_conn({
+            "dim_org_region": [{"region_key": "hangzhou"}]})
+        response = self._admin_client(conn).post("/api/org/move", json={
+            "user_id": "u-wang", "to_region": "atlantis"})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_move_rejects_missing_user_id(self):
+        client = self._admin_client(self._members_conn())
+        self.assertEqual(
+            400, client.post("/api/org/move", json={"to_region": "hq"}
+                             ).status_code)
+
+    def test_move_requires_org_capability(self):
+        unauth = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, unauth.post(
+            "/api/org/move", json={"user_id": "u-wang"}).status_code)
+        viewer = authz.Viewer(
+            userid="u1", name="张三", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u1")
+        self.assertEqual(403, client.post(
+            "/api/org/move",
+            json={"user_id": "u-wang", "to_region": "hq"}).status_code)
 
     # -- 组织目录（新增区域 / 部门，2026-10-13 P7）-------------------------
 

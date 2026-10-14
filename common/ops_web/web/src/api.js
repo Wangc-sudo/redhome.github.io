@@ -94,6 +94,20 @@ export function assignMember(payload) {
   });
 }
 
+/**
+ * 归属搬迁（原子复合写）：改权威归属 + 同步双侧 person 名册 + 审计。
+ * @param {{user_id:string, to_region:(string|null), person_name:string,
+ *          dept_name?:(string|null), from_region?:(string|null),
+ *          role?:string, note?:(string|null)}} payload
+ * to_region 为 null 表示移入未归类池；后端单事务完成，避免半移动态。
+ */
+export function moveMember(payload) {
+  return request('/api/org/move', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 /** 停用/启用某人的覆盖（停用 = 回种子口径）。 */
 export function toggleOverride(userId, enabled) {
   return request('/api/org/toggle', {

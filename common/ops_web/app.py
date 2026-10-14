@@ -243,6 +243,22 @@ def _region_scope_pairs(connection):
                  for scope in report_roster.SCOPES]
     return pairs
 
+
+def _find_person_roster_entry(connection, scope, person_name):
+    """该 scope 下该人**启用中**的 ``person`` 型名册条目（无则 ``None``）。
+
+    供归属搬迁（``/api/org/move``）双侧名册同步定位旧/新条目；scope 非
+    名册业务域或人名为空 → ``None``（fail-soft，不抛）。
+    """
+    if not person_name or scope not in report_roster.SCOPES:
+        return None
+    for row in report_roster.fetch_roster(connection, scope):
+        if (row.get("entity_type") == "person"
+                and row.get("person_name") == person_name
+                and int(row.get("enabled") or 0) == 1):
+            return row
+    return None
+
 #: 「口径收口」（P5，2026-10-12，设计稿 §3）：名册 / 覆盖 / 授权三条边界裁决
 #: 的唯一权威表述，只在「收件人总览」页完整渲染一次。
 _RECIPIENT_RULES_HTML = (
@@ -1506,6 +1522,104 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web org assign failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/move")
+    async def org_move(request: Request):
+        """归属搬迁（**原子复合写**，2026-10-15 闭环画布）。
+
+        一次事务内完成：覆盖 upsert（权威表 ``dim_org_assignment_override``）
+        + 双侧 ``person`` 型名册同步 + 审计，避免**半移动态**——名册是
+        fail-open 白名单，若人已进新区而旧区名册残留 / 新区无名册，会静默
+        剥夺或搞错该成员**报数资格**与**当月目标归属**。
+
+        ``to_region=null`` → 移入未归类池。**仅在目标区已存在启用 person
+        名册体系**（fail-open 白名单已生效）且该人不在册时才补录；否则不
+        动——避免给原本无名册的区凭空造白名单、把 fail-open 区整体翻成
+        强制在册。
+        """
+        from common.public_data.db import transaction
+
+        viewer = _resolve_request_viewer(request)
+        if not (capability_allows(viewer, CAPABILITY_ORG)
+                or capability_has_scoped(viewer, CAPABILITY_ORG)):
+            _forbidden(request)
+        request.state.viewer = viewer
+        payload = await _json_body(request)
+        user_id = payload.get("user_id")
+        to_region = payload.get("to_region")
+        person_name = payload.get("person_name")
+        dept_name = payload.get("dept_name")
+        from_region = payload.get("from_region")
+        role = payload.get("role") or "owner"
+        note = payload.get("note") or ""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if to_region is not None and (
+                not isinstance(to_region, str) or not to_region.strip()):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        for value in (person_name, dept_name, from_region, note):
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if from_region is not None and not from_region.strip():
+            from_region = None
+        if to_region is not None and not capability_allows(
+                viewer, CAPABILITY_ORG, to_region):
+            _forbidden(request)
+        # 区域真源校验：目标区须在注册表已登记（注册表空 → fail-soft）。
+        try:
+            with db_connector() as connection:
+                registered = org_catalog.fetch_region_keys(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org move region read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if to_region is not None and registered and to_region not in registered:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+
+        from_removed = False
+        to_added = False
+        try:
+            with db_connector() as connection:
+                with transaction(connection):
+                    org_assignment_override.apply_assignment(
+                        connection, user_id, to_region,
+                        dept_id=None, dept_name=dept_name, name=person_name,
+                        actor=viewer.userid, note=note)
+                    # 旧区：删该人启用中的 person 型名册（仅在册才动）。
+                    if from_region and from_region != to_region and person_name:
+                        hit = _find_person_roster_entry(
+                            connection, from_region, person_name)
+                        if hit is not None:
+                            report_roster.apply_roster_delete(
+                                connection, hit["id"], actor=viewer.userid)
+                            from_removed = True
+                    # 新区：仅当该区已启用 person 名册体系且该人不在册才补录。
+                    if to_region and to_region != from_region and person_name:
+                        existing = _find_person_roster_entry(
+                            connection, to_region, person_name)
+                        if existing is None and (
+                                report_roster.fetch_scope_person_names(
+                                    connection, to_region) is not None):
+                            entry = report_roster.validate_roster_fields(
+                                to_region, "person",
+                                dept_name or _org_region_label(to_region),
+                                person_name, role=role, note=note)
+                            report_roster.apply_roster_entry(
+                                connection, entry, actor=viewer.userid)
+                            to_added = True
+        except (report_roster.ReportRosterError,
+                org_assignment_override.OrgAssignmentOverrideError):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning("ops-web org move failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok", "moved": True,
+            "roster": {"from_removed": from_removed, "to_added": to_added},
+            "audit": True,
+        })
 
     @app.post("/api/org/region/add")
     async def org_region_add(request: Request):

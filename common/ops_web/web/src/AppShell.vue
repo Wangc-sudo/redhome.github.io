@@ -34,6 +34,7 @@ watch(flash, (value) => {
       <span class="nav-group">
         <span class="nav-label">权限</span>
         <router-link v-if="hasCapability('org')" to="/org">组织编排</router-link>
+        <router-link v-if="hasCapability('org')" to="/flow">闭环画布</router-link>
         <router-link v-if="isAdmin()" to="/grants">授权</router-link>
       </span>
       <span class="nav-group">

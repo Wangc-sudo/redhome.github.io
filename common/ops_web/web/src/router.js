@@ -16,6 +16,7 @@ import PipelinesAuditPage from './pages/PipelinesAuditPage.vue';
 import PipelinesHistoryPage from './pages/PipelinesHistoryPage.vue';
 import RecordsPage from './pages/RecordsPage.vue';
 import GrantsPage from './pages/GrantsPage.vue';
+import FlowPage from './pages/FlowPage.vue';
 
 const routes = [
   { path: '/', name: 'overview', component: OverviewPage },
@@ -27,6 +28,7 @@ const routes = [
     meta: { capability: 'org' },
   },
   { path: '/roster', name: 'roster', component: RosterPage, meta: { capability: 'roster' } },
+  { path: '/flow', name: 'flow', component: FlowPage, meta: { capability: 'org' } },
   { path: '/recipients', name: 'recipients', component: RecipientsPage, meta: { capability: 'admin' } },
   { path: '/calendar', name: 'calendar', component: CalendarPage, meta: { capability: 'calendar' } },
   { path: '/pipelines', name: 'pipelines', component: PipelinesPage, meta: { capability: 'pipelines' } },
