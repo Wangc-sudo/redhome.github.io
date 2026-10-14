@@ -18,12 +18,34 @@
   }
   .card h1 { font-size: 20px; margin: 0 0 12px; }
   .card p { font-size: 14px; line-height: 1.8; margin: 0; color: #666; }
+  .card .hint { font-size: 12px; color: #999; margin: 18px 0 8px; }
+  .card input {
+    display: block; width: 100%; box-sizing: border-box; margin-bottom: 8px;
+    padding: 9px 10px; font-size: 14px; border: 1px solid #d9dde3;
+    border-radius: 6px;
+  }
+  .card button {
+    width: 100%; padding: 10px 0; font-size: 14px; color: #fff;
+    cursor: pointer; background: #1f6feb; border: 0; border-radius: 6px;
+  }
+  .card .err { font-size: 12px; color: #d23f31; margin: 0 0 8px; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1 id="title">需要登录</h1>
   <p id="message">请从钉钉工作台打开本看板。</p>
+  <!-- 浏览器登录（2026-10-14）：默认隐藏，仅当本端提供该通道时由脚本揭示
+       （bi-web 无此路由，共享入口页对 bi-web 外观零变化）。 -->
+  <form id="browserLogin" hidden>
+    <p class="hint">无钉钉环境时，可用运维口令登录。</p>
+    <input id="blUser" type="text" placeholder="钉钉账号（userid）"
+           autocomplete="username">
+    <input id="blToken" type="password" placeholder="运维口令"
+           autocomplete="current-password">
+    <p id="blErr" class="err" hidden></p>
+    <button type="submit">登录</button>
+  </form>
 </div>
 <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/2.7.13/dingtalk.open.js"></script>
 <script>
@@ -99,6 +121,46 @@
         dd.error(fail);
       })
       .catch(fail);
+  })();
+
+  // 浏览器登录表单（2026-10-14）：先探 /auth/login-options，只有本端开放了
+  // 该通道才揭示表单；提交成功后回到 next（与钉钉免登同一枚 session cookie）。
+  (function () {
+    var form = document.getElementById("browserLogin");
+    var err = document.getElementById("blErr");
+
+    fetch("/auth/login-options", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) { if (cfg && cfg.browser) form.hidden = false; })
+      .catch(function () {});
+
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var user = document.getElementById("blUser").value.trim();
+      var token = document.getElementById("blToken").value;
+      if (!user || !token) {
+        err.textContent = "请填账号与运维口令。";
+        err.hidden = false;
+        return;
+      }
+      var next = params.get("next") || "/";
+      if (next.charAt(0) !== "/" || next.charAt(1) === "/") next = "/";
+      fetch("/auth/browser-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: user, token: token }),
+        cache: "no-store"
+      }).then(function (r) {
+        if (r.ok) { location.href = next; return; }
+        err.textContent = (r.status === 503)
+          ? "本端未开放浏览器登录。"
+          : "账号或运维口令不正确。";
+        err.hidden = false;
+      }).catch(function () {
+        err.textContent = "登录请求失败，请稍后重试。";
+        err.hidden = false;
+      });
+    });
   })();
 </script>
 </body>

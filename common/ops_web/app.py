@@ -16,6 +16,7 @@ unavailable / bad_request），异常只记一条带类名的 WARNING；页面 H
 同事务的一行 audit 同生共死（run_request 行的 requested_by 即触发审计）。
 """
 
+import hmac
 import html
 import json
 import logging
@@ -1140,6 +1141,7 @@ def _schedule_cell(schedule):
 
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
+               browser_login_token=None,
                fleet_source=None, config_source=None,
                config_publisher=None, corp_id=None, agent_id=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
@@ -1149,6 +1151,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     喂 fake 交换客户端。定时任务管理面另有三注入：``fleet_source``
     （零参 callable → service_id 元组）、``config_source``（注册表读）、
     ``config_publisher``（注册表写，None = 写 API 降级 503）。
+    ``browser_login_token`` 非空时开放浏览器登录通道（2026-10-14，
+    为无钉钉环境的运维/验收提供入口），缺省关闭。
     """
     if not session_secret:
         raise ValueError("ops-web requires a session secret")
@@ -1242,6 +1246,58 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.get("/auth/entry")
     def auth_entry():
         return FileResponse(auth.AUTH_ENTRY_PAGE)
+
+    @app.get("/auth/login-options")
+    def auth_login_options():
+        """入口页据此决定是否渲染「浏览器登录」表单（2026-10-14）。
+
+        bi-web 无本路由 → 404 → 表单保持隐藏，共享入口页对 bi-web 零变化。
+        """
+        return JSONResponse(
+            {
+                "dingtalk": auth_client is not None,
+                "browser": bool(browser_login_token),
+            }
+        )
+
+    @app.post("/auth/browser-login")
+    async def auth_browser_login(request: Request):
+        """浏览器登录（2026-10-14）：运维口令 + 钉钉账号 → 同一枚 session。
+
+        未配口令 = 通道未开放（503）；口令或账号任一不合规一律 401（不区分
+        分支，防探测）。**签发会话 ≠ 获得权限**：账号可见性仍由
+        ``ViewerResolver`` 逐请求对 ``bi_authz`` 校验（fail-closed）。
+        """
+        if not browser_login_token:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        user_id = payload.get("user_id") if isinstance(payload, dict) else None
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if (
+            not isinstance(user_id, str)
+            or not user_id.strip()
+            or not isinstance(token, str)
+            or not token
+        ):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not hmac.compare_digest(token, browser_login_token):
+            _LOGGER.warning("ops-web browser login rejected")
+            raise HTTPException(status_code=401, detail=ErrorDetail.UNAUTHORIZED)
+        user_id = user_id.strip()
+        _LOGGER.info("ops-web browser login: %s", auth.mask_userid(user_id))
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie(
+            auth.SESSION_COOKIE,
+            auth.issue_session(user_id, session_secret),
+            max_age=auth.SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=session_secure,
+        )
+        return response
 
     @app.get("/auth/logout")
     def auth_logout():
@@ -3172,6 +3228,11 @@ def main():
         session_secure = os.environ.get(
             "BI_WEB_SESSION_SECURE", ""
         ).strip().lower() in ("1", "true", "yes")
+        # 浏览器登录通道（2026-10-14）：非空才开放；凭据与其余 BI_* 同纪律
+        # ——宿主机 /opt/dops/ops-web.env 注入，不入库、不入 repo。
+        browser_login_token = (
+            os.environ.get("OPS_WEB_BROWSER_TOKEN") or ""
+        ).strip() or None
         corp_id = (os.environ.get("BI_DINGTALK_CORPID") or "").strip() or None
         agent_id = (os.environ.get("BI_DINGTALK_AGENTID") or "").strip() or None
         config_source = build_config_source()
@@ -3186,6 +3247,7 @@ def main():
             session_secret=session_secret,
             auth_client=auth_client,
             session_secure=session_secure,
+            browser_login_token=browser_login_token,
             fleet_source=fleet_source,
             config_source=config_source,
             config_publisher=build_config_publisher(),

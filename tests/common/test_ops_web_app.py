@@ -251,6 +251,96 @@ class AuthExchangeTests(unittest.TestCase):
         self.assertEqual(ADMIN_USERID, auth.resolve_session_userid(cookie, SECRET))
 
 
+class BrowserLoginTests(unittest.TestCase):
+    """浏览器登录（2026-10-14）：运维口令 + 账号 → 同一枚 shared session。
+
+    与钉钉免登的区别只在「怎么证明身份」；签发出来的会话与准入门完全同款
+    （签发 ≠ 有权限，权限仍由 ViewerResolver 对 bi_authz 逐请求判定）。
+    """
+
+    TOKEN = "ops-browser-secret"
+
+    def _app_with_channel(self, token=TOKEN, viewer=None):
+        return create_app(
+            settings=_fake_settings(), session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(
+                viewer() if callable(viewer) else (viewer or _admin_viewer())
+            ),
+            browser_login_token=token,
+        )
+
+    def test_channel_closed_without_token(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+
+        self.assertEqual(
+            503,
+            client.post(
+                "/auth/browser-login",
+                json={"user_id": ADMIN_USERID, "token": "anything"},
+            ).status_code,
+        )
+        self.assertFalse(client.get("/auth/login-options").json()["browser"])
+
+    def test_login_options_reports_the_channel(self):
+        client = TestClient(self._app_with_channel())
+
+        self.assertTrue(client.get("/auth/login-options").json()["browser"])
+
+    def test_issues_the_shared_session_cookie(self):
+        client = TestClient(self._app_with_channel())
+
+        response = client.post(
+            "/auth/browser-login",
+            json={"user_id": ADMIN_USERID, "token": self.TOKEN},
+        )
+
+        self.assertEqual(200, response.status_code)
+        cookie = response.cookies.get(auth.SESSION_COOKIE)
+        self.assertEqual(ADMIN_USERID, auth.resolve_session_userid(cookie, SECRET))
+        self.assertEqual(200, client.get("/api/me").status_code)
+
+    def test_rejects_bad_token_or_malformed_payload(self):
+        client = TestClient(self._app_with_channel())
+
+        self.assertEqual(
+            401,
+            client.post(
+                "/auth/browser-login",
+                json={"user_id": ADMIN_USERID, "token": "wrong"},
+            ).status_code,
+        )
+        self.assertEqual(
+            400,
+            client.post(
+                "/auth/browser-login",
+                json={"user_id": "  ", "token": self.TOKEN},
+            ).status_code,
+        )
+        self.assertEqual(
+            400,
+            client.post(
+                "/auth/browser-login", json={"user_id": ADMIN_USERID}
+            ).status_code,
+        )
+
+    def test_session_grants_no_permission_of_its_own(self):
+        # 准入门仍以 bi_authz 为准：拿到会话但未被授权 → 403（fail-closed）。
+        stranger = authz.Viewer(
+            userid="u-nobody", name="查无此人", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=False,
+        )
+        client = TestClient(self._app_with_channel(viewer=stranger))
+
+        response = client.post(
+            "/auth/browser-login",
+            json={"user_id": "u-nobody", "token": self.TOKEN},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(403, client.get("/api/recipients").status_code)
+
+
 class HealthzTests(unittest.TestCase):
     def test_healthz_reports_ok_with_db(self):
         client = TestClient(_app(viewer=_admin_viewer()))
