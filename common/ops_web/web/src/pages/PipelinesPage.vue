@@ -9,7 +9,7 @@
  *  - 收件人抽屉：?service=<id> 深链自动打开；reminder_html 内联的「收件人…」
  *    入口（服务端生成的 onclick=openRecipientOverride(...)）经全局桥接生效。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import {
   getPipelines,
@@ -26,6 +26,21 @@ import {
 import { setFlash } from '../store/me.js';
 
 const route = useRoute();
+
+//: 统一锚点（spec §5）：?region=<key> → 高亮并滚动到该区域分组。
+const anchorRegion = computed(() =>
+  typeof route.query.region === 'string' ? route.query.region : '',
+);
+
+async function applyRegionAnchor() {
+  if (!anchorRegion.value) return;
+  await nextTick();
+  const el = document.getElementById('group-' + anchorRegion.value);
+  if (el) {
+    if ('open' in el) el.open = true;
+    el.scrollIntoView({ block: 'start' });
+  }
+}
 
 /* ------------------------------ 读面 --------------------------------- */
 const loading = ref(true);
@@ -443,7 +458,10 @@ onMounted(async () => {
   await load();
   const deep = route.query.service;
   if (typeof deep === 'string' && deep) await openDrawer(deep);
+  await applyRegionAnchor();
 });
+
+watch(() => route.query.region, () => applyRegionAnchor());
 
 onBeforeUnmount(() => {
   if (window.openRecipientOverride) delete window.openRecipientOverride;
@@ -474,7 +492,14 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <details v-for="g in groups" :key="g.region ?? '__none__'" class="group" open>
+      <details
+        v-for="g in groups"
+        :id="'group-' + (g.region ?? '__none__')"
+        :key="g.region ?? '__none__'"
+        class="group"
+        :class="{ 'anchor-hit': anchorRegion && g.region === anchorRegion }"
+        open
+      >
         <summary>{{ g.title }}（{{ g.count }} 项）</summary>
         <table>
           <thead>
@@ -728,6 +753,12 @@ onBeforeUnmount(() => {
 <style scoped>
 .group {
   margin: 16px 0;
+}
+.group.anchor-hit {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #eef4ff;
+  box-shadow: 0 0 0 2px #bfdbfe;
 }
 .group > summary {
   cursor: pointer;
