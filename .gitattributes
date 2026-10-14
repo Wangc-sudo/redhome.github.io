@@ -1,0 +1,8 @@
+# ops-web 前端源码与构建产物统一按 LF 落盘 / 存库。
+#
+# 为什么：Vite 的产物内容哈希取决于源码字节，工作树若为 CRLF，
+# 本地构建出的 assets 文件名与 CI（Linux 检出为 LF）不一致，会导致
+# CI job `ops-web-frontend` 的 `git diff --exit-code -- ../static/dist` 失败。
+# 本仓库无此约定时，Windows 上 core.autocrlf=true 会把检出写成 CRLF。
+common/ops_web/web/** text eol=lf
+common/ops_web/static/dist/** text eol=lf
