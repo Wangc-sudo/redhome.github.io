@@ -270,6 +270,29 @@ def _region_scope_pairs(connection):
     return pairs
 
 
+def _fact_region_keys(connection):
+    """行级事实表（``fact_daily_report_offline``）的 region 值域（B5）。
+
+    授权页「暂无行级数据」标注的真源：键在此集合内 = 授权可裁剪出数据；
+    ``offline_all`` 由调用方另行豁免（B5 聚合授权键，oa 卡展开为三区
+    并集，事实表本无该行属预期）。
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT DISTINCT `region` FROM `fact_daily_report_offline`")
+        rows = cursor.fetchall()
+    finally:
+        close = getattr(cursor, "close", None)
+        if callable(close):
+            close()
+    keys = set()
+    for row in rows:
+        value = row.get("region") if isinstance(row, dict) else row[0]
+        if value:
+            keys.add(str(value))
+    return keys
+
+
 def _find_person_roster_entry(connection, scope, person_name):
     """该 scope 下该人**启用中**的 ``person`` 型名册条目（无则 ``None``）。
 
@@ -2026,6 +2049,19 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web grants load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # B5「暂无行级数据」标注（fail-soft：探针失败仅缺徽标，不拖垮读面）；
+        # offline_all 豁免——B5 聚合授权键，oa 卡展开为三区并集有数据语义。
+        empty_row_regions = []
+        try:
+            with db_connector() as connection:
+                vocab = {key for key, _ in _region_scope_pairs(connection)}
+                empty_row_regions = sorted(
+                    vocab - _fact_region_keys(connection) - {"offline_all"}
+                )
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web empty-row region probe failed: %s", type(exc).__name__
+            )
         rows = []
         for row in grants:
             if isinstance(row, dict):
@@ -2043,7 +2079,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "note": get("note"),
                 "created_at": _fmt_time(get("updated_at")),
             })
-        return JSONResponse({"status": "ok", "grants": rows})
+        return JSONResponse({
+            "status": "ok",
+            "grants": rows,
+            "empty_row_regions": empty_row_regions,
+        })
 
     @app.get("/api/audit")
     def api_audit(request: Request):

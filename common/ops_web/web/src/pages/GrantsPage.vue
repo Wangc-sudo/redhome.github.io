@@ -42,6 +42,8 @@ const grants = ref([]);
 const audit = ref([]);
 const loading = ref(false);
 const error = ref('');
+//: B5「暂无行级数据」徽标真源（/api/grants 附带；probe 失败为空 = 不标注）。
+const emptyRowRegions = ref([]);
 
 //: 写面表单状态。
 const form = ref({ user_id: '', grant_type: 'scope', note: '' });
@@ -53,6 +55,12 @@ const flash = ref(null); //: { type:'ok'|'err', text }
 
 const allRegions = computed(() => (me.value && me.value.all_regions) || []);
 const hasRegions = computed(() => allRegions.value.length > 0);
+const emptyRowSet = computed(() => new Set(emptyRowRegions.value));
+
+/** 区域 option 文案：无行级数据的键加标注（授权后看板为空，属预期）。 */
+function regionOptionLabel(key) {
+  return emptyRowSet.value.has(key) ? `${key}（暂无行级数据）` : key;
+}
 
 const activeUser = computed(() => route.query.user || '');
 
@@ -79,10 +87,12 @@ async function load() {
   try {
     const [grantsData, auditData] = await Promise.all([getGrants(), getAudit()]);
     grants.value = (grantsData && grantsData.grants) || [];
+    emptyRowRegions.value = (grantsData && grantsData.empty_row_regions) || [];
     audit.value = (auditData && auditData.rows) || [];
   } catch (err) {
     error.value = err.message;
     grants.value = [];
+    emptyRowRegions.value = [];
     audit.value = [];
   } finally {
     loading.value = false;
@@ -177,13 +187,14 @@ watch(() => route.query.user, load, { immediate: true });
       <template v-else-if="form.grant_type === 'region'">
         <select v-if="hasRegions" v-model="regionKey">
           <option value="">— 选择区域 —</option>
-          <option v-for="r in allRegions" :key="r" :value="r">{{ r }}</option>
+          <option v-for="r in allRegions" :key="r" :value="r">{{ regionOptionLabel(r) }}</option>
         </select>
         <input v-else v-model="regionKey" placeholder="区域 key" />
         <span class="hint">
           该键须与看板事实表的区域值一致（如 <code>hangzhou</code> /
-          <code>shaoxing</code>）才会裁剪出对应区域的数据；仅组织口径存在、
-          事实表无同键（如 <code>offline_all</code>）时该授权不带来数据。
+          <code>shaoxing</code>）才会裁剪出对应区域的数据；<code>offline_all</code>
+          为「线下整体」聚合授权键（视同放开杭/绍/省外三区并集）；标注
+          「暂无行级数据」的键可授但授后看板为空（属预期）。
         </span>
       </template>
       <template v-else>

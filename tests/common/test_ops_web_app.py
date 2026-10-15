@@ -2217,6 +2217,60 @@ class GrantsAndAuditPageTests(unittest.TestCase):
         self.assertEqual("fin", row["grant_key"])
 
 
+class GrantsEmptyRowRegionTests(unittest.TestCase):
+    """B5「暂无行级数据」标注（2026-10-15 裁决）：/api/grants 附带
+    ``empty_row_regions`` = 词表键 − 事实表值域 − {offline_all（聚合键）}；
+    探针失败 fail-soft 为空，不拖垮读面。"""
+
+    def _connection(self):
+        return _Connection({
+            "dim_org_region": [
+                {"id": 1, "region_key": "hangzhou", "label": "杭州",
+                 "sort_order": 0, "enabled": 1, "updated_by": None,
+                 "updated_at": None},
+                {"id": 2, "region_key": "shaoxing", "label": "绍兴",
+                 "sort_order": 1, "enabled": 1, "updated_by": None,
+                 "updated_at": None},
+                {"id": 3, "region_key": "offline_all", "label": "线下整体",
+                 "sort_order": 2, "enabled": 1, "updated_by": None,
+                 "updated_at": None},
+                {"id": 4, "region_key": "junpin", "label": "君品雅院",
+                 "sort_order": 3, "enabled": 1, "updated_by": None,
+                 "updated_at": None},
+                {"id": 5, "region_key": "hq", "label": "总部",
+                 "sort_order": 4, "enabled": 1, "updated_by": None,
+                 "updated_at": None},
+            ],
+            "fact_daily_report_offline": [
+                {"region": "hangzhou"}, {"region": "shaoxing"},
+            ],
+        })
+
+    def test_grants_api_marks_regions_without_row_data(self):
+        client = TestClient(_app(viewer=_admin_viewer(),
+                                 connection=self._connection()))
+        _login(client)
+
+        data = client.get("/api/grants").json()
+
+        self.assertEqual("ok", data["status"])
+        # hangzhou/shaoxing 有行级数据；offline_all 聚合键豁免；
+        # junpin/hq 词表有、事实无 → 标注。
+        self.assertEqual(["hq", "junpin"], data["empty_row_regions"])
+
+    def test_grants_api_probe_failure_keeps_read_ok(self):
+        client = TestClient(_app(viewer=_admin_viewer(),
+                                 connection=self._connection()))
+        _login(client)
+
+        with mock.patch("common.ops_web.app._fact_region_keys",
+                        side_effect=RuntimeError("boom")):
+            data = client.get("/api/grants").json()
+
+        self.assertEqual("ok", data["status"])
+        self.assertEqual([], data["empty_row_regions"])  # fail-soft：仅缺徽标
+
+
 class RecordsPageTests(unittest.TestCase):
     """统一「操作记录」页（任务3 2026-10-12：4 处审计收口 + 运行流水）。"""
 
