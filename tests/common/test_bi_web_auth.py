@@ -13,6 +13,7 @@
 import unittest
 import warnings
 from contextlib import contextmanager
+from dataclasses import replace
 
 warnings.filterwarnings(
     "ignore", message="Using `httpx` with `starlette.testclient` is deprecated"
@@ -21,7 +22,9 @@ warnings.filterwarnings(
 from fastapi.testclient import TestClient
 
 from common.bi_web import auth, authz
+from common.bi_web import queries as BI_WEB_QUERIES
 from common.bi_web.app import create_app
+from common.bi_web.cache import card_cache_key
 from common.bi_web.config import StaticDashboardSource
 
 from tests.common.test_bi_web_app import (
@@ -648,6 +651,146 @@ class LegacyModeTests(unittest.TestCase):
         response = client.get("/d/l1-cockpit", follow_redirects=False)
 
         self.assertEqual(401, response.status_code)
+
+
+# ---------------------------------------------------------------------------
+# 行级 scope（M3，设计稿 §4.1/§6）：allowed_regions 注入卡片的 params
+#
+# 分界很清楚：``row_scope="region"`` 的卡片必须收到 viewer 的区域集合
+# （空集也发，fail-closed 在查询层兜底）；豁免卡与两种「全量身份」
+# （admin / Bearer 机读通道）一律**不写保留键**，行为与 M3 前逐字节一致。
+# ---------------------------------------------------------------------------
+
+
+class RegionRowScopeTests(unittest.TestCase):
+    """``authz.region_row_scope`` 的三条出口（纯函数）。"""
+
+    def test_no_viewer_keeps_the_legacy_full_view(self):
+        # Bearer 机读通道 / 未配置 session：'None' 即"不启用行级过滤"。
+        self.assertIsNone(authz.region_row_scope(None))
+
+    def test_admin_is_always_full_view(self):
+        self.assertIsNone(authz.region_row_scope(ADMIN))
+
+    def test_admitted_non_admin_gets_its_exact_grant_set(self):
+        self.assertEqual(
+            frozenset({"hangzhou", "hq"}),
+            authz.region_row_scope(_viewer(regions={"hangzhou", "hq"})),
+        )
+
+    def test_empty_grant_set_stays_the_empty_set(self):
+        # 铁律 2：显式授予、无自动默认——空集是空集，绝不等价于 None(全量)。
+        self.assertEqual(frozenset(), authz.region_row_scope(_viewer()))
+
+
+class RegionScopeInjectionTests(unittest.TestCase):
+    """app 层：保留键只对 ``row_scope="region"`` 的卡片写入。"""
+
+    def _app(self, viewer):
+        registry = _FakeRegistry()
+        registry["kpi_offline_mtd"] = replace(
+            registry["kpi_offline_mtd"], row_scope="region"
+        )
+        client = TestClient(create_app(
+            settings=_fake_settings(),
+            dashboard_source=StaticDashboardSource({"l1-cockpit": _l1_mapping()}),
+            registry=registry,
+            token="machine-token",
+            gate=lambda: True,
+            db_connector=_fake_db_connector(),
+            session_secret=SECRET,
+            viewer_resolver=_StaticViewerResolver({"u1": viewer}),
+        ))
+        return client, registry
+
+    def _last_params(self, registry):
+        _card_id, _connection, params = registry.run_calls[-1]
+        return params
+
+    def test_scoped_viewer_gets_an_allow_list_fingerprint(self):
+        client, registry = self._app(_viewer(regions={"hangzhou"}))
+        _login(client, "u1")
+
+        response = client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            "hangzhou", self._last_params(registry)[BI_WEB_QUERIES.ROW_SCOPE_PARAM]
+        )
+
+    def test_empty_grant_set_injects_the_empty_fingerprint(self):
+        client, registry = self._app(_viewer())
+        _login(client, "u1")
+
+        self.assertEqual(
+            200,
+            client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd").status_code,
+        )
+        # 空串（而非缺键）：查询层据此拼 AND 1 = 0，而不是退回全量。
+        self.assertEqual(
+            "", self._last_params(registry)[BI_WEB_QUERIES.ROW_SCOPE_PARAM]
+        )
+
+    def test_admin_viewer_writes_no_reserved_key(self):
+        client, registry = self._app(ADMIN)
+        _login(client, "u1")
+
+        self.assertEqual(
+            200,
+            client.get("/api/v1/d/l1-cockpit/cards/kpi_offline_mtd").status_code,
+        )
+        self.assertNotIn(
+            BI_WEB_QUERIES.ROW_SCOPE_PARAM, self._last_params(registry)
+        )
+
+    def test_bearer_channel_writes_no_reserved_key(self):
+        client, registry = self._app(_viewer(regions={"hangzhou"}))
+
+        response = client.get(
+            "/api/v1/d/l1-cockpit/cards/kpi_offline_mtd",
+            headers={"Authorization": "Bearer machine-token"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertNotIn(
+            BI_WEB_QUERIES.ROW_SCOPE_PARAM, self._last_params(registry)
+        )
+
+    def test_exempt_card_never_receives_the_reserved_key(self):
+        client, registry = self._app(_viewer(regions={"hangzhou"}))
+        _login(client, "u1")
+
+        self.assertEqual(
+            200,
+            client.get("/api/v1/d/l1-cockpit/cards/kpi_channel_mtd").status_code,
+        )
+        self.assertNotIn(
+            BI_WEB_QUERIES.ROW_SCOPE_PARAM, self._last_params(registry)
+        )
+
+    def test_scope_separates_the_card_cache_key(self):
+        _full, _full_class = card_cache_key("kpi_offline_mtd", {})
+        hz_key, _hz_class = card_cache_key(
+            "kpi_offline_mtd", {BI_WEB_QUERIES.ROW_SCOPE_PARAM: "hangzhou"}
+        )
+        empty_key, _empty_class = card_cache_key(
+            "kpi_offline_mtd", {BI_WEB_QUERIES.ROW_SCOPE_PARAM: ""}
+        )
+
+        # 可见范围不同的载荷绝不能共用缓存键（否则就是越权缓存命中）。
+        self.assertEqual(3, len({_full, hz_key, empty_key}))
+
+    def test_fingerprint_is_order_independent(self):
+        one, _ = card_cache_key(
+            "kpi_offline_mtd", {BI_WEB_QUERIES.ROW_SCOPE_PARAM: "hangzhou,hq"}
+        )
+        other, _ = card_cache_key(
+            "kpi_offline_mtd",
+            {BI_WEB_QUERIES.ROW_SCOPE_PARAM: BI_WEB_QUERIES.scope_fingerprint(
+                frozenset({"hq", "hangzhou"})
+            )},
+        )
+        self.assertEqual(one, other)
 
 
 if __name__ == "__main__":

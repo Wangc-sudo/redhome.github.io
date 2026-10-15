@@ -11,7 +11,9 @@
   admin 不在快照属预期）——admin grant 命中即准入，在职校验只约束
   非 admin 用户。
 
-行级集合（``allowed_regions``）本批只算好不注入任何卡片查询（M3）。
+行级集合（``allowed_regions``）经 :func:`region_row_scope` 注入卡片
+查询层（M3：带 region 维度的卡片必须消费，其余卡片 ``row_scope=None``
+显式豁免，逐卡合约单测锁定）。
 """
 
 import threading
@@ -159,6 +161,24 @@ class ViewerResolver:
 # ---------------------------------------------------------------------------
 # 页面级判定（路由守卫与导航过滤共用的纯函数）
 # ---------------------------------------------------------------------------
+
+def region_row_scope(viewer):
+    """行级 scope（M3）：viewer → ``frozenset`` 或 ``None``（纯函数）。
+
+    * ``viewer is None``——Bearer 机读通道 / 未配置 session 的旧部署：
+      返回 ``None``，注入层不启用行级过滤，行为与 M3 前逐字节一致；
+    * ``viewer.is_admin``——恒全量：返回 ``None`` 绕过行级过滤（设计稿
+      §4.1 管理级「全量可见」）；
+    * 其余已准入用户——返回 ``viewer.allowed_regions``：**空集即空集**
+      （显式授予、无自动默认，铁律 2 fail-closed）。返回值可以是
+      ``frozenset()``，调用方据此对全部区域行判无可见。
+    """
+    if viewer is None:
+        return None
+    if viewer.is_admin:
+        return None
+    return viewer.allowed_regions
+
 
 def scope_allows(viewer, required_scope):
     """页面级：无声明 = 已准入即可见；有声明 = 需对应 scope（admin 恒过）。

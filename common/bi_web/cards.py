@@ -85,7 +85,7 @@ loop with Task 2's :class:`~common.bi_web.config.DashboardConfig` -- a
 dashboard may only place card ids that exist in the registry.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from common.bi_web import queries
@@ -110,6 +110,16 @@ class Card:
     ``grans``/``default_gran`` declare the day/week/month granularity
     a card accepts (2026-09-18 batch); both default to empty, so every
     undeclared card keeps its pre-granularity behaviour untouched.
+
+    ``row_scope`` declares whether the card's data carries a region
+    dimension (``"region"``) or is explicitly exempt (``None``, the
+    default).  ``"region"`` cards MUST consume the viewer's
+    ``allowed_regions`` -- the app layer injects it into ``params`` (see
+    :data:`common.bi_web.queries.ROW_SCOPE_PARAM`) and the per-card
+    contract test pins that consumption; ``None`` cards must NOT emit a
+    region whitelist predicate.  Design 2026-09-21 §4.1/§6: an admitted
+    non-admin viewer with an empty grant set sees no region rows at all
+    (fail-closed), and admin / the Bearer machine channel stay full-view.
     """
 
     card_id: str
@@ -118,6 +128,7 @@ class Card:
     params_schema: dict
     grans: tuple = ()
     default_gran: str = ""
+    row_scope: str = ""
 
 
 def _card(card_id, chart, run, params_schema=None, grans=(), default_gran=""):
@@ -406,8 +417,56 @@ _CARDS = (
           queries.run_table_contract_writeoff),
 )
 
+#: 行级 scope 卡片（``row_scope="region"``）：数据源带 region 维度
+#: （``fact_daily_report_offline`` 的离线线聚合 / 区域下钻 / 人员榜 /
+#: 缺口，以及 hz/sx/oa 三块区域大屏）。设计稿 §4.1/§6：**带区域语义
+#: 的查询必须消费 allowed_regions**，本集合是唯一声明点，缺失/多余由
+#: 逐卡合约测试（tests/common/test_bi_web_queries.py）双向锁定。
+#:
+#: 显式豁免（保持 ``row_scope=None``）及其事实依据：
+#: * 渠道 / 商品（``fact_channel_daily_sales`` / ``fact_order_line`` 无
+#:   ``region`` 列）——``kpi_channel_*`` / ``trend_channel_daily`` /
+#:   ``table_channel_mtd`` / ``table_store_mtd`` / ``bar_channel_mtd`` /
+#:   SKU 三卡 / 渠道大屏二十一卡；
+#: * 资金（``fact_fin_*`` 无 region），人工月报、0 占位卡；
+#: * 年度目标（设计稿点名豁免：全业务线目标无区域语义）；
+#: * 时间进度（工作日日历不分区域，与杭州卡同函数）。
+_REGION_SCOPED_CARD_IDS = frozenset({
+    # 离线线聚合 + 区域下钻 + 日环比
+    "kpi_offline_mtd", "kpi_offline_dod", "trend_region_daily",
+    "kpi_region_mtd", "bar_department_mtd",
+    # 人员榜（mart_collect 按 region 取榜）
+    "kpi_people_count", "kpi_people_completed", "kpi_people_rate",
+    "table_people_leaderboard",
+    # 缺口 / 告警（shortfall_facts 带 region 口径）
+    "kpi_shortfall", "anomaly_top",
+    # 杭州大屏（钉 hangzhou）
+    "kpi_hz_mtd", "kpi_hz_today", "trend_hz_daily", "bar_hz_dept",
+    "table_hz_people_progress", "table_hz_unfilled_today",
+    # 绍兴大屏（钉 shaoxing）
+    "kpi_sx_mtd", "kpi_sx_today", "trend_sx_daily", "bar_sx_dept",
+    "table_sx_people_progress", "table_sx_unfilled_today",
+    # 线下整体大屏（三区合并，整表放行/关闭）
+    "kpi_oa_mtd", "kpi_oa_today", "trend_oa_daily", "bar_oa_dept",
+    "table_oa_scopes", "table_oa_people_progress",
+})
+
+_UNKNOWN_SCOPED = _REGION_SCOPED_CARD_IDS - {c.card_id for c in _CARDS}
+if _UNKNOWN_SCOPED:
+    raise CardConfigError(
+        f"row_scope set names unknown card(s): {sorted(_UNKNOWN_SCOPED)}"
+    )
+
 #: card_id -> Card, built and import-time validated (chart + filter source).
-REGISTRY = {card.card_id: card for card in _CARDS}
+#: ``row_scope`` is stamped from the single declaration above so the
+#: region-scoped set has exactly one reviewable home.
+REGISTRY = {
+    card.card_id: (
+        replace(card, row_scope="region")
+        if card.card_id in _REGION_SCOPED_CARD_IDS else card
+    )
+    for card in _CARDS
+}
 
 
 def validate_dashboard_config(dashboard, registry) -> None:

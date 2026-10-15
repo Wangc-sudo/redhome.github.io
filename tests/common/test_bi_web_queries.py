@@ -12,7 +12,10 @@ Two layers:
   never couple to pre-existing data.
 """
 
+import ast
+import inspect
 import os
+import textwrap
 import threading
 import time
 import unittest
@@ -54,6 +57,7 @@ from pathlib import Path
 #   region_month_daily 形状测试各多一条静态 MAX 语句。
 # ---------------------------------------------------------------------------
 
+from common.bi_web import cards as bi_web_cards
 from common.bi_web import queries as bi_web_queries
 from common.bi_web.queries import (
     annual_target_total,
@@ -5602,6 +5606,346 @@ class BiWebQueriesIntegrationTests(unittest.TestCase):
         self.assertIn("biweb人员甲", names)
         self.assertIn("biweb人员乙", names)
         self.assertLess(names.index("biweb人员乙"), names.index("biweb人员甲"))
+
+
+# ---------------------------------------------------------------------------
+# 行级 scope（M3，设计稿 §4.1/§6）：viewer.allowed_regions 注入查询层
+#
+# 三条硬契约：
+# * ``scope=None``（Bearer/旧部署）—— 语句与绑定参数**逐字节不变**（零回归）；
+# * ``scope=空集`` —— ``AND 1 = 0``（显式授予无默认，铁律 2 fail-closed）；
+# * ``scope=非空`` —— **参数化** ``region IN (%s, ...)``，键升序、绝不插值。
+#
+# 逐卡合约（哪些卡必须消费、哪些卡豁免）见文件末
+# ``CardRowScopeContractTests``：走 queries 调用图静态判定，零 IO。
+# ---------------------------------------------------------------------------
+
+
+class ScopeHelperTests(unittest.TestCase):
+    """保留参数与过滤片段的纯函数（无 IO）。"""
+
+    def test_absent_key_means_row_level_filtering_is_off(self):
+        self.assertIsNone(bi_web_queries.scope_from_params({}))
+
+    def test_empty_fingerprint_is_the_empty_set_not_disabled(self):
+        # 关键区分："" 必须读成 frozenset()（fail-closed），不能读成 None。
+        self.assertEqual(
+            frozenset(), bi_web_queries.scope_from_params({"_scope": ""})
+        )
+
+    def test_fingerprint_splits_keys_and_drops_blanks(self):
+        self.assertEqual(
+            frozenset({"hangzhou", "hq"}),
+            bi_web_queries.scope_from_params({"_scope": "hangzhou,hq,"}),
+        )
+
+    def test_corrupt_shape_is_fail_closed(self):
+        self.assertEqual(
+            frozenset(), bi_web_queries.scope_from_params({"_scope": 123})
+        )
+
+    def test_scope_fingerprint_is_sorted_stable_and_none_passthrough(self):
+        self.assertEqual(
+            "hangzhou,shaoxing",
+            bi_web_queries.scope_fingerprint(frozenset({"shaoxing", "hangzhou"})),
+        )
+        self.assertEqual(
+            bi_web_queries.scope_fingerprint(frozenset({"hq", "hangzhou"})),
+            bi_web_queries.scope_fingerprint(frozenset({"hangzhou", "hq"})),
+        )
+        self.assertEqual("", bi_web_queries.scope_fingerprint(frozenset()))
+        self.assertIsNone(bi_web_queries.scope_fingerprint(None))
+
+    def test_region_filter_legacy_shape_is_untouched(self):
+        self.assertEqual(("", ()), bi_web_queries._scope_region_filter(None))
+
+    def test_region_filter_empty_scope_is_a_tautological_false(self):
+        self.assertEqual(
+            ("AND 1 = 0 ", ()), bi_web_queries._scope_region_filter(frozenset())
+        )
+
+    def test_region_filter_parameterises_sorted_keys(self):
+        fragment, params = bi_web_queries._scope_region_filter(
+            frozenset({"shaoxing", "hangzhou"})
+        )
+        self.assertEqual("AND region IN (%s, %s) ", fragment)
+        self.assertEqual(("hangzhou", "shaoxing"), params)
+
+    def test_region_filter_combines_pinned_region_and_scope(self):
+        fragment, params = bi_web_queries._scope_region_filter(
+            frozenset({"hangzhou"}), "hangzhou"
+        )
+        self.assertEqual("AND region = %s AND region IN (%s) ", fragment)
+        self.assertEqual(("hangzhou", "hangzhou"), params)
+
+    def test_append_region_sql_is_identity_on_the_legacy_path(self):
+        self.assertEqual(
+            "SELECT 1", bi_web_queries._append_region_sql("SELECT 1", "")
+        )
+        self.assertIn(
+            "AND region IN (%s)",
+            bi_web_queries._append_region_sql("SELECT 1", "AND region IN (%s) "),
+        )
+
+    def test_scope_allows_regions_requires_every_region(self):
+        self.assertTrue(
+            bi_web_queries._scope_allows_regions(None, "hangzhou", "hq")
+        )
+        self.assertTrue(
+            bi_web_queries._scope_allows_regions(
+                frozenset({"hangzhou", "hq"}), "hangzhou", "hq"
+            )
+        )
+        self.assertFalse(
+            bi_web_queries._scope_allows_regions(
+                frozenset({"hangzhou"}), "hangzhou", "hq"
+            )
+        )
+        self.assertFalse(
+            bi_web_queries._scope_allows_regions(frozenset(), "hangzhou")
+        )
+
+    def test_carry_scope_forwards_only_when_present(self):
+        self.assertEqual(
+            {"region": "hangzhou", "_scope": "hangzhou"},
+            bi_web_queries._carry_scope({"_scope": "hangzhou"}, {"region": "hangzhou"}),
+        )
+        self.assertEqual(
+            {"region": "hangzhou"},
+            bi_web_queries._carry_scope({}, {"region": "hangzhou"}),
+        )
+
+
+class RegionScopeQueryTests(unittest.TestCase):
+    """咽喉点：显式 region 与行级 scope 同时生效，旧路径逐字节不变。"""
+
+    def _connection(self):
+        return _RegionFakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("12"),
+                "region_target": Decimal("40"),
+            }
+        )
+
+    def test_no_scope_keeps_the_previous_statement_and_params(self):
+        connection = self._connection()
+        bi_web_queries.region_mtd_total(
+            connection, region="杭州",
+            first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+        )
+        sql, params = connection.executed[0]
+        self.assertIn("region = %s", sql)
+        self.assertNotIn("region IN", sql)
+        self.assertEqual((date(2026, 9, 1), date(2026, 9, 30), "杭州"), params)
+
+    def test_scope_pushes_a_parameterised_in_list(self):
+        connection = self._connection()
+        bi_web_queries.region_mtd_total(
+            connection, first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+            scope=frozenset({"shaoxing", "hangzhou"}),
+        )
+        sql, params = connection.executed[0]
+        self.assertIn("region IN (%s, %s)", sql)
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 9, 30), "hangzhou", "shaoxing"), params
+        )
+
+    def test_empty_scope_is_tautologically_false(self):
+        connection = self._connection()
+        bi_web_queries.region_mtd_total(
+            connection, first_day=date(2026, 9, 1), last_day=date(2026, 9, 30),
+            scope=frozenset(),
+        )
+        sql, params = connection.executed[0]
+        self.assertIn("AND 1 = 0", sql)
+        self.assertNotIn("region IN", sql)
+        self.assertEqual((date(2026, 9, 1), date(2026, 9, 30)), params)
+
+    def test_run_layer_reads_the_reserved_param(self):
+        connection = self._connection()
+        run_kpi_region_mtd(
+            connection, {"month": "2026-09", "_scope": "shaoxing"}
+        )
+        sql, params = connection.executed[0]
+        self.assertIn("region IN (%s)", sql)
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 9, 30), "shaoxing"), params
+        )
+
+    def test_pinned_region_outside_the_scope_carries_both_predicates(self):
+        # 钉死区域 + 不含它的 scope：两条谓词同时拼上（交集空，行数为 0）。
+        connection = self._connection()
+        run_kpi_region_mtd(
+            connection,
+            {"region": "hangzhou", "month": "2026-09", "_scope": "shaoxing"},
+        )
+        sql, params = connection.executed[0]
+        self.assertIn("region = %s", sql)
+        self.assertIn("region IN (%s)", sql)
+        self.assertEqual(
+            (date(2026, 9, 1), date(2026, 9, 30), "hangzhou", "shaoxing"), params
+        )
+
+    def test_offline_mtd_sum_static_path_is_untouched(self):
+        connection = _DodFakeConnection(
+            scalars={"fact_daily_report_offline": Decimal("7")},
+            latest={"fact_daily_report_offline": date(2026, 9, 30)},
+        )
+        bi_web_queries._offline_mtd_sum(connection, date(2026, 9, 30))
+        sql, params = connection.executed[0]
+        self.assertEqual(bi_web_queries._OFFLINE_MTD_SQL, sql)
+        self.assertEqual((date(2026, 9, 30),), params)
+
+    def test_offline_mtd_sum_scopes_the_water_mark_and_the_sum(self):
+        connection = _DodFakeConnection(
+            scalars={"fact_daily_report_offline": Decimal("7")},
+            latest={"fact_daily_report_offline": date(2026, 9, 30)},
+        )
+        run_kpi_offline_mtd(connection, {"_scope": "hangzhou"})
+        scoped = [
+            (sql, params) for sql, params in connection.executed
+            if "region IN (%s)" in sql
+        ]
+        # 水位定锚与求和都收窄到 scope 内：两处都不得再读全域。
+        self.assertEqual(2, len(scoped), connection.executed)
+        for sql, params in scoped:
+            self.assertEqual("hangzhou", params[-1])
+
+    def test_region_daily_series_static_path_has_no_bound_parameters(self):
+        connection = _DodFakeConnection(
+            rowsets={"fact_daily_report_offline": []},
+            latest={"fact_daily_report_offline": date(2026, 9, 30)},
+        )
+        bi_web_queries.region_daily_series(connection)
+        for sql, params in connection.executed:
+            if "GROUP BY business_date, region" in sql:
+                self.assertIsNone(params)
+
+    def test_region_daily_series_drops_out_of_scope_rows(self):
+        # 轴锚在「当前月首 → 当前水位」，故夹具必须落在本月。
+        today = date.today()
+        first_day = today.replace(day=1)
+        connection = _DodFakeConnection(
+            rowsets={
+                "fact_daily_report_offline": [
+                    {"business_date": first_day, "region": "hangzhou",
+                     "total": Decimal("10")},
+                    {"business_date": first_day, "region": "shaoxing",
+                     "total": Decimal("20")},
+                ]
+            },
+            latest={"fact_daily_report_offline": today},
+        )
+        series = bi_web_queries.region_daily_series(
+            connection, frozenset({"hangzhou"})
+        )
+        self.assertEqual(["hangzhou"], [one["name"] for one in series["series"]])
+        self.assertEqual(10.0, series["series"][0]["data"][0])
+
+    def test_exempt_card_sql_never_carries_a_region_predicate(self):
+        # 渠道日环比卡的间接调用会经过 `_dod_totals`（已 scope 化，但缺省
+        # 参数为 None）——运行时必须是"一条 region 白名单谓词也没有"。
+        connection = _DodFakeConnection(
+            rowsets={"fact_channel_daily_sales": []},
+            latest={"fact_channel_daily_sales": date(2026, 9, 30)},
+        )
+        bi_web_queries.run_kpi_channel_dod(connection, {"_scope": "hangzhou"})
+        self.assertTrue(connection.executed)
+        for sql, _params in connection.executed:
+            self.assertNotIn("region IN", sql)
+            self.assertNotIn("AND 1 = 0", sql)
+
+    def test_people_snapshot_gates_the_pinned_region(self):
+        # mart_collect 在共享采集层，无法下推——不在 scope 内即空榜，
+        # 且**一次查询都不发起**（这里顺便守住「不该取数就别取」）。
+        connection = FakeConnection()
+        people = bi_web_queries._people_snapshot(
+            connection, "杭州", "2026-09", frozenset({"shaoxing"})
+        )
+        self.assertEqual([], people)
+        self.assertEqual([], connection.executed)
+
+    def test_people_snapshot_merged_view_intersects_the_scope(self):
+        connection = FakeConnection()
+        people = bi_web_queries._people_snapshot(
+            connection, None, "2026-09", frozenset({"shaoxing"})
+        )
+        # 两榜位（中文「杭州」「绍兴」）与区域键词表的交集为空：空榜而非全域榜。
+        self.assertEqual([], people)
+
+
+class CardRowScopeContractTests(unittest.TestCase):
+    """逐卡合约：声明了 ``row_scope="region"`` 的卡必须消费 scope。
+
+    判定走 queries 调用图（函数源码里出现任一 scope 记号，或它转调的函数
+    里有），零 IO——这样「新加一张区域卡却忘了接线」会在 CI 直接红，而不是
+    等到某次越权才发现。
+    """
+
+    _MARKERS = (
+        "scope_from_params",
+        "_scope_region_filter",
+        "_scope_allows_regions",
+        "_carry_scope",
+        "ROW_SCOPE_PARAM",
+    )
+
+    def _callees(self, func):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+        names = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "bi_web_queries"
+            ):
+                names.append(target.attr)
+            elif isinstance(target, ast.Name):
+                names.append(target.id)
+        return names
+
+    def _consumes(self, func, seen=None):
+        seen = set() if seen is None else seen
+        if func in seen:
+            return False
+        seen.add(func)
+        try:
+            source = inspect.getsource(func)
+        except (OSError, TypeError):
+            return False
+        if any(marker in source for marker in self._MARKERS):
+            return True
+        for name in self._callees(func):
+            nested = getattr(bi_web_queries, name, None)
+            if inspect.isfunction(nested) and self._consumes(nested, seen):
+                return True
+        return False
+
+    def test_declared_region_cards_consume_the_scope(self):
+        missing = [
+            card_id for card_id, card in bi_web_cards.REGISTRY.items()
+            if card.row_scope == "region" and not self._consumes(card.run)
+        ]
+        self.assertEqual([], missing, f"row_scope=region 但未消费 scope: {missing}")
+
+    def test_exempt_cards_never_wire_the_scope_directly(self):
+        # 反向锁只看本卡自身源码（不递归）：豁免卡一旦被"顺手"接上 scope，
+        # 说明豁免理由已过期——要么补声明、要么撤接线，不允许两不占。
+        # 不递归是因为若干**共享**核（如 ``_dod_totals``）已被 scope 化，
+        # 豁免卡以缺省 scope=None 调它并不等于接线（行为另由
+        # ``test_exempt_card_sql_never_carries_a_region_predicate`` 守住）。
+        leaked = [
+            card_id for card_id, card in bi_web_cards.REGISTRY.items()
+            if card.row_scope != "region"
+            and any(
+                marker in textwrap.dedent(inspect.getsource(card.run))
+                for marker in self._MARKERS
+            )
+        ]
+        self.assertEqual([], leaked, f"豁免卡却接了 scope: {leaked}")
 
 
 if __name__ == "__main__":

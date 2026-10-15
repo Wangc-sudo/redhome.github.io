@@ -399,21 +399,30 @@ def month_bounds(month):
     return days[0], days[-1]
 
 
-def _offline_mtd_sum(connection, latest) -> Decimal:
-    """当月 1 号 → 水位日的 Σsales；水位为空（空表）时直接 0，不发起求和。"""
+def _offline_mtd_sum(connection, latest, scope=None) -> Decimal:
+    """当月 1 号 → 水位日的 Σsales；水位为空（空表）时直接 0，不发起求和。
+
+    行级 scope（M3）：scope 非 None 时在窗口 SQL 末尾追加参数化
+    ``region IN``；scope=None 时语句与参数逐字节不变。
+    """
     if latest is None:
         return Decimal(0)
-    return _fetch_scalar(connection, _OFFLINE_MTD_SQL, (latest,))
+    fragment, scope_params = _scope_region_filter(scope)
+    sql = _append_region_sql(_OFFLINE_MTD_SQL, fragment)
+    return _fetch_scalar(connection, sql, (latest,) + scope_params)
 
 
-def offline_window_sum(connection, *, first_day, last_day) -> Decimal:
+def offline_window_sum(connection, *, first_day, last_day, scope=None) -> Decimal:
     """线下 [first_day, last_day] 闭区间 Σsales（合计行 + 电商线排除）。
 
     粒度批次 A3 的共用窗口核：调用方负责按档位算边界（周=周一→锚点、
-    日=锚点当日、月=月首→锚点），本函数不掺任何时钟。
+    日=锚点当日、月=月首→锚点），本函数不掺任何时钟。行级 scope（M3）
+    与 :func:`_offline_mtd_sum` 同款下推。
     """
+    fragment, scope_params = _scope_region_filter(scope)
+    sql = _append_region_sql(_OFFLINE_WINDOW_SQL, fragment)
     return _fetch_scalar(
-        connection, _OFFLINE_WINDOW_SQL, (first_day, last_day)
+        connection, sql, (first_day, last_day) + scope_params
     )
 
 
@@ -640,17 +649,25 @@ def _daily_three_state(connection, rows, name_key, first_day, last_day,
     return aligned
 
 
-def region_daily_series(connection) -> dict:
+def region_daily_series(connection, scope=None) -> dict:
     """L1 无参路径：当前月全区域日序列（窗口 SQL 全静态）。
 
     轴由「有数据的日」改为 月首→min(月末, 锚点) 的完整日窗口（三态：
     缺失日 null 断线、营业日真实 0 标 zero）；B2 起锚点 = 真实数据
     水位（多一条静态 MAX 定锚查询），T+1 未入仓的日子不再进轴。
+
+    行级 scope（M3）：源 SQL 已按 ``business_date × region`` 分组，逐行
+    丢弃不在 scope 内的 region 与下推 ``region IN`` 结果逐字节等价——
+    故本卡走 Python 过滤，保住「无参静态 SQL」契约（StaticSqlTests 与
+    FakeConnection 断言 ``executed`` 里无 ``%s``）；scope=空集 ⇒ 无行
+    （fail-closed，轴仍在但全 missing，不声称有数）。
     """
     today = datetime.now().date()
     first_day, last_day = month_bounds(today.strftime("%Y-%m"))
     anchor = _offline_trend_anchor(connection, first_day, last_day)
     rows = _fetch_rows(connection, _REGION_DAILY_SQL)
+    if scope is not None:
+        rows = [row for row in rows if row.get("region") in scope]
     return _daily_three_state(
         connection, rows, "region", first_day, last_day, anchor=anchor
     )
@@ -799,7 +816,108 @@ def _optional_region_filter(region):
     return "", ()
 
 
-def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal:
+# ---------------------------------------------------------------------------
+# 行级 scope（M3，设计稿 §4.1/§6）：viewer.allowed_regions 注入查询层
+# ---------------------------------------------------------------------------
+#
+# 通道：app 层把 :func:`region_row_scope` 的产出压成稳定指纹串写进
+# ``params[ROW_SCOPE_PARAM]``（仅 ``row_scope == "region"`` 的卡片），
+# 本模块的 region 语义查询读回后拼**参数化** ``region IN (%s, ...)``。
+# 指纹（而非 frozenset 本体）入 params 是两个约束同时逼出来的：
+# ① 缓存键 ``normalize_params`` 直接 str() 各参数——frozenset 的 str()
+# 顺序随进程哈希种子漂移，会让 Redis 键跨容器不稳定；② scope 必须进
+# 缓存键，否则不同可见范围的载荷会互相串（越权缓存命中）。
+#
+#: 行级 scope 在 params 里的保留键（URL 参数白名单之外，app 层注入）。
+#: 值 = 逗号分隔的 region 键**升序**串；空串 = 空集（fail-closed）。
+ROW_SCOPE_PARAM = "_scope"
+
+
+def scope_from_params(params):
+    """params → ``frozenset`` 或 ``None``（纯函数）。
+
+    键缺失 → ``None``：不启用行级过滤（Bearer/旧部署，行为逐字节不变）。
+    键存在 → frozenset（空串即空集）；形态损坏（非字符串）按空集
+    fail-closed，绝不退化为「全区域可见」。
+    """
+    raw = params.get(ROW_SCOPE_PARAM)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return frozenset()
+    return frozenset(part for part in raw.split(",") if part)
+
+
+def scope_fingerprint(scope):
+    """``frozenset``/``None`` → params 指纹串（``None`` → 不写键的哨兵）。"""
+    if scope is None:
+        return None
+    return ",".join(sorted(scope))
+
+
+def _carry_scope(params, target):
+    """把 scope 指纹转抄进派生 params（锚定卡委派通用函数时用）。
+
+    hz/sx/oa 卡把 ``{"region": 钉死值, "month": ...}`` 交给通用取数函数，
+    若不转抄，scope 会在委派边界丢失 → 锚定卡反而绕过行级过滤。
+    """
+    raw = params.get(ROW_SCOPE_PARAM)
+    if raw is not None:
+        target[ROW_SCOPE_PARAM] = raw
+    return target
+
+
+def _scope_region_filter(scope, region=None):
+    """行级 scope + 可选显式 region → ``(SQL 片段, 参数元组)``（纯函数）。
+
+    * ``scope is None`` → 与 :func:`_optional_region_filter` 完全同形
+      （旧调用路径零变化；片段为空时 SQL 仍无 ``%s``，StaticSqlTests
+      锁定的静态语句不破）；
+    * ``scope == frozenset()`` → ``AND 1 = 0``（空集铁律：一行不可见）；
+    * 非空 → ``AND region IN (%s, ...)``，值一律参数化、按 sorted 稳定
+      （绝不字符串插值，设计稿 §6）。
+
+    片段只允许拼进**已参数化**（字面 ``%`` 双写）的 SQL：``%s`` 占位
+    由 pymysql ``sql % params`` 消费，与既有 region 片段同款。
+    """
+    fragments, params = [], []
+    if region:
+        fragments.append("AND region = %s ")
+        params.append(region)
+    if scope is not None:
+        if not scope:
+            fragments.append("AND 1 = 0 ")
+        else:
+            placeholders = ", ".join(["%s"] * len(scope))
+            fragments.append(f"AND region IN ({placeholders}) ")
+            params.extend(sorted(scope))
+    return "".join(fragments), tuple(params)
+
+
+def _scope_allows_regions(scope, *regions):
+    """scope 是否覆盖给定区域集合（供无法下推 SQL 的合并卡做 fail-closed 门）。
+
+    ``scope is None``（未启用行级）→ True；否则要求 *regions* 全部在
+    scope 内——合并采集（三区 merge 后已不可按区域拆分）**不能**只凭
+    交集放行：少给一个区域的授权就会多暴露该区域的行。
+    """
+    if scope is None:
+        return True
+    return all(one in scope for one in regions)
+
+
+def _append_region_sql(sql, fragment):
+    """把 :func:`_scope_region_filter` 的片段追加到**已参数化** SQL 末尾。
+
+    片段为空（scope=None 且无显式 region）→ 原样返回，静态语句/绑定参数
+    逐字节不变；否则追加成新的 ``AND`` 谓词（片段一律 %s 占位）。
+    """
+    stripped = fragment.strip()
+    return sql if not stripped else f"{sql}\n    {stripped}"
+
+
+def region_mtd_total(connection, *, region=None, first_day, last_day,
+                     scope=None) -> Decimal:
     """选中区域（缺省全区域）某自然月 Σsales（截断未来 + 排除合计行）。
 
     B3 起「全区域」= 线下线全域（排除 qudao/vanke/电商，见
@@ -808,7 +926,7 @@ def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal
     ``sql % params`` 约定）：``'%%合计%%'`` 格式化后 MySQL 收到
     ``'%合计%'``。
     """
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT COALESCE(SUM(sales_amount), 0)
@@ -823,13 +941,14 @@ def region_mtd_total(connection, *, region=None, first_day, last_day) -> Decimal
     return _fetch_scalar(connection, sql, (first_day, last_day) + region_params)
 
 
-def region_month_target(connection, *, region=None, first_day, last_day) -> Decimal:
+def region_month_target(connection, *, region=None, first_day, last_day,
+                        scope=None) -> Decimal:
     """区域月目标 = Σ各人员 MAX(monthly_target)（melt 陷阱：绝不跨行 SUM）。
 
     与 ``summarize_people`` 同口径取**全月行** MAX：月目标是月级常量，
     预填未来行不影响 MAX，故不做 CURDATE 截断（与取数查询刻意不对称）。
     """
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT COALESCE(SUM(mx), 0)
@@ -847,9 +966,10 @@ def region_month_target(connection, *, region=None, first_day, last_day) -> Deci
     return _fetch_scalar(connection, sql, (first_day, last_day) + region_params)
 
 
-def department_mtd_ranking(connection, *, region=None, first_day, last_day) -> dict:
+def department_mtd_ranking(connection, *, region=None, first_day, last_day,
+                           scope=None) -> dict:
     """选中区域（缺省全区域）某自然月按部门 Σsales 降序；空部门→未分组。"""
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT department, SUM(sales_amount) AS total
@@ -870,12 +990,15 @@ def department_mtd_ranking(connection, *, region=None, first_day, last_day) -> d
     }
 
 
-def region_month_daily_series(connection, *, region=None, first_day, last_day) -> dict:
+def region_month_daily_series(connection, *, region=None, first_day, last_day,
+                              scope=None) -> dict:
     """参数化的区域日销序列（L2 用）；有 region 单系列、无则全区域系列。
 
-    L1 无参路径仍走静态 ``region_daily_series``（StaticSqlTests 锁定）。
+    L1 无参路径仍走静态 ``region_daily_series``（StaticSqlTests 锁定）；
+    行级 scope（M3）与显式 region 同时生效：``region = %s AND region IN``
+    交集，钉死区域不在 scope 内即空集（fail-closed）。
     """
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT business_date, region, SUM(sales_amount) AS total
@@ -895,7 +1018,7 @@ def region_month_daily_series(connection, *, region=None, first_day, last_day) -
     )
 
 
-def region_weekly_series(connection, *, region=None, month) -> dict:
+def region_weekly_series(connection, *, region=None, month, scope=None) -> dict:
     """周档位区域序列：month=窗口截止月，锚点所在自然周起向前 12 周。
 
     周一为首、跨月周归属起始日所在月；桶内求和由 SQL 下推（
@@ -913,7 +1036,7 @@ def region_weekly_series(connection, *, region=None, month) -> dict:
     as_of = _offline_trend_anchor(connection, first_day, last_day)
     axis = _week_axis(as_of) if as_of is not None else []
     workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT DATE_SUB(business_date, INTERVAL WEEKDAY(business_date) DAY) AS bucket_start,
@@ -938,7 +1061,7 @@ def region_weekly_series(connection, *, region=None, month) -> dict:
     return aligned
 
 
-def region_monthly_series(connection, *, region=None, month) -> dict:
+def region_monthly_series(connection, *, region=None, month, scope=None) -> dict:
     """月档位区域序列：month=窗口截止月，向前 12 个自然月（YYYY-MM 轴）。
 
     桶键 = 月初日（SQL 下推 ``DAYOFMONTH`` 归一，别名 ``bucket_start``
@@ -949,7 +1072,7 @@ def region_monthly_series(connection, *, region=None, month) -> dict:
     as_of = _offline_trend_anchor(connection, first_day, last_day)
     axis = _month_axis(first_day) if as_of is not None else []
     workdays = _window_workdays(connection, axis[0] if axis else first_day, last_day)
-    region_sql, region_params = _optional_region_filter(region)
+    region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
         SELECT DATE_SUB(business_date, INTERVAL DAYOFMONTH(business_date) - 1 DAY) AS bucket_start,
@@ -980,6 +1103,19 @@ _OFFLINE_DOD_LATEST_SQL = textwrap.dedent(
     FROM fact_daily_report_offline
     WHERE business_date <= CURDATE()
     AND responsible_person NOT LIKE '%合计%'
+    {_OFFLINE_LINE_SQL}
+    """
+).strip()
+
+#: 水位定锚的参数化孪生（M3 行级 scope）：与上面静态版同口径，字面 ``%``
+#: 双写以配合 ``sql % params``。仅在 scope 非 None 时使用——静态版继续
+#: 服务无 scope 路径（StaticSqlTests 锁定的「无 %s」形状不被污染）。
+_OFFLINE_DOD_LATEST_SCOPED_SQL = textwrap.dedent(
+    f"""
+    SELECT MAX(business_date) AS d
+    FROM fact_daily_report_offline
+    WHERE business_date <= CURDATE()
+    AND responsible_person NOT LIKE '%%合计%%'
     {_OFFLINE_LINE_SQL}
     """
 ).strip()
@@ -1020,10 +1156,17 @@ _CHANNEL_DOD_WINDOW_SQL = textwrap.dedent(
 ).strip()
 
 
-def _dod_totals(connection, sql, latest):
-    """近 7 自然日窗口的按日 Σsales 映射（缺数日不在映射中）。"""
+def _dod_totals(connection, sql, latest, scope=None):
+    """近 7 自然日窗口的按日 Σsales 映射（缺数日不在映射中）。
+
+    行级 scope（M3）：*sql* 必须是已参数化语句（字面 ``%`` 双写），
+    scope 非 None 时在末尾追加参数化 ``region IN`` 片段。
+    """
     first_day = latest - timedelta(days=6)
-    rows = _fetch_rows(connection, sql, (first_day, latest))
+    fragment, scope_params = _scope_region_filter(scope)
+    rows = _fetch_rows(
+        connection, _append_region_sql(sql, fragment), (first_day, latest) + scope_params
+    )
     return {row["business_date"]: row["total"] for row in rows}
 
 
@@ -1053,22 +1196,29 @@ def _dod_core(totals, latest):
     }
 
 
-def offline_latest_date(connection):
+def offline_latest_date(connection, scope=None):
     """线下日报数据水位：最新入仓 business_date（空表 None）。
 
-    与 :func:`offline_dod` 共用 ``_OFFLINE_DOD_LATEST_SQL``（含未来行
-    截断 + 合计行排除）；B2 起 MTD 窗口上界、线下趋势卡锚点与
-    日环比同源。
+    与 :func:`offline_dod` 共用定锚语句（含未来行截断 + 合计行排除）；
+    B2 起 MTD 窗口上界、线下趋势卡锚点与日环比同源。行级 scope（M3）：
+    scope 非 None 时改走参数化孪生语句，水位也按可见区域取——否则
+    「一区域全空」的授权仍会从全域水位里读出别人区域的最新日。
     """
-    return _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+    if scope is None:
+        return _fetch_one(connection, _OFFLINE_DOD_LATEST_SQL)
+    fragment, scope_params = _scope_region_filter(scope)
+    sql = _append_region_sql(_OFFLINE_DOD_LATEST_SCOPED_SQL, fragment)
+    return _fetch_one(connection, sql, scope_params)
 
 
-def offline_dod(connection):
+def offline_dod(connection, scope=None):
     """⑭ 线下日环比核：最新数据日 Σsales、前一自然日、近 7 自然日。"""
-    latest = offline_latest_date(connection)
+    latest = offline_latest_date(connection, scope)
     if latest is None:
         return None
-    return _dod_core(_dod_totals(connection, _OFFLINE_DOD_WINDOW_SQL, latest), latest)
+    return _dod_core(
+        _dod_totals(connection, _OFFLINE_DOD_WINDOW_SQL, latest, scope), latest
+    )
 
 
 def channel_dod(connection):
@@ -1218,7 +1368,7 @@ def _people_for_region(connection, region, month):
     return list(data.people)
 
 
-def _people_snapshot(connection, region, month):
+def _people_snapshot(connection, region, month, scope=None):
     """l2-people 四卡共享的人员快照（模块级 60s 缓存，带锁）。
 
     页面一次加载的四张卡（三 scalar + 一 table）只触发一轮采集查询；
@@ -1228,15 +1378,27 @@ def _people_snapshot(connection, region, month):
 
     锁覆盖检查与采集全程（与 app._TTLGate 同款语义）：同键并发首查
     只发起一轮采集，后到者等锁后直接命中缓存。
+
+    行级 scope（M3）：mart_collect 的 region 校验在共享采集层、无法在
+    本卡下推 SQL，故此处走 fail-closed **门**——钉死区域不在 scope 内
+    即空榜；region=None 时只并入 scope 内的榜位（交集为空即空榜，绝不
+    用「全域榜」冒充可见）。scope 指纹并入缓存键，避免不同可见范围
+    互相命中同一份榜。
     """
-    key = (region, month)
+    key = (region, month, scope_fingerprint(scope))
     with _PEOPLE_CACHE_LOCK:
         cached = _PEOPLE_CACHE.get(key)
         if cached is not None and time.monotonic() < cached[0]:
             return cached[1]
         if region is None:
+            if scope is None:
+                wanted = _PEOPLE_REGIONS
+            else:
+                wanted = tuple(
+                    one for one in _PEOPLE_REGIONS if one in scope
+                )
             people = []
-            for one_region in _PEOPLE_REGIONS:
+            for one_region in wanted:
                 people.extend(
                     _people_for_region(connection, one_region, month)
                 )
@@ -1247,6 +1409,8 @@ def _people_snapshot(connection, region, month):
                     -person["target"],
                 )
             )
+        elif scope is not None and region not in scope:
+            people = []
         else:
             people = _people_for_region(connection, region, month)
         _PEOPLE_CACHE[key] = (
@@ -1287,7 +1451,8 @@ def run_kpi_offline_mtd(connection, params) -> dict:
     """
     month = (params.get("month") or "").strip()
     gran = (params.get("gran") or "month").strip()
-    latest = offline_latest_date(connection)
+    scope = scope_from_params(params)
+    latest = offline_latest_date(connection, scope)
     value, as_of = Decimal(0), None
     if latest is not None:
         if month:
@@ -1300,21 +1465,26 @@ def run_kpi_offline_mtd(connection, params) -> dict:
         if anchor is not None:
             if gran == "day":
                 value = offline_window_sum(
-                    connection, first_day=anchor, last_day=anchor
+                    connection, first_day=anchor, last_day=anchor, scope=scope
                 )
             elif gran == "week":
                 monday = anchor - timedelta(days=anchor.weekday())
                 value = offline_window_sum(
-                    connection, first_day=monday, last_day=anchor
+                    connection, first_day=monday, last_day=anchor, scope=scope
                 )
             elif gran == "year":
-                value = _fetch_scalar(connection, _OFFLINE_YTD_SQL, (anchor,))
+                fragment, scope_params = _scope_region_filter(scope)
+                value = _fetch_scalar(
+                    connection,
+                    _append_region_sql(_OFFLINE_YTD_SQL, fragment),
+                    (anchor,) + scope_params,
+                )
             elif first_day is not None:
                 value = offline_window_sum(
-                    connection, first_day=first_day, last_day=anchor
+                    connection, first_day=first_day, last_day=anchor, scope=scope
                 )
             else:
-                value = _offline_mtd_sum(connection, latest)
+                value = _offline_mtd_sum(connection, latest, scope)
             as_of = anchor
     return {
         "chart": "scalar",
@@ -1407,23 +1577,25 @@ def run_trend_region_daily(connection, params) -> dict:
     region = params.get("region")
     month = params.get("month")
     gran = params.get("gran") or "day"
+    scope = scope_from_params(params)
     if gran == "week":
         series = region_weekly_series(
             connection, region=region,
-            month=month or datetime.now().strftime("%Y-%m"),
+            month=month or datetime.now().strftime("%Y-%m"), scope=scope,
         )
     elif gran == "month":
         series = region_monthly_series(
             connection, region=region,
-            month=month or datetime.now().strftime("%Y-%m"),
+            month=month or datetime.now().strftime("%Y-%m"), scope=scope,
         )
     elif region is None and month is None:
-        series = region_daily_series(connection)
+        series = region_daily_series(connection, scope)
     else:
         month = month or datetime.now().strftime("%Y-%m")
         first_day, last_day = month_bounds(month)
         series = region_month_daily_series(
-            connection, region=region, first_day=first_day, last_day=last_day
+            connection, region=region, first_day=first_day, last_day=last_day,
+            scope=scope,
         )
     return {
         "chart": "line",
@@ -1653,12 +1825,15 @@ def run_kpi_region_mtd(connection, params) -> dict:
     """
     region = params.get("region")
     month = params.get("month") or datetime.now().strftime("%Y-%m")
+    scope = scope_from_params(params)
     first_day, last_day = month_bounds(month)
     value = region_mtd_total(
-        connection, region=region, first_day=first_day, last_day=last_day
+        connection, region=region, first_day=first_day, last_day=last_day,
+        scope=scope,
     )
     target = region_month_target(
-        connection, region=region, first_day=first_day, last_day=last_day
+        connection, region=region, first_day=first_day, last_day=last_day,
+        scope=scope,
     )
     rate = None if target == 0 else float(value) / float(target)
     return {
@@ -1674,9 +1849,11 @@ def run_bar_department_mtd(connection, params) -> dict:
     """区域部门当月排行（模块 ① 区域下钻）: region/month bar 降序。"""
     region = params.get("region")
     month = params.get("month") or datetime.now().strftime("%Y-%m")
+    scope = scope_from_params(params)
     first_day, last_day = month_bounds(month)
     ranking = department_mtd_ranking(
-        connection, region=region, first_day=first_day, last_day=last_day
+        connection, region=region, first_day=first_day, last_day=last_day,
+        scope=scope,
     )
     return {
         "chart": "bar",
@@ -1704,7 +1881,7 @@ def _run_dod(core):
 
 def run_kpi_offline_dod(connection, params):
     """⑭ 线下日环比卡（L1，无参）。"""
-    return _run_dod(offline_dod(connection))
+    return _run_dod(offline_dod(connection, scope_from_params(params)))
 
 
 def run_kpi_channel_dod(connection, params):
@@ -1783,14 +1960,14 @@ def run_table_store_mtd(connection, params) -> dict:
 def run_kpi_people_count(connection, params) -> dict:
     """参与人数: 榜上人员数（unit=人，前端不做万换算）。"""
     region, month = _people_params(params)
-    people = _people_snapshot(connection, region, month)
+    people = _people_snapshot(connection, region, month, scope_from_params(params))
     return {"chart": "scalar", "value": float(len(people)), "unit": "人"}
 
 
 def run_kpi_people_completed(connection, params) -> dict:
     """Σ完成额: 已过工作日 sales_amount 合计（元）。"""
     region, month = _people_params(params)
-    people = _people_snapshot(connection, region, month)
+    people = _people_snapshot(connection, region, month, scope_from_params(params))
     return {
         "chart": "scalar",
         "value": float(sum(person["completed"] for person in people)),
@@ -1801,7 +1978,7 @@ def run_kpi_people_completed(connection, params) -> dict:
 def run_kpi_people_rate(connection, params) -> dict:
     """总达成率: Σcompleted÷Σtarget（非个人率平均；Σtarget=0 → None）。"""
     region, month = _people_params(params)
-    people = _people_snapshot(connection, region, month)
+    people = _people_snapshot(connection, region, month, scope_from_params(params))
     completed = sum(person["completed"] for person in people)
     target = sum(person["target"] for person in people)
     rate = None if target == 0 else completed / target
@@ -1906,7 +2083,7 @@ _ANOMALY_TOP_N = 10
 
 
 def shortfall_facts(connection, *, grain="people", region=None,
-                    first_day, last_day) -> list:
+                    first_day, last_day, scope=None) -> list:
     """只读事实：``[{name, target, done}]``（金额与 ``_unit`` 同为元）。
 
     **不含任何派生列** —— 派生一律走 :mod:`common.bi_web.derived`，这是
@@ -1918,18 +2095,27 @@ def shortfall_facts(connection, *, grain="people", region=None,
     if grain not in _SHORTFALL_GRAINS:
         grain = _DEFAULT_SHORTFALL_GRAIN
     if grain == "region":
-        return _fetch_rows(
+        rows = _fetch_rows(
             connection, _SHORTFALL_REGION_SQL,
             (first_day, last_day, first_day, last_day),
         )
+        if scope is not None:
+            # 行级 scope（M3）：区域汇总 SQL 无 WHERE 且按 region 分组，
+            # 逐行过滤与下推 region IN 等价（HTTP 侧 grain 未放开，此路径
+            # 目前只有单测到达；仍按同一契约消费 scope，不留绕过口）。
+            rows = [row for row in rows if row.get("region") in scope]
+        return rows
     if region:
-        region_sql, region_params = _optional_region_filter(region)
+        region_sql, region_params = _scope_region_filter(scope, region)
     else:
         # P0-1（2026-09-28）：缺省 = 线下线全域。L1 的缺口/告警卡不带
         # region 参数，原「空片段=全区域」把 qudao 电商集合口径人员
         # （23 人、月目标合计 1.62 亿）整个混进缺口榜；显式选 region
         # （如 l2-ecom-people 选 qudao）仍逐字透传，不受本过滤影响。
-        region_sql, region_params = _OFFLINE_LINE_SQL, ()
+        # 行级 scope（M3）叠加在线过滤之后：全域口径再收窄到 scope 内
+        # 区域；scope=None 时片段为空，语句与参数逐字节不变。
+        fragment, region_params = _scope_region_filter(scope)
+        region_sql = _append_region_sql(_OFFLINE_LINE_SQL, fragment)
     sql = _SHORTFALL_PEOPLE_SQL.replace("{region_sql}", region_sql)
     return _fetch_rows(
         connection, sql,
@@ -2106,6 +2292,7 @@ def run_kpi_shortfall(connection, params) -> dict:
         region=params.get("region"),
         first_day=first_day,
         last_day=last_day,
+        scope=scope_from_params(params),
     )
     calendar = shortfall_calendar(
         connection, first_day=first_day, last_day=last_day
@@ -2134,6 +2321,7 @@ def run_anomaly_top(connection, params) -> dict:
         connection, grain=_DEFAULT_SHORTFALL_GRAIN,
         region=params.get("region"),
         first_day=first_day, last_day=last_day,
+        scope=scope_from_params(params),
     )
     calendar = shortfall_calendar(
         connection, first_day=first_day, last_day=last_day
@@ -2161,7 +2349,7 @@ def run_anomaly_top(connection, params) -> dict:
 def run_table_people_leaderboard(connection, params) -> dict:
     """人员榜: 服务端名次；未完成缺口=未填工作日数（spec §3.4）。"""
     region, month = _people_params(params)
-    people = _people_snapshot(connection, region, month)
+    people = _people_snapshot(connection, region, month, scope_from_params(params))
     rows = [
         {
             "rank": index,
@@ -2914,14 +3102,22 @@ def run_kpi_hz_mtd(connection, params) -> dict:
     （月 = 锚点日所在月）。"""
     anchor = _hz_anchor(params)
     return run_kpi_region_mtd(
-        connection, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}
+        connection,
+        _carry_scope(params, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}),
     )
 
 
 def run_kpi_hz_today(connection, params) -> dict:
-    """杭州当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。"""
+    """杭州当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。
+
+    行级 scope（M3）：语句已参数化（字面 % 双写），scope 非 None 时在
+    末尾追加 ``region IN`` 片段——钉死区域不在 scope 内即 0（fail-closed）。
+    """
     anchor = _hz_anchor(params)
-    rows = _fetch_rows(connection, _HZ_TODAY_SQL, (anchor,))
+    fragment, scope_params = _scope_region_filter(scope_from_params(params))
+    rows = _fetch_rows(
+        connection, _append_region_sql(_HZ_TODAY_SQL, fragment), (anchor,) + scope_params
+    )
     value = rows[0]["s"] if rows else 0
     return {
         "chart": "scalar",
@@ -2954,7 +3150,8 @@ def run_bar_hz_dept(connection, params) -> dict:
     """杭州部门本月排行（bar）：bar_department_mtd 的杭州锚定版。"""
     anchor = _hz_anchor(params)
     return run_bar_department_mtd(
-        connection, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}
+        connection,
+        _carry_scope(params, {"region": _HZ_REGION, "month": anchor.strftime("%Y-%m")}),
     )
 
 
@@ -2964,15 +3161,15 @@ def run_trend_hz_daily(connection, params) -> dict:
     anchor = _hz_anchor(params)
     return run_trend_region_daily(
         connection,
-        {
+        _carry_scope(params, {
             "region": _HZ_REGION,
             "month": anchor.strftime("%Y-%m"),
             "gran": params.get("gran") or "day",
-        },
+        }),
     )
 
 
-def _unfilled_payload(connection, region, anchor):
+def _unfilled_payload(connection, region, anchor, scope=None):
     """区域当日未填报人载荷（hz/sx 共用，2026-10-10 运维反馈新增）。
 
     真源 = 催办同款 ``mart_tasks._unfilled``（dim_robot_member ∩
@@ -2983,7 +3180,10 @@ def _unfilled_payload(connection, region, anchor):
     """
     from common.daily_robot.mart_tasks import _unfilled
 
-    members = _unfilled(connection, region, anchor, {})
+    members = (
+        _unfilled(connection, region, anchor, {})
+        if _scope_allows_regions(scope, region) else []
+    )
     rows = [
         {
             "rank": index,
@@ -3006,23 +3206,28 @@ def _unfilled_payload(connection, region, anchor):
 
 def run_table_hz_unfilled_today(connection, params) -> dict:
     """杭州当日未填报人（table）：``_unfilled_payload`` 杭州锚定版。"""
-    return _unfilled_payload(connection, _HZ_REGION, _hz_anchor(params))
+    return _unfilled_payload(
+        connection, _HZ_REGION, _hz_anchor(params), scope_from_params(params)
+    )
 
 
-def _people_progress_payload(connection, region, anchor):
+def _people_progress_payload(connection, region, anchor, scope=None):
     """区域个人完成率榜载荷（hz/sx 共用）：静态榜单页同口径全列。
 
     排名/姓名/部门/完成/月目标/达成率/进度差/日均完成/预计月末/未填；
     进度基准 = 已过工作日 ÷ 全月工作日（mart_collect 自带 elapsed，
     含锚点当天）。dim_calendar 缺行（MartTaskError）降级空表。
     """
-    try:
-        data = mart_collect(
-            connection, region=region, business_date=anchor,
-            include_today=True,
-        )
-    except MartTaskError:
-        data = None
+    if not _scope_allows_regions(scope, region):
+        data = None  # 行级 scope 门：钉死区域不授权，整表空（fail-closed）
+    else:
+        try:
+            data = mart_collect(
+                connection, region=region, business_date=anchor,
+                include_today=True,
+            )
+        except MartTaskError:
+            data = None
     rows = []
     if data is not None and data.workdays:
         n_elapsed = len(data.elapsed)
@@ -3064,7 +3269,9 @@ def _people_progress_payload(connection, region, anchor):
 
 def run_table_hz_people_progress(connection, params) -> dict:
     """杭州个人完成率榜（table）：``_people_progress_payload`` 杭州锚定版。"""
-    return _people_progress_payload(connection, _HZ_REGION, _hz_anchor(params))
+    return _people_progress_payload(
+        connection, _HZ_REGION, _hz_anchor(params), scope_from_params(params)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3091,14 +3298,22 @@ def run_kpi_sx_mtd(connection, params) -> dict:
     """绍兴本月累计 + 达成率（scalar）：kpi_region_mtd 的绍兴锚定版。"""
     anchor = _hz_anchor(params)
     return run_kpi_region_mtd(
-        connection, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}
+        connection,
+        _carry_scope(params, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}),
     )
 
 
 def run_kpi_sx_today(connection, params) -> dict:
-    """绍兴当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。"""
+    """绍兴当日销售（scalar）：锚点日 Σ sales_amount（排合计行）。
+
+    行级 scope（M3）：与杭州卡同款——语句已参数化，scope 非 None 时
+    末尾追加 ``region IN`` 片段（钉死区域不授权即 0）。
+    """
     anchor = _hz_anchor(params)
-    rows = _fetch_rows(connection, _SX_TODAY_SQL, (anchor,))
+    fragment, scope_params = _scope_region_filter(scope_from_params(params))
+    rows = _fetch_rows(
+        connection, _append_region_sql(_SX_TODAY_SQL, fragment), (anchor,) + scope_params
+    )
     value = rows[0]["s"] if rows else 0
     return {
         "chart": "scalar",
@@ -3119,11 +3334,11 @@ def run_trend_sx_daily(connection, params) -> dict:
     anchor = _hz_anchor(params)
     return run_trend_region_daily(
         connection,
-        {
+        _carry_scope(params, {
             "region": _SX_REGION,
             "month": anchor.strftime("%Y-%m"),
             "gran": params.get("gran") or "day",
-        },
+        }),
     )
 
 
@@ -3131,18 +3346,23 @@ def run_bar_sx_dept(connection, params) -> dict:
     """绍兴部门本月排行（bar）：bar_department_mtd 的绍兴锚定版。"""
     anchor = _hz_anchor(params)
     return run_bar_department_mtd(
-        connection, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}
+        connection,
+        _carry_scope(params, {"region": _SX_REGION, "month": anchor.strftime("%Y-%m")}),
     )
 
 
 def run_table_sx_people_progress(connection, params) -> dict:
     """绍兴个人完成率榜（table）：``_people_progress_payload`` 绍兴锚定版。"""
-    return _people_progress_payload(connection, _SX_REGION, _hz_anchor(params))
+    return _people_progress_payload(
+        connection, _SX_REGION, _hz_anchor(params), scope_from_params(params)
+    )
 
 
 def run_table_sx_unfilled_today(connection, params) -> dict:
     """绍兴当日未填报人（table）：``_unfilled_payload`` 绍兴锚定版。"""
-    return _unfilled_payload(connection, _SX_REGION, _hz_anchor(params))
+    return _unfilled_payload(
+        connection, _SX_REGION, _hz_anchor(params), scope_from_params(params)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3176,15 +3396,23 @@ def run_kpi_oa_mtd(connection, params) -> dict:
     （月 = 锚点日所在月，region=None = 线下线全域）。"""
     anchor = _hz_anchor(params)
     return run_kpi_region_mtd(
-        connection, {"month": anchor.strftime("%Y-%m")}
+        connection,
+        _carry_scope(params, {"month": anchor.strftime("%Y-%m")}),
     )
 
 
 def run_kpi_oa_today(connection, params) -> dict:
     """线下整体当日销售（scalar）：锚点日 Σ sales_amount（线下线全域 +
-    排合计行）。"""
+    排合计行）。
+
+    行级 scope（M3）：语句已参数化，scope 非 None 时末尾追加
+    ``region IN`` 片段——汇总口径随之收窄到可见区域（fail-closed）。
+    """
     anchor = _hz_anchor(params)
-    rows = _fetch_rows(connection, _OA_TODAY_SQL, (anchor,))
+    fragment, scope_params = _scope_region_filter(scope_from_params(params))
+    rows = _fetch_rows(
+        connection, _append_region_sql(_OA_TODAY_SQL, fragment), (anchor,) + scope_params
+    )
     value = rows[0]["s"] if rows else 0
     return {
         "chart": "scalar",
@@ -3206,20 +3434,31 @@ def run_trend_oa_daily(connection, params) -> dict:
     anchor = _hz_anchor(params)
     return run_trend_region_daily(
         connection,
-        {
+        _carry_scope(params, {
             "month": anchor.strftime("%Y-%m"),
             "gran": params.get("gran") or "day",
-        },
+        }),
     )
 
 
-def _oa_people(connection, anchor):
+#: 线下整体（offline-all）合并采集覆盖的**事实表区域键**——三区合并后
+#: 已不可按区域拆分，故行级 scope 只能整表放行或整表关闭（见下）。
+_OA_MERGED_REGIONS = ("hangzhou", "shaoxing", "offline_extra")
+
+
+def _oa_people(connection, anchor, scope=None):
     """线下整体人员榜采集（BI 实时口径 include_today=True）。
 
     fail-soft：dim_calendar 缺行（MartTaskError）→ 空人空日历，卡片
     降级空态而非 5xx（同 hz 人员卡纪律）。
+
+    行级 scope（M3）：``collect_offline_all_people`` 是共享采集层，合并
+    结果无法按区域再切——**不能**只凭交集放行（少授一个区域就多暴露
+    该区人员），故 scope 非 None 时要求三区全在 scope 内，否则整表空。
     """
     from common.daily_robot.offline_summary import collect_offline_all_people
+    if not _scope_allows_regions(scope, *_OA_MERGED_REGIONS):
+        return [], frozenset()
     try:
         return collect_offline_all_people(
             connection, business_date=anchor, include_today=True
@@ -3237,7 +3476,7 @@ def run_bar_oa_dept(connection, params) -> dict:
     部门混杂（运维 2026-09-23「人与部门不要混乱」裁决）。
     """
     anchor = _hz_anchor(params)
-    people, _workdays = _oa_people(connection, anchor)
+    people, _workdays = _oa_people(connection, anchor, scope_from_params(params))
     totals = {}
     for person in people:
         dept = person["dept"] or "未分组"
@@ -3260,7 +3499,7 @@ def run_table_oa_people_progress(connection, params) -> dict:
     dim_calendar 缺行降级空表。
     """
     anchor = _hz_anchor(params)
-    people, workdays = _oa_people(connection, anchor)
+    people, workdays = _oa_people(connection, anchor, scope_from_params(params))
     rows = []
     if workdays:
         elapsed = elapsed_workdays(workdays, today=anchor, include_today=True)
@@ -3346,6 +3585,18 @@ def run_table_oa_scopes(connection, params) -> dict:
     from common.metrics.daily_report import achievement_rate
 
     anchor = _hz_anchor(params)
+    if not _scope_allows_regions(
+        scope_from_params(params), *_OA_MERGED_REGIONS
+    ):
+        # 行级 scope（M3）：板块总览逐板块取数后 merge（且含「李树军」这类
+        # 非 region 口径板块），无法按区域下推——同 _oa_people：三区不全
+        # 在 scope 内即整表空（fail-closed，绝不用全域板块冒充可见）。
+        return {
+            "chart": "table",
+            "columns": _OA_SCOPE_COLUMNS,
+            "rows": [],
+            "date": anchor.isoformat(),
+        }
     prev_first, _ = previous_month(anchor)
     facts_by_scope = {}
     targets = {}

@@ -12,7 +12,10 @@
  *
  * grant_key 语义（bi_authz._SCOPE_KEY_RE 已放行 region 级形态）：
  *   scope  → `<capability>`（全局）或 `<capability>:<region>`（限该区域，如 roster:other）
- *   region → `<region>`（看板区域数据查看，bi-web 侧消费）
+ *   region → `<region>`（看板区域数据行级裁剪）：bi-web 把该键集合注入带
+ *            region 维度的卡片查询（参数化 region IN），键须与事实表
+ *            fact_daily_report_offline.region 同值（hangzhou/shaoxing/…）；
+ *            事实表无同键时是 fail-closed 空数据，绝不放大可见面。
  *   admin  → `-`（占位，admin 无对象维度）
  *
  * ?user= 供 /records 深链而来，用于过滤/高亮某账号。
@@ -150,6 +153,8 @@ watch(() => route.query.user, load, { immediate: true });
         <p class="note">
           能力 × 范围自助授权（区域清单来自组织注册表 <code>dim_org_region</code>）。
           区域级键形如 <code>roster:other</code>，仅限该区域；未授权一律 fail-closed。
+          看板区域数据（region）按钉钉日报事实表的区域口径逐行裁剪：未授权/键与事实表
+          不一致时该账号在区域卡片上看到空数据，<strong>不会</strong>因此看到其他区域。
         </p>
       </div>
     </div>
@@ -175,6 +180,11 @@ watch(() => route.query.user, load, { immediate: true });
           <option v-for="r in allRegions" :key="r" :value="r">{{ r }}</option>
         </select>
         <input v-else v-model="regionKey" placeholder="区域 key" />
+        <span class="hint">
+          该键须与看板事实表的区域值一致（如 <code>hangzhou</code> /
+          <code>shaoxing</code>）才会裁剪出对应区域的数据；仅组织口径存在、
+          事实表无同键（如 <code>offline_all</code>）时该授权不带来数据。
+        </span>
       </template>
       <template v-else>
         <select v-model="scopeCap">
