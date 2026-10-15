@@ -423,7 +423,8 @@ function nodeHeight(node) {
 }
 
 /**
- * 默认网格位：按**实测高度**逐列下推，避免大节点（成员/名册多）盖住下方节点。
+ * 默认网格位：**逐行对齐**——每 3 个节点一层，层内顶边对齐、列位固定，
+ * 层高取层内最高节点（实测 offsetHeight），层间留 24px，避免大节点盖住下方节点。
  * 用户已拖过的节点（nodePos 有记录）不参与排布。
  */
 async function packDefaults() {
@@ -434,18 +435,26 @@ async function packDefaults() {
     if (el) node.height = el.offsetHeight || 320;
   }
   await nextTick();
-  const cols = [16, 16, 16];
+  const rowHeights = [];
+  nodes.value.forEach((node, index) => {
+    const row = Math.floor(index / 3);
+    rowHeights[row] = Math.max(rowHeights[row] || 0, nodeHeight(node));
+  });
+  const rowY = [];
+  let acc = 16;
+  for (let row = 0; row < rowHeights.length; row += 1) {
+    rowY[row] = acc;
+    acc += (rowHeights[row] || 320) + 24;
+  }
   let dirty = false;
-  for (const node of nodes.value) {
-    if (nodePos.value[node.key]) continue;
-    const col = cols.indexOf(Math.min(...cols));
-    const x = 16 + col * 344;
-    const y = cols[col];
+  nodes.value.forEach((node, index) => {
+    if (nodePos.value[node.key]) return;
+    const x = 16 + (index % 3) * 344;
+    const y = rowY[Math.floor(index / 3)];
     if (node.x !== x || node.y !== y) dirty = true;
     node.x = x;
     node.y = y;
-    cols[col] = y + nodeHeight(node) + 24;
-  }
+  });
   if (dirty) await nextTick();
 }
 
