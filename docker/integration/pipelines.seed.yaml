@@ -25,6 +25,7 @@ sync-dingtalk:
   sources: [dingtalk]
   schedule: "0 2,7,14,16 * * *"
   reads: [raw_dingtalk, mart_ops]
+  depends_on: [roll-manifest]
   description: "DingTalk AI sheets -> raw_dingtalk"
 sync-wdt:
   kind: apps

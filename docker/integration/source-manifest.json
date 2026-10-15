@@ -1752,8 +1752,8 @@
         "base_id": "QOG9lyrgJPmxNQlwIw4QDd6q8zN67Mw4",
         "sheets": [
           {
-            "sheet_id": "6AJ3wpa",
-            "sheet_name": "天猫渠道数据9",
+            "sheet_id": "Cr0G5gJ",
+            "sheet_name": "天猫渠道数据10",
             "dataset": "channel_daily_sales_tmall",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1791,8 +1791,8 @@
             }
           },
           {
-            "sheet_id": "WCaC6Yx",
-            "sheet_name": "京东渠道数据9",
+            "sheet_id": "CVVUwBo",
+            "sheet_name": "京东渠道数据10",
             "dataset": "channel_daily_sales_jd",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1834,8 +1834,8 @@
             }
           },
           {
-            "sheet_id": "gYQlqjn",
-            "sheet_name": "拼多多渠道数据9",
+            "sheet_id": "dICmQUm",
+            "sheet_name": "拼多多渠道数据10",
             "dataset": "channel_daily_sales_pdd",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1877,8 +1877,8 @@
             }
           },
           {
-            "sheet_id": "s2wLsNP",
-            "sheet_name": "猫超渠道数据9",
+            "sheet_id": "vQ9g8L3",
+            "sheet_name": "猫超渠道数据10",
             "dataset": "channel_daily_sales_maochao",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1916,8 +1916,8 @@
             }
           },
           {
-            "sheet_id": "opo5gl8",
-            "sheet_name": "即时零售渠道数据9",
+            "sheet_id": "gcfR3gS",
+            "sheet_name": "即时零售渠道数据10",
             "dataset": "channel_daily_sales_instant_retail",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1955,8 +1955,8 @@
             }
           },
           {
-            "sheet_id": "uRjZ8u5",
-            "sheet_name": "直播渠道数据9",
+            "sheet_id": "sQv54Kg",
+            "sheet_name": "直播渠道数据10",
             "dataset": "channel_daily_sales_live",
             "target_table": "channel_daily_sales",
             "max_pages": 100,
@@ -1990,8 +1990,8 @@
             }
           },
           {
-            "sheet_id": "ViSjPlk",
-            "sheet_name": "私域渠道数据9",
+            "sheet_id": "YOlU6PE",
+            "sheet_name": "私域渠道数据10",
             "dataset": "channel_daily_sales_private",
             "target_table": "channel_daily_sales",
             "max_pages": 100,

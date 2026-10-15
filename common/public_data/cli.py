@@ -6,6 +6,7 @@ All output is limited to safe run-summary lines.
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -590,16 +591,43 @@ def _handle_backfill_pipeline_categories(args):
         sys.exit(1)
 
 
-def roll_manifest_windows(manifest_path, *, lookback_days=None):
-    """Roll the WDT window block of *manifest_path* forward to now."""
+#: roll-manifest 干校验（渠道 sheet 滚月）读取钉钉凭据的默认路径；
+#: 与调度器容器挂载点一致（compose `scheduler` 服务）。
+_DEFAULT_SOURCE_CREDENTIALS_PATH = "/run/live-input/source-credentials.json"
+
+
+def roll_manifest_windows(manifest_path, *, lookback_days=None, gateway=None):
+    """Roll the WDT window block (+ 渠道 sheet 换月) of *manifest_path* to now."""
     from common.public_data.manifest_roll import roll_manifest
-    return roll_manifest(manifest_path, lookback_days=lookback_days)
+    return roll_manifest(manifest_path, lookback_days=lookback_days, gateway=gateway)
+
+
+def _roll_manifest_gateway():
+    """构建渠道 sheet 换月干校验用的钉钉读网关；缺失/异常一律 None（fail-soft）。
+
+    只读凭据、只读表结构，不发送任何消息；凭据值不进任何输出。
+    """
+    path = (
+        os.environ.get("PUBLIC_DATA_LIVE_CREDENTIALS_PATH") or ""
+    ).strip() or _DEFAULT_SOURCE_CREDENTIALS_PATH
+    try:
+        credentials = load_source_credentials(path, source="dingtalk")
+        dingtalk = credentials["dingtalk"]
+        from common.public_data.dingtalk_read import DingTalkReadGateway
+        return DingTalkReadGateway(
+            app_key=dingtalk["app_key"],
+            app_secret=dingtalk["app_secret"],
+            operator_id=dingtalk["operator_id"],
+        )
+    except Exception:
+        return None
 
 
 def _handle_roll_manifest(args):
-    """每日滚动 manifest 的 WDT 窗口块（sync-wdt 的前置管线）。
+    """每日滚动 manifest 的 WDT 窗口块 + 渠道 sheet 换月（sync-wdt 的前置管线）。
 
-    只重写配置文件的 ``wdt.datasets``（原子写），不碰 DB、不调源 API；
+    只重写配置文件的 ``wdt.datasets`` 与渠道 sheet 绑定（原子写），不碰 DB；
+    钉钉读网关只用于 sheet 结构干校验（凭据缺失时跳过换月，fail-soft）。
     窗口不滚动时 sync-wdt 会幂等重拉同一天（2026-09-23 生产实锤窗口
     停在 09-21→09-22），所以本管线必须排在每日 sync 之前。
     """
@@ -613,7 +641,9 @@ def _handle_roll_manifest(args):
             print(f"service={service_id} status=skipped reason=disabled")
             return
         written = roll_manifest_windows(
-            settings.source_config_path, lookback_days=args.lookback_days
+            settings.source_config_path,
+            lookback_days=args.lookback_days,
+            gateway=_roll_manifest_gateway(),
         )
         print(
             f"service={service_id} kind=roll-manifest "
