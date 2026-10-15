@@ -214,12 +214,36 @@ def capability_has_scoped(viewer, capability):
     return any(scope.startswith(prefix) for scope in viewer.scopes)
 
 
+def scoped_region_keys(viewer, capability):
+    """纯函数：viewer 在 *capability* 上被授权的区域键列表（已排序、去重）。
+
+    只认 ``<capability>:<region>`` 形态（全局 ``<capability>`` 不经此路，
+    由 :func:`capability_allows` 自行判全量）。未准入 → 空（fail-closed）。"""
+    if viewer is None or not viewer.admitted:
+        return []
+    prefix = f"{capability}:"
+    return sorted({
+        scope.split(":", 1)[1]
+        for scope in viewer.scopes
+        if scope.startswith(prefix) and ":" in scope
+    })
+
+
 def visible_region_scopes(viewer, scopes):
     """*scopes*（区域键列表）中该 viewer 可操作（或其区域级授权覆盖）的子集。
 
     admin / 全局 ``roster`` → 全量；仅持 ``roster:<r>`` → 只留授权区域。
     未准入 → 空（fail-closed）。"""
-    return [s for s in scopes if capability_allows(viewer, CAPABILITY_ROSTER, s)]
+    return visible_scopes(viewer, CAPABILITY_ROSTER, scopes)
+
+
+def visible_scopes(viewer, capability, scopes):
+    """通用版 :func:`visible_region_scopes`（*capability* 任意）。
+
+    2026-10-15 闭环修复：组织编排（org）等能力也要支持区域级授权，
+    否则「授权页可授 ``org:<region>``」与「接口只认全局 org」自相矛盾——
+    用户会拿到一条永远用不上的授权。"""
+    return [s for s in scopes if capability_allows(viewer, capability, s)]
 
 
 def _region_scope_pairs(connection):
@@ -312,8 +336,10 @@ def _audit_get(row, keys):
 def _collect_records(connection):
     """5 处审计（授权/任务/名册/日历/收件人覆盖）+ 定时运行流水 → 统一行。
 
-    每行形状 (时间, 来源, 操作人, 动作, 对象, 详情)，供「操作记录」页
-    归一展示（任务3 2026-10-12：运维改完一处即可查到全部变更）。
+    每行形状 (时间, 来源, 操作人, 动作, 对象, 详情[, user_id])，供「操作记录」页
+    归一展示（任务3 2026-10-12：运维改完一处即可查到全部变更）。第 7 位仅
+    「授权」来源带（2026-10-15 闭环修复）：该页回源深链要 ``/grants?user=``
+    的账号过滤，此前被丢在元组外，深链恒空过滤。
     """
     records = []
 
@@ -326,6 +352,7 @@ def _collect_records(connection):
             get("grant_key") or "",
             " ".join(x for x in (_label(_GRANT_TYPE_LABEL, get("grant_type")),
                                  get("note")) if x),
+            get("user_id") or "",
         ))
 
     for row in ops_control.fetch_pipeline_audit(connection):
@@ -1395,11 +1422,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             if capability_allows(viewer, capability):
                 capabilities.append(capability)
                 continue
-            keys = sorted(
-                scope.split(":", 1)[1]
-                for scope in viewer.scopes
-                if scope.startswith(f"{capability}:") and ":" in scope
-            )
+            keys = scoped_region_keys(viewer, capability)
             if keys:
                 scoped[capability] = keys
         return JSONResponse({
@@ -1457,7 +1480,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         成员读故障 = 503（组织树无从展示）；覆盖读故障 = fail-soft
         （只丢覆盖，回种子口径，不拖垮整页）。
         """
-        require_capability(request, CAPABILITY_ORG)
+        viewer = _resolve_request_viewer(request)
+        if not (capability_allows(viewer, CAPABILITY_ORG)
+                or capability_has_scoped(viewer, CAPABILITY_ORG)):
+            _forbidden(request)
+        request.state.viewer = viewer
         try:
             with db_connector() as connection:
                 members = bi_authz.fetch_active_members(connection)
@@ -1481,6 +1508,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web org catalog read failed: %s", type(exc).__name__)
             catalog = {"regions": [], "depts": []}
         overview = _build_org_overview(members, overrides, catalog)
+        if not capability_allows(viewer, CAPABILITY_ORG):
+            # 区域级 org 授权（2026-10-15 闭环修复）：只回授权区域，且不带
+            # 「未归类」池与跨区覆盖行——pool 成员无区域可归因，scoped 视角
+            # 无权看；否则 org:<r> 授权就等于全量可见，等于没授权。
+            allowed = set(scoped_region_keys(viewer, CAPABILITY_ORG))
+            overview["regions"] = [
+                region for region in overview["regions"]
+                if region["key"] in allowed
+            ]
+            overview["pool"] = []
+            rows = [row for row in rows if row.get("region") in allowed]
         overview["overrides"] = [
             dict(row, updated_at=_fmt_time(row.get("updated_at")),
                  region_label=_org_region_label(row.get("region")))
@@ -1491,7 +1529,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/assign")
     async def org_assign(request: Request):
         """新增/更新一条归属覆盖（``region`` 为 null = 移出全部区域）。"""
-        viewer = require_capability(request, CAPABILITY_ORG)
+        viewer = _resolve_request_viewer(request)
+        request.state.viewer = viewer
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         region = payload.get("region")
@@ -1507,6 +1546,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             if value is not None and not isinstance(value, str):
                 raise HTTPException(
                     status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        # 区域级 org 授权（2026-10-15 闭环修复）：``region=None``（移出全部
+        # 区域）是跨区动作，只认全局 org；``region=<r>`` 则全局 org 或
+        # ``org:<r>`` 均可——与 /api/org/move 的区域校验同一口径。
+        if not capability_allows(viewer, CAPABILITY_ORG, region):
+            _forbidden(request)
         try:
             with db_connector() as connection:
                 org_assignment_override.upsert_assignment(
@@ -1788,16 +1832,39 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
 
+    def _org_override_region(user_id):
+        """被操作覆盖行所属区域（无该行 → None）；读故障 503（收敛语义）。
+
+        区域级 org 授权（2026-10-15 闭环修复）用：toggle/delete 只带 user_id，
+        必须回读该行区域才能判定是否落在授权范围内。
+        """
+        try:
+            with db_connector() as connection:
+                rows = org_assignment_override.fetch_all_overrides(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org override read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        for row in rows:
+            if row.get("user_id") == user_id:
+                return row.get("region")
+        return None
+
     @app.post("/api/org/toggle")
     async def org_toggle(request: Request):
         """停用/启用一条归属覆盖（按天然键 user_id）。"""
-        viewer = require_capability(request, CAPABILITY_ORG)
+        viewer = _resolve_request_viewer(request)
+        request.state.viewer = viewer
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         enabled = payload.get("enabled")
         if (not isinstance(user_id, str) or not user_id.strip()
                 or not isinstance(enabled, bool)):
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not capability_allows(viewer, CAPABILITY_ORG):
+            if not capability_allows(
+                    viewer, CAPABILITY_ORG, _org_override_region(user_id)):
+                _forbidden(request)
         try:
             with db_connector() as connection:
                 hit = org_assignment_override.set_assignment_enabled(
@@ -1817,11 +1884,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     @app.post("/api/org/delete")
     async def org_delete(request: Request):
         """删除一条归属覆盖（审计留存被删行内容）。"""
-        viewer = require_capability(request, CAPABILITY_ORG)
+        viewer = _resolve_request_viewer(request)
+        request.state.viewer = viewer
         payload = await _json_body(request)
         user_id = payload.get("user_id")
         if not isinstance(user_id, str) or not user_id.strip():
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not capability_allows(viewer, CAPABILITY_ORG):
+            if not capability_allows(
+                    viewer, CAPABILITY_ORG, _org_override_region(user_id)):
+                _forbidden(request)
         try:
             with db_connector() as connection:
                 hit = org_assignment_override.delete_assignment(
@@ -1933,7 +2005,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             rows = [r for r in rows if _fmt_time(r[0])[:10] <= to_q]
         records = [
             {"created_at": _fmt_time(r[0]), "source": r[1], "actor": r[2],
-             "action": r[3], "target": r[4], "detail": r[5]}
+             "action": r[3], "target": r[4], "detail": r[5],
+             "user_id": r[6] if len(r) > 6 else ""}
             for r in rows[:200]
         ]
         return JSONResponse({

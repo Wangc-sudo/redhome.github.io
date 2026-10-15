@@ -63,6 +63,26 @@ export function visibleRegions() {
   return (me.value && me.value.regions) || [];
 }
 
+/**
+ * 持有该能力的**全局或任一区域级**授权（无单区域上下文的菜单/路由守卫用）。
+ *
+ * 2026-10-15 闭环修复：此前守卫只看全局能力，导致 `org:<region>` 这类
+ * 区域级授权在 UI 上根本进不去页面（授权页却允许授出），授权语义不自洽。
+ * @param {string} cap 能力键（org/roster/pipelines/audit/calendar）。
+ */
+export function hasAnyCapability(cap) {
+  const info = me.value;
+  if (!info) return false;
+  if ((info.capabilities || []).includes(cap)) return true;
+  return scopedRegions(cap).length > 0;
+}
+
+/** 某能力的区域级授权键数组（``scoped_capabilities[cap]``）。 */
+export function scopedRegions(cap) {
+  const scoped = (me.value && me.value.scoped_capabilities) || {};
+  return scoped[cap] || [];
+}
+
 /** 设置全局 flash 提示。 */
 export function setFlash(type, text) {
   flash.value = { type, text };

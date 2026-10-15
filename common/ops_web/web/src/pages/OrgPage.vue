@@ -509,7 +509,12 @@ watch(() => route.query, () => applyAnchor());
           type="search"
           placeholder="搜索姓名 / 账号"
         />
-        <button class="btn danger" :disabled="busy || loading" @click="onReset">
+        <button
+          v-if="hasCapability('org')"
+          class="btn danger"
+          :disabled="busy || loading"
+          @click="onReset"
+        >
           全部归还种子口径
         </button>
       </div>
@@ -574,6 +579,7 @@ watch(() => route.query, () => applyAnchor());
           <div class="col-head-actions">
             <span class="count">{{ regions.length }} 个区域</span>
             <button
+              v-if="hasCapability('org')"
               class="btn mini"
               :disabled="busy || loading"
               title="登记一个区域（即使暂无成员也会出现在树里）"
@@ -638,6 +644,7 @@ watch(() => route.query, () => applyAnchor());
                 下游 0 项
               </span>
               <button
+                v-if="hasCapability('org')"
                 class="btn mini"
                 :disabled="busy || loading"
                 :title="`在 ${region.label} 登记一个部门（即使暂无成员也会出现在树里）`"
@@ -646,6 +653,7 @@ watch(() => route.query, () => applyAnchor());
                 + 部门
               </button>
               <button
+                v-if="hasCapability('org')"
                 class="btn mini ghost"
                 :disabled="busy || loading"
                 title="停用该区域（可重新启用）"
@@ -654,6 +662,7 @@ watch(() => route.query, () => applyAnchor());
                 停用
               </button>
               <button
+                v-if="hasCapability('org')"
                 class="btn mini danger"
                 :disabled="busy || loading"
                 title="删除该区域（级联删除其下部门）"
@@ -681,6 +690,7 @@ watch(() => route.query, () => applyAnchor());
                   <span class="dept-id">{{ dept.dept_id || '无ID' }}</span>
                   <span class="dept-count">{{ dept.members.length }} 人</span>
                   <button
+                    v-if="hasCapability('org')"
                     class="btn mini ghost"
                     :disabled="busy || loading"
                     title="停用该部门（可重新启用）"
@@ -689,6 +699,7 @@ watch(() => route.query, () => applyAnchor());
                     停用
                   </button>
                   <button
+                    v-if="hasCapability('org')"
                     class="btn mini danger"
                     :disabled="busy || loading"
                     title="删除该部门"
