@@ -351,8 +351,8 @@ def _next_store_no(connection, scope, channel):
     return (int(current) if current is not None else 0) + 1
 
 
-def upsert_roster_entry(connection, entry, *, actor):
-    """新增/重启用一条名册（自然键冲突即更新别名/备注并重新启用）。
+def _write_roster_entry(connection, entry, *, actor):
+    """无事务写：名册 upsert + 同事务 audit（调用方负责 commit/rollback）。
 
     store 类型（v2 编号冻结）：channel 缺省经 fact 表反查；该店尚无
     store_no 时按渠道内 max+1 派号（既有店沿用原号）。
@@ -377,27 +377,45 @@ def upsert_roster_entry(connection, entry, *, actor):
             store_no = _next_store_no(connection, entry.scope, channel)
     cursor = connection.cursor()
     try:
-        with transaction(connection):
-            cursor.execute(
-                "INSERT INTO `dim_report_roster` "
-                "(`scope`, `entity_type`, `entity_key`, `person_name`, "
-                "`aliases`, `enabled`, `note`, `updated_by`, `updated_at`, "
-                "`channel`, `store_no`, `role`) "
-                "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE "
-                "`aliases` = VALUES(`aliases`), `enabled` = 1, "
-                "`note` = VALUES(`note`), "
-                "`updated_by` = VALUES(`updated_by`), "
-                "`updated_at` = VALUES(`updated_at`), "
-                "`channel` = COALESCE(VALUES(`channel`), `channel`), "
-                "`role` = VALUES(`role`)",
-                (entry.scope, entry.entity_type, entry.entity_key,
-                 entry.person_name, aliases_json, entry.note or None,
-                 actor, _utc_now_text(), channel, store_no, entry.role),
-            )
-            _insert_audit(connection, actor, "add", entry, detail=entry.note)
+        cursor.execute(
+            "INSERT INTO `dim_report_roster` "
+            "(`scope`, `entity_type`, `entity_key`, `person_name`, "
+            "`aliases`, `enabled`, `note`, `updated_by`, `updated_at`, "
+            "`channel`, `store_no`, `role`) "
+            "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE "
+            "`aliases` = VALUES(`aliases`), `enabled` = 1, "
+            "`note` = VALUES(`note`), "
+            "`updated_by` = VALUES(`updated_by`), "
+            "`updated_at` = VALUES(`updated_at`), "
+            "`channel` = COALESCE(VALUES(`channel`), `channel`), "
+            "`role` = VALUES(`role`)",
+            (entry.scope, entry.entity_type, entry.entity_key,
+             entry.person_name, aliases_json, entry.note or None,
+             actor, _utc_now_text(), channel, store_no, entry.role),
+        )
+        _insert_audit(connection, actor, "add", entry, detail=entry.note)
     finally:
         cursor.close()
+
+
+def apply_roster_entry(connection, entry, *, actor):
+    """**无事务**名册写（upsert + 同事务 audit），供调用方自有事务组合使用。
+
+    语义与 :func:`upsert_roster_entry` 一致，仅不自行 commit；调用方负责
+    ``commit`` / ``rollback``。
+    """
+    _write_roster_entry(connection, entry, actor=actor)
+
+
+def upsert_roster_entry(connection, entry, *, actor):
+    """新增/重启用一条名册（自然键冲突即更新别名/备注并重新启用）。
+
+    store 类型（v2 编号冻结）：channel 缺省经 fact 表反查；该店尚无
+    store_no 时按渠道内 max+1 派号（既有店沿用原号）。
+    """
+    with transaction(connection):
+        _write_roster_entry(connection, entry, actor=actor)
 
 
 def backfill_store_numbers(connection, *, actor):
@@ -524,31 +542,44 @@ def set_roster_enabled(connection, roster_id, enabled, *, actor):
         cursor.close()
 
 
-def delete_roster_entry(connection, roster_id, *, actor):
-    """删除一条名册（按主键 id；审计留存被删行内容）。返回是否命中。"""
+def _remove_roster_by_id(connection, roster_id, *, actor):
+    """无事务删：按主键 id 删 + 同事务 audit，返回是否命中。"""
     cursor = connection.cursor()
     try:
-        with transaction(connection):
-            cursor.execute(
-                "SELECT `scope`, `entity_type`, `entity_key`, `person_name` "
-                "FROM `dim_report_roster` WHERE `id` = %s",
-                (roster_id,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return False
-            cursor.execute(
-                "DELETE FROM `dim_report_roster` WHERE `id` = %s",
-                (roster_id,),
-            )
-            entry = RosterEntry(
-                scope=row["scope"], entity_type=row["entity_type"],
-                entity_key=row["entity_key"], person_name=row["person_name"],
-            )
-            _insert_audit(connection, actor, "delete", entry)
-            return True
+        cursor.execute(
+            "SELECT `scope`, `entity_type`, `entity_key`, `person_name` "
+            "FROM `dim_report_roster` WHERE `id` = %s",
+            (roster_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        cursor.execute(
+            "DELETE FROM `dim_report_roster` WHERE `id` = %s",
+            (roster_id,),
+        )
+        entry = RosterEntry(
+            scope=row["scope"], entity_type=row["entity_type"],
+            entity_key=row["entity_key"], person_name=row["person_name"],
+        )
+        _insert_audit(connection, actor, "delete", entry)
+        return True
     finally:
         cursor.close()
+
+
+def apply_roster_delete(connection, roster_id, *, actor):
+    """**无事务**删除一条名册（按主键 id），供调用方自有事务组合使用。
+
+    语义与 :func:`delete_roster_entry` 一致，仅不自行 commit。返回是否命中。
+    """
+    return _remove_roster_by_id(connection, roster_id, actor=actor)
+
+
+def delete_roster_entry(connection, roster_id, *, actor):
+    """删除一条名册（按主键 id；审计留存被删行内容）。返回是否命中。"""
+    with transaction(connection):
+        return _remove_roster_by_id(connection, roster_id, actor=actor)
 
 
 # ---------------------------------------------------------------------------

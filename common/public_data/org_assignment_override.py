@@ -346,6 +346,56 @@ def _validate(user_id, region, dept_id, dept_name, note):
     return user_id, region, dept_id, dept_name, note.strip()
 
 
+def _write_assignment(connection, user_id, region, *, dept_id, dept_name,
+                      name, actor, note=""):
+    """无事务写：覆盖 upsert + 同事务 audit（调用方负责 commit/rollback）。
+
+    *user_id/region/dept_id/dept_name/name/note* 均须已过 :func:`_validate`
+    / :func:`_text` 规范化（本函数不再复校验）。
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO `dim_org_assignment_override` "
+            "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, "
+            "`enabled`, `note`, `updated_by`, `updated_at`) "
+            "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE "
+            "`name` = COALESCE(VALUES(`name`), `name`), "
+            "`region` = VALUES(`region`), "
+            "`dept_id` = VALUES(`dept_id`), "
+            "`dept_name` = VALUES(`dept_name`), `enabled` = 1, "
+            "`note` = VALUES(`note`), "
+            "`updated_by` = VALUES(`updated_by`), "
+            "`updated_at` = VALUES(`updated_at`)",
+            (user_id, name, region, dept_id, dept_name, note or None,
+             actor, _utc_now_text()),
+        )
+        _insert_audit(
+            connection, actor, "assign", user_id=user_id, name=name,
+            region=region, dept_id=dept_id, dept_name=dept_name,
+            detail=note or ("移出全部区域" if region is None else ""),
+        )
+    finally:
+        cursor.close()
+
+
+def apply_assignment(connection, user_id, region, *, dept_id=None,
+                     dept_name=None, name=None, actor, note=""):
+    """**无事务**归属覆盖写：校验后写覆盖 + 同事务 audit，返回是否写库。
+
+    供调用方在**自己的事务**内组合多表原子写（如归属搬迁
+    ``/api/org/move``）。调用方负责 ``commit`` / ``rollback``。
+    返回规范化的 ``(user_id, region, dept_id, dept_name)``。
+    """
+    user_id, region, dept_id, dept_name, note = _validate(
+        user_id, region, dept_id, dept_name, note)
+    name = _text(name, _NAME_MAX)
+    _write_assignment(connection, user_id, region, dept_id=dept_id,
+                      dept_name=dept_name, name=name, actor=actor, note=note)
+    return user_id, region, dept_id, dept_name
+
+
 def upsert_assignment(connection, user_id, region, *, dept_id=None,
                       dept_name=None, name=None, actor, note=""):
     """新增/更新一条归属覆盖（``user_id`` 冲突即更新并重新启用）。
@@ -356,29 +406,10 @@ def upsert_assignment(connection, user_id, region, *, dept_id=None,
     user_id, region, dept_id, dept_name, note = _validate(
         user_id, region, dept_id, dept_name, note)
     name = _text(name, _NAME_MAX)
-    with contextlib.closing(connection.cursor()) as cursor:
-        with transaction(connection):
-            cursor.execute(
-                "INSERT INTO `dim_org_assignment_override` "
-                "(`user_id`, `name`, `region`, `dept_id`, `dept_name`, "
-                "`enabled`, `note`, `updated_by`, `updated_at`) "
-                "VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE "
-                "`name` = COALESCE(VALUES(`name`), `name`), "
-                "`region` = VALUES(`region`), "
-                "`dept_id` = VALUES(`dept_id`), "
-                "`dept_name` = VALUES(`dept_name`), `enabled` = 1, "
-                "`note` = VALUES(`note`), "
-                "`updated_by` = VALUES(`updated_by`), "
-                "`updated_at` = VALUES(`updated_at`)",
-                (user_id, name, region, dept_id, dept_name, note or None,
-                 actor, _utc_now_text()),
-            )
-            _insert_audit(
-                connection, actor, "assign", user_id=user_id, name=name,
-                region=region, dept_id=dept_id, dept_name=dept_name,
-                detail=note or ("移出全部区域" if region is None else ""),
-            )
+    with transaction(connection):
+        _write_assignment(connection, user_id, region, dept_id=dept_id,
+                          dept_name=dept_name, name=name, actor=actor,
+                          note=note)
     return user_id, region, dept_id, dept_name
 
 
