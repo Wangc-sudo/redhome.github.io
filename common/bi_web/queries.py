@@ -3393,11 +3393,15 @@ _OA_TODAY_SQL = (
 
 def run_kpi_oa_mtd(connection, params) -> dict:
     """线下整体本月累计 + 达成率（scalar）：kpi_region_mtd 全域锚定版
-    （月 = 锚点日所在月，region=None = 线下线全域）。"""
+    （月 = 锚点日所在月，region=None = 线下线全域）。
+
+    行级 scope（M3）：``offline_all`` 授权经 :func:`_oa_effective_scope`
+    展开为三区并集（B5 聚合授权键），其余区域授权语义不变。
+    """
     anchor = _hz_anchor(params)
     return run_kpi_region_mtd(
         connection,
-        _carry_scope(params, {"month": anchor.strftime("%Y-%m")}),
+        _carry_oa_scope(params, {"month": anchor.strftime("%Y-%m")}),
     )
 
 
@@ -3406,10 +3410,13 @@ def run_kpi_oa_today(connection, params) -> dict:
     排合计行）。
 
     行级 scope（M3）：语句已参数化，scope 非 None 时末尾追加
-    ``region IN`` 片段——汇总口径随之收窄到可见区域（fail-closed）。
+    ``region IN`` 片段——汇总口径随之收窄到可见区域（fail-closed）；
+    ``offline_all`` 授权先经 :func:`_oa_effective_scope` 展开为三区并集。
     """
     anchor = _hz_anchor(params)
-    fragment, scope_params = _scope_region_filter(scope_from_params(params))
+    fragment, scope_params = _scope_region_filter(
+        _oa_effective_scope(scope_from_params(params))
+    )
     rows = _fetch_rows(
         connection, _append_region_sql(_OA_TODAY_SQL, fragment), (anchor,) + scope_params
     )
@@ -3430,11 +3437,15 @@ def run_kpi_oa_progress(connection, params) -> dict:
 
 def run_trend_oa_daily(connection, params) -> dict:
     """线下整体区域日销趋势（line）：trend_region_daily 全域锚定版
-    （分区域多系列；月 = 锚点月，gran 透传缺省日）。"""
+    （分区域多系列；月 = 锚点月，gran 透传缺省日）。
+
+    行级 scope（M3）：``offline_all`` 经 :func:`_oa_effective_scope`
+    展开为三区并集（B5 聚合授权键）。
+    """
     anchor = _hz_anchor(params)
     return run_trend_region_daily(
         connection,
-        _carry_scope(params, {
+        _carry_oa_scope(params, {
             "month": anchor.strftime("%Y-%m"),
             "gran": params.get("gran") or "day",
         }),
@@ -3446,6 +3457,32 @@ def run_trend_oa_daily(connection, params) -> dict:
 _OA_MERGED_REGIONS = ("hangzhou", "shaoxing", "offline_extra")
 
 
+def _oa_effective_scope(scope):
+    """oa 卡专用 scope 展开（B5，2026-10-15 用户裁决）。
+
+    ``offline_all`` 是「线下整体」**聚合授权键**：事实表本无该区行
+    （oa = 杭/绍/省外三区并集），直接下推 SQL 只会得空——语义错位。
+    授权 ``offline_all`` 在此展开为 ``_OA_MERGED_REGIONS`` 并集；其余
+    键（hangzhou/shaoxing/offline_extra 单独授权）原样保留。
+    ``None`` 或不含 ``offline_all`` → 原样返回（旧路径零变化）。
+    """
+    if scope is None or "offline_all" not in scope:
+        return scope
+    return (scope - {"offline_all"}) | frozenset(_OA_MERGED_REGIONS)
+
+
+def _carry_oa_scope(params, target):
+    """oa 委派卡（mtd/trend）专用：先展开 ``offline_all`` 再转抄指纹。
+
+    与 :func:`_carry_scope` 的差别仅在展开——hz/sx 锚定卡钉死单一真实
+    区域，不适用聚合键语义，仍用原函数。
+    """
+    fingerprint = scope_fingerprint(_oa_effective_scope(scope_from_params(params)))
+    if fingerprint is not None:
+        target[ROW_SCOPE_PARAM] = fingerprint
+    return target
+
+
 def _oa_people(connection, anchor, scope=None):
     """线下整体人员榜采集（BI 实时口径 include_today=True）。
 
@@ -3454,10 +3491,11 @@ def _oa_people(connection, anchor, scope=None):
 
     行级 scope（M3）：``collect_offline_all_people`` 是共享采集层，合并
     结果无法按区域再切——**不能**只凭交集放行（少授一个区域就多暴露
-    该区人员），故 scope 非 None 时要求三区全在 scope 内，否则整表空。
+    该区人员），故 scope 非 None 时要求三区全在 scope 内，否则整表空；
+    ``offline_all`` 授权先经 :func:`_oa_effective_scope` 展开为三区并集。
     """
     from common.daily_robot.offline_summary import collect_offline_all_people
-    if not _scope_allows_regions(scope, *_OA_MERGED_REGIONS):
+    if not _scope_allows_regions(_oa_effective_scope(scope), *_OA_MERGED_REGIONS):
         return [], frozenset()
     try:
         return collect_offline_all_people(
@@ -3586,7 +3624,7 @@ def run_table_oa_scopes(connection, params) -> dict:
 
     anchor = _hz_anchor(params)
     if not _scope_allows_regions(
-        scope_from_params(params), *_OA_MERGED_REGIONS
+        _oa_effective_scope(scope_from_params(params)), *_OA_MERGED_REGIONS
     ):
         # 行级 scope（M3）：板块总览逐板块取数后 merge（且含「李树军」这类
         # 非 region 口径板块），无法按区域下推——同 _oa_people：三区不全

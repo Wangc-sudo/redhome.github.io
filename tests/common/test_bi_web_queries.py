@@ -3000,6 +3000,140 @@ class OfflineAllDashboardTests(unittest.TestCase):
         self.assertEqual([], payload["rows"])
 
 
+class OaAggregateScopeKeyTests(unittest.TestCase):
+    """B5（2026-10-15 用户裁决）：``offline_all`` = oa 聚合授权键。
+
+    oa 六卡消费 scope 时，``offline_all`` 展开为
+    ``_OA_MERGED_REGIONS``（hangzhou/shaoxing/offline_extra）并集；
+    其余区域授权语义不变；scope=None 路径逐字节不变。
+    """
+
+    def test_effective_scope_expands_offline_all(self):
+        self.assertEqual(
+            frozenset({"hangzhou", "shaoxing", "offline_extra"}),
+            bi_web_queries._oa_effective_scope(frozenset({"offline_all"})),
+        )
+
+    def test_effective_scope_keeps_other_keys(self):
+        self.assertEqual(
+            frozenset({"hangzhou", "shaoxing", "offline_extra", "qudao"}),
+            bi_web_queries._oa_effective_scope(
+                frozenset({"offline_all", "qudao"})
+            ),
+        )
+
+    def test_effective_scope_passes_through_without_offline_all(self):
+        self.assertIsNone(bi_web_queries._oa_effective_scope(None))
+        scope = frozenset({"hangzhou"})
+        self.assertEqual(scope, bi_web_queries._oa_effective_scope(scope))
+
+    def test_kpi_oa_today_offline_all_expands_to_three_regions(self):
+        connection = FakeConnection(
+            rowsets={"fact_daily_report_offline": [{"s": Decimal("123")}]}
+        )
+        payload = bi_web_queries.run_kpi_oa_today(
+            connection, {"date": "2026-08-04", "_scope": "offline_all"})
+        self.assertEqual(123.0, payload["value"])
+        sql, params = connection.executed[-1]
+        self.assertIn("region IN (%s, %s, %s)", sql)
+        self.assertNotIn("offline_all", params)
+        self.assertEqual(
+            (date(2026, 8, 4), "hangzhou", "offline_extra", "shaoxing"),
+            params,
+        )
+
+    def test_kpi_oa_mtd_offline_all_expands_to_three_regions(self):
+        connection = _RegionFakeConnection(
+            scalars={
+                "fact_daily_report_offline": Decimal("80"),
+                "region_target": Decimal("100"),
+            }
+        )
+        bi_web_queries.run_kpi_oa_mtd(
+            connection, {"date": "2026-08-04", "_scope": "offline_all"})
+        sql, params = connection.executed[0]
+        self.assertIn("region IN (%s, %s, %s)", sql)
+        self.assertEqual(
+            (date(2026, 8, 1), date(2026, 8, 31),
+             "hangzhou", "offline_extra", "shaoxing"),
+            params,
+        )
+
+    def test_trend_oa_daily_offline_all_expands_the_fingerprint(self):
+        from unittest import mock
+
+        connection = FakeConnection()
+        with mock.patch.object(
+            bi_web_queries, "run_trend_region_daily",
+            return_value={"chart": "line"},
+        ) as trend:
+            bi_web_queries.run_trend_oa_daily(
+                connection, {"date": "2026-08-04", "_scope": "offline_all"})
+        trend.assert_called_once_with(
+            connection,
+            {"month": "2026-08", "gran": "day",
+             "_scope": "hangzhou,offline_extra,shaoxing"},
+        )
+
+    def test_oa_people_offline_all_passes_the_merged_gate(self):
+        connection = _OaFakeConnection(
+            rowsets={
+                "dim_calendar": [
+                    {"business_date": date(2026, 8, 3)},
+                    {"business_date": date(2026, 8, 4)},
+                ],
+                "fact_daily_report_offline": [
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "department": "杭中", "business_date": date(2026, 8, 3),
+                     "sales_amount": Decimal("30"),
+                     "monthly_target": Decimal("100")},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_oa_people_progress(
+            connection, {"date": "2026-08-04", "_scope": "offline_all"})
+        # 聚合授权键视同三区全授：合并榜非空（不再是整表空）。
+        self.assertEqual(["张三"], [row["name"] for row in payload["rows"]])
+
+    def test_oa_people_partial_scope_still_closes_the_merged_gate(self):
+        # 回归：仅 hangzhou（三区不全）仍整表空——聚合键不影响原门径。
+        connection = _OaFakeConnection(
+            rowsets={
+                "dim_calendar": [
+                    {"business_date": date(2026, 8, 3)},
+                    {"business_date": date(2026, 8, 4)},
+                ],
+                "fact_daily_report_offline": [
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "department": "杭中", "business_date": date(2026, 8, 3),
+                     "sales_amount": Decimal("30"),
+                     "monthly_target": Decimal("100")},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_oa_people_progress(
+            connection, {"date": "2026-08-04", "_scope": "hangzhou"})
+        self.assertEqual([], payload["rows"])
+
+    def test_table_oa_scopes_offline_all_passes_the_gate(self):
+        connection = _OaFakeConnection(
+            rowsets={
+                "fact_daily_report_offline": [
+                    {"region": "hangzhou", "responsible_person": "张三",
+                     "department": "杭中", "business_date": date(2026, 8, 3),
+                     "sales_amount": Decimal("30"),
+                     "monthly_target": Decimal("100")},
+                ],
+            }
+        )
+        payload = bi_web_queries.run_table_oa_scopes(
+            connection, {"date": "2026-08-04", "_scope": "offline_all"})
+        self.assertEqual(
+            ["杭州", "绍兴", "省外", "线下总经办", "李树军", "线下整体"],
+            [row["scope"] for row in payload["rows"]],
+        )
+
+
 class SxDashboardTests(unittest.TestCase):
     """绍兴线下销售BI看板（sx-offline-sales，2026-10-10 裁决）：
 
