@@ -32,7 +32,12 @@ Routing (spec section 6; API-first per the 2026-09-14 separation spec):
   ``Card.params_schema`` and their values validated against the
   dimension option sets (TTL-cached, fail-open on a failed lookup -- a
   bad value can only ever surface as an empty card, never a 5xx); the
-  SQL itself is fully static.  The ``run`` result is served through
+  SQL itself is fully static, and the only per-viewer input is the
+  row-level scope: for cards declaring ``row_scope="region"`` the
+  viewer's ``allowed_regions`` is injected as a parameterized
+  ``region IN (...)`` predicate (M3, design section 4.1/6) -- an
+  admitted non-admin with no region grant gets an empty set, i.e. no
+  region rows at all, never a broader view.  The ``run`` result is served through
   the stage-2 card cache (:mod:`common.bi_web.cache`): read-through
   with hot/cold TTLs, fail-open to a direct mart read, one compute per
   key under concurrency -- the ``no-store`` header stays, caching only
@@ -855,6 +860,17 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                 raise HTTPException(
                     status_code=400, detail=ErrorDetail.BAD_REQUEST
                 )
+        if card.row_scope == "region":
+            # 行级 scope（M3）：把 viewer.allowed_regions 注入查询层。指纹串
+            # 一并进缓存键（normalize_params 按名排序会带上 _scope），
+            # 不同可见范围的载荷绝不互相命中。viewer=None（Bearer 机读通道
+            # / 未配置 session）与 admin（恒全量）→ 不写键，行为与 M3 前
+            # 逐字节一致；其余用户写入（空集也写）→ 查询层 fail-closed。
+            fingerprint = queries.scope_fingerprint(
+                authz.region_row_scope(getattr(request.state, "viewer", None))
+            )
+            if fingerprint is not None:
+                params[queries.ROW_SCOPE_PARAM] = fingerprint
         if "gran" in card.params_schema and "gran" not in params and card.default_gran:
             # gran 未传 → default_gran（§4.6）：注入后 gran=day 与不带参走
             # 同一缓存键、同一计算路径，响应逐字节一致；注入值来自注册表

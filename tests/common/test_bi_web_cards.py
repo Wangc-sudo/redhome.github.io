@@ -600,5 +600,73 @@ class ValidateDashboardConfigTests(unittest.TestCase):
             validate_dashboard_config(_l1_cockpit(), subset)
 
 
+#: 行级 scope 卡片清单（M3）：声明点在 ``cards.py::_REGION_SCOPED_CARD_IDS``，
+#: 本元组是测试侧的逐字复述——双向锁，往清单里"顺带"加一张或漏掉一张
+#: 都必须同时改两处，避免豁免决定悄悄溜过评审。
+REGION_SCOPED_CARD_IDS = (
+    "kpi_offline_mtd",
+    "kpi_offline_dod",
+    "trend_region_daily",
+    "kpi_region_mtd",
+    "bar_department_mtd",
+    "kpi_people_count",
+    "kpi_people_completed",
+    "kpi_people_rate",
+    "table_people_leaderboard",
+    "kpi_shortfall",
+    "anomaly_top",
+    "kpi_hz_mtd",
+    "kpi_hz_today",
+    "trend_hz_daily",
+    "bar_hz_dept",
+    "table_hz_people_progress",
+    "table_hz_unfilled_today",
+    "kpi_sx_mtd",
+    "kpi_sx_today",
+    "trend_sx_daily",
+    "bar_sx_dept",
+    "table_sx_people_progress",
+    "table_sx_unfilled_today",
+    "kpi_oa_mtd",
+    "kpi_oa_today",
+    "trend_oa_daily",
+    "bar_oa_dept",
+    "table_oa_scopes",
+    "table_oa_people_progress",
+)
+
+
+class RowScopeDeclarationTests(unittest.TestCase):
+    """``row_scope`` 的声明面：集合唯一、清单和注册表逐字对齐。"""
+
+    def test_declared_set_is_pinned(self):
+        from common.bi_web import cards
+
+        self.assertEqual(
+            set(REGION_SCOPED_CARD_IDS), set(cards._REGION_SCOPED_CARD_IDS)
+        )
+
+    def test_registry_row_scope_matches_the_declaration(self):
+        scoped = {
+            card_id for card_id, card in REGISTRY.items()
+            if card.row_scope == "region"
+        }
+        self.assertEqual(set(REGION_SCOPED_CARD_IDS), scoped)
+
+    def test_every_other_card_is_explicitly_exempt(self):
+        for card_id, card in REGISTRY.items():
+            if card_id in REGION_SCOPED_CARD_IDS:
+                continue
+            # 默认空串 = 未声明 = 豁免（非 region 语义，行为不受 scope 影响）。
+            self.assertEqual("", card.row_scope, card_id)
+
+    def test_declared_ids_all_exist_in_the_registry(self):
+        # import 期的 CardConfigError 守卫（未知 card_id 直接让模块加载失败）
+        # 无法在测试里复现一次加载失败，这里等价断言其前置条件。
+        from common.bi_web import cards
+
+        self.assertEqual(set(), set(cards._REGION_SCOPED_CARD_IDS) - set(REGISTRY))
+
+
 if __name__ == "__main__":
     unittest.main()
