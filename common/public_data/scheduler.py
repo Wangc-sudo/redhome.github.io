@@ -200,6 +200,9 @@ _COMMAND_TABLE = {
     # 工作日历覆盖看门（2026-10-10 三层防线 B 层）：跨区域告警，
     # 不注入 ROBOT_REGION（投递 region 固定 offline_all）。
     "calendar-watch": _mart_cli_entry("calendar-watch"),
+    # L3 数据新鲜度看门狗（A3）：跨区域，投递固定 region=ops；
+    # 依赖 extract-channel 完成后触发，避免早于数据落地误报。
+    "freshness-check": _mart_cli_entry("freshness-check"),
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable
@@ -306,7 +309,7 @@ def build_argv(service_id, settings):
 _FORCEABLE_MART_SUBCOMMANDS = frozenset({
     "remind", "check", "once",
     "offline-daily", "offline-weekly", "offline-monthly",
-    "channel-missing", "target-remind", "calendar-watch",
+    "channel-missing", "target-remind", "calendar-watch", "freshness-check",
 })
 
 

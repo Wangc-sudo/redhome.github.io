@@ -216,6 +216,44 @@ class CategoryFieldTests(unittest.TestCase):
         self.assertEqual(derive_category("robot-hangzhou"), "催办")
 
 
+class ParamsFieldTests(unittest.TestCase):
+    def test_params_parsed_and_round_trips(self):
+        config = parse_pipeline_config(
+            "freshness-check",
+            {"params": {"alert_threshold": "warning",
+                        "alert_cooldown_hours": 24}},
+        )
+        self.assertEqual(
+            {"alert_threshold": "warning", "alert_cooldown_hours": 24},
+            config.params,
+        )
+        self.assertEqual(config.to_mapping()["params"], config.params)
+        self.assertEqual(
+            parse_pipeline_config("freshness-check", config.to_mapping()), config
+        )
+
+    def test_params_defaults_empty_and_omitted(self):
+        config = parse_pipeline_config("sync-wdt", {"kind": "apps"})
+        self.assertEqual({}, config.params)
+        self.assertNotIn("params", config.to_mapping())
+
+    def test_params_keys_are_stripped(self):
+        config = parse_pipeline_config("x", {"params": {" k ": 1}})
+        self.assertEqual({"k": 1}, config.params)
+
+    def test_rejects_non_mapping_or_nested_or_blank_key(self):
+        for bad in ([1], "nope", {"": 1}, {"k": {"nested": 1}}, {"k": [1]}):
+            with self.assertRaises(PipelineConfigError):
+                parse_pipeline_config("x", {"params": bad})
+
+    def test_accepts_scalar_values_including_null(self):
+        config = parse_pipeline_config(
+            "x", {"params": {"a": 1, "b": 1.5, "c": True, "d": "s", "e": None}}
+        )
+        self.assertEqual({"a": 1, "b": 1.5, "c": True, "d": "s", "e": None},
+                         config.params)
+
+
 class BackfillCategoriesTests(unittest.TestCase):
     def setUp(self):
         self.client = _FakeNacosClient({

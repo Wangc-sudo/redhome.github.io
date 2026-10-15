@@ -331,8 +331,16 @@ export function updatePipelineTimes(payload) {
   return post('/api/pipelines/update', payload);
 }
 
+/**
+ * 改线级参数（巡检告警线的阈值/冷却）。payload: {service_id, params}，
+ * params 传 {} 即清空。只覆盖 params，其余运行态原样保留。
+ */
+export function updatePipelineParams(payload) {
+  return post('/api/pipelines/params', payload);
+}
+
 /** 新增一条定时任务。payload: {service_id, kind, schedule, enabled?,
- *  description?, depends_on?, category?}。 */
+ *  description?, depends_on?, category?, params?}。 */
 export function addPipeline(payload) {
   return post('/api/pipelines/add', payload);
 }

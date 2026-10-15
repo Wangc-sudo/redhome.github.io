@@ -549,6 +549,31 @@ class PipelinePageTests(unittest.TestCase):
         self.assertEqual("2026-09-30 18:00:00",
                          row["latest"]["created_at"])            # UTC → 北京时
 
+    def test_pipelines_api_exposes_params_and_alertable(self):
+        """巡检线读面携带 params 与 alertable，供前端「告警设置」入口。"""
+        client = TestClient(_fleet_app(
+            viewer=_admin_viewer(),
+            fleet=("channel-missing-check", "robot-hangzhou"),
+            configs={
+                "channel-missing-check": {
+                    "schedule": "40 10 * * *", "enabled": True,
+                    "params": {"alert_threshold": "critical",
+                               "alert_cooldown_hours": 6},
+                },
+                "robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True},
+            },
+        ))
+        _login(client)
+        data = client.get("/api/pipelines").json()
+
+        alert = self._pick(data, "channel-missing-check")
+        self.assertTrue(alert["alertable"])
+        self.assertEqual({"alert_threshold": "critical",
+                          "alert_cooldown_hours": 6}, alert["params"])
+        plain = self._pick(data, "robot-hangzhou")
+        self.assertFalse(plain["alertable"])
+        self.assertEqual({}, plain["params"])
+
     def test_pipelines_api_group_and_function_classification(self):
         """群视角分组：家族后缀/显式区域映射、跨区域线与平台线归组。"""
         fleet = (
@@ -1232,6 +1257,77 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
                                    json={"service_id": "robot-hangzhou",
                                          "times": [{"hour": 1, "minute": 0}]}
                                    ).status_code
+        )
+
+    def test_params_rewrites_and_audits_preserving_runtime_state(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = self._client(publisher=publisher)
+        params = {"alert_threshold": "critical", "alert_cooldown_hours": 6}
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/params",
+                json={"service_id": "robot-hangzhou", "params": params},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(params, response.json()["params"])
+        published = publisher.published[0]
+        self.assertEqual(params, published.params)
+        # 只覆盖 params，其余运行态（schedule/enabled）原样保留。
+        self.assertEqual("0 18 * * 1-5", published.schedule)
+        self.assertEqual(True, published.enabled)
+        self.assertEqual("params", store.audit[0][1])
+        self.assertEqual("robot-hangzhou", store.audit[0][2])
+
+    def test_params_empty_dict_clears_existing(self):
+        publisher = _RecordingPublisher()
+        client = self._client(
+            configs={"robot-hangzhou": {"schedule": "0 18 * * 1-5",
+                                        "enabled": True,
+                                        "params": {"alert_threshold": "warning"}}},
+            publisher=publisher,
+        )
+        response = client.post(
+            "/api/pipelines/params",
+            json={"service_id": "robot-hangzhou", "params": {}},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({}, publisher.published[0].params)
+
+    def test_params_rejects_bad_payload_and_unknown_service(self):
+        client = self._client(publisher=_RecordingPublisher())
+        for payload in (
+            {"service_id": "BAD ID", "params": {}},                  # 非法 id
+            {"service_id": "nope", "params": {}},                    # 不在舰队
+            {"service_id": "robot-hangzhou"},                        # 缺 params
+            {"service_id": "robot-hangzhou", "params": None},        # 非 dict
+            {"service_id": "robot-hangzhou", "params": {"": "x"}},   # 空键
+            {"service_id": "robot-hangzhou", "params": {"k": [1]}},  # 非标量
+            {"service_id": "robot-hangzhou", "params": {"k": "x" * 201}},
+            {"service_id": "robot-hangzhou",                         # 超 16 项
+             "params": {"k%d" % i: 1 for i in range(20)}},
+        ):
+            self.assertEqual(
+                400, client.post("/api/pipelines/params", json=payload).status_code,
+                payload,
+            )
+
+    def test_params_requires_admin(self):
+        client = self._client(publisher=_RecordingPublisher(), login=False)
+        self.assertEqual(
+            401, client.post("/api/pipelines/params",
+                             json={"service_id": "robot-hangzhou",
+                                   "params": {}}).status_code
+        )
+
+    def test_params_503_when_no_publisher(self):
+        client = self._client(publisher=None)
+        self.assertEqual(
+            503, client.post("/api/pipelines/params",
+                             json={"service_id": "robot-hangzhou",
+                                   "params": {}}).status_code
         )
 
 

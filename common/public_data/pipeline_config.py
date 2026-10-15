@@ -19,7 +19,7 @@ import logging
 import os
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from common.public_data.pipeline_taxonomy import SUPPORTED_CATEGORIES
@@ -66,6 +66,11 @@ class PipelineConfig:
     #: 功能分类真源（七值，见 pipeline_taxonomy）；None = 未配置，
     #: 读路径按 service_id 推导兜底（存量条目回填前的过渡态）。
     category: str | None = None
+    #: 线级可调参数（标量映射）：注册表承载、ops-web 可编辑、Nacos 发布，
+    #: 复用既有变更审计。巡检线的告警口径即落此：
+    #: ``alert_threshold``（info/warning/critical）、
+    #: ``alert_cooldown_hours``（同窗口内去重）。未配置则为空。
+    params: dict = field(default_factory=dict)
 
     def to_mapping(self):
         mapping = {"enabled": self.enabled, "kind": self.kind}
@@ -81,6 +86,8 @@ class PipelineConfig:
             mapping["description"] = self.description
         if self.depends_on:
             mapping["depends_on"] = list(self.depends_on)
+        if self.params:
+            mapping["params"] = dict(self.params)
         return mapping
 
 
@@ -135,6 +142,8 @@ def parse_pipeline_config(service_id, data):
     if category is not None and category not in SUPPORTED_CATEGORIES:
         raise PipelineConfigError(f"pipeline '{service_id}' has an invalid 'category'")
 
+    params = _validate_params(service_id, data.get("params"))
+
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -145,7 +154,34 @@ def parse_pipeline_config(service_id, data):
         description=description,
         depends_on=tuple(depends_on),
         category=category,
+        params=params,
     )
+
+
+def _validate_params(service_id, params):
+    """校验 params：非空字符串键 + 标量值（str/int/float/bool/None）。
+
+    巡警口径（阈值/冷却）等具体语义由消费侧自行规范化并兜底默认，注册表
+    层只保证「结构合法、不塞入嵌套/二进制」，便于 Nacos 承载与审计。
+    """
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise PipelineConfigError(
+            f"pipeline '{service_id}' field 'params' must be a mapping"
+        )
+    normalized = {}
+    for key, value in params.items():
+        if not isinstance(key, str) or not key.strip():
+            raise PipelineConfigError(
+                f"pipeline '{service_id}' has an invalid 'params' key"
+            )
+        if not (value is None or isinstance(value, (str, int, float, bool))):
+            raise PipelineConfigError(
+                f"pipeline '{service_id}' param '{key}' must be a scalar"
+            )
+        normalized[key.strip()] = value
+    return normalized
 
 
 # ---------------------------------------------------------------------------

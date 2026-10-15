@@ -15,6 +15,7 @@ import {
   getPipelines,
   togglePipeline,
   updatePipelineTimes,
+  updatePipelineParams,
   addPipeline,
   runPipelineOnce,
   getRecipientOverride,
@@ -270,6 +271,73 @@ async function submitScheduleEdit() {
   }
 }
 
+/* -------------------- 告警设置（巡检线阈值/冷却，落注册表 params）---- */
+//: 阈值选项（须与后端 inspection_alert.SEVERITY_ORDER 一致）。
+const ALERT_THRESHOLDS = [
+  { value: 'info', label: 'info（全部发现）' },
+  { value: 'warning', label: 'warning（默认：中及以上）' },
+  { value: 'critical', label: 'critical（仅严重）' },
+];
+
+const alertOpen = ref(false);
+const alertSid = ref('');
+const alertRow = ref(null);
+const alertThreshold = ref('warning');
+const alertCooldownHours = ref('24');
+const alertSaving = ref(false);
+
+/** 行内展示当前告警口径（阈值 · 冷却）。 */
+function alertSummary(s) {
+  const p = s.params || {};
+  const th = p.alert_threshold || 'warning';
+  const cd = p.alert_cooldown_hours ?? 24;
+  return '阈值 ' + th + ' · 冷却 ' + cd + 'h';
+}
+
+function openAlertSettings(s) {
+  alertSid.value = s.service_id;
+  alertRow.value = s;
+  alertThreshold.value = (s.params && s.params.alert_threshold) || 'warning';
+  alertCooldownHours.value = String(
+    (s.params && s.params.alert_cooldown_hours) ?? 24,
+  );
+  alertOpen.value = true;
+}
+
+function closeAlertSettings() {
+  alertOpen.value = false;
+  alertRow.value = null;
+}
+
+async function submitAlertSettings() {
+  const hours = Number(alertCooldownHours.value);
+  if (!Number.isFinite(hours) || hours < 1 || hours > 24) {
+    window.alert('冷却小时数需为 1–24 的整数（24 = 每天最多一条）');
+    return;
+  }
+  // read-modify-write：保留本行已有 params 的其他键，只覆盖告警两键。
+  const extra = { ...((alertRow.value && alertRow.value.params) || {}) };
+  delete extra.alert_threshold;
+  delete extra.alert_cooldown_hours;
+  const params = {
+    ...extra,
+    alert_threshold: alertThreshold.value,
+    alert_cooldown_hours: hours,
+  };
+  const sid = alertSid.value;
+  alertSaving.value = true;
+  try {
+    await updatePipelineParams({ service_id: sid, params });
+    setFlash('ok', '已更新 ' + sid + ' 告警口径（≤30s 生效）');
+    closeAlertSettings();
+    await load(false);
+  } catch (err) {
+    setFlash('err', err.message);
+  } finally {
+    alertSaving.value = false;
+  }
+}
+
 /* -------------------- 新增定时任务（预设 + 时点合成 cron）------------ */
 const form = reactive({
   service_id: '',
@@ -510,6 +578,7 @@ onBeforeUnmount(() => {
               <th>播报时间</th>
               <th>依赖</th>
               <th>说明</th>
+              <th>告警口径</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -537,6 +606,10 @@ onBeforeUnmount(() => {
               <td>{{ s.depends_on && s.depends_on.length ? s.depends_on.join(', ') : '—' }}</td>
               <td>{{ s.service_label }}</td>
               <td>
+                <span v-if="s.alertable">{{ alertSummary(s) }}</span>
+                <span v-else class="hint">—</span>
+              </td>
+              <td>
                 <span>{{ s.enabled ? '启用' : '停用' }}</span>
                 <span v-if="s.latest" class="hint">（{{ s.latest.status_label }} {{ s.latest.requested_by }} {{ s.latest.created_at }}）</span>
                 <span v-else class="hint">（无运行记录）</span>
@@ -544,6 +617,7 @@ onBeforeUnmount(() => {
               <td class="row-actions">
                 <button class="btn mini" @click="toggleTask(s)">{{ s.enabled ? '停用' : '启用' }}</button>
                 <button class="btn mini" @click="openSchedule(s)">改播报时间</button>
+                <button v-if="s.alertable" class="btn mini" @click="openAlertSettings(s)">告警设置</button>
                 <button v-if="s.has_command" class="btn mini" @click="runOnce(s)">运行一次</button>
               </td>
             </tr>
@@ -656,6 +730,34 @@ onBeforeUnmount(() => {
         <div class="modal-btns">
           <button :disabled="!schedParsed" @click="submitScheduleEdit()">确定</button>
           <button @click="closeScheduleEdit()">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 告警设置弹窗（巡检线阈值/冷却） -->
+    <div v-if="alertOpen" class="modal-mask" @click.self="closeAlertSettings()">
+      <div class="modal-box">
+        <div>修改 <b>{{ alertSid }}</b> 的告警口径</div>
+        <div class="hint">
+          低于阈值的发现不告警；冷却窗口内同一线只发一次（24h = 每天最多一条）。
+          配置存 Nacos 注册表（PIPELINES 组），≤30 秒生效。
+        </div>
+        <div class="alert-row">
+          <label>告警阈值</label>
+          <select v-model="alertThreshold">
+            <option v-for="t in ALERT_THRESHOLDS" :key="t.value" :value="t.value">{{ t.label }}</option>
+          </select>
+        </div>
+        <div class="alert-row">
+          <label>冷却（小时）</label>
+          <input
+            v-model="alertCooldownHours"
+            type="number" min="1" max="24" style="width:80px"
+          >
+        </div>
+        <div class="modal-btns">
+          <button :disabled="alertSaving" @click="submitAlertSettings()">确定</button>
+          <button @click="closeAlertSettings()">取消</button>
         </div>
       </div>
     </div>
@@ -780,6 +882,15 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   margin: 6px 0;
+}
+.alert-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.alert-row label {
+  min-width: 96px;
 }
 .base-box h3 {
   margin: 12px 0 4px;
