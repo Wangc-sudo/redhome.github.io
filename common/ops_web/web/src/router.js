@@ -5,7 +5,7 @@
  * 401/403 → 跳 /auth/entry；meta.capability 不通过 → 重定向 / 并 flash。
  */
 import { createRouter, createWebHistory } from 'vue-router';
-import { loadMe, hasCapability, isAdmin, setFlash } from './store/me.js';
+import { loadMe, hasCapability, hasAnyCapability, isAdmin, setFlash } from './store/me.js';
 import OverviewPage from './pages/OverviewPage.vue';
 import OrgPage from './pages/OrgPage.vue';
 import RosterPage from './pages/RosterPage.vue';
@@ -25,7 +25,8 @@ const routes = [
     alias: '/members',
     name: 'org',
     component: OrgPage,
-    meta: { capability: 'org' },
+    // scoped：区域级 ``org:<region>`` 授权也能进（页面内按授权区域裁剪）。
+    meta: { capability: 'org', scoped: true },
   },
   { path: '/roster', name: 'roster', component: RosterPage, meta: { capability: 'roster' } },
   { path: '/flow', name: 'flow', component: FlowPage, meta: { capability: 'org' } },
@@ -79,7 +80,9 @@ router.beforeEach(async (to) => {
 
   const cap = to.meta && to.meta.capability;
   if (cap) {
-    const ok = cap === 'admin' ? isAdmin() : hasCapability(cap);
+    const ok = cap === 'admin'
+      ? isAdmin()
+      : (to.meta.scoped ? hasAnyCapability(cap) : hasCapability(cap));
     if (!ok) {
       setFlash('err', '无权限');
       return { path: '/' };

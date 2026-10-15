@@ -8,6 +8,7 @@
 import { ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { getRecords } from '../api.js';
+import { isAdmin } from '../store/me.js';
 
 const route = useRoute();
 const router = useRouter();
@@ -101,7 +102,10 @@ function deepLink(row) {
   const target = (row.target || '').trim();
   const first = target.split(/\s+/)[0] || '';
   if (src === '授权') {
-    // 记录行的 user_id（若后端下发）优先；否则退化为 grant_key（旧 handler 口径）。
+    // 授权页（/grants）是 admin 闸——GET/POST /api/grants 都是 require_admin。
+    // 非管理员不给「去处理」死链（点了会被守卫弹回首页），改由「回源」列
+    // 展示账号，运维照着账号去授权页处理（2026-10-15 闭环修复）。
+    if (!isAdmin()) return null;
     const user = row.user_id || '';
     return user ? { path: '/grants', query: { user } } : { path: '/grants' };
   }
@@ -156,6 +160,9 @@ function deepLink(row) {
         <td>{{ row.detail }}</td>
         <td>
           <router-link v-if="deepLink(row)" :to="deepLink(row)">去处理</router-link>
+          <span v-else-if="row.source === '授权' && row.user_id" class="muted">
+            账号 {{ row.user_id }}
+          </span>
           <span v-else class="muted">—</span>
         </td>
       </tr>

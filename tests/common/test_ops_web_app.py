@@ -3209,6 +3209,106 @@ class OrgAssignmentApiTests(unittest.TestCase):
                                    "dept_name": "  "}).status_code)
 
 
+class RegionScopedOrgGateTests(unittest.TestCase):
+    """C5 闭环修复（2026-10-15）：``org:<region>`` 区域级授权真正生效。
+
+    授权页允许授出 ``org:<region>``（能力×范围模型），但此前 /api/org/overview
+    与 assign/toggle/delete 只认全局 ``org``——授权页能给、页面用不上，语义
+    不自洽。本组钉死：只读本区域、只写本区域、越区 403、池与跨区覆盖行不泄漏；
+    目录级 CRUD（区域/部门增删停用）有意保持全局 org。
+    """
+
+    def _scoped_client(self, region, connection=None):
+        viewer = authz.Viewer(
+            userid="u-org-scoped", name="区域组织",
+            scopes=frozenset({f"org:{region}"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer, connection=connection))
+        _login(client, "u-org-scoped")
+        return client
+
+    def _members_conn(self, rows=None, **kwargs):
+        base = {"dim_robot_member": _MEMBERS}
+        base.update(rows or {})
+        return _OrgConn(base, **kwargs)
+
+    def _cross_region_override_conn(self):
+        return self._members_conn({"dim_org_assignment_override": [
+            dict(_ORG_OVERRIDE_ROW, user_id="u-wang", region="hq"),
+            dict(_ORG_OVERRIDE_ROW, user_id="u-zhang", region="hangzhou"),
+        ]})
+
+    def test_overview_reads_only_authorized_region(self):
+        client = self._scoped_client("hangzhou", self._members_conn())
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual("ok", data["status"])
+        self.assertEqual(["hangzhou"], [r["key"] for r in data["regions"]])
+        self.assertEqual([], data["pool"])
+
+    def test_overview_hides_cross_region_overrides(self):
+        client = self._scoped_client("hangzhou", self._cross_region_override_conn())
+        data = client.get("/api/org/overview").json()
+
+        self.assertEqual(["hangzhou"], [r["key"] for r in data["regions"]])
+        # 跨区覆盖行（hq）不下发，只留本区域行
+        self.assertEqual({"u-zhang"},
+                         {row["user_id"] for row in data["overrides"]})
+
+    def test_assign_inside_authorized_region_allowed(self):
+        client = self._scoped_client("hangzhou", self._members_conn())
+        response = client.post("/api/org/assign", json={
+            "user_id": "u-li", "region": "hangzhou", "dept_id": "d1",
+            "dept_name": "门店一部", "name": "李四"})
+
+        self.assertEqual(200, response.status_code)
+
+    def test_assign_outside_authorized_region_forbidden(self):
+        client = self._scoped_client("hangzhou", self._members_conn())
+        response = client.post("/api/org/assign", json={
+            "user_id": "u-li", "region": "hq", "dept_id": "d9",
+            "dept_name": "总经办", "name": "李四"})
+
+        self.assertEqual(403, response.status_code)
+
+    def test_assign_null_region_requires_global_org(self):
+        """``region=null``（移出全部区域）是跨区动作，只认全局 org。"""
+        client = self._scoped_client("hangzhou", self._members_conn())
+        self.assertEqual(403, client.post(
+            "/api/org/assign", json={"user_id": "u-li"}).status_code)
+
+    def test_toggle_inside_region_allowed_outside_forbidden(self):
+        client = self._scoped_client("hangzhou", self._cross_region_override_conn())
+        ok = client.post("/api/org/toggle",
+                         json={"user_id": "u-zhang", "enabled": False})
+        bad = client.post("/api/org/toggle",
+                          json={"user_id": "u-wang", "enabled": False})
+
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual(403, bad.status_code)
+
+    def test_delete_outside_region_forbidden(self):
+        client = self._scoped_client("hangzhou", self._cross_region_override_conn())
+        self.assertEqual(403, client.post(
+            "/api/org/delete", json={"user_id": "u-wang"}).status_code)
+
+    def test_catalog_crud_stays_global_org(self):
+        """区域/部门增删停用影响整张登记表结构，超出单区域范围，保持全局 org。"""
+        client = self._scoped_client("hangzhou", self._members_conn())
+        self.assertEqual(403, client.post(
+            "/api/org/region/add",
+            json={"region_key": "shaoxing"}).status_code)
+        self.assertEqual(403, client.post(
+            "/api/org/dept/add",
+            json={"region_key": "hangzhou", "dept_name": "新部门"}).status_code)
+
+    def test_plain_member_cannot_read_overview(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        self.assertEqual(403, client.get("/api/org/overview").status_code)
+
+
 class CapabilityModelTests(unittest.TestCase):
     """D4（2026-10-14）：能力×范围闸的纯函数语义。"""
 
@@ -3276,6 +3376,20 @@ class MeApiTests(unittest.TestCase):
         self.assertEqual([], data["capabilities"])
         self.assertEqual({"roster": ["other"]}, data["scoped_capabilities"])
         self.assertEqual(["other"], data["regions"])
+
+    def test_scoped_org_viewer_reports_region_only(self):
+        """C5 闭环修复（2026-10-15）：``org:<region>`` 也进 scoped_capabilities，
+        前端据此放行 /org 并按授权区域渲染（此前守卫只看全局 org → 进不去）。"""
+        viewer = authz.Viewer(
+            userid="u-org", name="组织", scopes=frozenset({"org:other"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-org")
+        data = client.get("/api/me").json()
+        self.assertFalse(data["is_admin"])
+        self.assertEqual([], data["capabilities"])
+        self.assertEqual({"org": ["other"]}, data["scoped_capabilities"])
 
 
 class RegionScopeGateTests(unittest.TestCase):
@@ -3405,6 +3519,38 @@ class RecordsApiTests(unittest.TestCase):
         self.assertEqual(1, len(data["records"]))
         self.assertEqual("填报名册", data["records"][0]["source"])
         self.assertIn("填报名册", data["sources"])
+
+    def test_authorization_records_carry_user_id(self):
+        """D1 闭环修复（2026-10-15）：授权来源行下发 ``user_id``，供「操作记录」
+        页回源深链 ``/grants?user=`` 过滤——此前该列被丢在元组外，深链恒空过滤。"""
+        viewer = authz.Viewer(
+            userid="u-audit", name="审计", scopes=frozenset({"audit"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-audit")
+        with mock.patch(
+                "common.ops_web.app._collect_records",
+                lambda conn: [(datetime(2026, 10, 15, 1, 0, 0), "授权",
+                               "admin", "新增授权", "roster:other", "备注",
+                               "u-other")]):
+            data = client.get("/api/records").json()
+        self.assertEqual("u-other", data["records"][0]["user_id"])
+
+    def test_non_authorization_records_default_user_id_empty(self):
+        """非授权来源（6 元组）不误填 user_id，保持空串。"""
+        viewer = authz.Viewer(
+            userid="u-audit", name="审计", scopes=frozenset({"audit"}),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(_app(viewer=viewer))
+        _login(client, "u-audit")
+        with mock.patch(
+                "common.ops_web.app._collect_records",
+                lambda conn: [(datetime(2026, 10, 15, 1, 0, 0), "定时任务",
+                               "admin", "启用", "kb-gateway", "")]):
+            data = client.get("/api/records").json()
+        self.assertEqual("", data["records"][0]["user_id"])
 
 
 class SpaJsonApiContractTests(unittest.TestCase):
