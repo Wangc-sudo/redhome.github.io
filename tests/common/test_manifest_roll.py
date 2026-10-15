@@ -1,6 +1,7 @@
 """manifest 窗口滚动（roll-manifest 管线）测试。"""
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -150,6 +151,179 @@ class RollManifestTests(unittest.TestCase):
             self.assertEqual(calls["n"], 2)  # 第一次被拒后走了回退
 
 
+_CHANNEL_NOW = datetime(2026, 10, 15, 0, 0, 0, tzinfo=timezone.utc)
+_LOGGER = "common.public_data.manifest_roll"
+
+
+def _channel_manifest():
+    """单 base / 单渠道 sheet（天猫 9 月）的最小合法 manifest。"""
+    return {
+        "version": 1,
+        "dingtalk": {
+            "bases": [
+                {
+                    "base_id": "BASE_TM",
+                    "sheets": [
+                        {
+                            "sheet_id": "s9",
+                            "sheet_name": "天猫渠道数据9",
+                            "dataset": "channel_daily_sales_tmall",
+                            "target_table": "channel_daily_sales",
+                            "max_pages": 100,
+                            "field_mapping": {
+                                "店铺": {"column": "store_name", "source_type": "text"}
+                            },
+                            "transform": {
+                                "type": "inject",
+                                "values": {"channel": "天猫"},
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+        "wdt": {"datasets": []},
+    }
+
+
+class _FakeGateway:
+    """钉钉读网关替身：只实现换月用到的两个只读方法。"""
+
+    def __init__(self, sheets, *, validate_error=None, list_error=False):
+        self._sheets = sheets
+        self._validate_error = validate_error
+        self._list_error = list_error
+        self.validated = []
+
+    def list_sheets(self, base_id):
+        if self._list_error:
+            raise RuntimeError("boom")
+        return list(self._sheets.get(base_id, []))
+
+    def validate_sheet(self, sheet):
+        if self._validate_error is not None:
+            raise self._validate_error
+        self.validated.append(sheet)
+
+
+class RollDingtalkSheetsTests(unittest.TestCase):
+
+    def _roll(self, gateway, *, now=_CHANNEL_NOW, manifest=None):
+        """跑一次 roll_manifest，返回 channel sheet 的滚动后声明。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "wdt_datasets.json"
+            config_path.write_text(json.dumps(_CONFIG), encoding="utf-8")
+            manifest_path = Path(tmp) / "source-manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest or _channel_manifest(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            roll_manifest(
+                manifest_path, config_path=config_path, now=now, gateway=gateway
+            )
+            rolled = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return rolled["dingtalk"]["bases"][0]["sheets"][0]
+
+    def test_rebinds_to_current_month_sheet(self):
+        gateway = _FakeGateway({
+            "BASE_TM": [
+                {"id": "s10", "name": "天猫渠道数据10"},
+                {"id": "s9", "name": "天猫渠道数据9"},
+            ]
+        })
+        sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s10")
+        self.assertEqual(sheet["sheet_name"], "天猫渠道数据10")
+        # 干校验作用于换绑后的候选 sheet
+        self.assertEqual([s.sheet_id for s in gateway.validated], ["s10"])
+
+    def test_missing_current_month_keeps_old_binding(self):
+        gateway = _FakeGateway({
+            "BASE_TM": [{"id": "s9", "name": "天猫渠道数据9"}]
+        })
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s9")
+        self.assertEqual(sheet["sheet_name"], "天猫渠道数据9")
+        self.assertEqual(gateway.validated, [])
+
+    def test_non_conforming_names_are_ignored(self):
+        gateway = _FakeGateway({
+            "BASE_TM": [
+                {"id": "a", "name": "天猫渠道数据 (4)"},
+                {"id": "b", "name": "各渠道每日总销售 10"},
+                {"id": "c", "name": "渠道销售目标达成率10"},
+            ]
+        })
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s9")
+
+    def test_ambiguous_month_keeps_old_binding(self):
+        gateway = _FakeGateway({
+            "BASE_TM": [
+                {"id": "x", "name": "天猫渠道数据10"},
+                {"id": "y", "name": "天猫渠道数据 10"},
+            ]
+        })
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s9")
+
+    def test_validation_failure_keeps_old_binding(self):
+        gateway = _FakeGateway(
+            {"BASE_TM": [{"id": "s10", "name": "天猫渠道数据10"}]},
+            validate_error=RuntimeError("field schema"),
+        )
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s9")
+        self.assertEqual(sheet["sheet_name"], "天猫渠道数据9")
+
+    def test_list_failure_keeps_old_binding(self):
+        gateway = _FakeGateway({}, list_error=True)
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            sheet = self._roll(gateway)
+        self.assertEqual(sheet["sheet_id"], "s9")
+
+    def test_already_bound_sheet_is_left_untouched(self):
+        manifest = _channel_manifest()
+        declared = manifest["dingtalk"]["bases"][0]["sheets"][0]
+        declared["sheet_id"] = "s10"
+        declared["sheet_name"] = "天猫渠道数据10"
+        gateway = _FakeGateway({
+            "BASE_TM": [{"id": "s10", "name": "天猫渠道数据10"}]
+        })
+        sheet = self._roll(gateway, manifest=manifest)
+        self.assertEqual(sheet["sheet_id"], "s10")
+        self.assertEqual(gateway.validated, [])
+
+    def test_beijing_month_boundary(self):
+        # UTC 2026-09-30 20:00 = 北京 2026-10-01 04:00 → 应按 10 月滚
+        gateway = _FakeGateway({
+            "BASE_TM": [{"id": "s10", "name": "天猫渠道数据10"}]
+        })
+        sheet = self._roll(
+            gateway, now=datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(sheet["sheet_id"], "s10")
+
+    def test_no_gateway_leaves_dingtalk_untouched(self):
+        """既有口径：不给网关时不触网，dingtalk 块原样保留。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "wdt_datasets.json"
+            config_path.write_text(json.dumps(_CONFIG), encoding="utf-8")
+            manifest_path = Path(tmp) / "source-manifest.json"
+            manifest_path.write_text(
+                json.dumps(_channel_manifest(), ensure_ascii=False), encoding="utf-8"
+            )
+            roll_manifest(manifest_path, config_path=config_path, now=_CHANNEL_NOW)
+            rolled = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            rolled["dingtalk"]["bases"][0]["sheets"][0]["sheet_id"], "s9"
+        )
+
+
 class RollManifestCliTests(unittest.TestCase):
 
     def test_handler_rolls_the_configured_manifest(self):
@@ -169,8 +343,18 @@ class RollManifestCliTests(unittest.TestCase):
             with redirect_stdout(output):
                 cli.main(["roll-manifest", "--confirm-local-test-write"])
         roll.assert_called_once()
+        # 换月干校验网关以关键字传入（无凭据时为 None，fail-soft 不触网）
+        self.assertIn("gateway", roll.call_args.kwargs)
         self.assertIn("datasets=145", output.getvalue())
         self.assertIn("status=completed", output.getvalue())
+
+    def test_gateway_is_none_without_credentials(self):
+        from common.public_data import cli
+        with patch.dict(
+            os.environ,
+            {"PUBLIC_DATA_LIVE_CREDENTIALS_PATH": "/nonexistent/creds.json"},
+        ):
+            self.assertIsNone(cli._roll_manifest_gateway())
 
     def test_handler_requires_confirmation(self):
         from common.public_data import cli
