@@ -84,10 +84,11 @@ function defaultPos(index) {
 }
 
 /** 复位某节点坐标到默认网格位（并清除本地记忆）。 */
-function resetPos(key) {
+async function resetPos(key) {
   delete nodePos.value[key];
   savePos();
   buildNodes(lastRaw.value);
+  await packDefaults();
 }
 
 // -- 拖拽组（互不串门）----------------------------------------------------
@@ -248,6 +249,7 @@ async function load({ silent = false } = {}) {
   } finally {
     if (!silent) loading.value = false;
   }
+  await packDefaults();
   await applyAnchor();
 }
 
@@ -411,9 +413,41 @@ function startNodeDrag(evt, node) {
 
 const planeHeight = computed(() => {
   let max = 360;
-  for (const node of nodes.value) max = Math.max(max, node.y + 320);
+  for (const node of nodes.value) max = Math.max(max, node.y + nodeHeight(node) + 16);
   return max;
 });
+
+/** 节点实测高度（渲染后测量；未测到回退 320）。 */
+function nodeHeight(node) {
+  return node.height || 320;
+}
+
+/**
+ * 默认网格位：按**实测高度**逐列下推，避免大节点（成员/名册多）盖住下方节点。
+ * 用户已拖过的节点（nodePos 有记录）不参与排布。
+ */
+async function packDefaults() {
+  if (!nodes.value.length) return;
+  await nextTick();
+  for (const node of nodes.value) {
+    const el = document.getElementById(`region-${node.key}`);
+    if (el) node.height = el.offsetHeight || 320;
+  }
+  await nextTick();
+  const cols = [16, 16, 16];
+  let dirty = false;
+  for (const node of nodes.value) {
+    if (nodePos.value[node.key]) continue;
+    const col = cols.indexOf(Math.min(...cols));
+    const x = 16 + col * 344;
+    const y = cols[col];
+    if (node.x !== x || node.y !== y) dirty = true;
+    node.x = x;
+    node.y = y;
+    cols[col] = y + nodeHeight(node) + 24;
+  }
+  if (dirty) await nextTick();
+}
 
 // -- 生命周期 -------------------------------------------------------------
 loadPos();
