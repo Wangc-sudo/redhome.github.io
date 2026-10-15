@@ -218,6 +218,11 @@ def run_channel_missing_task(conn, outbox, **kwargs):
     return run_channel_missing(conn, outbox, **kwargs)
 
 
+def run_freshness_check_task(conn, outbox, **kwargs):
+    from common.daily_robot.freshness_check import run_freshness_check
+    return run_freshness_check(conn, outbox, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -852,6 +857,55 @@ def _handle_calendar_watch(args):
         sys.exit(1)
 
 
+def _handle_freshness_check(args):
+    """L3 数据新鲜度看门狗（跨区域，投递 region=ops）：断言两表存 T-1 行。
+
+    业务日默认 **昨天**（T-1 窗口）；``--date`` 覆盖；``--dry`` 只打印
+    （不入队）；``--no-workday-gate`` 对休息日也入队（人工核对任意日期用）。
+    阈值/冷却取本线注册表 ``params``（ops-web「告警设置」可调）。
+    """
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_business_run(
+            settings, confirm_local_test_write=args.confirm_local_test_write
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        from common.daily_robot import inspection_alert
+
+        now = datetime.now()
+        raw_date = (getattr(args, "date", None) or "").strip()
+        business_date = (
+            date.fromisoformat(raw_date) if raw_date
+            else now.date() - timedelta(days=1)
+        )
+
+        conn = connect_mart(settings)
+        outbox = build_outbox(conn)
+        result = run_freshness_check_task(
+            conn, outbox,
+            business_date=business_date, now=now,
+            params=inspection_alert.fetch_service_params(service_id),
+            dedupe_override=_force_suffix(args, now),
+            dry=args.dry,
+            skip_workday_gate=getattr(args, "no_workday_gate", False),
+        )
+        if not args.dry:
+            conn.commit()
+        print(f"service={service_id} kind=alert result={result}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure("robot_error")
+        sys.exit(1)
+
+
 def render_leaderboard_page(conn, *, region, cfg, business_date, now, output):
     """渲染并双写 current+archive 榜单页；返回 ``(page_html, stats)``。
 
@@ -1118,6 +1172,37 @@ def main(argv=None):
         help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
 
+    # -- freshness-check -------------------------------------------------------
+    freshness_sub = subparsers.add_parser(
+        "freshness-check",
+        help="L3 data freshness watchdog: assert a T-1 row exists in the "
+             "channel facts (alert to region 'ops')",
+    )
+    freshness_sub.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    freshness_sub.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+    freshness_sub.add_argument(
+        "--date", default=None,
+        help="business date override (YYYY-MM-DD, default: yesterday)",
+    )
+    freshness_sub.add_argument(
+        "--dry", action="store_true", default=False,
+        help="print findings only; nothing enqueued",
+    )
+    freshness_sub.add_argument(
+        "--no-workday-gate", action="store_true", default=False,
+        help="enqueue even when T-1 is a non-workday (manual verification)",
+    )
+    freshness_sub.add_argument(
+        "--force", action="store_true", default=False,
+        help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
+    )
+
     # -- leaderboard-html ------------------------------------------------------
     html_sub = subparsers.add_parser(
         "leaderboard-html", help="Render the leaderboard HTML page to a file"
@@ -1165,6 +1250,9 @@ def main(argv=None):
         return
     if args.command == "calendar-watch":
         _handle_calendar_watch(args)
+        return
+    if args.command == "freshness-check":
+        _handle_freshness_check(args)
         return
     if args.command == "leaderboard-html":
         _handle_leaderboard_html(args)

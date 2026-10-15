@@ -107,8 +107,36 @@ def _is_service_id(value):
     return isinstance(value, str) and SERVICE_ID_RE.match(value) is not None
 
 
+def validate_pipeline_params(params):
+    """校验线级 ``params``（ops-web「告警设置」写面），返回规范化 dict。
+
+    只做结构校验（非空字符串键 + 标量值），语义（阈值/冷却）由巡检线自行
+    规范化兜底；非法抛 :class:`OpsControlError`（消息只含键名/字段名）。
+    """
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise OpsControlError("params must be a mapping")
+    if len(params) > 16:
+        raise OpsControlError("params supports at most 16 entries")
+    normalized = {}
+    for key, value in params.items():
+        if not isinstance(key, str) or not key.strip():
+            raise OpsControlError("params keys must be non-empty strings")
+        key = key.strip()
+        if len(key) > 64:
+            raise OpsControlError("params keys must be at most 64 chars")
+        if not (value is None or isinstance(value, (str, int, float, bool))):
+            raise OpsControlError(f"params '{key}' must be a scalar")
+        if isinstance(value, str) and len(value) > 200:
+            raise OpsControlError(f"params '{key}' value must be at most 200 chars")
+        normalized[key] = value
+    return normalized
+
+
 def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
-                             description="", depends_on=(), category=None):
+                             description="", depends_on=(), category=None,
+                             params=None):
     """校验「新增管道」表单字段，返回规范化的 :class:`PipelineConfig`。
 
     schedule 必填且必须是合法 cron（这是定时任务管理面）；depends_on
@@ -164,6 +192,7 @@ def validate_pipeline_fields(service_id, kind, schedule, enabled=True,
         description=description,
         depends_on=tuple(deps),
         category=category,
+        params=validate_pipeline_params(params),
     )
 
 

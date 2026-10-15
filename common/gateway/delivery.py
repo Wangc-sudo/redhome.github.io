@@ -37,10 +37,13 @@ class DeliveryErrorCode(str, enum.Enum):
 
 
 #: 群消息类 kind：走 DingTalkClient 的群 Markdown。
+#: 注意：这里必须与 ``outbox_repository._KINDS`` 对齐——``target_remind`` /
+#: ``calendar_watch`` 曾只登记入队侧、漏登记投递侧，导致入队后被打成
+#: ``unknown_outbox_kind`` 死信（告警发不出去），2026-10-15 随 C5 一并修正。
 _GROUP_KINDS = frozenset({
     "remind", "check", "leaderboard", "channel_daily",
     "offline_daily", "offline_weekly", "offline_monthly",
-    "channel_missing",
+    "channel_missing", "target_remind", "calendar_watch", "alert",
 })
 
 #: 每种 kind 的非泄露错误码（写 outbox.last_error）。
@@ -53,6 +56,9 @@ _ERROR_CODES = {
     "offline_weekly": DeliveryErrorCode.GROUP_SEND_FAILED,
     "offline_monthly": DeliveryErrorCode.GROUP_SEND_FAILED,
     "channel_missing": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "target_remind": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "calendar_watch": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "alert": DeliveryErrorCode.GROUP_SEND_FAILED,
     "ding": DeliveryErrorCode.DING_SEND_FAILED,
 }
 

@@ -20,6 +20,9 @@ _KINDS = frozenset({
     "remind", "check", "ding", "leaderboard", "channel_daily",
     "offline_daily", "offline_weekly", "offline_monthly",
     "channel_missing", "target_remind", "calendar_watch",
+    # C5 巡检告警通用出口（2026-10-15）：阈值/冷却由注册表 params 控，
+    # 投递 region 固定运维群 'ops'。
+    "alert",
 })
 
 #: 投递重试上限：达到后行转 ``failed``，留给控制面告警，不再自动重试。

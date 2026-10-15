@@ -16,6 +16,7 @@ from common.public_data.ops_control import (
     OpsControlError,
     RunRequest,
     validate_pipeline_fields,
+    validate_pipeline_params,
 )
 
 
@@ -182,6 +183,41 @@ class WriteValidationTests(unittest.TestCase):
     def test_non_bool_enabled_rejected(self):
         with self.assertRaises(OpsControlError):
             validate_pipeline_fields("robot-x", "apps", "0 2 * * *", enabled="yes")
+
+    def test_params_none_or_empty_yields_empty_dict(self):
+        self.assertEqual({}, validate_pipeline_params(None))
+        self.assertEqual({}, validate_pipeline_params({}))
+
+    def test_params_returns_normalized_scalars(self):
+        got = validate_pipeline_params(
+            {" k ": "v", "n": 6, "f": 1.5, "b": True, "z": None}
+        )
+        self.assertEqual({"k": "v", "n": 6, "f": 1.5, "b": True, "z": None}, got)
+
+    def test_params_rejects_non_mapping(self):
+        for bad in ([1], "nope", 3, True):
+            with self.assertRaises(OpsControlError):
+                validate_pipeline_params(bad)
+
+    def test_params_rejects_blank_key_and_nested_value(self):
+        for bad in ({"": 1}, {"k": {"x": 1}}, {"k": [1]}):
+            with self.assertRaises(OpsControlError):
+                validate_pipeline_params(bad)
+
+    def test_params_rejects_over_16_entries_or_long_key_or_value(self):
+        with self.assertRaises(OpsControlError):
+            validate_pipeline_params({"k%d" % i: 1 for i in range(17)})
+        with self.assertRaises(OpsControlError):
+            validate_pipeline_params({"k" * 65: 1})
+        with self.assertRaises(OpsControlError):
+            validate_pipeline_params({"k": "x" * 201})
+
+    def test_pipeline_fields_threads_params_through(self):
+        cfg = validate_pipeline_fields(
+            "robot-x", "apps", "0 2 * * *",
+            params={"alert_threshold": "warning"},
+        )
+        self.assertEqual({"alert_threshold": "warning"}, cfg.params)
 
 
 # -- 「立即运行一次」请求生命周期 -------------------------------------------

@@ -90,6 +90,21 @@
       "deptLabel": {},
       "broadcastExclude": [],
       "leaderboardUrl": "<榜单页面地址>"
+      },
+      "ops": {
+      "_备注": "运维巡检告警群（2026-10-15 新增，承载 C5 巡检告警通用出口 outbox kind=alert）。非业务区域：无日报表 / 无催办 / 无榜单，仅供告警投递；robotCode/openConversationId 为占位符，真值由运维发布 Nacos region-ops.yaml 覆盖。",
+      "display": "运维告警",
+      "tableUrl": "<无日报表：填群公告地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["运维"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": "<榜单页面地址>"
       }
       }
       }

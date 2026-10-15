@@ -58,11 +58,19 @@ class ShippedRegionSeedTests(unittest.TestCase):
         configs = load_region_seed(_SEED_PATH)
         self.assertEqual(
             list(configs),
-            ["hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all"],
+            ["hangzhou", "vanke", "shaoxing", "junpin", "qudao",
+             "offline_all", "ops"],
         )
         cfg = configs["hangzhou"]
         self.assertEqual(cfg.display, "杭州")
         self.assertEqual((cfg.remind_hour, cfg.check_hour), (18, 20))
+
+    def test_shipped_seed_defines_ops_alert_group(self):
+        """ops = 运维巡检告警群（C5 通用出口），非业务区域、无真值。"""
+        cfg = load_region_seed(_SEED_PATH)["ops"]
+        self.assertEqual(cfg.display, "运维告警")
+        self.assertTrue(cfg.robot_code.startswith("<"))
+        self.assertTrue(cfg.open_conversation_id.startswith("<"))
 
     def test_shipped_seed_defines_vanke_without_a_table(self):
         """万科&大莲花&团购：无 AI 日报表区域，成员来自体验中心部门。"""

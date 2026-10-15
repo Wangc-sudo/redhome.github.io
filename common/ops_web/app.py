@@ -44,6 +44,7 @@ from common.public_data import (
     recipient_override,
     report_roster,
 )
+from common.daily_robot.inspection_alert import ALERT_SERVICES
 from common.public_data.calendar_import import CalendarImportError
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
@@ -143,6 +144,7 @@ _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
     "update": "修正", "schedule": "改定时", "carry": "结转",
+    "params": "改告警参数",
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
     "target": "月目标",
@@ -2284,6 +2286,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "schedule": config.schedule or "",
                 "schedule_zh": _cron_zh(config.schedule) or "",
                 "depends_on": list(config.depends_on or []),
+                "params": dict(config.params or {}),
+                "alertable": config.service_id in ALERT_SERVICES,
                 "description": config.description or "",
                 "has_command": bool(has_command(config.service_id)),
                 "latest": latest_out,
@@ -2518,6 +2522,59 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "schedule": new_cron})
 
+    @app.post("/api/pipelines/params")
+    async def pipeline_params_update(request: Request):
+        """修改既有线的线级参数 ``params``（read-modify-write + 审计）。
+
+        巡检告警线的阈值/冷却即落此：请求体 ``{service_id, params:{...}}``，
+        ``params`` 传 ``{}`` 即清空。只覆盖 ``params`` 字段，其余运行态
+        （enabled/schedule/description…）原样保留，与改定时同型。
+        """
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
+        if config_publisher is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        if not ops_control.SERVICE_ID_RE.match(service_id or ""):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if service_id not in _fleet():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        # 必须显式给 dict（清空传 {}）；缺键/None/非映射一律 400，
+        # 避免客户端漏传把既有 params 静默清空。
+        raw_params = payload.get("params")
+        if not isinstance(raw_params, dict):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            params = ops_control.validate_pipeline_params(raw_params)
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config = config_source.get_pipeline(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            config_publisher(replace(config, params=params))
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        detail = "; ".join(
+            f"{key}={value}" for key, value in sorted(params.items())
+        ) or "cleared"
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid, "params", service_id,
+                    detail=detail,
+                )
+        except Exception as exc:
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER publish: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "params": params})
+
     @app.post("/api/pipelines/add")
     async def pipeline_add(request: Request):
         viewer = require_capability(request, CAPABILITY_PIPELINES)
@@ -2536,6 +2593,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 description=payload.get("description", ""),
                 depends_on=depends_on,
                 category=payload.get("category") or None,
+                params=payload.get("params"),
             )
         except ops_control.OpsControlError:
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)

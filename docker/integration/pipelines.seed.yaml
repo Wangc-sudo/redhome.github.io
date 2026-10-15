@@ -166,6 +166,21 @@ channel-missing-check:
   reads: [mart_ops]
   depends_on: [extract-channel]
   description: "渠道门店到齐校验与催办（region=qudao，同步失败 fail-closed 跳过）"
+freshness-check:
+  kind: business
+  category: 催办
+  # A3 L3 数据新鲜度看门狗（2026-10-15 裁决）：断言 fact_channel_daily_sales
+  # 与 fact_daily_report_offline(region=qudao) 存在 business_date=T-1 的行
+  # （禁用 max>=T-1——AI 表格含未来日期，10 月 max 已达 10-31）。缺则经
+  # C5 通用巡检告警通道（outbox kind=alert）发到运维群 region=ops；
+  # T-1 非工作日只抑制告警、照常检查。
+  enabled: true
+  schedule: "0 11 * * *"
+  reads: [mart_ops]
+  depends_on: [extract-channel]
+  # 告警口径（ops-web「告警设置」可改；真源落 Nacos 本条目 params）：
+  params: {alert_threshold: warning, alert_cooldown_hours: 24}
+  description: "L3 数据新鲜度看门狗：渠道两表缺 T-1 行即告警（region=ops）"
 pages-qudao-t1:
   kind: business
   category: 页面
