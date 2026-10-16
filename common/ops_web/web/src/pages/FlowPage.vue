@@ -867,6 +867,18 @@ function taskBroken(service) {
   return !!(latest && latest.status === 'failed');
 }
 
+// -- 聚合节点（2026-10-16：线下整体=杭州+绍兴+其他，圆形形态）-----------------
+//: 聚合区域 → 组成它的区域键。聚合节点指标=成员桶求和，不做名册门禁
+//: （它不填报，只汇总）；形态=圆形（与矩形业务节点视觉分层）。
+const AGGREGATE_REGIONS = {
+  offline_all: { label: '线下整体', parts: ['hangzhou', 'shaoxing', 'other'] },
+};
+const AGG_SIZE = 176;   // 聚合节点圆形直径
+
+//: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
+//: overview.regions 不含它——从名册/目标数据派生）。
+const COMPLEMENT_REGION = 'other';
+
 function buildGraph(raw) {
   const { overview, roster, groups } = raw;
   const rosterRows = (roster && roster.roster) || [];
@@ -884,15 +896,26 @@ function buildGraph(raw) {
   const nextRegions = [];
   const nextTasks = [];
   const nextEdges = [];
-  const regionSpecs = regions.map((region) => ({ key: region.key, region }));
+  // 聚合区域从普通循环里摘出（最后单独成圆形聚合节点）
+  const regionSpecs = regions
+    .map((region) => ({ key: region.key, region }))
+    .filter((spec) => !(spec.key in AGGREGATE_REGIONS));
   const platform = servicesByRegion.__platform__ || [];
   if (platform.length) {
     regionSpecs.push({ key: '__platform__', region: null });
+  }
+  // 补集桶虚拟节点（组织树无成员但名册/目标存在时补出）
+  if (!regions.some((r) => r.key === COMPLEMENT_REGION)
+      && (rosterRows.some((row) => row.scope === COMPLEMENT_REGION
+                                    && Number(row.enabled) === 1)
+          || (targets[COMPLEMENT_REGION]))) {
+    regionSpecs.push({ key: COMPLEMENT_REGION, region: null });
   }
 
   for (const spec of regionSpecs) {
     const key = spec.key;
     const isPlatform = key === '__platform__';
+    const isComplement = key === COMPLEMENT_REGION && !spec.region;
     const memberCount = isPlatform ? 0 : (spec.region.depts || [])
       .reduce((sum, dept) => sum + (dept.members || []).length, 0);
     const rosterCount = isPlatform ? 0 : rosterRows
@@ -904,11 +927,15 @@ function buildGraph(raw) {
     const services = servicesByRegion[key] || [];
     const badge = isPlatform
       ? { text: '平台线', cls: 'plain' }
-      : regionBadge(rosterCount, targetCount, services.length);
+      : isComplement
+        ? { text: '补集', cls: 'plain' }
+        : regionBadge(rosterCount, targetCount, services.length);
     nextRegions.push({
       id: `region:${key}`,
       key,
-      label: isPlatform ? '平台 / 无群' : (spec.region.label || key),
+      label: isPlatform ? '平台 / 无群'
+        : isComplement ? '其他（补集）'
+        : (spec.region.label || key),
       badge,
       rosterCount,
       targetCount,
@@ -946,6 +973,62 @@ function buildGraph(raw) {
         from: `region:${key}`,
         to: moduleId,
         broken: badge.cls === 'warn' || brokenCount > 0,
+      });
+    }
+  }
+  // 聚合节点：指标=组成桶求和；汇聚边 桶→聚合；下游任务照常成模块。
+  for (const [aggKey, spec] of Object.entries(AGGREGATE_REGIONS)) {
+    const services = servicesByRegion[aggKey] || [];
+    const partNodes = nextRegions.filter((n) => spec.parts.includes(n.key));
+    const agg = {
+      id: `region:${aggKey}`,
+      key: aggKey,
+      label: spec.label,
+      badge: { text: '聚合', cls: 'agg' },
+      rosterCount: partNodes.reduce((s, n) => s + n.rosterCount, 0),
+      targetCount: partNodes.reduce((s, n) => s + n.targetCount, 0),
+      targetSum: partNodes.reduce((s, n) => s + n.targetSum, 0),
+      memberCount: partNodes.reduce((s, n) => s + n.memberCount, 0),
+      taskCount: services.length,
+      isAggregate: true,
+      parts: spec.parts,
+      x: REGION_X,
+      y: TOP_Y,
+    };
+    nextRegions.push(agg);
+    for (const part of partNodes) {
+      nextEdges.push({
+        id: `cv:${part.key}:${aggKey}`,
+        from: part.id,
+        to: agg.id,
+        broken: false,
+        converge: true,
+      });
+    }
+    const families = {};
+    for (const service of services) {
+      const family = familyOf(service.service_id, aggKey);
+      if (!families[family]) families[family] = [];
+      families[family].push(service);
+    }
+    for (const [family, members] of Object.entries(families)) {
+      const moduleId = `module:${aggKey}:${family}`;
+      const brokenCount = members.filter(taskBroken).length;
+      nextTasks.push({
+        id: moduleId,
+        regionKey: aggKey,
+        family,
+        label: familyLabel(family, members[0]),
+        services: members,
+        brokenCount,
+        x: TASK_X,
+        y: TOP_Y,
+      });
+      nextEdges.push({
+        id: `e:${aggKey}:${family}`,
+        from: agg.id,
+        to: moduleId,
+        broken: brokenCount > 0,
       });
     }
   }
@@ -1045,7 +1128,11 @@ function layout() {
 // -- 连线几何 -------------------------------------------------------------------
 const nodeById = computed(() => {
   const map = {};
-  for (const n of regionNodes.value) map[n.id] = { ...n, w: REGION_W, h: REGION_H };
+  for (const n of regionNodes.value) {
+    map[n.id] = n.isAggregate
+      ? { ...n, w: AGG_SIZE, h: AGG_SIZE }
+      : { ...n, w: REGION_W, h: REGION_H };
+  }
   for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: moduleH(n) };
   return map;
 });
@@ -1167,8 +1254,8 @@ watch(() => route.query.region, () => applyAnchor());
       <div class="head-main">
         <h1>闭环画布</h1>
         <p class="note">
-          连线即驱动关系；从池成员端口拉线到区域＝归入该区；任务节点内嵌开关与
-          「运行一次」，点节点开抽屉改播报时间。名册/日历/记录/授权陆续上画布。
+          连线即关系：矩形=业务区域、圆形=聚合（线下整体=杭州+绍兴+其他，靛蓝线汇聚）。
+          拉线：池成员→区域＝归口、模块→模块＝依赖；点节点开抽屉（名册/目标/时间/收件人/日历/记录/授权/修正）。
         </p>
       </div>
       <div class="head-actions">
@@ -1203,7 +1290,7 @@ watch(() => route.query.region, () => applyAnchor());
               :key="edge.id"
               :d="edge.d"
               class="edge"
-              :class="{ broken: edge.broken }"
+              :class="{ broken: edge.broken, converge: edge.converge }"
             />
             <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
             <path v-if="depDraft" :d="depDraftPath" class="edge dep-drafting" />
@@ -1245,30 +1332,47 @@ watch(() => route.query.region, () => applyAnchor());
             <p v-if="!poolMembers.length" class="pool-hint">全员已归口</p>
           </article>
 
-          <!-- 区域节点 -->
+          <!-- 区域节点（聚合=圆形，业务=矩形） -->
           <article
             v-for="node in regionNodes"
             :key="node.id"
             :id="`flow-${node.key}`"
             class="node region-node"
-            :class="{ 'anchor-hit': anchorRegion === node.key }"
-            :style="{ left: node.x + 'px', top: node.y + 'px', width: REGION_W + 'px' }"
+            :class="{ 'anchor-hit': anchorRegion === node.key, 'agg-node': node.isAggregate }"
+            :style="node.isAggregate
+              ? { left: node.x + 'px', top: node.y + 'px', width: AGG_SIZE + 'px', height: AGG_SIZE + 'px' }
+              : { left: node.x + 'px', top: node.y + 'px', width: REGION_W + 'px' }"
           >
-            <span class="port in-region" :data-region-in="node.key" title="成员归口输入" />
-            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
-              <h3>{{ node.label }}</h3>
-              <span class="badge" :class="node.badge.cls">{{ node.badge.text }}</span>
-            </div>
-            <div class="metrics" v-if="!node.isPlatform">
-              <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
-              <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
-              <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
-              <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
-            </div>
-            <div class="node-foot">
-              <span class="task-count">下游任务 {{ node.taskCount }}</span>
-              <button class="btn mini ghost" @click="openRegionDrawer(node)">详情</button>
-            </div>
+            <span v-if="!node.isAggregate" class="port in-region" :data-region-in="node.key" title="成员归口输入" />
+            <span v-else class="port in-region agg-in" title="汇聚输入（组成桶汇入）" />
+            <!-- 聚合节点：圆形内容居中 -->
+            <template v-if="node.isAggregate">
+              <div class="agg-body" @mousedown="startNodeDrag($event, node)">
+                <h3>{{ node.label }}</h3>
+                <span class="badge agg">{{ node.badge.text }}</span>
+                <div class="agg-metrics">
+                  <b>{{ node.rosterCount }}</b><span>名册</span>
+                  <b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span>
+                </div>
+                <button class="btn mini ghost" @mousedown.stop @click="openRegionDrawer(node)">详情</button>
+              </div>
+            </template>
+            <template v-else>
+              <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
+                <h3>{{ node.label }}</h3>
+                <span class="badge" :class="node.badge.cls">{{ node.badge.text }}</span>
+              </div>
+              <div class="metrics" v-if="!node.isPlatform">
+                <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
+                <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
+                <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
+                <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
+              </div>
+              <div class="node-foot">
+                <span class="task-count">下游任务 {{ node.taskCount }}</span>
+                <button class="btn mini ghost" @click="openRegionDrawer(node)">详情</button>
+              </div>
+            </template>
             <span class="port out" title="驱动下游任务" />
           </article>
 
@@ -1347,8 +1451,9 @@ watch(() => route.query.region, () => applyAnchor());
       <div class="legend">
         <span class="lg"><i class="line ok" /> 正常驱动</span>
         <span class="lg"><i class="line broken" /> 断链（缺名册/缺目标/停用/失败）</span>
+        <span class="lg"><i class="line converge" /> 汇聚（桶→聚合）</span>
         <span class="lg"><i class="line drafting" /> 拉线中＝归口</span>
-        <span class="lg">滚轮缩放 · 拖空白平移 · 拖节点头移动</span>
+        <span class="lg">圆形＝聚合节点 · 滚轮缩放 · 拖空白平移 · 拖节点头移动</span>
       </div>
     </div>
 
@@ -1794,6 +1899,50 @@ watch(() => route.query.region, () => applyAnchor());
   stroke: #f59e0b;
   stroke-dasharray: 6 4;
 }
+.edge.converge {
+  stroke: #6366f1;
+  stroke-width: 2.5;
+}
+
+/* 聚合节点（圆形）：与矩形业务节点视觉分层 */
+.node.agg-node {
+  border-radius: 50%;
+  border: 2px solid #6366f1;
+  background: radial-gradient(circle at 35% 30%, #eef2ff, #e0e7ff);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.18);
+}
+.agg-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: move;
+  user-select: none;
+  text-align: center;
+}
+.agg-body h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.agg-metrics {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: #4b5563;
+}
+.agg-metrics b {
+  font-size: 15px;
+  color: #1f2933;
+}
+.badge.agg {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+.port.agg-in {
+  background: #6366f1;
+}
 .edge.drafting {
   stroke: #2563eb;
   stroke-dasharray: 4 4;
@@ -2109,6 +2258,9 @@ watch(() => route.query.region, () => applyAnchor());
 }
 .line.drafting {
   border-top: 2px dashed #2563eb;
+}
+.line.converge {
+  border-top: 2.5px solid #6366f1;
 }
 
 /* 抽屉 */
