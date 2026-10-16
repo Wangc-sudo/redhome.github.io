@@ -31,6 +31,7 @@ import {
   getRecipientOverride,
   getRecords,
   getRoster,
+  moveMember,
   resetCalendarMonth,
   runPipelineOnce,
   saveRegionTargets,
@@ -155,6 +156,31 @@ const TASK_GAP = 14;
 const REGION_X = 330;
 const TASK_X = 850;
 const TOP_Y = 40;
+const DEPT_ROW_H = 26;
+const MEMBER_ROW_H = 26;
+
+//: 成员行展开状态（区域节点默认收起成员列表，保持画布清爽）
+const expandedRegions = ref(new Set());
+
+function toggleRegionMembers(node) {
+  const next = new Set(expandedRegions.value);
+  if (next.has(node.id)) next.delete(node.id);
+  else next.add(node.id);
+  expandedRegions.value = next;
+  layout();   // 高度变化影响连线端点与层距
+}
+
+/** 区域节点动态高度：头+指标+脚 + 部门行 +（展开时）成员行。 */
+function regionH(node) {
+  if (node.isAggregate) return AGG_SIZE;
+  if (node.isPlatform) return 120;
+  let h = 34 + 52 + 30 + 10;                     // head+metrics+foot+padding
+  h += 22 + (node.depts ? node.depts.length : 0) * DEPT_ROW_H;   // 部门槽
+  if (expandedRegions.value.has(node.id)) {
+    h += 24 + (node.members ? node.members.length : 0) * MEMBER_ROW_H;
+  }
+  return h;
+}
 
 function startNodeDrag(evt, node) {
   if (evt.button !== 0 || busy.value) return;
@@ -177,23 +203,24 @@ function startNodeDrag(evt, node) {
   window.addEventListener('mouseup', onUp);
 }
 
-// -- 拉线（成员池 → 区域 ＝ 归属变更）------------------------------------------
+// -- 拉线（成员 → 区域/部门；2026-10-16 部门粒度化）----------------------------
+// 语义配对：成员口 → 区域口＝归口该区（部门取通讯录原值）；
+// 成员口 → 部门口＝归口该区该部门；区域成员口 → 他区部门/区域口＝搬迁
+// （moveMember，confirm+双侧名册同步）；区域成员口 → 本区部门口＝区内调部门。
 const wireDraft = ref(null);   // {member, x1, y1, x2, y2}
 const poolNode = ref({ id: 'pool', x: 40, y: TOP_Y });
 
-function memberPortY(index) {
-  return poolNode.value.y + POOL_HEAD_H + index * POOL_ROW_H + POOL_ROW_H / 2;
-}
-
-function startWire(evt, member, index) {
+function startWire(evt, member) {
   if (evt.button !== 0 || busy.value) return;
   if (!canPipelines.value && !canRoster.value) return;
   evt.stopPropagation();
   evt.preventDefault();
-  const x1 = poolNode.value.x + POOL_W;
-  const y1 = memberPortY(index);
   const canvasEl = evt.target.closest('.canvas');
   const rect = canvasEl.getBoundingClientRect();
+  // 起点=被按下的端口圆心（画布坐标），不再绑死池节点几何
+  const portRect = evt.target.getBoundingClientRect();
+  const x1 = (portRect.left + portRect.width / 2 - rect.left - panX.value) / zoom.value;
+  const y1 = (portRect.top + portRect.height / 2 - rect.top - panY.value) / zoom.value;
   wireDraft.value = { member, x1, y1, x2: x1, y2: y1 };
   function toCanvas(moveEvt) {
     return {
@@ -212,35 +239,67 @@ function startWire(evt, member, index) {
     const draft = wireDraft.value;
     wireDraft.value = null;
     const hit = document.elementFromPoint(upEvt.clientX, upEvt.clientY);
-    const port = hit && hit.closest
-      ? hit.closest('[data-region-in]') : null;
-    if (!port) return;
-    dropWireOnRegion(draft.member, port.getAttribute('data-region-in'));
+    if (!hit || !hit.closest) return;
+    const deptPort = hit.closest('[data-dept-in]');
+    if (deptPort) {
+      dropWire(deptPort.getAttribute('data-dept-in'), draft.member);
+      return;
+    }
+    const regionPort = hit.closest('[data-region-in]');
+    if (regionPort) {
+      dropWire(regionPort.getAttribute('data-region-in'), draft.member);
+    }
   }
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
 }
 
-async function dropWireOnRegion(member, regionKey) {
+function regionLabel(key) {
+  const hit = regionNodes.value.find((n) => n.key === key);
+  return hit ? hit.label : key;
+}
+
+/** 落点解析："regionKey"（区域口）或 "regionKey|deptId|deptName"（部门口）。 */
+async function dropWire(target, member) {
+  const [regionKey, deptId, deptName] = target.split('|');
   const region = regionNodes.value.find((n) => n.key === regionKey);
   if (!region) return;
-  const ok = window.confirm(
-    `将「${member.name || member.user_id}」归入 ${region.label}？`,
-  );
+  const fromRegion = member.region || null;   // 区域成员卡带 region 标记
+  const name = member.name || member.user_id;
+  const deptText = deptName ? `·${deptName}` : '';
+  const moving = fromRegion && fromRegion !== regionKey;
+
+  const ok = window.confirm(moving
+    ? `将「${name}」从 ${regionLabel(fromRegion)} 搬迁到 ${region.label}${deptText}？\n\n`
+      + '跨区搬迁会同步增删双侧名册，影响报数资格与当月目标归属。'
+    : `将「${name}」归入 ${region.label}${deptText}？`);
   if (!ok) return;
+
   busy.value = true;
   try {
-    await assignMember({
-      user_id: member.user_id,
-      region: regionKey,
-      dept_id: member.dept_id || null,
-      dept_name: member.dept_name || '',
-      name: member.name || null,
-    });
-    setFlash('ok', `已把「${member.name || member.user_id}」归入 ${region.label}`);
+    if (moving) {
+      await moveMember({
+        user_id: member.user_id,
+        to_region: regionKey,
+        person_name: member.name || null,
+        dept_name: deptName || member.dept_name || '',
+        from_region: fromRegion,
+        note: '',
+      });
+      setFlash('ok', `已搬迁「${name}」到 ${region.label}${deptText}`);
+    } else {
+      await assignMember({
+        user_id: member.user_id,
+        region: regionKey,
+        dept_id: deptId || member.dept_id || null,
+        dept_name: deptName || member.dept_name || '',
+        name: member.name || null,
+      });
+      setFlash('ok', `已把「${name}」归入 ${region.label}${deptText}`);
+    }
     await load({ silent: true });
   } catch (err) {
-    setFlash('err', `归属失败：${err.message}`);
+    setFlash('err', `操作失败：${err.message}`);
   } finally {
     busy.value = false;
   }
@@ -916,8 +975,23 @@ function buildGraph(raw) {
     const key = spec.key;
     const isPlatform = key === '__platform__';
     const isComplement = key === COMPLEMENT_REGION && !spec.region;
-    const memberCount = isPlatform ? 0 : (spec.region.depts || [])
-      .reduce((sum, dept) => sum + (dept.members || []).length, 0);
+    // 部门/成员随节点携带（部门输入端口 + 成员输出口拉线的数据底）
+    const depts = isPlatform || !spec.region ? [] : (spec.region.depts || [])
+      .map((dept) => ({
+        dept_id: dept.dept_id || '',
+        dept_name: dept.dept_name || dept.label || '',
+        memberCount: (dept.members || []).length,
+      }));
+    const members = isPlatform || !spec.region ? []
+      : (spec.region.depts || []).flatMap((dept) =>
+        (dept.members || []).map((m) => ({
+          user_id: m.user_id,
+          name: m.name,
+          region: key,
+          dept_id: dept.dept_id || '',
+          dept_name: dept.dept_name || '',
+        })));
+    const memberCount = members.length;
     const rosterCount = isPlatform ? 0 : rosterRows
       .filter((row) => row.scope === key && Number(row.enabled) === 1).length;
     const targetMap = (targets[key]) || {};
@@ -941,6 +1015,8 @@ function buildGraph(raw) {
       targetCount,
       targetSum,
       memberCount,
+      depts,
+      members,
       taskCount: services.length,
       isPlatform,
       x: REGION_X,
@@ -1113,10 +1189,11 @@ function layout() {
       cursorY += moduleH(task) + TASK_GAP;
     });
     const stackH = cursorY - stackTop - TASK_GAP;
+    const rh = regionH(region);
     const regionY = stack.length
-      ? stackTop + Math.max(0, (stackH - REGION_H) / 2)
+      ? stackTop + Math.max(0, (stackH - rh) / 2)
       : cursorY;
-    if (!stack.length) cursorY += REGION_H;
+    if (!stack.length) cursorY += rh;
     cursorY += 26;
     const savedPos = saved[region.id];
     region.x = savedPos ? savedPos.x : REGION_X;
@@ -1131,7 +1208,7 @@ const nodeById = computed(() => {
   for (const n of regionNodes.value) {
     map[n.id] = n.isAggregate
       ? { ...n, w: AGG_SIZE, h: AGG_SIZE }
-      : { ...n, w: REGION_W, h: REGION_H };
+      : { ...n, w: REGION_W, h: regionH(n) };
   }
   for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: moduleH(n) };
   return map;
@@ -1325,8 +1402,8 @@ watch(() => route.query.region, () => applyAnchor());
               <span
                 class="port out member-port"
                 :class="{ busy }"
-                title="拉线到区域节点＝归入该区"
-                @mousedown="startWire($event, member, index)"
+                title="拉线到区域/部门端口＝归口"
+                @mousedown="startWire($event, member)"
               />
             </div>
             <p v-if="!poolMembers.length" class="pool-hint">全员已归口</p>
@@ -1367,6 +1444,44 @@ watch(() => route.query.region, () => applyAnchor());
                 <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
                 <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
                 <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
+              </div>
+              <!-- 部门槽（部门输入端口：成员拉线至此=归口到该部门） -->
+              <div v-if="node.depts && node.depts.length" class="dept-slot">
+                <div
+                  v-for="dept in node.depts"
+                  :key="dept.dept_id || dept.dept_name"
+                  class="dept-row"
+                >
+                  <span
+                    class="port in-dept"
+                    :data-dept-in="`${node.key}|${dept.dept_id}|${dept.dept_name}`"
+                    title="成员拉线至此＝归口到该部门"
+                  />
+                  <span class="dept-name">{{ dept.dept_name || '（无 ID 部门）' }}</span>
+                  <span class="dept-count">{{ dept.memberCount }}</span>
+                </div>
+              </div>
+              <!-- 成员行（展开后每人一个输出端口：拉到他区=搬迁、本区部门=调部门） -->
+              <div class="member-slot">
+                <button class="btn mini ghost expand-members" @click="toggleRegionMembers(node)">
+                  {{ expandedRegions.has(node.id) ? '收起成员 ⌃' : `成员 ${node.memberCount} ⌄` }}
+                </button>
+                <template v-if="expandedRegions.has(node.id)">
+                  <div
+                    v-for="member in node.members"
+                    :key="member.user_id"
+                    class="member-row-wire"
+                  >
+                    <span class="member-name">{{ member.name || member.user_id }}</span>
+                    <span class="member-dept">{{ member.dept_name }}</span>
+                    <span
+                      class="port out member-port"
+                      :class="{ busy }"
+                      title="拉到他区/部门口＝搬迁；本区部门口＝调部门"
+                      @mousedown="startWire($event, member)"
+                    />
+                  </div>
+                </template>
               </div>
               <div class="node-foot">
                 <span class="task-count">下游任务 {{ node.taskCount }}</span>
@@ -1942,6 +2057,66 @@ watch(() => route.query.region, () => applyAnchor());
 }
 .port.agg-in {
   background: #6366f1;
+}
+
+/* 部门槽（输入端口） */
+.dept-slot {
+  margin: 2px 10px 4px;
+  padding: 4px 0;
+  border-top: 1px dashed #eef0f3;
+}
+.dept-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding-left: 14px;
+  font-size: 12px;
+}
+.dept-name {
+  color: #374151;
+}
+.dept-count {
+  margin-left: auto;
+  color: #9ca3af;
+  font-size: 11px;
+}
+.port.in-dept {
+  left: 0;
+  top: 8px;
+  width: 8px;
+  height: 8px;
+  background: #2563eb;
+  cursor: crosshair;
+}
+
+/* 成员行（输出端口） */
+.member-slot {
+  padding: 0 10px 4px;
+}
+.expand-members {
+  margin: 2px 0;
+}
+.member-row-wire {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  font-size: 12px;
+}
+.member-name {
+  font-weight: 600;
+}
+.member-dept {
+  color: #9ca3af;
+  font-size: 11px;
+}
+.member-row-wire .member-port {
+  right: -6px;
+  top: 8px;
+  margin-top: 0;
 }
 .edge.drafting {
   stroke: #2563eb;
