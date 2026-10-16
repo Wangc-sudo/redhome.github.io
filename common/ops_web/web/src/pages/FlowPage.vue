@@ -148,7 +148,6 @@ const POOL_HEAD_H = 44;
 const REGION_W = 300;
 const REGION_H = 168;
 const TASK_W = 330;
-const TASK_H = 108;
 const TASK_GAP = 14;
 const REGION_X = 330;
 const TASK_X = 850;
@@ -756,27 +755,87 @@ function buildGraph(raw) {
       x: REGION_X,
       y: TOP_Y,
     });
-    services.forEach((service) => {
-      const taskId = `task:${service.service_id}`;
+    // 家族模块化（2026-10-16）：同一区域下同家族任务折叠为模块节点——
+    // 家族=模板、区域=实例（robot-hangzhou/robot-shaoxing 同属 robot-*）。
+    // 连线 N:1 收敛为 区域→模块；状态聚合（全绿/有停用/有失败）。
+    const families = {};
+    for (const service of services) {
+      const family = familyOf(service.service_id, key);
+      if (!families[family]) families[family] = [];
+      families[family].push(service);
+    }
+    for (const [family, members] of Object.entries(families)) {
+      const moduleId = `module:${key}:${family}`;
+      const brokenCount = members.filter(taskBroken).length;
       nextTasks.push({
-        id: taskId,
+        id: moduleId,
         regionKey: key,
-        service,
-        broken: taskBroken(service),
+        family,
+        label: familyLabel(family, members[0]),
+        services: members,
+        brokenCount,
         x: TASK_X,
         y: TOP_Y,
       });
       nextEdges.push({
-        id: `e:${key}:${service.service_id}`,
+        id: `e:${key}:${family}`,
         from: `region:${key}`,
-        to: taskId,
-        broken: badge.cls === 'warn' || taskBroken(service),
+        to: moduleId,
+        broken: badge.cls === 'warn' || brokenCount > 0,
       });
-    });
+    }
   }
   regionNodes.value = nextRegions;
   taskNodes.value = nextTasks;
   edges.value = nextEdges;
+  layout();
+}
+
+/** 管道家族键：剥掉区域后缀（robot-check-hangzhou → robot-check）。 */
+function familyOf(serviceId, regionKey) {
+  const suffix = `-${regionKey}`;
+  if (regionKey !== '__platform__' && serviceId.endsWith(suffix)) {
+    return serviceId.slice(0, -suffix.length);
+  }
+  return serviceId;
+}
+
+/** 家族展示名（先映射表，缺省用首成员的类别标签）。 */
+const FAMILY_LABEL = {
+  'robot': '填报提醒',
+  'robot-check': '催办未填 + DING',
+  'pages': '榜单页生成',
+  'leaderboard': '榜单群播报',
+  'leaderboard-html': '榜单页生成',
+  'channel-missing-check': '渠道到齐检查',
+};
+function familyLabel(family, firstService) {
+  return FAMILY_LABEL[family]
+    || `${(firstService && firstService.category_label) || '任务'}·${family}`;
+}
+
+/** 模块节点高度（折叠 64；展开按成员行数）。 */
+function moduleH(node) {
+  const expanded = expandedModules.value.has(node.id);
+  return expanded ? 44 + node.services.length * 78 : 64;
+}
+
+const expandedModules = ref(new Set());
+const expandAll = ref(false);
+
+function toggleModule(node) {
+  const next = new Set(expandedModules.value);
+  if (next.has(node.id)) next.delete(node.id);
+  else next.add(node.id);
+  expandedModules.value = next;
+  layout();   // 高度变化影响下游连线端点
+}
+
+function toggleExpandAll() {
+  expandAll.value = !expandAll.value;
+  expandedModules.value = expandAll.value
+    ? new Set(taskNodes.value.map((n) => n.id))
+    : new Set();
   layout();
 }
 
@@ -804,9 +863,9 @@ function layout() {
       const savedPos = saved[task.id];
       task.x = savedPos ? savedPos.x : TASK_X;
       task.y = savedPos ? savedPos.y : cursorY;
-      cursorY += TASK_H + TASK_GAP;
+      cursorY += moduleH(task) + TASK_GAP;
     });
-    const stackH = stack.length * (TASK_H + TASK_GAP) - TASK_GAP;
+    const stackH = cursorY - stackTop - TASK_GAP;
     const regionY = stack.length
       ? stackTop + Math.max(0, (stackH - REGION_H) / 2)
       : cursorY;
@@ -823,7 +882,7 @@ function layout() {
 const nodeById = computed(() => {
   const map = {};
   for (const n of regionNodes.value) map[n.id] = { ...n, w: REGION_W, h: REGION_H };
-  for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: TASK_H };
+  for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: moduleH(n) };
   return map;
 });
 
@@ -907,6 +966,9 @@ watch(() => route.query.region, () => applyAnchor());
       </div>
       <div class="head-actions">
         <span v-if="month" class="month">目标月份 {{ month }}</span>
+        <button class="btn" @click="toggleExpandAll">
+          {{ expandAll ? '收起全部模块' : '展开全部模块' }}
+        </button>
         <button class="btn" @click="resetAllPos">复位布局</button>
         <button class="btn" @click="resetView">复位视图</button>
         <button class="btn" :disabled="loading" @click="load()">刷新</button>
@@ -1008,35 +1070,52 @@ watch(() => route.query.region, () => applyAnchor());
             </button>
           </article>
 
-          <!-- 任务节点（节点即控件） -->
+          <!-- 家族模块节点（区域→模块 N:1；点头部展开成员） -->
           <article
             v-for="node in taskNodes"
             :key="node.id"
-            class="node task-node"
-            :class="{ broken: node.broken, disabled: !node.service.enabled }"
+            class="node task-node module-node"
+            :class="{ broken: node.brokenCount > 0, expanded: expandedModules.has(node.id) }"
             :style="{ left: node.x + 'px', top: node.y + 'px', width: TASK_W + 'px' }"
           >
             <span class="port in" />
-            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
-              <h4>{{ node.service.service_label }}</h4>
-              <span class="cat">{{ node.service.category_label }}</span>
-            </div>
-            <div class="task-meta">
-              <span>{{ node.service.schedule_zh || node.service.schedule || '—' }}</span>
-              <span v-if="node.service.latest" class="latest">
-                最近 {{ node.service.latest.status_label }}
+            <div class="node-head module-head" title="拖动移动；点击展开/收起成员" @mousedown="startNodeDrag($event, node)">
+              <h4>{{ node.label }}</h4>
+              <span class="badge" :class="node.brokenCount ? 'warn' : 'ok'">
+                {{ node.services.length - node.brokenCount }}/{{ node.services.length }} 正常
               </span>
-            </div>
-            <div class="task-actions">
               <button
-                class="switch"
-                :class="{ on: node.service.enabled }"
-                :disabled="busy"
-                :title="node.service.enabled ? '点击停用' : '点击启用'"
-                @click="onToggleTask(node)"
-              ><i /></button>
-              <button class="btn mini" :disabled="busy" @click="onRunOnce(node)">运行一次</button>
-              <button class="btn mini ghost" @click="openTaskDrawer(node)">详情</button>
+                class="btn mini ghost expand-btn"
+                @mousedown.stop
+                @click.stop="toggleModule(node)"
+              >{{ expandedModules.has(node.id) ? '收起 ⌃' : '展开 ⌄' }}</button>
+            </div>
+            <div v-if="expandedModules.has(node.id)" class="module-members">
+              <div
+                v-for="service in node.services"
+                :key="service.service_id"
+                class="member-row"
+                :class="{ disabled: !service.enabled }"
+              >
+                <div class="member-main">
+                  <b>{{ service.service_label }}</b>
+                  <span class="member-sched">
+                    {{ service.schedule_zh || service.schedule || '—' }}
+                    <template v-if="service.latest"> · {{ service.latest.status_label }}</template>
+                  </span>
+                </div>
+                <div class="member-actions">
+                  <button
+                    class="switch"
+                    :class="{ on: service.enabled }"
+                    :disabled="busy"
+                    :title="service.enabled ? '点击停用' : '点击启用'"
+                    @click="onToggleTask({ service })"
+                  ><i /></button>
+                  <button class="btn mini" :disabled="busy" @click="onRunOnce({ service })">运行一次</button>
+                  <button class="btn mini ghost" @click="openTaskDrawer({ service })">详情</button>
+                </div>
+              </div>
             </div>
           </article>
         </div>
@@ -1594,6 +1673,59 @@ watch(() => route.query.region, () => applyAnchor());
   align-items: center;
   gap: 8px;
   padding: 5px 10px 2px;
+}
+
+/* 家族模块节点 */
+.module-node {
+  border-left: 3px solid #818cf8;
+}
+.module-node.broken {
+  border-left-color: #f59e0b;
+}
+.module-head {
+  cursor: move;
+}
+.module-head h4 {
+  flex: 1;
+}
+.expand-btn {
+  flex: 0 0 auto;
+}
+.module-members {
+  border-top: 1px dashed #eef0f3;
+  padding: 4px 8px 6px;
+}
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid #f6f7f9;
+}
+.member-row:last-child {
+  border-bottom: none;
+}
+.member-row.disabled {
+  opacity: 0.6;
+}
+.member-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.member-main b {
+  font-size: 12px;
+}
+.member-sched {
+  font-size: 11px;
+  color: #9ca3af;
+}
+.member-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 /* 开关 */
