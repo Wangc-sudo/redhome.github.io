@@ -22,7 +22,6 @@ watch(flash, (value) => {
     <strong>ops-web</strong>
     <nav>
       <span class="nav-group">
-        <span class="nav-label">总览</span>
         <router-link to="/">总览</router-link>
       </span>
       <span class="nav-group">
