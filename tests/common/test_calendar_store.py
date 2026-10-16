@@ -59,6 +59,13 @@ class _FakeCursor:
                 if not (v[1] == "holiday_cn" and d.year == year)
             }
             self.rowcount = before - len(conn.overrides)
+        elif sql.startswith("SELECT `business_date` FROM `dim_calendar_override` "
+                            "WHERE YEAR("):
+            (year,) = params
+            self._rows = [
+                {"business_date": d}
+                for d in sorted(conn.overrides) if d.year == year
+            ]
         elif "DELETE FROM `dim_calendar_override` WHERE `business_date`" in sql:
             (day,) = params
             self.rowcount = 1 if conn.overrides.pop(day, None) is not None else 0
@@ -189,7 +196,8 @@ class ImportYearOverridesTests(unittest.TestCase):
         stats = import_year_overrides(
             conn, 2027, actor="admin", fetcher=lambda year: self._FIXTURE)
         self.assertEqual(
-            {"deleted": 1, "inserted": 3, "holidays": 2, "makeup": 1}, stats)
+            {"deleted": 1, "inserted": 3, "holidays": 2, "makeup": 1,
+             "skipped_manual": 0}, stats)
         self.assertNotIn(date(2027, 1, 5) , ())
         self.assertEqual(
             (1, "manual", "人工裁决"), conn.overrides[date(2027, 1, 5)])
@@ -202,6 +210,20 @@ class ImportYearOverridesTests(unittest.TestCase):
             conn.overrides[date(2027, 1, 4)],
         )
         self.assertEqual("import", conn.audits[-1][1])
+
+    def test_manual_same_day_is_kept_and_skipped(self):
+        """manual 裁决日与法定节假日同日：跳过该日不撞 PK（人工优先）。"""
+        conn = _FakeConn()
+        conn.overrides[date(2027, 2, 16)] = (1, "manual", "运维裁决：春节上班")
+        stats = import_year_overrides(
+            conn, 2027, actor="admin", fetcher=lambda year: self._FIXTURE)
+        self.assertEqual(2, stats["inserted"])
+        self.assertEqual(1, stats["skipped_manual"])
+        self.assertEqual(
+            (1, "manual", "运维裁决：春节上班"),
+            conn.overrides[date(2027, 2, 16)],
+        )
+        self.assertIn("跳过 1 天", conn.audits[-1][5])
 
 
 class ApplyOverridesTests(unittest.TestCase):
