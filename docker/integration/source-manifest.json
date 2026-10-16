@@ -1749,6 +1749,50 @@
         ]
       },
       {
+        "base_id": "vy20BglGWOayj65ltDMjPOQaJA7depqY",
+        "sheets": [
+          {
+            "sheet_id": "BZx1EK7",
+            "sheet_name": "日报填报",
+            "dataset": "daily_report_offline_other",
+            "target_table": "daily_report_offline",
+            "max_pages": 100,
+            "field_mapping": {
+              "日期": {
+                "column": "business_date",
+                "source_type": "date"
+              },
+              "责任人": {
+                "column": "responsible_person",
+                "source_type": "text"
+              },
+              "部门": {
+                "column": "department",
+                "source_type": "text"
+              },
+              "销售额": {
+                "column": "sales_amount",
+                "source_type": "currency"
+              },
+              "月目标": {
+                "column": "monthly_target",
+                "source_type": "number"
+              },
+              "补充说明": {
+                "column": "note",
+                "source_type": "text"
+              }
+            },
+            "transform": {
+              "type": "inject",
+              "values": {
+                "region": "其他区"
+              }
+            }
+          }
+        ]
+      },
+      {
         "base_id": "QOG9lyrgJPmxNQlwIw4QDd6q8zN67Mw4",
         "sheets": [
           {

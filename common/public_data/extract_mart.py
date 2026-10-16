@@ -41,6 +41,9 @@ _REGION_KEY_BY_DISPLAY = {
     "绍兴": "shaoxing",
     "万科&大莲花&团购": "vanke",
     "线下总经办&省外": "offline_extra",
+    # 2026-10-16：线下其他区日报 AI 表（inject 显示名「其他区」→ other；
+    # 三桶口径下 other 落「其他」补集桶）。
+    "其他区": "other",
 }
 
 
