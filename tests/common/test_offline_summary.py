@@ -271,7 +271,15 @@ class _Cursor:
                 for (region, name), dept in self._conn.members.items()
             ]
             return
-        region = params[0]
+        # 补集人员采集（「其他」桶人员榜）：列形 region/rp/dept/...
+        if "`region` AS `region`" in sql:
+            self._rows = self._conn.other_rows
+            return
+        # 补集（region NOT IN 杭/绍/vanke）：region 不进 params
+        if "`region` NOT IN" in sql:
+            region = "__offline_other__"
+        else:
+            region = params[0]
         # 锚点由 SQL 片段形态识别（值都在 params[3]）
         if "`responsible_person` = %s" in sql:
             anchor = ("person", params[3])
@@ -302,6 +310,7 @@ class _Conn:
         self.facts = facts        # {(region, anchor): {date: amount}}
         self.targets = targets    # {(region, anchor): float|None}
         self.members = {}         # {(region, name): dept_name}（通讯录）
+        self.other_rows = []      # 补集人员采集行（「其他」桶）
         self.agg_rows = []
         self.sql_log = []
 
@@ -320,21 +329,26 @@ class _Outbox:
 
 
 def _task_conn():
+    # 2026-10-16 三桶口径：绍兴=全区（含李树军 142910），其他=省外+总经办
     facts = {
         ("hangzhou", None): {date(2026, 9, 23): 20000.0, date(2026, 9, 22): 10000.0},
-        ("shaoxing", ("dept_not", "线下运营中心")): {date(2026, 9, 23): 5000.0},
-        ("offline_extra", ("person", "省外")): {date(2026, 9, 17): 1519440.0},
-        ("offline_extra", ("person", "线下总经办")): {date(2026, 9, 17): 3322147.0},
-        ("shaoxing", ("dept", "线下运营中心")): {date(2026, 9, 17): 142910.0},
+        ("shaoxing", None): {date(2026, 9, 23): 5000.0,
+                             date(2026, 9, 17): 142910.0},
+        ("__offline_other__", None): {date(2026, 9, 17): 4841587.0},
     }
     targets = {
         ("hangzhou", None): 100000.0,
-        ("shaoxing", ("dept_not", "线下运营中心")): None,
-        ("offline_extra", ("person", "省外")): 1000000.0,
-        ("offline_extra", ("person", "线下总经办")): 2195000.0,
-        ("shaoxing", ("dept", "线下运营中心")): None,
+        ("shaoxing", None): None,
+        ("__offline_other__", None): 3195000.0,   # 省外 100万+总经办 219.5万
     }
-    return _Conn(facts, targets)
+    conn = _Conn(facts, targets)
+    # 补集人员行（余云涛：offline_extra 遗留行形，rp=板块/dept=责任人）
+    conn.other_rows = [
+        {"region": "offline_extra", "rp": "省外", "dept": "余云涛",
+         "business_date": date(2026, 9, 22), "sales_amount": 1519440.0,
+         "monthly_target": 1000000.0},
+    ]
+    return conn
 
 
 class TaskTest(unittest.TestCase):
@@ -346,23 +360,23 @@ class TaskTest(unittest.TestCase):
             business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 20, 30),
         )
         self.assertEqual(status, "enqueued")
-        # agg 落表：5 板块（含李树军拆分）+ 整体 = 6 行
-        self.assertEqual(len(conn.agg_rows), 6)
+        # agg 落表：3 桶（杭州/绍兴/其他）+ 整体 = 4 行（2026-10-16 三桶口径）
+        self.assertEqual(len(conn.agg_rows), 4)
         scopes = {row[1] for row in conn.agg_rows}
         self.assertEqual(
             scopes,
-            {"hangzhou", "shaoxing", "shengwai", "zongjingban",
-             "lishujun", TOTAL_SCOPE_KEY},
+            {"hangzhou", "shaoxing", "other", TOTAL_SCOPE_KEY},
         )
-        # 省外 9-23 无报数 → 0；线下总经办月目标 2195000
         by_scope = {row[1]: row for row in conn.agg_rows}
-        self.assertEqual(by_scope["shengwai"][2], 0.0)
+        # 其他桶 9-23 无报数 → 当日 0；月累计=省外+总经办 9-17 合计
+        self.assertEqual(by_scope["other"][2], 0.0)
+        self.assertEqual(by_scope["other"][9], 4841587.0)
         # 元组索引 10 = month_target（11 为 month_rate）
-        self.assertEqual(by_scope["zongjingban"][10], 2195000.0)
-        # 李树军板块：9-23 无报数 → 当日 0，月累计含 9-17 的 142910
-        self.assertEqual(by_scope["lishujun"][2], 0.0)
-        self.assertEqual(by_scope["lishujun"][9], 142910.0)
-        # 整体月目标 = 100000 + 1000000 + 2195000（绍兴/李树军 None 跳过）
+        self.assertEqual(by_scope["other"][10], 3195000.0)
+        # 绍兴含李树军（拆分退役）：9-23 当日 5000，月累计 5000+142910
+        self.assertEqual(by_scope["shaoxing"][2], 5000.0)
+        self.assertEqual(by_scope["shaoxing"][9], 147910.0)
+        # 整体月目标 = 100000 + 3195000（绍兴 None 跳过）
         self.assertEqual(by_scope[TOTAL_SCOPE_KEY][10], 3295000.0)
 
         self.assertEqual(len(outbox.calls), 1)
@@ -381,7 +395,7 @@ class TaskTest(unittest.TestCase):
             business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 21, 0),
         )
         self.assertEqual(status, "already_sent")
-        self.assertEqual(len(conn.agg_rows), 6)
+        self.assertEqual(len(conn.agg_rows), 4)
 
     def test_weekly_uses_previous_full_week(self):
         conn = _task_conn()
@@ -426,17 +440,18 @@ class TaskTest(unittest.TestCase):
             self.assertIn("NOT LIKE '%%合计%%'", sql)
 
     def test_scope_table_is_config_driven(self):
+        """三桶口径（2026-10-16 裁决）：杭州/绍兴/其他（补集）。"""
         keys = [scope for scope, _, _, _ in AGG_SCOPES]
         self.assertEqual(len(keys), len(set(keys)))
-        self.assertIn("shengwai", keys)
-        self.assertIn("zongjingban", keys)
-        self.assertIn("lishujun", keys)
-        # 李树军拆分：绍兴剔除线下运营中心，李树军板块=该部门
+        self.assertEqual(["hangzhou", "shaoxing", "other"], keys)
         anchors = {scope: anchor for scope, _, _, anchor in AGG_SCOPES}
-        self.assertEqual(anchors["shaoxing"], ("dept_not", "线下运营中心"))
-        self.assertEqual(anchors["lishujun"], ("dept", "线下运营中心"))
+        self.assertEqual(anchors["shaoxing"], None)   # 李树军拆分退役，并入绍兴
+        from common.daily_robot.offline_summary import OFFLINE_OTHER_REGION
+        regions = {scope: region for scope, _, region, _ in AGG_SCOPES}
+        self.assertEqual(regions["other"], OFFLINE_OTHER_REGION)
 
-    def test_daily_markdown_contains_lishujun_row(self):
+    def test_daily_markdown_contains_other_row(self):
+        """「其他」桶成行（省外+总经办并入）；李树军不再单独成行。"""
         conn = _task_conn()
         outbox = _Outbox()
         run_daily_summary(
@@ -444,9 +459,10 @@ class TaskTest(unittest.TestCase):
             business_date=date(2026, 9, 23), now=datetime(2026, 9, 23, 20, 30),
         )
         body = outbox.calls[0]["body_md"]
-        self.assertIn("| 李树军 |", body)
-        # 李树军月累计 14.3万（142910）
-        self.assertIn("14.3万", body)
+        self.assertIn("| 其他 |", body)
+        self.assertNotIn("| 李树军 |", body)
+        # 其他月累计 484.2万（4841587）
+        self.assertIn("484.2万", body)
 
 
 class OverviewRowTest(unittest.TestCase):
@@ -593,10 +609,10 @@ class OfflineAllHtmlTest(unittest.TestCase):
         # 杭/绍部门以通讯录为准：张三被 dim 覆盖，李树军无 dim 匹配保留表内值
         self.assertEqual(by_name["张三"]["dept"], "杭中（通讯录）")
         self.assertEqual(by_name["李树军"]["dept"], "线下运营中心")
-        # 覆盖区域登记含 offline_extra（省外/总经办责任人也进榜）
+        # 覆盖区域登记=杭/绍（其他桶走补集采集，不走 mart_collect）
         from common.daily_robot.offline_summary import OFFLINE_PEOPLE_REGIONS
         self.assertEqual(
-            OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing", "offline_extra")
+            OFFLINE_PEOPLE_REGIONS, ("hangzhou", "shaoxing")
         )
 
         # 总览面板：单 panel 单表（日/周/月三期同行，环比带基期，无 tab）
@@ -617,8 +633,8 @@ class OfflineAllHtmlTest(unittest.TestCase):
         # 杭州月累计只含 9-22 的 1.0万（9-23 的 2.0万被 T-1 排除）
         self.assertIn("1.0万", panel)
         self.assertNotIn(">2.0万<", panel)
-        # 板块含李树军拆分后的五个板块行 + 整体行
-        self.assertIn("李树军", panel)
+        # 三桶板块行（杭州/绍兴/其他）+ 整体行（2026-10-16 口径）
+        self.assertIn("其他", panel)
         self.assertIn("线下整体", panel)
 
 

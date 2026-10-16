@@ -2744,7 +2744,16 @@ class _OaFakeConnection(FakeConnection):
     （mart_collect 的 fetch_month_facts）回原始行。"""
 
     def _region_rows(self):
-        region = self.executed[-1][1][0]
+        sql, params = self.executed[-1]
+        # 补集（「其他」桶，2026-10-16 三桶口径）：region NOT IN (杭,绍,vanke)
+        if "NOT IN" in sql:
+            excludes = set(params[:3])
+            return [
+                row
+                for row in self._rowsets.get("fact_daily_report_offline", [])
+                if row.get("region") not in excludes
+            ]
+        region = params[0]
         return [
             row
             for row in self._rowsets.get("fact_daily_report_offline", [])
@@ -2755,6 +2764,18 @@ class _OaFakeConnection(FakeConnection):
         if "fact_daily_report_offline" not in sql:
             return super().scripted_fetchall(sql)
         rows = self._region_rows()
+        # 补集人员采集（SELECT ... AS rp/dept）：镜像别名
+        if "`region` AS `region`" in sql:
+            return [
+                {"region": row.get("region"),
+                 "rp": row.get("responsible_person"),
+                 "dept": row.get("department"),
+                 "business_date": row.get("business_date"),
+                 "sales_amount": row.get("sales_amount"),
+                 "monthly_target": row.get("monthly_target")}
+                for row in rows
+                if "合计" not in (row.get("responsible_person") or "")
+            ]
         if "MAX(`monthly_target`)" in sql:
             by_person = {}
             for row in rows:
@@ -2957,9 +2978,9 @@ class OfflineAllDashboardTests(unittest.TestCase):
             ["week", "completed", "target"],
             [key for key in keys if by_key[key].get("cls") == "col-sep"],
         )
-        # 5 板块 + 线下整体
+        # 3 桶 + 线下整体（2026-10-16 三桶口径：其他=省外/总经办补集）
         self.assertEqual(
-            ["杭州", "绍兴", "省外", "线下总经办", "李树军", "线下整体"],
+            ["杭州", "绍兴", "其他", "线下整体"],
             [row["scope"] for row in payload["rows"]],
         )
         hangzhou = payload["rows"][0]
@@ -3129,7 +3150,7 @@ class OaAggregateScopeKeyTests(unittest.TestCase):
         payload = bi_web_queries.run_table_oa_scopes(
             connection, {"date": "2026-08-04", "_scope": "offline_all"})
         self.assertEqual(
-            ["杭州", "绍兴", "省外", "线下总经办", "李树军", "线下整体"],
+            ["杭州", "绍兴", "其他", "线下整体"],
             [row["scope"] for row in payload["rows"]],
         )
 

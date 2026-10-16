@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """线下整体销售汇总（offline_all 汇总群）——日 / 周 / 月报。
 
-数据源：``mart_ops.fact_daily_report_offline``——杭州/绍兴为机器人报数落库，
-省外/线下总经办为 AI 表 melt 同步（region='offline_extra'，按
-``responsible_person`` 区分板块）。
+数据源：``mart_ops.fact_daily_report_offline``——杭州/绍兴为机器人报数落库；
+「其他」=补集桶（region ∉ 杭/绍/vanke：省外/线下总经办等自动落桶，
+2026-10-16 运维裁决 线下总体=杭州+绍兴+其他，vanke 不算）。
 
 口径铁律（方案 §5）：
 - 月目标 MAX 不 SUM（melt 行重复携带，同人同板块多行只取 MAX）；
@@ -26,16 +26,21 @@ from common.daily_robot.channel_daily import _fmt_pct, _fmt_wan
 from common.metrics.daily_report import achievement_rate
 
 #: 汇总板块：(scope 键, 展示名, fact region 键, 锚点)。
-#: 锚点：None=整区域；("person", 名)=按 responsible_person 过滤；
-#: ("dept", 部门)=按 department 过滤；("dept_not", 部门)=排除该部门。
-#: 新增/拆分板块只改这里（2026-09-23 李树军拆分：绍兴剔除线下运营中心，
-#: 李树军板块=线下运营中心——绍兴播报中他本就独立计算）。
+#: 板块锚点：None=整区域（或整补集）。
+#: 2026-10-16 运维裁决：线下总体=杭州+绍兴+其他 三桶——「其他」=fact 里
+#: region ∉ {hangzhou, shaoxing, vanke} 的补集（省外/线下总经办/未来新板块
+#: 自动落桶，零维护）；原 offline_extra 板块锚点（省外/总经办）与李树军
+#: 拆分（dept_not 线下运营中心）随之退役——李树军并入绍兴行。
+#: vanke 不算线下总体（同日裁决，vanke 独立观察）。
+OFFLINE_OTHER_REGION = "__offline_other__"
+
+#: 补集排除的 region（核心桶 + vanke）。
+_OFFLINE_OTHER_EXCLUDES = ("hangzhou", "shaoxing", "vanke")
+
 AGG_SCOPES = (
     ("hangzhou", "杭州", "hangzhou", None),
-    ("shaoxing", "绍兴", "shaoxing", ("dept_not", "线下运营中心")),
-    ("shengwai", "省外", "offline_extra", ("person", "省外")),
-    ("zongjingban", "线下总经办", "offline_extra", ("person", "线下总经办")),
-    ("lishujun", "李树军", "shaoxing", ("dept", "线下运营中心")),
+    ("shaoxing", "绍兴", "shaoxing", None),
+    ("other", "其他", OFFLINE_OTHER_REGION, None),
 )
 
 TOTAL_SCOPE_KEY = "offline_total"
@@ -88,24 +93,33 @@ def _anchor_clause(anchor):
     raise ValueError(f"unknown scope anchor: {anchor!r}")
 
 
+def _region_clause(region):
+    """region 过滤片段：普通区域=等值；``OFFLINE_OTHER_REGION``=补集排除。"""
+    if region == OFFLINE_OTHER_REGION:
+        placeholders = ", ".join(["%s"] * len(_OFFLINE_OTHER_EXCLUDES))
+        return f"`region` NOT IN ({placeholders})", list(_OFFLINE_OTHER_EXCLUDES)
+    return "`region` = %s", [region]
+
+
 def fetch_scope_daily_facts(connection, *, region, anchor, start, end):
     """``{date: 销售额}``；anchor=None 整区域，否则按锚点过滤。
 
     名称含「合计」的行一律排除（与 ``mart_leaderboard`` 同口径）——AI 表
     自带 杭州合计/余杭合计 等合计行，不排则区域汇总双倍计数。
     """
+    region_sql, region_params = _region_clause(region)
     clause, clause_params = _anchor_clause(anchor)
     sql = (
         "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
         "FROM `fact_daily_report_offline` "
-        "WHERE `region` = %s AND `sales_amount` IS NOT NULL "
+        f"WHERE {region_sql} AND `sales_amount` IS NOT NULL "
         # %% 转义：pymysql 按 % 格式化 SQL，字面量 %合计% 须双写
         "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
         f"{clause}"
         " GROUP BY `business_date`"
     )
-    params = [region, start, end, *clause_params]
+    params = [*region_params, start, end, *clause_params]
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -120,17 +134,18 @@ def fetch_scope_month_target(connection, *, region, anchor, year, month):
     汇总，混入即虚增）。
     """
     first, last = month_days(year, month)[0], month_days(year, month)[-1]
+    region_sql, region_params = _region_clause(region)
     clause, clause_params = _anchor_clause(anchor)
     sql = (
         "SELECT `responsible_person` AS `p`, MAX(`monthly_target`) AS `t` "
         "FROM `fact_daily_report_offline` "
-        "WHERE `region` = %s AND `monthly_target` IS NOT NULL "
+        f"WHERE {region_sql} AND `monthly_target` IS NOT NULL "
         "AND `responsible_person` NOT LIKE '%%合计%%' "
         "AND `business_date` BETWEEN %s AND %s"
         f"{clause}"
         " GROUP BY `responsible_person`"
     )
-    params = [region, first, last, *clause_params]
+    params = [*region_params, first, last, *clause_params]
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -538,9 +553,10 @@ def run_monthly_summary(connection, outbox, *, reference, now,
 # 榜单页（pages-offline_all）：人员总榜 + 日/周/月三维度板块
 # ---------------------------------------------------------------------------
 
-#: 人员总榜覆盖的 fact region（每个 region 的全部人员，无人例外；
-#: 「合计」行由 mart_collect 统一跳过；新增线下区域在此登记）。
-OFFLINE_PEOPLE_REGIONS = ("hangzhou", "shaoxing", "offline_extra")
+#: 人员总榜覆盖：杭/绍两区走 ``mart_collect``（与各区榜单页逐行同口径），
+#: 其余线下人员走补集（region ∉ 杭/绍/vanke，当月有填报才进榜，零填报不造
+#: 幽灵行；目标/达成率=None 不参与排序——补集人员无名册语义，纯汇总桶）。
+OFFLINE_PEOPLE_REGIONS = ("hangzhou", "shaoxing")
 
 import html as _html_mod
 
@@ -758,6 +774,76 @@ def build_offline_panels(connection, *, business_date):
     return [f'<div class="panel">\n{body}\n</div>']
 
 
+def _collect_other_people(connection, *, business_date, elapsed_days):
+    """补集人员行（「其他」桶）：当月 region ∉ 杭/绍/vanke 的事实按人聚合。
+
+    与 ``mart_collect`` 同 ``summarize_people`` 口径（同 elapsed_days）。
+    offline_extra 行「姓名↔部门」互换保留（其 responsible_person 是板块名、
+    department 才是责任人——AI 表时代遗留行形）；补集人员无名册语义：
+    目标缺省 0、达成率 None（排序沉底，不参与达成率比较）。
+    """
+    from common.metrics.daily_report import summarize_people
+
+    first = month_days(business_date.year, business_date.month)[0]
+    placeholders = ", ".join(["%s"] * len(_OFFLINE_OTHER_EXCLUDES))
+    sql = (
+        "SELECT `region` AS `region`, `responsible_person` AS `rp`, "
+        "`department` AS `dept`, `business_date` AS `business_date`, "
+        "`sales_amount` AS `sales_amount`, `monthly_target` AS `monthly_target` "
+        "FROM `fact_daily_report_offline` "
+        f"WHERE `region` NOT IN ({placeholders}) "
+        "AND `sales_amount` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
+        "AND `business_date` BETWEEN %s AND %s"
+    )
+    params = [*_OFFLINE_OTHER_EXCLUDES, first, business_date]
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+
+    facts = []
+    dept_by_person = {}
+    for row in rows:
+        get = row.get if isinstance(row, dict) else None
+        if get is None:  # tuple 行（兜底）：按 SELECT 列序取值
+            region, rp, dept = row[0], row[1], row[2]
+        else:
+            region, rp, dept = get("region"), get("rp"), get("dept")
+        if region == "offline_extra":
+            name, dept = (dept or "").strip(), (rp or "").strip()
+        else:
+            name, dept = (rp or "").strip(), (dept or "").strip()
+        if not name:
+            continue
+        if get is None:
+            business_date_, sales_amount_, monthly_target_ = row[3], row[4], row[5]
+        else:
+            business_date_ = get("business_date")
+            sales_amount_ = get("sales_amount")
+            monthly_target_ = get("monthly_target")
+        facts.append({
+            "responsible_person": name,
+            "business_date": business_date_,
+            "sales_amount": sales_amount_,
+            "monthly_target": monthly_target_,
+        })
+        dept_by_person.setdefault(name, dept or "其他")
+
+    summaries = summarize_people(facts, elapsed_days=elapsed_days)
+    return [
+        {
+            "name": name,
+            "dept": dept_by_person.get(name, "其他"),
+            "target": summary.target if summary.target is not None else 0,
+            "completed": summary.completed,
+            "unfilled": summary.unfilled,
+            "rate": summary.rate,
+        }
+        for name, summary in summaries.items()
+        if "合计" not in name
+    ]
+
+
 def collect_offline_all_people(connection, *, business_date, include_today=False):
     """线下整体人员总榜采集（页面与 08:30 群播报同口径，无人例外）。
 
@@ -775,6 +861,7 @@ def collect_offline_all_people(connection, *, business_date, include_today=False
     页面/播报缺省 False 维持 T-1）。返回 ``(people, workdays)``。
     """
     from common.daily_robot.mart_leaderboard import mart_collect
+    from common.metrics.daily_report import elapsed_workdays, fetch_workdays
 
     people = []
     by_region = {}
@@ -785,17 +872,26 @@ def collect_offline_all_people(connection, *, business_date, include_today=False
             include_today=include_today,
         )
         rows = [dict(p) for p in data.people]
-        if region == "offline_extra":
-            for p in rows:
-                p["name"], p["dept"] = p["dept"], p["name"]
         by_region[region] = rows
         people.extend(rows)
         workdays = data.workdays
 
+    # 补集（「其他」桶）：当月有填报且 region ∉ 杭/绍/vanke 的人员，
+    # 与 mart_collect 同 summarize_people 口径；无目标 → rate=None 沉底。
+    if not workdays:
+        workdays = fetch_workdays(
+            connection, year=business_date.year, month=business_date.month
+        )
+    elapsed_set = elapsed_workdays(
+        workdays, today=business_date, include_today=include_today
+    )
+    people.extend(_collect_other_people(
+        connection, business_date=business_date, elapsed_days=elapsed_set
+    ))
+
     # 部门归属以通讯录为准（无匹配保留表内部门）
-    dim_regions = tuple(r for r in OFFLINE_PEOPLE_REGIONS if r != "offline_extra")
-    dept_map = fetch_member_dept_map(connection, dim_regions)
-    for region in dim_regions:
+    dept_map = fetch_member_dept_map(connection, OFFLINE_PEOPLE_REGIONS)
+    for region in OFFLINE_PEOPLE_REGIONS:
         for p in by_region[region]:
             p["dept"] = dept_map.get((region, p["name"]), p["dept"])
 
