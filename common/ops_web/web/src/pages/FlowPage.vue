@@ -1,33 +1,24 @@
 <script setup>
 /**
- * 闭环画布（2026-10-15）：把运维中心五段业务
- * 「组织 → 名册 → 目标 → 定时任务 → 记录」放在**同一平面**上。
+ * 闭环画布 v2（2026-10-16）：ComfyUI 式纯读拓扑画布。
  *
- * 每个已登记区域＝平面上的一个活节点，节点直显四要素
- * （名册数 / 目标人数与 Σ 万元 / 下游任务数 / 闭环状态）；拖拽即写，
- * 四类拖拽动作直接落库：
- *   ① 池成员 → 区域节点       ＝ 归属变更（assignMember）
- *   ② 区域成员 → 另一区域节点 ＝ 归属搬迁（moveMember，原子复合写 + confirm）
- *   ③ 成员 → 区域「名册槽」   ＝ 名册补录（addRosterEntry）
- *   ④ 名册槽条目 → 池         ＝ 名册移除（deleteRosterEntry）
+ * 语义裁决：画布只表达「谁驱动谁」的拓扑——写操作各归其位
+ * （归属=组织编排页、名册=名册页、收件人=定时任务页），画布零写接口。
  *
- * 读面并行拉既有 GET（overview / roster / pipelines），**零新增聚合读端点**；
- * 定时任务只读展示 + 深链，**绝不触发管道发布**（不碰 Nacos）。
- * 节点坐标存 localStorage（v1 不落库）。
+ * 节点两类：
+ *   · 区域节点（左）：名册/目标/成员/Σ万元 四要素 + 闭环状态徽标
+ *   · 任务节点（右）：该区域下游定时任务（schedule/启用态/最近运行）
+ * 连线：区域输出端口 →（驱动）→ 任务输入端口，贝塞尔曲线；
+ * 断链（缺名册/缺目标/任务停用/最近失败）= 琥珀虚线。
+ *
+ * 画布交互：滚轮缩放（光标为中心）、拖空白平移、拖节点头移动节点
+ * （坐标存 localStorage，v2 不落库）、?region= 锚点定位。
+ * 读面并行拉既有 GET（overview / roster / pipelines），零新增端点。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import draggable from 'vuedraggable';
-import {
-  addRosterEntry,
-  assignMember,
-  deleteRosterEntry,
-  getOverview,
-  getPipelines,
-  getRoster,
-  moveMember,
-} from '../api.js';
-import { hasCapability, me, setFlash, flash } from '../store/me.js';
+import { getOverview, getPipelines, getRoster } from '../api.js';
+import { hasCapability, me } from '../store/me.js';
 
 const route = useRoute();
 
@@ -38,27 +29,77 @@ function hasAnyCap(cap) {
     && me.value.scoped_capabilities[cap]) || [];
   return scoped.length > 0;
 }
-
 const canRoster = computed(() => hasAnyCap('roster'));
 const canPipelines = computed(() => hasAnyCap('pipelines'));
 
 // -- 状态 -----------------------------------------------------------------
-const nodes = ref([]);        // 区域节点（可拖拽列表：members + chips）
-const poolMembers = ref([]);  // 未归类池成员卡
+const regionNodes = ref([]);   // 区域节点（含「平台/无群」伪区域）
+const taskNodes = ref([]);     // 任务节点
+const edges = ref([]);         // 连线（region → task）
+const poolMembers = ref([]);   // 未归类池（只读展示）
 const month = ref('');
 const loading = ref(true);
 const loadError = ref('');
-const busy = ref(false);      // 有写接口在途：暂停拖拽，防并发写入
 
-const dragDisabled = computed(() => busy.value);
-
-// -- 统一锚点（?region=<key>）--------------------------------------------
 const anchorRegion = computed(() =>
   typeof route.query.region === 'string' ? route.query.region : '',
 );
 
-// -- 节点坐标（localStorage 持久化，v1 不落库）----------------------------
-const POS_KEY = 'ops-web.flow.node-pos.v1';
+// -- 画布视口（缩放/平移）-------------------------------------------------
+const zoom = ref(1);
+const panX = ref(0);
+const panY = ref(0);
+const ZOOM_MIN = 0.3;
+const ZOOM_MAX = 2;
+
+const viewportStyle = computed(() => ({
+  transform: `translate(${panX.value}px, ${panY.value}px) scale(${zoom.value})`,
+}));
+const gridStyle = computed(() => ({
+  backgroundSize: `${22 * zoom.value}px ${22 * zoom.value}px`,
+  backgroundPosition: `${panX.value}px ${panY.value}px`,
+}));
+
+function onWheel(evt) {
+  const old = zoom.value;
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+    old * (evt.deltaY < 0 ? 1.12 : 1 / 1.12)));
+  if (next === old) return;
+  // 以光标为锚缩放：保持光标下的画布点不动
+  const rect = evt.currentTarget.getBoundingClientRect();
+  const cx = evt.clientX - rect.left;
+  const cy = evt.clientY - rect.top;
+  panX.value = cx - ((cx - panX.value) / old) * next;
+  panY.value = cy - ((cy - panY.value) / old) * next;
+  zoom.value = next;
+}
+
+function startPan(evt) {
+  if (evt.button !== 0) return;
+  const startX = evt.clientX;
+  const startY = evt.clientY;
+  const originX = panX.value;
+  const originY = panY.value;
+  function onMove(moveEvt) {
+    panX.value = originX + moveEvt.clientX - startX;
+    panY.value = originY + moveEvt.clientY - startY;
+  }
+  function onUp() {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+function resetView() {
+  zoom.value = 1;
+  panX.value = 0;
+  panY.value = 0;
+}
+
+// -- 节点坐标（localStorage 持久化）---------------------------------------
+const POS_KEY = 'ops-web.flow.node-pos.v2';
 const nodePos = ref({});
 
 function loadPos() {
@@ -68,202 +109,59 @@ function loadPos() {
     nodePos.value = {};
   }
 }
-
 function savePos() {
   try {
     localStorage.setItem(POS_KEY, JSON.stringify(nodePos.value));
   } catch (err) {
-    /* 隐私模式 / 配额满：坐标持久化失败不影响业务 */
+    /* 隐私模式/配额满：坐标持久化失败不影响展示 */
   }
 }
-
-function defaultPos(index) {
-  const col = index % 3;
-  const row = Math.floor(index / 3);
-  return { x: 16 + col * 340, y: 16 + row * 300 };
-}
-
-/** 复位某节点坐标到默认网格位（并清除本地记忆）。 */
-async function resetPos(key) {
-  delete nodePos.value[key];
+function resetAllPos() {
+  nodePos.value = {};
   savePos();
-  buildNodes(lastRaw.value);
-  await packDefaults();
+  layout();
 }
 
-// -- 拖拽组（互不串门）----------------------------------------------------
-// 成员卡：池 / 区域成员区 之间自由流动；名册槽只收成员、自身卡片可拉出到池。
-const memberGroup = { name: 'flow-members', pull: true, put: ['flow-members'] };
-const poolGroup = {
-  name: 'flow-members', pull: true, put: ['flow-members', 'flow-roster'],
-};
-const slotGroup = { name: 'flow-roster', pull: true, put: ['flow-members'] };
+// -- 布局常量 --------------------------------------------------------------
+const REGION_W = 300;
+const REGION_H = 168;
+const TASK_W = 330;
+const TASK_H = 96;
+const TASK_GAP = 14;
+const REGION_X = 40;
+const TASK_X = 560;
+const TOP_Y = 40;
 
-// -- 数据装载 -------------------------------------------------------------
+// -- 节点拖拽（头部拖动＝改坐标）-------------------------------------------
+function startNodeDrag(evt, node) {
+  if (evt.button !== 0) return;
+  evt.stopPropagation();
+  const startX = evt.clientX;
+  const startY = evt.clientY;
+  const originX = node.x;
+  const originY = node.y;
+  function onMove(moveEvt) {
+    node.x = Math.max(0, originX + (moveEvt.clientX - startX) / zoom.value);
+    node.y = Math.max(0, originY + (moveEvt.clientY - startY) / zoom.value);
+  }
+  function onUp() {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    nodePos.value[node.id] = { x: Math.round(node.x), y: Math.round(node.y) };
+    savePos();
+  }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+// -- 数据装载 --------------------------------------------------------------
 const lastRaw = ref(null);
 
-/** 成员卡装饰：唯一键 + 类型标签 + 当前区域（搬迁用）。 */
-function decorateMember(member, region) {
-  return {
-    ...member,
-    _kind: 'member',
-    _key: `m:${member.user_id}`,
-    region: region || null,
-  };
-}
-
-/** 名册条目 → 槽位卡（可拖出到池＝移除）。 */
-function decorateChip(row) {
-  return {
-    ...row,
-    _kind: 'roster',
-    _key: `r:${row.id}`,
-    roster_id: row.id,
-  };
-}
-
-function pipelineCount(map, key) {
-  if (!map) return null;
-  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : 0;
-}
-
-/** 由原始读面派生节点（members / chips / metrics / 坐标）。 */
-function buildNodes(raw) {
-  const { overview, roster, pipelineCounts } = raw;
-  const rosterRows = (roster && roster.roster) || [];
-  const targets = (roster && roster.targets) || {};
-  const regions = (overview && overview.regions) || [];
-
-  poolMembers.value = ((overview && overview.pool) || [])
-    .map((member) => decorateMember(member, null));
-
-  nodes.value = regions.map((region, index) => {
-    const key = region.key;
-    const members = [];
-    for (const dept of region.depts || []) {
-      for (const member of dept.members || []) {
-        members.push(decorateMember(member, key));
-      }
-    }
-    const chips = rosterRows
-      .filter((row) => row.scope === key && Number(row.enabled) === 1)
-      .map(decorateChip);
-    const targetMap = targets[key] || {};
-    const targetCount = Object.keys(targetMap).length;
-    const targetSum = Object.values(targetMap)
-      .reduce((sum, value) => sum + (Number(value) || 0), 0);
-    const k = pipelineCount(pipelineCounts, key);
-    const metrics = buildMetrics(members.length, chips.length, targetCount,
-                                 targetSum, k);
-    const pos = nodePos.value[key] || defaultPos(index);
-    return {
-      key,
-      label: region.label || key,
-      members,
-      chips,
-      metrics,
-      chain: buildChain(chips.length, targetCount, k),
-      x: pos.x,
-      y: pos.y,
-    };
-  });
-}
-
-function buildMetrics(memberCount, rosterCount, targetCount, targetSum, k) {
-  let badge = '已闭环';
-  let badgeClass = 'ok';
-  if (rosterCount === 0) {
-    badge = '缺名册';
-    badgeClass = 'warn';
-  } else if (targetCount === 0) {
-    badge = '缺目标';
-    badgeClass = 'warn';
-  } else if (!k) {
-    badge = '待下游';
-    badgeClass = 'warn';
-  }
-  return {
-    memberCount, rosterCount, targetCount, targetSum,
-    pipelineCount: k == null ? 0 : k,
-    pipelineUnknown: k == null,
-    badge, badgeClass, broken: badgeClass !== 'ok',
-  };
-}
-
-/** 本区五段链路：组织（恒在）/ 名册 / 目标 / 任务 / 记录（随任务）。 */
-function buildChain(rosterCount, targetCount, k) {
-  return [
-    { key: 'org', label: '组织', ok: true },
-    { key: 'roster', label: '名册', ok: rosterCount > 0 },
-    { key: 'target', label: '目标', ok: targetCount > 0 },
-    { key: 'task', label: '任务', ok: !!k },
-    { key: 'record', label: '记录', ok: !!k },
-  ];
-}
-
-// -- 主链聚合（五段总览）--------------------------------------------------
-const stageStats = computed(() => {
-  let members = 0;
-  let roster = 0;
-  let target = 0;
-  let tasks = 0;
-  let withTasks = 0;
-  for (const node of nodes.value) {
-    members += node.metrics.memberCount;
-    roster += node.metrics.rosterCount;
-    target += node.metrics.targetCount;
-    tasks += node.metrics.pipelineCount;
-    if (node.metrics.pipelineCount > 0) withTasks += 1;
-  }
-  return [
-    { key: 'org', label: '组织', value: members, ok: members > 0 },
-    { key: 'roster', label: '名册', value: roster, ok: roster > 0 },
-    { key: 'target', label: '目标', value: target, ok: target > 0 },
-    { key: 'task', label: '定时任务', value: tasks, ok: tasks > 0 },
-    { key: 'record', label: '记录', value: withTasks, ok: withTasks > 0 },
-  ];
-});
-
-async function load({ silent = false } = {}) {
-  if (!silent) loading.value = true;
-  loadError.value = '';
-  try {
-    const [overview, roster, pipelines] = await Promise.all([
-      getOverview(),
-      canRoster.value ? getRoster() : Promise.resolve(null),
-      canPipelines.value ? getPipelines() : Promise.resolve(null),
-    ]);
-    const pipelineCounts = {};
-    for (const group of (pipelines && pipelines.groups) || []) {
-      if (group && group.region) pipelineCounts[group.region] = group.count || 0;
-    }
-    month.value = (roster && roster.month) || '';
-    lastRaw.value = {
-      overview,
-      roster,
-      pipelineCounts: canPipelines.value ? pipelineCounts : null,
-    };
-    buildNodes(lastRaw.value);
-  } catch (err) {
-    loadError.value = err.message;
-  } finally {
-    if (!silent) loading.value = false;
-  }
-  await packDefaults();
-  await applyAnchor();
-}
-
-function regionLabel(key) {
-  const hit = nodes.value.find((node) => node.key === key);
-  return hit ? hit.label : key;
-}
-
-/** 落点高亮：有 ?region= 锚点时滚动到对应节点。 */
-async function applyAnchor() {
-  if (!anchorRegion.value) return;
-  await nextTick();
-  const el = document.getElementById(`region-${anchorRegion.value}`);
-  if (el) el.scrollIntoView({ block: 'center' });
+function regionBadge(rosterCount, targetCount, taskCount) {
+  if (rosterCount === 0) return { text: '缺名册', cls: 'warn' };
+  if (targetCount === 0) return { text: '缺目标', cls: 'warn' };
+  if (!taskCount) return { text: '待下游', cls: 'warn' };
+  return { text: '已闭环', cls: 'ok' };
 }
 
 function fmt(value) {
@@ -271,194 +169,214 @@ function fmt(value) {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 }
 
-// -- 拖拽落位：成员/槽位卡 → 未归类池 -------------------------------------
-async function onPoolChange(evt) {
-  if (!evt.added) return;
-  const el = evt.added.element;
-  busy.value = true;
-  try {
-    if (el._kind === 'roster') {
-      await deleteRosterEntry({ id: el.roster_id });
-      setFlash('ok', `已从名册移除「${el.person_name}」`);
-    } else {
-      await assignMember({
-        user_id: el.user_id,
-        region: null,
-        dept_id: null,
-        dept_name: '',
-        name: el.name || null,
-      });
-      setFlash('ok', `已把「${el.name || el.user_id}」移出全部区域（未归类）`);
-    }
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}（已回滚）`);
-    await load({ silent: true });
-  } finally {
-    busy.value = false;
-  }
+/** 任务是否处于断链态（停用或最近运行失败）。 */
+function taskBroken(service) {
+  if (!service.enabled) return true;
+  const latest = service.latest;
+  return !!(latest && latest.status === 'failed');
 }
 
-// -- 拖拽落位：成员 → 某区域节点（归属变更 / 搬迁）------------------------
-async function onNodeMembersChange(evt, node) {
-  if (!evt.added) return;
-  const el = evt.added.element;
-  if (el._kind !== 'member') {
-    await load({ silent: true });
-    return;
-  }
-  const fromRegion = el.region || null;
-  const toRegion = node.key;
-  if (fromRegion === toRegion) return; // 同区排序，不落库
+/** 由原始读面派生节点与连线。 */
+function buildGraph(raw) {
+  const { overview, roster, groups } = raw;
+  const rosterRows = (roster && roster.roster) || [];
+  const targets = (roster && roster.targets) || {};
+  const regions = (overview && overview.regions) || [];
 
-  // 跨区搬迁：必须二次确认（会同步增删双侧名册，影响报数资格与目标归属）。
-  if (fromRegion !== null) {
-    const ok = window.confirm(
-      `将「${el.name || el.user_id}」从 ${regionLabel(fromRegion)} 改归属到 `
-      + `${node.label}？\n\n这会同步增删双侧 person 名册，影响该成员的`
-      + `报数资格与当月目标归属。`,
-    );
-    if (!ok) {
-      setFlash('ok', '已取消搬迁');
-      await load({ silent: true });
-      return;
-    }
+  poolMembers.value = ((overview && overview.pool) || []).slice(0, 50);
+
+  const servicesByRegion = {};
+  for (const group of groups || []) {
+    servicesByRegion[group.region === null ? '__platform__' : group.region] =
+      group.services || [];
   }
 
-  busy.value = true;
-  try {
-    if (fromRegion === null) {
-      await assignMember({
-        user_id: el.user_id,
-        region: toRegion,
-        dept_id: el.dept_id || null,
-        dept_name: el.dept_name || '',
-        name: el.name || null,
-      });
-      setFlash('ok', `已把「${el.name || el.user_id}」归入 ${node.label}`);
-    } else {
-      const res = await moveMember({
-        user_id: el.user_id,
-        to_region: toRegion,
-        person_name: el.name || null,
-        dept_name: el.dept_name || '',
-        from_region: fromRegion,
-        note: '',
-      });
-      const moved = (res && res.roster) || {};
-      const tail = `${moved.to_added ? '（已补新名册）' : ''}`
-        + `${moved.from_removed ? '（已清旧名册）' : ''}`;
-      setFlash('ok',
-        `已搬迁「${el.name || el.user_id}」到 ${node.label}${tail}`);
-    }
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}（已回滚）`);
-    await load({ silent: true });
-  } finally {
-    busy.value = false;
-  }
-}
-
-// -- 拖拽落位：成员 → 某区域「名册槽」（补录）----------------------------
-async function onSlotChange(evt, node) {
-  if (!evt.added) return;
-  const el = evt.added.element;
-  if (el._kind !== 'member') {
-    await load({ silent: true });
-    return;
-  }
-  busy.value = true;
-  try {
-    await addRosterEntry({
-      scope: node.key,
-      entity_type: 'person',
-      entity_key: el.dept_name || node.label,
-      person_name: el.name || el.user_id,
-      role: 'owner',
-      note: '',
+  const nextRegions = [];
+  const nextTasks = [];
+  const nextEdges = [];
+  for (const region of regions) {
+    const key = region.key;
+    const memberCount = (region.depts || [])
+      .reduce((sum, dept) => sum + (dept.members || []).length, 0);
+    const rosterCount = rosterRows
+      .filter((row) => row.scope === key && Number(row.enabled) === 1).length;
+    const targetMap = targets[key] || {};
+    const targetCount = Object.keys(targetMap).length;
+    const targetSum = Object.values(targetMap)
+      .reduce((sum, value) => sum + (Number(value) || 0), 0);
+    const services = servicesByRegion[key] || [];
+    const badge = regionBadge(rosterCount, targetCount, services.length);
+    nextRegions.push({
+      id: `region:${key}`,
+      key,
+      label: region.label || key,
+      badge,
+      rosterCount,
+      targetCount,
+      targetSum,
+      memberCount,
+      taskCount: services.length,
+      x: REGION_X,
+      y: TOP_Y,
     });
-    setFlash('ok', `已把「${el.name || el.user_id}」补录到 ${node.label} 名册`);
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}（已回滚）`);
-    await load({ silent: true });
-  } finally {
-    busy.value = false;
+    services.forEach((service, index) => {
+      const taskId = `task:${service.service_id}`;
+      nextTasks.push({
+        id: taskId,
+        regionKey: key,
+        index,
+        service,
+        broken: taskBroken(service),
+        x: TASK_X,
+        y: TOP_Y,
+      });
+      nextEdges.push({
+        id: `e:${key}:${service.service_id}`,
+        from: `region:${key}`,
+        to: taskId,
+        broken: badge.cls !== 'ok' || taskBroken(service),
+      });
+    });
+  }
+  // 平台/无群任务（region=None）挂到伪区域节点
+  const platform = servicesByRegion.__platform__ || [];
+  if (platform.length) {
+    nextRegions.push({
+      id: 'region:__platform__',
+      key: '__platform__',
+      label: '平台 / 无群',
+      badge: { text: '平台线', cls: 'plain' },
+      rosterCount: 0,
+      targetCount: 0,
+      targetSum: 0,
+      memberCount: 0,
+      taskCount: platform.length,
+      x: REGION_X,
+      y: TOP_Y,
+    });
+    platform.forEach((service, index) => {
+      const taskId = `task:${service.service_id}`;
+      nextTasks.push({
+        id: taskId,
+        regionKey: '__platform__',
+        index,
+        service,
+        broken: taskBroken(service),
+        x: TASK_X,
+        y: TOP_Y,
+      });
+      nextEdges.push({
+        id: `e:__platform__:${service.service_id}`,
+        from: 'region:__platform__',
+        to: taskId,
+        broken: taskBroken(service),
+      });
+    });
+  }
+  regionNodes.value = nextRegions;
+  taskNodes.value = nextTasks;
+  edges.value = nextEdges;
+  layout();
+}
+
+/** 默认布局：任务按所属区域纵向成摞，区域节点垂直居中对齐其任务摞。 */
+function layout() {
+  const saved = nodePos.value;
+  const taskYById = {};
+  let cursorY = TOP_Y;
+  for (const region of regionNodes.value) {
+    const stack = taskNodes.value.filter((t) => t.regionKey === region.key);
+    const stackTop = cursorY;
+    stack.forEach((task) => {
+      taskYById[task.id] = cursorY;
+      cursorY += TASK_H + TASK_GAP;
+    });
+    const stackH = stack.length * (TASK_H + TASK_GAP) - TASK_GAP;
+    const regionY = stack.length
+      ? stackTop + Math.max(0, (stackH - REGION_H) / 2)
+      : cursorY;
+    cursorY = Math.max(cursorY, stack.length ? stackTop : cursorY)
+      + (stack.length ? 0 : REGION_H) + 26;
+    const savedPos = saved[region.id];
+    region.x = savedPos ? savedPos.x : REGION_X;
+    region.y = savedPos ? savedPos.y : Math.round(regionY);
+  }
+  for (const task of taskNodes.value) {
+    const savedPos = saved[task.id];
+    task.x = savedPos ? savedPos.x : TASK_X;
+    task.y = savedPos ? savedPos.y : taskYById[task.id];
   }
 }
 
-// -- 节点位置拖拽（头部拖动＝改坐标，存 localStorage）---------------------
-function startNodeDrag(evt, node) {
-  if (busy.value || evt.button !== 0) return;
-  // 仅左键；避免与节点内卡片拖拽/链接点击冲突（头部为专用拖拽柄）。
-  const originX = node.x;
-  const originY = node.y;
-  const startX = evt.clientX;
-  const startY = evt.clientY;
-
-  function onMove(moveEvt) {
-    node.x = Math.max(0, originX + moveEvt.clientX - startX);
-    node.y = Math.max(0, originY + moveEvt.clientY - startY);
-  }
-  function onUp() {
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
-    nodePos.value[node.key] = { x: node.x, y: node.y };
-    savePos();
-  }
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
-}
-
-const planeHeight = computed(() => {
-  let max = 360;
-  for (const node of nodes.value) max = Math.max(max, node.y + nodeHeight(node) + 16);
-  return max;
+// -- 连线几何（贝塞尔）-----------------------------------------------------
+const nodeById = computed(() => {
+  const map = {};
+  for (const n of regionNodes.value) map[n.id] = { ...n, w: REGION_W, h: REGION_H };
+  for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: TASK_H };
+  return map;
 });
 
-/** 节点实测高度（渲染后测量；未测到回退 320）。 */
-function nodeHeight(node) {
-  return node.height || 320;
+const edgePaths = computed(() => edges.value.map((edge) => {
+  const from = nodeById.value[edge.from];
+  const to = nodeById.value[edge.to];
+  if (!from || !to) return { ...edge, d: '' };
+  const x1 = from.x + from.w;
+  const y1 = from.y + from.h / 2;
+  const x2 = to.x;
+  const y2 = to.y + 34;
+  const dx = Math.max(60, (x2 - x1) / 2);
+  return {
+    ...edge,
+    d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
+  };
+}));
+
+const canvasSize = computed(() => {
+  let maxX = 960;
+  let maxY = 480;
+  for (const n of Object.values(nodeById.value)) {
+    maxX = Math.max(maxX, n.x + n.w + 60);
+    maxY = Math.max(maxY, n.y + n.h + 60);
+  }
+  return { w: maxX, h: maxY };
+});
+
+// -- 锚点 -------------------------------------------------------------------
+async function applyAnchor() {
+  if (!anchorRegion.value) return;
+  await nextTick();
+  const node = regionNodes.value.find((n) => n.key === anchorRegion.value);
+  if (!node) return;
+  // 平移视口让目标节点大致居中（缩放保持）
+  panX.value = 260 - node.x * zoom.value;
+  panY.value = 120 - node.y * zoom.value;
 }
 
-/**
- * 默认网格位：**逐行对齐**——每 3 个节点一层，层内顶边对齐、列位固定，
- * 层高取层内最高节点（实测 offsetHeight），层间留 24px，避免大节点盖住下方节点。
- * 用户已拖过的节点（nodePos 有记录）不参与排布。
- */
-async function packDefaults() {
-  if (!nodes.value.length) return;
-  await nextTick();
-  for (const node of nodes.value) {
-    const el = document.getElementById(`region-${node.key}`);
-    if (el) node.height = el.offsetHeight || 320;
+// -- 装载 -------------------------------------------------------------------
+async function load() {
+  loading.value = true;
+  loadError.value = '';
+  try {
+    const [overview, roster, pipelines] = await Promise.all([
+      getOverview(),
+      canRoster.value ? getRoster() : Promise.resolve(null),
+      canPipelines.value ? getPipelines() : Promise.resolve(null),
+    ]);
+    month.value = (roster && roster.month) || '';
+    lastRaw.value = {
+      overview,
+      roster,
+      groups: (pipelines && pipelines.groups) || [],
+    };
+    buildGraph(lastRaw.value);
+  } catch (err) {
+    loadError.value = err.message;
+  } finally {
+    loading.value = false;
   }
-  await nextTick();
-  const rowHeights = [];
-  nodes.value.forEach((node, index) => {
-    const row = Math.floor(index / 3);
-    rowHeights[row] = Math.max(rowHeights[row] || 0, nodeHeight(node));
-  });
-  const rowY = [];
-  let acc = 16;
-  for (let row = 0; row < rowHeights.length; row += 1) {
-    rowY[row] = acc;
-    acc += (rowHeights[row] || 320) + 24;
-  }
-  let dirty = false;
-  nodes.value.forEach((node, index) => {
-    if (nodePos.value[node.key]) return;
-    const x = 16 + (index % 3) * 344;
-    const y = rowY[Math.floor(index / 3)];
-    if (node.x !== x || node.y !== y) dirty = true;
-    node.x = x;
-    node.y = y;
-  });
-  if (dirty) await nextTick();
+  await applyAnchor();
 }
 
-// -- 生命周期 -------------------------------------------------------------
 loadPos();
 load();
 watch(() => route.query.region, () => applyAnchor());
@@ -470,226 +388,131 @@ watch(() => route.query.region, () => applyAnchor());
       <div class="head-main">
         <h1>闭环画布</h1>
         <p class="note">
-          组织 → 名册 → 目标 → 定时任务 → 记录 一平面总览。拖拽成员卡即改归属、
-          跨区拖＝搬迁（同步双侧名册），拖入「名册槽」＝补录名册，槽位卡拖回池＝移除。
-          定时任务只读，画布**不触发**管道发布。
+          组织 → 名册 → 目标 → 定时任务 → 记录 的拓扑总览：连线即驱动关系，
+          琥珀虚线＝断链（缺名册/缺目标/任务停用/最近失败）。纯读视图——
+          改归属去「组织编排」、改名册去「填报名册」、改收件人去「定时任务」。
         </p>
       </div>
       <div class="head-actions">
         <span v-if="month" class="month">目标月份 {{ month }}</span>
+        <button class="btn" @click="resetAllPos">复位布局</button>
+        <button class="btn" @click="resetView">复位视图</button>
         <button class="btn" :disabled="loading" @click="load()">刷新</button>
       </div>
     </header>
 
-    <transition name="flash">
-      <div v-if="flash" class="flash" :class="flash.type">{{ flash.text }}</div>
-    </transition>
-
     <div v-if="loading" class="state">加载中…</div>
     <div v-else-if="loadError" class="state error">{{ loadError }}</div>
 
-    <template v-else>
-      <!-- 五段业务主链（断链段虚线） -->
-      <section class="chain">
-        <div class="chain-row">
-          <template v-for="(stage, index) in stageStats" :key="stage.key">
-            <div class="stage" :class="{ broken: !stage.ok }">
-              <span class="stage-name">{{ stage.label }}</span>
-              <span class="stage-value">{{ stage.value }}</span>
-            </div>
-            <svg
-              v-if="index < stageStats.length - 1"
-              class="arrow"
-              :class="{ dashed: !stageStats[index + 1].ok }"
-              width="42"
-              height="18"
-              viewBox="0 0 42 18"
-              aria-hidden="true"
-            >
-              <line x1="2" y1="9" x2="32" y2="9" />
-              <polygon points="32,4 41,9 32,14" />
-            </svg>
-          </template>
-        </div>
-      </section>
+    <div v-else class="canvas-wrap">
+      <!-- 未归类池（只读角条） -->
+      <aside class="pool-bar" v-if="poolMembers.length">
+        <b>未归类池 {{ poolMembers.length }}</b>
+        <span
+          v-for="member in poolMembers"
+          :key="member.user_id"
+          class="pool-chip"
+        >{{ member.name || member.user_id }}</span>
+        <router-link class="pool-go" to="/org">去归口 →</router-link>
+      </aside>
 
-      <div class="grid">
-        <!-- 未归类池 -->
-        <aside class="col pool-col">
-          <div class="col-head">
-            <h2>未归类池</h2>
-            <span class="count">{{ poolMembers.length }}</span>
-          </div>
-          <p class="hint">拖入区域节点＝归入该区；拖入名册槽＝补录名册。</p>
-          <draggable
-            class="pool-drop"
-            :list="poolMembers"
-            :group="poolGroup"
-            item-key="_key"
-            :disabled="dragDisabled"
-            :animation="150"
-            @change="onPoolChange"
+      <div
+        class="canvas"
+        :style="gridStyle"
+        @wheel.prevent="onWheel"
+        @mousedown="startPan"
+      >
+        <div class="viewport" :style="viewportStyle">
+          <svg
+            class="edges"
+            :width="canvasSize.w"
+            :height="canvasSize.h"
           >
-            <template #item="{ element: member }">
-              <div class="card">
-                <span class="card-name">{{ member.name || member.user_id || '—' }}</span>
-                <span class="card-sub">{{ member.dept_name || member.user_id || '' }}</span>
-              </div>
-            </template>
-          </draggable>
-        </aside>
+            <path
+              v-for="edge in edgePaths"
+              :key="edge.id"
+              :d="edge.d"
+              class="edge"
+              :class="{ broken: edge.broken }"
+            />
+          </svg>
 
-        <!-- 区域节点平面 -->
-        <section class="plane-wrap">
-          <p v-if="!nodes.length" class="state">尚无已登记区域。</p>
-          <div v-else class="plane" :style="{ height: planeHeight + 'px' }">
-            <article
-              v-for="node in nodes"
-              :key="node.key"
-              :id="`region-${node.key}`"
-              class="node"
-              :class="{ 'anchor-hit': anchorRegion === node.key }"
-              :style="{ left: node.x + 'px', top: node.y + 'px' }"
-            >
-              <div
-                class="node-head"
-                title="拖动头部＝移动节点（坐标存本机）"
-                @mousedown.prevent="startNodeDrag($event, node)"
-              >
-                <h3>{{ node.label }}</h3>
-                <span class="badge" :class="node.metrics.badgeClass">
-                  {{ node.metrics.badge }}
-                </span>
-                <button
-                  class="btn mini ghost"
-                  title="复位该节点位置"
-                  @mousedown.stop
-                  @click.stop="resetPos(node.key)"
-                >
-                  复位
-                </button>
-              </div>
+          <!-- 区域节点 -->
+          <article
+            v-for="node in regionNodes"
+            :key="node.id"
+            :id="`flow-${node.key}`"
+            class="node region-node"
+            :class="{ 'anchor-hit': anchorRegion === node.key }"
+            :style="{ left: node.x + 'px', top: node.y + 'px', width: REGION_W + 'px' }"
+          >
+            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
+              <h3>{{ node.label }}</h3>
+              <span class="badge" :class="node.badge.cls">{{ node.badge.text }}</span>
+            </div>
+            <div class="metrics" v-if="node.key !== '__platform__'">
+              <router-link class="metric" :to="{ path: '/roster', query: { region: node.key } }">
+                <b>{{ node.rosterCount }}</b><span>名册</span>
+              </router-link>
+              <router-link class="metric" :to="{ path: '/roster', query: { region: node.key } }">
+                <b>{{ node.targetCount }}</b><span>目标人</span>
+              </router-link>
+              <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
+              <router-link class="metric" :to="{ path: '/org', query: { region: node.key } }">
+                <b>{{ node.memberCount }}</b><span>成员</span>
+              </router-link>
+            </div>
+            <div class="node-foot">
+              <span class="task-count">下游任务 {{ node.taskCount }}</span>
+            </div>
+            <span class="port out" title="驱动下游任务" />
+          </article>
 
-              <div class="metrics">
-                <router-link
-                  class="metric"
-                  :to="{ path: '/roster', query: { region: node.key } }"
-                  title="该区名册（点开名册页并高亮）"
-                >
-                  <b>{{ node.metrics.rosterCount }}</b><span>名册</span>
-                </router-link>
-                <router-link
-                  class="metric"
-                  :to="{ path: '/roster', query: { region: node.key } }"
-                  title="该区当月目标人数（万元口径）"
-                >
-                  <b>{{ node.metrics.targetCount }}</b><span>目标人</span>
-                </router-link>
-                <span class="metric" title="该区当月个人目标合计（万元）">
-                  <b>{{ fmt(node.metrics.targetSum) }}</b><span>Σ 万元</span>
-                </span>
-                <router-link
-                  v-if="node.metrics.pipelineCount > 0"
-                  class="metric"
-                  :to="{ path: '/pipelines', query: { region: node.key } }"
-                  title="该区下游定时任务（点开并高亮）"
-                >
-                  <b>{{ node.metrics.pipelineCount }}</b><span>下游任务</span>
-                </router-link>
-                <span
-                  v-else
-                  class="metric is-zero"
-                  title="该区暂无下游定时任务"
-                >
-                  <b>0</b><span>下游任务</span>
-                </span>
-                <router-link
-                  class="metric"
-                  :to="{ path: '/org', query: { region: node.key } }"
-                  title="该区组织成员（点开组织页并高亮）"
-                >
-                  <b>{{ node.metrics.memberCount }}</b><span>成员</span>
-                </router-link>
-                <router-link class="metric" to="/records" title="六源审计记录">
-                  <b>·</b><span>记录</span>
-                </router-link>
-              </div>
-
-              <!-- 本区五段小闭环（缺口段虚线） -->
-              <div class="mini-chain">
-                <template v-for="(seg, index) in node.chain" :key="seg.key">
-                  <span class="mini-chip" :class="{ on: seg.ok }">{{ seg.label }}</span>
-                  <span
-                    v-if="index < node.chain.length - 1"
-                    class="mini-gap"
-                    :class="{ dashed: !node.chain[index + 1].ok }"
-                  />
-                </template>
-              </div>
-
-              <!-- 名册槽（拖入成员＝补录；槽位卡拖回池＝移除） -->
-              <div v-if="canRoster" class="slot">
-                <div class="slot-head">
-                  名册槽 <span class="count">{{ node.chips.length }}</span>
-                </div>
-                <draggable
-                  class="slot-drop"
-                  :list="node.chips"
-                  :group="slotGroup"
-                  item-key="_key"
-                  :disabled="dragDisabled"
-                  :animation="150"
-                  @change="onSlotChange($event, node)"
-                >
-                  <template #item="{ element: chip }">
-                    <span
-                      class="chip-roster"
-                      :title="`${chip.person_name}（${chip.role || 'owner'}）拖到左侧池＝移除`"
-                    >
-                      {{ chip.person_name }}
-                    </span>
-                  </template>
-                </draggable>
-              </div>
-
-              <!-- 区域成员（拖到其它区＝搬迁、拖到名册槽＝补录、拖到池＝移出） -->
-              <draggable
-                class="node-members"
-                :list="node.members"
-                :group="memberGroup"
-                item-key="_key"
-                :disabled="dragDisabled"
-                :animation="150"
-                @change="onNodeMembersChange($event, node)"
-              >
-                <template #item="{ element: member }">
-                  <span
-                    class="chip"
-                    :id="`member-${member.user_id}`"
-                    :title="`${member.user_id}｜拖到其它区域＝搬迁、拖到名册槽＝补录`"
-                  >
-                    {{ member.name || member.user_id }}
-                  </span>
-                </template>
-              </draggable>
-            </article>
-          </div>
-        </section>
+          <!-- 任务节点 -->
+          <article
+            v-for="node in taskNodes"
+            :key="node.id"
+            class="node task-node"
+            :class="{ broken: node.broken, disabled: !node.service.enabled }"
+            :style="{ left: node.x + 'px', top: node.y + 'px', width: TASK_W + 'px' }"
+          >
+            <span class="port in" />
+            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
+              <h4>{{ node.service.service_label }}</h4>
+              <span class="cat">{{ node.service.category_label }}</span>
+            </div>
+            <div class="task-meta">
+              <span>{{ node.service.schedule_zh || node.service.schedule || '—' }}</span>
+              <span :class="node.service.enabled ? 'on' : 'off'">
+                {{ node.service.enabled ? '启用' : '停用' }}
+              </span>
+              <span v-if="node.service.latest" class="latest">
+                最近 {{ node.service.latest.status_label }}
+              </span>
+            </div>
+          </article>
+        </div>
       </div>
-    </template>
+
+      <div class="legend">
+        <span class="lg"><i class="line ok" /> 正常驱动</span>
+        <span class="lg"><i class="line broken" /> 断链（缺名册/缺目标/停用/失败）</span>
+        <span class="lg">滚轮缩放 · 拖空白平移 · 拖节点头移动</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .page {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 20px;
+  height: calc(100vh - 52px);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
   color: #1f2933;
   font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   font-size: 14px;
 }
-
 .head {
   display: flex;
   justify-content: space-between;
@@ -703,7 +526,7 @@ watch(() => route.query.region, () => applyAnchor());
 }
 .note {
   margin: 0;
-  max-width: 820px;
+  max-width: 860px;
   color: #6b7280;
   font-size: 13px;
   line-height: 1.5;
@@ -717,7 +540,6 @@ watch(() => route.query.region, () => applyAnchor());
   color: #6b7280;
   font-size: 13px;
 }
-
 .btn {
   padding: 7px 12px;
   border: 1px solid #d1d5db;
@@ -730,44 +552,6 @@ watch(() => route.query.region, () => applyAnchor());
 .btn:hover {
   background: #f9fafb;
 }
-.btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.btn.ghost {
-  border-color: transparent;
-  color: #4b5563;
-}
-.btn.mini {
-  padding: 3px 8px;
-  font-size: 12px;
-}
-
-.flash {
-  margin: 12px 0;
-  padding: 9px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-}
-.flash.ok {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #047857;
-}
-.flash.err {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #b91c1c;
-}
-.flash-enter-active,
-.flash-leave-active {
-  transition: opacity 0.2s ease;
-}
-.flash-enter-from,
-.flash-leave-to {
-  opacity: 0;
-}
-
 .state {
   padding: 48px;
   text-align: center;
@@ -777,149 +561,81 @@ watch(() => route.query.region, () => applyAnchor());
   color: #b91c1c;
 }
 
-/* 五段主链 */
-.chain {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
-}
-.chain-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.stage {
+.canvas-wrap {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  min-width: 92px;
-  padding: 8px 12px;
-  border: 1px solid #c7d2fe;
-  border-radius: 8px;
-  background: #eef2ff;
+  margin-top: 12px;
 }
-.stage.broken {
-  border-color: #fde68a;
-  background: #fffbeb;
-}
-.stage-name {
-  font-size: 12px;
-  color: #4b5563;
-}
-.stage-value {
-  font-size: 18px;
-  font-weight: 600;
-}
-.arrow {
-  flex: 0 0 auto;
-}
-.arrow line,
-.arrow polygon {
-  fill: #10b981;
-  stroke: #10b981;
-  stroke-width: 2;
-}
-.arrow.dashed line {
-  fill: none;
-  stroke: #f59e0b;
-  stroke-dasharray: 5 4;
-}
-.arrow.dashed polygon {
-  fill: #f59e0b;
-  stroke: #f59e0b;
-}
-
-/* 两栏 */
-.grid {
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 16px;
-  margin-top: 16px;
-  align-items: start;
-}
-@media (max-width: 960px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
-}
-.col {
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
-}
-.col-head {
+.pool-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.col-head h2 {
-  margin: 0;
-  font-size: 15px;
-}
-.count {
-  display: inline-block;
-  min-width: 20px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: #f3f4f6;
-  color: #4b5563;
-  font-size: 12px;
-  text-align: center;
-}
-.hint {
-  margin: 6px 0 10px;
-  color: #9ca3af;
-  font-size: 12px;
-  line-height: 1.4;
-}
-.pool-drop {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 120px;
-}
-.card {
-  display: flex;
-  flex-direction: column;
-  padding: 6px 9px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 10px;
   border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+  color: #4b5563;
+}
+.pool-chip {
+  padding: 2px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
   background: #f9fafb;
-  cursor: grab;
 }
-.card-name {
-  font-size: 13px;
-}
-.card-sub {
-  color: #9ca3af;
-  font-size: 11px;
+.pool-go {
+  margin-left: auto;
+  color: #2563eb;
+  text-decoration: none;
 }
 
-/* 平面 */
-.plane-wrap {
-  min-width: 0;
-}
-.plane {
+.canvas {
+  flex: 1;
+  min-height: 0;
   position: relative;
-  overflow: auto;
-  border: 1px dashed #d1d5db;
-  border-radius: 10px;
-  background:
-    radial-gradient(#e5e7eb 1px, transparent 1px) 0 0 / 22px 22px,
-    #fcfcfd;
-}
-.node {
-  position: absolute;
-  width: 320px;
-  padding: 10px;
+  overflow: hidden;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
+  background:
+    radial-gradient(#dfe3e8 1px, transparent 1px) 0 0 / 22px 22px,
+    #f7f8fa;
+  cursor: grab;
+}
+.canvas:active {
+  cursor: grabbing;
+}
+.viewport {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+.edge {
+  fill: none;
+  stroke: #10b981;
+  stroke-width: 2;
+}
+.edge.broken {
+  stroke: #f59e0b;
+  stroke-dasharray: 6 4;
+}
+
+.node {
+  position: absolute;
+  border: 1px solid #e2e5ea;
+  border-radius: 10px;
   background: #fff;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
 }
 .node.anchor-hit {
   border-color: #2563eb;
@@ -929,11 +645,18 @@ watch(() => route.query.region, () => applyAnchor());
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 10px 4px;
   cursor: move;
+  user-select: none;
 }
 .node-head h3 {
   margin: 0;
   font-size: 15px;
+}
+.node-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
 }
 .badge {
   padding: 1px 7px;
@@ -948,20 +671,23 @@ watch(() => route.query.region, () => applyAnchor());
   background: #fffbeb;
   color: #b45309;
 }
+.badge.plain {
+  background: #f3f4f6;
+  color: #6b7280;
+}
 
 .metrics {
   display: flex;
-  flex-wrap: wrap;
   gap: 6px;
-  margin: 8px 0 6px;
+  padding: 4px 10px;
 }
 .metric {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 58px;
-  padding: 4px 8px;
-  border: 1px solid #e5e7eb;
+  min-width: 52px;
+  padding: 3px 6px;
+  border: 1px solid #eef0f3;
   border-radius: 6px;
   background: #f9fafb;
   color: #1f2933;
@@ -969,7 +695,7 @@ watch(() => route.query.region, () => applyAnchor());
   font-size: 11px;
 }
 .metric b {
-  font-size: 15px;
+  font-size: 14px;
 }
 .metric span {
   color: #6b7280;
@@ -978,81 +704,84 @@ a.metric:hover {
   border-color: #93c5fd;
   background: #eff6ff;
 }
-.metric.is-zero {
-  color: #9ca3af;
-}
-.metric.is-zero b {
+.node-foot {
+  padding: 2px 10px 8px;
+  font-size: 11px;
   color: #9ca3af;
 }
 
-/* 本区五段小闭环 */
-.mini-chain {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  margin: 4px 0 8px;
+.task-node {
+  padding-bottom: 6px;
 }
-.mini-chip {
+.task-node.disabled {
+  opacity: 0.62;
+}
+.task-node.broken {
+  border-color: #fbbf24;
+}
+.cat {
   padding: 1px 6px;
-  border-radius: 10px;
-  background: #f3f4f6;
-  color: #9ca3af;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #4338ca;
   font-size: 11px;
 }
-.mini-chip.on {
-  background: #ecfdf5;
+.task-meta {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: #6b7280;
+}
+.task-meta .on {
   color: #047857;
 }
-.mini-gap {
-  width: 12px;
+.task-meta .off {
+  color: #b91c1c;
+}
+.task-meta .latest {
+  color: #9ca3af;
+}
+
+/* 端口 */
+.port {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #cbd2da;
+}
+.port.out {
+  right: -6px;
+  top: 50%;
+  margin-top: -5px;
+  background: #10b981;
+}
+.port.in {
+  left: -6px;
+  top: 29px;
+  background: #64748b;
+}
+
+.legend {
+  display: flex;
+  gap: 18px;
+  padding: 8px 4px 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+.lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.line {
+  display: inline-block;
+  width: 22px;
   border-top: 2px solid #10b981;
 }
-.mini-gap.dashed {
+.line.broken {
   border-top: 2px dashed #f59e0b;
-}
-
-/* 名册槽 */
-.slot {
-  margin-bottom: 8px;
-  padding: 6px 8px;
-  border: 1px dashed #c7d2fe;
-  border-radius: 8px;
-  background: #f8faff;
-}
-.slot-head {
-  color: #4b5563;
-  font-size: 12px;
-  margin-bottom: 4px;
-}
-.slot-drop {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-height: 24px;
-}
-.chip-roster {
-  padding: 2px 7px;
-  border: 1px solid #a7f3d0;
-  border-radius: 10px;
-  background: #ecfdf5;
-  color: #047857;
-  font-size: 12px;
-  cursor: grab;
-}
-
-/* 区域成员 */
-.node-members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-height: 26px;
-}
-.chip {
-  padding: 3px 8px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #f9fafb;
-  font-size: 12px;
-  cursor: grab;
 }
 </style>
