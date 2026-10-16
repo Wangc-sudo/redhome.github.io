@@ -712,10 +712,13 @@ def _handle_calendar_import(args):
                 rewrite_month(
                     connection, settings.calendar_seed_path, args.year, month
                 )
+        skipped = stats.get("skipped_manual") or 0
         print(
             f"year={args.year} applied +{stats['inserted']}"
             f"（休 {stats['holidays']} / 调休上班 {stats['makeup']}）"
-            f" -{stats['deleted']}，dim_calendar 12 个月已重写"
+            f" -{stats['deleted']}"
+            + (f"，manual 裁决日跳过 {skipped} 天" if skipped else "")
+            + "，dim_calendar 12 个月已重写"
         )
     except SystemExit:
         raise
