@@ -272,7 +272,7 @@ export function getRecipientOverride(serviceId) {
   );
 }
 
-/** 工作日历读面（整月天 + 最近修正）。month = 'YYYY-MM'。 */
+/** 播报日历读面（整月天 + 最近修正）。month = 'YYYY-MM'。 */
 export function getCalendar(month) {
   return request(`/api/calendar${queryString({ month })}`, { method: 'GET' });
 }
@@ -371,14 +371,9 @@ export function resetRecipientOverride(payload) {
   return post('/api/pipelines/recipient-override/reset', payload);
 }
 
-/** 点日期改上班/休息。payload: {date:'YYYY-MM-DD', is_workday, note?}。 */
+/** 点日期改播报/休息。payload: {date:'YYYY-MM-DD', is_workday, note?}。 */
 export function toggleCalendarDay(payload) {
   return post('/api/calendar/toggle', payload);
-}
-
-/** 一键导入该年法定节假日。payload: {year}。 */
-export function importCalendarYear(payload) {
-  return post('/api/calendar/import-year', payload);
 }
 
 /** 清除当月人工裁决。payload: {month:'YYYY-MM'}。 */

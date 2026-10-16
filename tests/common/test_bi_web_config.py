@@ -752,7 +752,7 @@ class BiSeedFileTests(unittest.TestCase):
              "table_qd_product_series", "table_qd_product_bands",
              "table_qd_product_top", "table_qd_product_summary",
              "table_qd_refund_reason", "table_qd_gmv_factors",
-             "table_qd_cohort", "table_qd_baijiu_node",
+             "table_qd_cohort",
              "table_qd_channel_daily", "table_qd_hot_items",
              "table_qd_stock_urgent", "table_qd_stock_oversold",
              "table_qd_purchase_inbound", "table_qd_order_risk",
@@ -763,7 +763,7 @@ class BiSeedFileTests(unittest.TestCase):
             (4, 4, 4, 8, 4, 12, 12,
              12, 6, 6, 4, 4, 4,
              6, 6, 6, 6, 6, 6,
-             12, 12, 12, 12, 6, 6,
+             12, 12, 12, 6, 6,
              12, 12, 12),
             tuple(placement.span for placement in qd.cards),
         )

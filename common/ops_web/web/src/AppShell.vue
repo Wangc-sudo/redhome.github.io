@@ -29,7 +29,7 @@ watch(flash, (value) => {
         <span class="nav-label">日常</span>
         <router-link v-if="hasCapability('roster')" to="/roster">填报名册</router-link>
         <router-link v-if="isAdmin()" to="/recipients">收件人总览</router-link>
-        <router-link v-if="hasCapability('calendar')" to="/calendar">工作日历</router-link>
+        <router-link v-if="hasCapability('calendar')" to="/calendar">播报日历</router-link>
       </span>
       <span class="nav-group">
         <span class="nav-label">权限</span>

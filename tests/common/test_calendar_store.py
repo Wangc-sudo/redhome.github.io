@@ -12,7 +12,6 @@ from common.public_data.calendar_store import (
     fetch_month_days,
     fetch_overrides,
     fetch_recent_audits,
-    import_year_overrides,
     reset_month_overrides,
     rewrite_month,
     upsert_override,
@@ -59,13 +58,6 @@ class _FakeCursor:
                 if not (v[1] == "holiday_cn" and d.year == year)
             }
             self.rowcount = before - len(conn.overrides)
-        elif sql.startswith("SELECT `business_date` FROM `dim_calendar_override` "
-                            "WHERE YEAR("):
-            (year,) = params
-            self._rows = [
-                {"business_date": d}
-                for d in sorted(conn.overrides) if d.year == year
-            ]
         elif "DELETE FROM `dim_calendar_override` WHERE `business_date`" in sql:
             (day,) = params
             self.rowcount = 1 if conn.overrides.pop(day, None) is not None else 0
@@ -164,66 +156,19 @@ class OverrideCrudTests(unittest.TestCase):
         self.assertFalse(delete_override(conn, date(2026, 10, 31), actor="admin"))
         self.assertEqual(["upsert", "reset"], [a[1] for a in conn.audits])
 
-    def test_reset_month_keeps_holiday_cn_and_other_months(self):
+    def test_reset_month_keeps_other_months(self):
         conn = _FakeConn()
         upsert_override(conn, date(2026, 10, 7), 1, actor="admin")
         upsert_override(conn, date(2026, 10, 31), 0, actor="admin")
         upsert_override(
             conn, date(2026, 11, 2), 0, actor="admin", source="manual")
-        conn.overrides[date(2026, 1, 1)] = (0, "holiday_cn", "元旦")
         deleted = reset_month_overrides(conn, 2026, 10, actor="admin")
         self.assertEqual(2, deleted)
         self.assertEqual(
-            {date(2026, 11, 2): (0, "manual", None),
-             date(2026, 1, 1): (0, "holiday_cn", "元旦")},
+            {date(2026, 11, 2): (0, "manual", None)},
             conn.overrides,
         )
         self.assertEqual("reset_month", conn.audits[-1][1])
-
-
-class ImportYearOverridesTests(unittest.TestCase):
-    _FIXTURE = [
-        {"date": "2027-01-01", "name": "元旦", "isOffDay": True},
-        {"date": "2027-01-04", "name": "元旦调休", "isOffDay": False},
-        {"date": "2027-02-16", "name": "春节", "isOffDay": True},
-    ]
-
-    def test_replaces_holiday_cn_year_keeps_manual(self):
-        conn = _FakeConn()
-        conn.overrides[date(2027, 1, 1)] = (0, "holiday_cn", "旧元旦")
-        conn.overrides[date(2027, 1, 5)] = (1, "manual", "人工裁决")
-        conn.overrides[date(2026, 1, 1)] = (0, "holiday_cn", "元旦")
-        stats = import_year_overrides(
-            conn, 2027, actor="admin", fetcher=lambda year: self._FIXTURE)
-        self.assertEqual(
-            {"deleted": 1, "inserted": 3, "holidays": 2, "makeup": 1,
-             "skipped_manual": 0}, stats)
-        self.assertNotIn(date(2027, 1, 5) , ())
-        self.assertEqual(
-            (1, "manual", "人工裁决"), conn.overrides[date(2027, 1, 5)])
-        self.assertEqual(
-            (0, "holiday_cn", "元旦"), conn.overrides[date(2026, 1, 1)])
-        self.assertEqual(
-            (0, "holiday_cn", "元旦"), conn.overrides[date(2027, 1, 1)])
-        self.assertEqual(
-            (1, "holiday_cn", "元旦调休（调休上班）"),
-            conn.overrides[date(2027, 1, 4)],
-        )
-        self.assertEqual("import", conn.audits[-1][1])
-
-    def test_manual_same_day_is_kept_and_skipped(self):
-        """manual 裁决日与法定节假日同日：跳过该日不撞 PK（人工优先）。"""
-        conn = _FakeConn()
-        conn.overrides[date(2027, 2, 16)] = (1, "manual", "运维裁决：春节上班")
-        stats = import_year_overrides(
-            conn, 2027, actor="admin", fetcher=lambda year: self._FIXTURE)
-        self.assertEqual(2, stats["inserted"])
-        self.assertEqual(1, stats["skipped_manual"])
-        self.assertEqual(
-            (1, "manual", "运维裁决：春节上班"),
-            conn.overrides[date(2027, 2, 16)],
-        )
-        self.assertIn("跳过 1 天", conn.audits[-1][5])
 
 
 class ApplyOverridesTests(unittest.TestCase):
@@ -240,28 +185,23 @@ class ApplyOverridesTests(unittest.TestCase):
 
 class RewriteMonthTests(unittest.TestCase):
     def _seed(self):
+        # 纯播报口径：种子 rule 数组不再参与推导，基线每天都是播报日
         return _seed_file({
             "version": 1,
-            "months": [{
-                "year": 2026, "month": 10,
-                "bigRestSaturdays": [17],
-                "holidays": [1, 2, 3, 4, 5, 6, 7],
-                "makeupWorkdays": [10],
-            }],
+            "months": [{"year": 2026, "month": 10}],
         })
 
     def test_rewrite_merges_baseline_and_overrides(self):
         conn = _FakeConn()
-        conn.overrides[date(2026, 10, 7)] = (1, "manual", "改上班")
+        conn.overrides[date(2026, 10, 31)] = (0, "manual", "大休")
         written = rewrite_month(
             conn, self._seed(), 2026, 10, today=date(2026, 10, 15))
         self.assertEqual(31, written)
-        # 10-07 法定休被裁决改上班（source/note 随 override）
-        self.assertEqual((1, "manual", "改上班"), conn.dim[date(2026, 10, 7)])
-        # 10-10 调休上班（基线）
+        # 10-31 人工裁决休息（source/note 随 override）
+        self.assertEqual((0, "manual", "大休"), conn.dim[date(2026, 10, 31)])
+        # 基线每天都是播报日（周末/节假日不再默认休息）
         self.assertEqual((1, "local", None), conn.dim[date(2026, 10, 10)])
-        # 10-06 法定休（基线）
-        self.assertEqual((0, "local", None), conn.dim[date(2026, 10, 6)])
+        self.assertEqual((1, "local", None), conn.dim[date(2026, 10, 6)])
         # run id 前缀区分 ops 写与 extract 写（CHAR(36) 约束：恰好 36 位）
         sql, seq = conn.executed[-1]
         self.assertTrue(all(str(run).startswith("ops-") and len(str(run)) == 36

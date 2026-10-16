@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""工作日历 DB 裁决层（``dim_calendar_override``）+ ``dim_calendar`` 派生合并。
+"""播报日历 DB 裁决层（``dim_calendar_override``）+ ``dim_calendar`` 派生合并。
 
-两层模型（2026-10-10 运维裁决「后端太复杂，要给非技术同学用」）：
+两层模型（2026-10-16 纯播报口径裁决）：
 
-* **基线**：JSON 种子承载历史月（2025-01~2026-12，法定假 + 大小休锚点）
-  + 规则兜底（``calendar_utils.synthesize_fallback_months``，周日休 +
-  每月第 3 个周六大休）；
-* **裁决层（DB，本模块）**：``dim_calendar_override`` 按日记上班/休息
-  覆盖——``source='holiday_cn'``（运维中心「导入法定节假日」一键写入）
-  与 ``source='manual'``（「工作日历」页点日期写入）——非技术同学全程
-  页面操作，不碰 git/CLI/PR。
+* **基线**：JSON 种子承载覆盖月（2025-01~2026-12）+ 规则兜底
+  （``calendar_utils.synthesize_fallback_months``）——rest 恒为空，
+  **每天都是播报日**，法定节假日/周末不再默认休息；
+* **裁决层（DB，本模块）**：``dim_calendar_override`` 按日记 播报/休息
+  覆盖，``source='manual'``（ops-web「播报日历」页点日期写入）——休息日
+  只来自人工裁决，非技术同学全程页面操作，不碰 git/CLI/PR。
+  （2026-10-10 曾有的 holiday_cn 法定节假日导入已随纯播报口径退役。）
 
 ``dim_calendar`` = 基线 ∪ override（逐日 override 赢）：extract-mart 每日
 重建时合并（``apply_overrides``），ops-web 操作后即时重写受影响月份
 （``rewrite_month``）——两条路径同函数合并，口径不漂移；override 行
-独立于派生表，extract 的全量替换永不冲掉人工裁决与法定导入。
+独立于派生表，extract 的全量替换永不冲掉人工裁决。
 """
 
 import contextlib
@@ -22,14 +22,10 @@ import uuid
 from datetime import datetime, timezone
 
 from common.calendar_utils import load_calendar_seed, month_days
-from common.public_data.calendar_import import (
-    fetch_holiday_cn,
-    map_days_to_overrides,
-)
 from common.public_data.db import transaction
 
-#: 合法 override 来源：holiday_cn=法定节假日导入 / manual=页面人工裁决。
-OVERRIDE_SOURCES = ("holiday_cn", "manual")
+#: 合法 override 来源：manual=页面人工裁决（纯播报口径后唯一来源）。
+OVERRIDE_SOURCES = ("manual",)
 
 _OVERRIDE_DDL = (
     "CREATE TABLE IF NOT EXISTS `dim_calendar_override` (\n"
@@ -190,7 +186,7 @@ def delete_override(connection, business_date, *, actor):
 
 
 def reset_month_overrides(connection, year, month, *, actor):
-    """本月恢复规则：清除该月 manual 覆盖（法定导入 holiday_cn 行不动）。
+    """本月恢复规则：清除该月 manual 覆盖（回到全播报基线）。
 
     返回清除行数（审计 action=reset_month）。
     """
@@ -205,65 +201,9 @@ def reset_month_overrides(connection, year, month, *, actor):
             deleted = cursor.rowcount
         _insert_audit(
             connection, actor, "reset_month", year=int(year), month=int(month),
-            detail=f"清除人工裁决 {deleted} 行（法定导入保留）",
+            detail=f"清除人工裁决 {deleted} 行（回到全播报基线）",
         )
     return deleted
-
-
-def import_year_overrides(connection, year, *, actor, fetcher=None):
-    """导入法定节假日到裁决层：该年 holiday_cn 行整年替换（manual 不动）。
-
-    manual 裁决行与法定节假日同日时**跳过该日**（人工优先——裸 INSERT 会
-    撞 PK 1062，2026-10-16 云上实测：10-07 manual 上班裁决 vs 国庆节）。
-    返回 ``{"deleted", "inserted", "holidays", "makeup",
-    "skipped_manual"}``（审计 action=import；holidays/makeup 为源文件口径，
-    inserted 为实际写入）。
-    """
-    days = (fetcher or fetch_holiday_cn)(year)
-    overrides = map_days_to_overrides(year, days)
-    holidays = sum(1 for _, is_workday, _ in overrides if not is_workday)
-    makeup = len(overrides) - holidays
-    with transaction(connection):
-        with contextlib.closing(connection.cursor()) as cursor:
-            cursor.execute(
-                "DELETE FROM `dim_calendar_override` "
-                "WHERE `source` = 'holiday_cn' AND YEAR(`business_date`) = %s",
-                (int(year),),
-            )
-            deleted = cursor.rowcount
-            cursor.execute(
-                "SELECT `business_date` FROM `dim_calendar_override` "
-                "WHERE YEAR(`business_date`) = %s",
-                (int(year),),
-            )
-            kept = {
-                (row["business_date"] if isinstance(row, dict) else row[0])
-                for row in cursor.fetchall()
-            }
-            rows = [
-                (day, is_workday, name, actor, _utc_now_text())
-                for day, is_workday, name in overrides
-                if day not in kept
-            ]
-            if rows:
-                cursor.executemany(
-                    "INSERT INTO `dim_calendar_override` "
-                    "(`business_date`, `is_workday`, `source`, `note`, "
-                    " `updated_by`, `updated_at`) "
-                    "VALUES (%s, %s, 'holiday_cn', %s, %s, %s)",
-                    rows,
-                )
-        skipped = len(overrides) - len(rows)
-        detail = (f"holiday-cn 导入：+{len(rows)}（休 {holidays} / "
-                  f"调休上班 {makeup}）/-{deleted}")
-        if skipped:
-            detail += f"，manual 裁决日跳过 {skipped} 天（人工优先）"
-        _insert_audit(connection, actor, "import", year=int(year), detail=detail)
-    return {
-        "deleted": deleted, "inserted": len(rows),
-        "holidays": holidays, "makeup": makeup,
-        "skipped_manual": skipped,
-    }
 
 
 def rewrite_month(connection, seed_path, year, month, *, today=None,

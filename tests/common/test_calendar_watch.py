@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""calendar_watch（工作日历覆盖看门，三层防线 B 层）离线单测。"""
+"""calendar_watch（播报日历覆盖看门）离线单测——纯播报口径只告警零行。"""
 
 import io
 import unittest
@@ -9,7 +9,6 @@ from unittest import mock
 
 from common.daily_robot import calendar_watch
 from common.daily_robot.calendar_watch import (
-    RULE_FALLBACK_SOURCE,
     build_watch_markdown,
     classify_issues,
     fetch_calendar_coverage,
@@ -24,7 +23,7 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
-        self._row = self._coverage.get(params[1], {"n": 0, "fb": 0})
+        self._row = self._coverage.get(params[0], {"n": 0})
 
     def fetchone(self):
         return self._row
@@ -51,29 +50,24 @@ class _FakeOutbox:
         return not self._dedupe_hit
 
 
-_OK = {"n": 31, "fb": 0}                       # DB 行形（_FakeConn 用）
-_OK_SNAPSHOT = {"rows": 31, "fallback_rows": 0}  # 覆盖快照形（classify 用）
+_OK = {"n": 31}                        # DB 行形（_FakeConn 用）
+_OK_SNAPSHOT = {"rows": 31}            # 覆盖快照形（classify 用）
 
 
 class FetchCoverageTests(unittest.TestCase):
-    def test_counts_rows_and_fallback_per_month(self):
-        conn = _FakeConn({
-            "2026-10": {"n": 31, "fb": 0},
-            "2027-01": {"n": 31, "fb": 31},
-        })
+    def test_counts_rows_per_month(self):
+        conn = _FakeConn({"2026-10": {"n": 31}, "2027-01": {"n": 31}})
         coverage = fetch_calendar_coverage(conn, ("2026-10", "2027-01"))
-        self.assertEqual({"rows": 31, "fallback_rows": 0}, coverage["2026-10"])
-        self.assertEqual({"rows": 31, "fallback_rows": 31}, coverage["2027-01"])
+        self.assertEqual({"rows": 31}, coverage["2026-10"])
+        self.assertEqual({"rows": 31}, coverage["2027-01"])
         sql, params = conn._cursor.executed[-1]
-        self.assertIn(RULE_FALLBACK_SOURCE, params)
         self.assertIn("2027-01", params)
         self.assertIn("dim_calendar", sql)
 
 
 class ClassifyIssuesTests(unittest.TestCase):
-    def test_ok_when_both_months_fully_seeded(self):
-        coverage = {"2026-10": _OK_SNAPSHOT,
-                    "2026-11": {"rows": 30, "fallback_rows": 0}}
+    def test_ok_when_both_months_covered(self):
+        coverage = {"2026-10": _OK_SNAPSHOT, "2026-11": {"rows": 30}}
         self.assertEqual([], classify_issues(
             coverage, current_month="2026-10", next_month="2026-11"))
 
@@ -84,24 +78,11 @@ class ClassifyIssuesTests(unittest.TestCase):
         self.assertEqual("P0", issues[0][0])
         self.assertIn("2026-10", issues[0][1])
 
-    def test_p1_current_month_on_rule_fallback(self):
-        coverage = {"2026-10": {"rows": 31, "fallback_rows": 31},
-                    "2026-11": _OK_SNAPSHOT}
-        issues = classify_issues(
-            coverage, current_month="2026-10", next_month="2026-11")
-        self.assertEqual("P1", issues[0][0])
-        self.assertIn("规则兜底", issues[0][1])
-
-    def test_p1_next_month_zero_and_p2_next_month_fallback(self):
+    def test_p1_next_month_zero_rows(self):
         p1 = classify_issues(
             {"2026-10": _OK_SNAPSHOT},
             current_month="2026-10", next_month="2026-11")
         self.assertEqual(["P1"], [level for level, _ in p1])
-        p2 = classify_issues(
-            {"2026-10": _OK_SNAPSHOT,
-             "2026-11": {"rows": 30, "fallback_rows": 30}},
-            current_month="2026-10", next_month="2026-11")
-        self.assertEqual(["P2"], [level for level, _ in p2])
 
 
 class RunWatchTests(unittest.TestCase):
@@ -115,10 +96,7 @@ class RunWatchTests(unittest.TestCase):
 
     def test_alert_enqueues_to_offline_all_group(self):
         outbox = _FakeOutbox()
-        conn = _FakeConn({
-            "2026-10": {"n": 31, "fb": 0},
-            "2026-11": {"n": 30, "fb": 30},
-        })
+        conn = _FakeConn({"2026-10": _OK, "2026-11": {"n": 0}})
         result = run_watch(
             conn, outbox,
             anchor_date=date(2026, 10, 25), now=datetime(2026, 10, 25, 10, 0))
@@ -128,23 +106,22 @@ class RunWatchTests(unittest.TestCase):
         self.assertEqual("calendar_watch", call["kind"])
         self.assertEqual(date(2026, 10, 25), call["business_date"])
         self.assertIsNone(call["dedupe_suffix"])
-        self.assertIn("P2", call["body_md"])
-        self.assertIn("calendar-import", call["body_md"])
+        self.assertIn("P1", call["body_md"])
+        self.assertIn("extract-mart", call["body_md"])
 
     def test_dedupe_hit_reports_already_sent(self):
         outbox = _FakeOutbox(dedupe_hit=True)
         result = run_watch(
-            _FakeConn({"2026-10": {"n": 31, "fb": 0},
-                        "2026-11": {"n": 30, "fb": 30}}),
+            _FakeConn({"2026-10": {"n": 0}, "2026-11": _OK}),
             outbox,
             anchor_date=date(2026, 10, 25), now=datetime(2026, 10, 25, 10, 0))
         self.assertEqual(("alerted", 1, "already_sent"), result)
 
     def test_markdown_lists_levels_and_hint(self):
-        body = build_watch_markdown(issues=[("P1", "当月兜底"), ("P2", "下月兜底")])
-        self.assertIn("**P1** 当月兜底", body)
-        self.assertIn("**P2** 下月兜底", body)
-        self.assertIn("calendar-import", body)
+        body = build_watch_markdown(issues=[("P0", "当月零行"), ("P1", "下月零行")])
+        self.assertIn("**P0** 当月零行", body)
+        self.assertIn("**P1** 下月零行", body)
+        self.assertIn("extract-mart", body)
 
 
 class CalendarWatchCliTests(unittest.TestCase):

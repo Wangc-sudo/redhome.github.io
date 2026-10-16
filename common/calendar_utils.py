@@ -61,9 +61,9 @@ SOURCE_LOCAL = "local"
 SOURCE_YONYOU_TP = "yonyou_tplus"
 
 #: 规则兜底行的 source 标记（2026-10-10 三层防线 A 层）：种子未覆盖的
-#: 近端月份按「周日休 + 每月第 3 个周六大休」纯规则合成（沿用 2026 种子
-#: 锚点约定）——翻年/翻月不再 MartTaskError 硬死（法定节假日口径失真由
-#: B 层 calendar-watch 管道告警补救）。
+#: 近端月份按纯规则合成——翻年/翻月不再 MartTaskError 硬死。
+#: 2026-10-16 纯播报口径裁决：基线 rest=∅（每天都是播报日），休息日
+#: 只来自 DB 人工裁决（dim_calendar_override），法定节假日不再默认休息。
 RULE_FALLBACK_SOURCE = "rule_fallback"
 
 #: 兜底窗口：以今天为锚的 [前 2 个月, 后 3 个月]（上月环比/当月/下月
@@ -173,14 +173,13 @@ def _shift_month(year, month, delta):
 
 
 def synthesize_fallback_months(covered, *, today=None):
-    """规则兜底月（A 层）：窗口内种子未覆盖的月份按「周日休 + 每月第 3
-    个周六大休」纯规则合成（沿用 2026 种子锚点约定）。
+    """规则兜底月（A 层）：窗口内种子未覆盖的月份按纯播报口径合成。
 
     *covered* 为已被种子覆盖的 ``(year, month)`` 集合；返回
     ``[(year, month, rest_days, RULE_FALLBACK_SOURCE)]``（按年月升序）。
-    法定节假日未知一律按工作日计——宁可口径失真不可静默死；失真月份由
-    :data:`RULE_FALLBACK_SOURCE` 落进 ``dim_calendar.source``，
-    calendar-watch 管道据此告警。
+    2026-10-16 纯播报口径：兜底月 rest=∅（每天都是播报日），休息日只
+    来自 DB 人工裁决——兜底不再是「周日休+大休」的猜测口径，
+    calendar-watch 只告警零行缺口。
     """
     today = today or date.today()
     covered = set(covered)
@@ -189,17 +188,7 @@ def synthesize_fallback_months(covered, *, today=None):
         year, month = _shift_month(today.year, today.month, delta)
         if (year, month) in covered:
             continue
-        saturdays = [
-            d.day for d in month_days(year, month) if d.weekday() == _WEEKDAY_SAT
-        ]
-        rows.append((
-            year,
-            month,
-            generate_rest_days(
-                year, month, big_rest_saturdays=[saturdays[2]]
-            ),
-            RULE_FALLBACK_SOURCE,
-        ))
+        rows.append((year, month, [], RULE_FALLBACK_SOURCE))
     return rows
 
 
@@ -224,18 +213,16 @@ def load_calendar_seed(path, *, fallback=True, today=None):
           ]
         }
 
-    ``rest_days`` 一律由 :func:`generate_rest_days` 推导、**不手工列举**，所以
-    种子只记录*意图*（rule），渲染结果不可能与规则漂移。
+    2026-10-16 纯播报口径裁决（运维）：``rest_days`` 一律为 ``[]``——
+    每天都是播报日，法定节假日/周末不再默认休息；休息日只来自 DB
+    ``dim_calendar_override`` 人工裁决（ops-web「播报日历」页点日期）。
+    种子 months 退化为**覆盖声明**（哪些月份有基线行），rule 数组
+    （bigRestSaturdays/holidays/makeupWorkdays）保留为历史档案不再参与
+    推导；:func:`generate_rest_days` 仅供旧 config.json 校验路径使用。
 
     ``source`` 缺省 :data:`SOURCE_LOCAL`。用友 T+ 尚未接入，声明它即抛
     :class:`CalendarSourceUnavailable`——**明确失败，不静默降级**；未知来源
     抛 :class:`CalendarError`，避免静默走错口径。
-
-    口径分层（2026-10-10 运维裁决）：本种子只承载**规则基线**（历史月
-    法定假 + 大小休锚点）；**播报口径裁决层**已迁入 DB
-    ``dim_calendar_override``（``calendar_store``，法定导入 + ops-web
-    页面人工裁决）——JSON 不再承载逐日裁决，导入与页面操作都不碰本
-    文件（2026-10-10 起，原 broadcastAdjust JSON 层随裁决行迁库废弃）。
     """
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -280,18 +267,10 @@ def load_calendar_seed(path, *, fallback=True, today=None):
             raise CalendarError(f"日历种子 {label} 重复声明 {year}-{month:02d}")
         seen.add((year, month))
 
-        result.append((
-            year,
-            month,
-            generate_rest_days(
-                year,
-                month,
-                item.get("bigRestSaturdays", []),
-                item.get("holidays", []),
-                item.get("makeupWorkdays", []),
-            ),
-            source,
-        ))
+        # 纯播报口径（2026-10-16）：基线无默认休息日，rest_days 恒为空；
+        # rule 数组（bigRestSaturdays/holidays/makeupWorkdays）不再参与
+        # 推导，仅作历史档案保留在种子文件中。
+        result.append((year, month, [], source))
     if fallback:
         result.extend(synthesize_fallback_months(seen, today=today))
     return result

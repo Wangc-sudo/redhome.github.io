@@ -667,70 +667,6 @@ def _handle_publish_bi(args):
         sys.exit(1)
 
 
-def _handle_calendar_import(args):
-    """法定节假日导入（holiday-cn → DB 裁决层 dim_calendar_override）。
-
-    dry-run（缺省）只拉取映射打印；``--apply`` 写 DB 裁决层（该年
-    holiday_cn 行整年替换，manual 人工裁决不动）并按当前基线重写
-    ``dim_calendar`` 全年月份（即时生效，下轮 extract 同口径）。
-    """
-    try:
-        from common.public_data.calendar_import import (
-            CalendarImportError,
-            fetch_holiday_cn,
-            map_days_to_overrides,
-        )
-        from common.public_data.calendar_store import (
-            import_year_overrides,
-            rewrite_month,
-        )
-
-        if not args.apply:
-            days = fetch_holiday_cn(args.year)
-            overrides = map_days_to_overrides(args.year, days)
-            holidays = sum(1 for _, is_workday, _ in overrides if not is_workday)
-            print(
-                f"year={args.year} dry-run overrides={len(overrides)} "
-                f"（休 {holidays} / 调休上班 {len(overrides) - holidays}）"
-            )
-            for day, is_workday, name in overrides:
-                print(f"  {day.isoformat()} {'休' if not is_workday else '上班'} {name}")
-            return
-
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        from common.public_data.db import connect
-
-        stats = None
-        with connect(settings.mart_database) as connection:
-            stats = import_year_overrides(
-                connection, args.year, actor="calendar-import"
-            )
-            for month in range(1, 13):
-                rewrite_month(
-                    connection, settings.calendar_seed_path, args.year, month
-                )
-        skipped = stats.get("skipped_manual") or 0
-        print(
-            f"year={args.year} applied +{stats['inserted']}"
-            f"（休 {stats['holidays']} / 调休上班 {stats['makeup']}）"
-            f" -{stats['deleted']}"
-            + (f"，manual 裁决日跳过 {skipped} 天" if skipped else "")
-            + "，dim_calendar 12 个月已重写"
-        )
-    except SystemExit:
-        raise
-    except CalendarImportError as exc:
-        # 拉取/自证失败要能看到原因（GitHub 间歇 reset 可重试），不吞细节
-        print(f"status=failed code=calendar_import reason={exc}")
-        sys.exit(1)
-    except Exception:
-        _print_failure(code="config_error")
-        sys.exit(1)
-
-
 def _handle_migrate(args):
     try:
         settings = load_settings()
@@ -1163,29 +1099,6 @@ def main(argv=None):
     )
     publish_bi.add_argument("--if-missing", action="store_true", default=False)
 
-    # -- calendar-import ------------------------------------------------------
-    calendar_import = subparsers.add_parser(
-        "calendar-import",
-        help="Import statutory holidays from holiday-cn into calendar.seed.json",
-    )
-    calendar_import.add_argument(
-        "--year", type=int, required=True,
-        help="holiday year to import (e.g. 2027)",
-    )
-    calendar_import.add_argument(
-        "--seed", default="docker/integration/calendar.seed.json",
-        help="version-controlled workday-calendar seed file",
-    )
-    calendar_import.add_argument(
-        "--apply", action="store_true", default=False,
-        help="write to dim_calendar_override and rewrite dim_calendar "
-             "(default: dry-run print only)",
-    )
-    calendar_import.add_argument(
-        "--confirm-local-test-write", action="store_true", default=False,
-        help="confirm DB writes (required with --apply)",
-    )
-
     # -- load-target ----------------------------------------------------------
     load_target = subparsers.add_parser(
         "load-target", help="Replay the annual-target seed into dim_target"
@@ -1270,7 +1183,6 @@ def main(argv=None):
         "split-robot-check": _handle_split_robot_check,
         "roll-manifest": _handle_roll_manifest,
         "publish-bi": _handle_publish_bi,
-        "calendar-import": _handle_calendar_import,
         "migrate": _handle_migrate,
         "load-target": _handle_load_target,
         "load-ops-seed": _handle_load_ops_seed,

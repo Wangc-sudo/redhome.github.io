@@ -1074,133 +1074,7 @@ def fetch_cohort_retention(connection, *, months_back=COHORT_MONTHS, today=None)
     }
 
 
-#: 白酒节点弹性展示窗口（近 N 个月，同 MONTHLY_KPI_MONTHS）。
-NODE_MONTHS = MONTHLY_KPI_MONTHS
-
-#: 白酒节点标记：dim_calendar.note 命中的节日关键词 → 展示名（口径受控）。
-#: 节点=礼赠/宴席高峰；节假日名称由 holiday-cn 导入 note（未导入则节点缺）。
-BAIJIU_NODE_KEYWORDS = (
-    ("春节", "春节"),
-    ("中秋", "中秋"),
-    ("国庆", "国庆"),
-    ("元旦", "元旦"),
-    ("端午", "端午"),
-    ("清明", "清明"),
-    ("劳动", "劳动节"),
-    ("双11", "双十一"),
-    ("双十一", "双十一"),
-    ("618", "618"),
-)
-
-
-def _node_label(note, is_workday):
-    """dim_calendar.note → 白酒节点展示名（调休上班日/非节点返回 None）。"""
-    text = str(note or "")
-    if not text or "调休" in text or int(is_workday or 0):
-        return None
-    for keyword, label in BAIJIU_NODE_KEYWORDS:
-        if keyword in text:
-            return label
-    return None
-
-
-def fetch_baijiu_node_elasticity(connection, *, months_back=NODE_MONTHS,
-                                 today=None):
-    """白酒节点弹性：节日节点窗口日均 GMV ÷ 平日日均 GMV（近 *months_back* 月）。
-
-    数据源与口径：
-
-    * 节点标记 —— ``dim_calendar``（business_date / is_workday / note）：
-      note 命中 :data:`BAIJIU_NODE_KEYWORDS` 且 is_workday=0（调休上班日
-      不计）的日期标记为节点日，按展示名分组为节点窗口；
-    * GMV —— ``fact_order_line`` 按 DATE(trade_time) 汇总日 GMV（剔除取消
-      口径同月度看板）；
-    * 有效窗口 = [max(展示窗口首日, 数据首日), min(today, 数据末日)]，避免
-      数据起点前的空日与结尾空日稀释基线；
-    * 弹性 = 节点日均 GMV ÷ 平日（非节点）日均 GMV；>1 表示节点旺。
-
-    若 ``dim_calendar`` 窗口内无节点标记（如法定节假日未导入 note），返回
-    ``nodes=[]``、``has_calendar``，面板显式标注「数据缺失」，不臆造节点。
-    返回 ``{"nodes": [...], "baseline_daily": float|None, "baseline_days": int,
-    "window": [...], "has_calendar": bool, "has_data": bool, "as_of": date}``。
-    """
-    today = today or date.today()
-    months = _recent_months(today, months_back)
-    window = _window_start(months)
-
-    daily_rows = _query(
-        connection,
-        "SELECT DATE(`trade_time`) AS `d`, SUM(`paid_amount`) AS `gmv` "
-        "FROM `fact_order_line` "
-        "WHERE `trade_time` >= %s "
-        "GROUP BY `d` ORDER BY `d`",
-        (window,),
-    )
-    daily = {
-        r["d"]: float(r["gmv"] or 0)
-        for r in daily_rows if r["d"] is not None
-    }
-    if not daily:
-        return {
-            "nodes": [], "baseline_daily": None, "baseline_days": 0,
-            "window": months, "has_calendar": False, "has_data": False,
-            "as_of": today,
-        }
-    days_sorted = sorted(daily)
-    eff_start = max(window, days_sorted[0])
-    eff_end = min(today, days_sorted[-1])
-
-    cal_rows = _query(
-        connection,
-        "SELECT `business_date` AS `d`, `is_workday` AS `is_workday`, "
-        "`note` AS `note` FROM `dim_calendar` "
-        "WHERE `business_date` >= %s AND `business_date` <= %s",
-        (eff_start, eff_end),
-    )
-    node_days: dict[str, list] = {}
-    baseline_days = []
-    for r in cal_rows:
-        day = r["d"]
-        if day is None:
-            continue
-        label = _node_label(r.get("note"), r.get("is_workday"))
-        if label:
-            node_days.setdefault(label, []).append(day)
-        else:
-            baseline_days.append(day)
-
-    baseline_avg = (
-        sum(daily.get(d, 0.0) for d in baseline_days) / len(baseline_days)
-        if baseline_days else None
-    )
-    nodes = []
-    for label, days in node_days.items():
-        total = sum(daily.get(d, 0.0) for d in days)
-        avg = total / len(days) if days else None
-        nodes.append({
-            "node": label,
-            "days": len(days),
-            "gmv": total,
-            "daily_avg": avg,
-            "elasticity": (
-                (avg / baseline_avg)
-                if (avg is not None and baseline_avg) else None
-            ),
-        })
-    nodes.sort(key=lambda n: -n["gmv"])
-    return {
-        "nodes": nodes,
-        "baseline_daily": baseline_avg,
-        "baseline_days": len(baseline_days),
-        "window": months,
-        "has_calendar": bool(cal_rows),
-        "has_data": True,
-        "as_of": today,
-    }
-
-
 __all__ = [
-    "BAIJIU_NODE_KEYWORDS",
     "BILL_TOP_ITEMS",
     "COHORT_MONTHS",
     "DANGER_MONTH_SALES",
@@ -1220,7 +1094,6 @@ __all__ = [
     "SERIES_TOP_N",
     "UNMAPPED_CHANNEL_LABEL",
     "WINE_KEYWORDS",
-    "fetch_baijiu_node_elasticity",
     "fetch_bill_breakdown",
     "fetch_cohort_retention",
     "fetch_expense_summary",

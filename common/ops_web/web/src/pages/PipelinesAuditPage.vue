@@ -73,7 +73,7 @@ onMounted(load);
         <router-link to="/pipelines/history">执行流水</router-link> 页。
         其他审计：<router-link to="/roster">填报名册</router-link>页底=名册变更流水、
         <router-link to="/grants">授权审计</router-link>=成员授权变更、
-        <router-link to="/calendar">工作日历</router-link>页底=日历改判流水。
+        <router-link to="/calendar">播报日历</router-link>页底=日历改判流水。
       </p>
     </template>
   </div>

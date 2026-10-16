@@ -284,10 +284,6 @@ qd-channel-sales:
       title: "客群复购留存"
       source: "WDT · 交易单"
       span: 12
-    - card: table_qd_baijiu_node
-      title: "白酒节点弹性"
-      source: "WDT · 交易单"
-      span: 12
     - card: table_qd_channel_daily
       title: "渠道日销快报"
       source: "钉钉AI表格 · 渠道日销"

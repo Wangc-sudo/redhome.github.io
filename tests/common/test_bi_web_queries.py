@@ -3729,21 +3729,6 @@ class QdDashboardTests(unittest.TestCase):
         self.assertEqual(0.6, payload["rows"][-1]["m1"])
         self.assertIsNone(payload["rows"][-1]["size"])
 
-    def test_table_qd_baijiu_node_maps(self):
-        from unittest import mock
-
-        from common.broadcast import queries as bq
-
-        data = {"nodes": [{"node": "中秋", "days": 3, "gmv": 9.0,
-                           "daily_avg": 3.0, "elasticity": 1.5}]}
-        with mock.patch.object(
-            bq, "fetch_baijiu_node_elasticity", return_value=data
-        ):
-            payload = bi_web_queries.run_table_qd_baijiu_node(
-                FakeConnection(), {"date": "2026-08-04"})
-        self._assert_table(payload)
-        self.assertEqual(data["nodes"], payload["rows"])
-
     def _channel_conn(self, month_facts, channel_date, targets):
         from unittest import mock
 
@@ -3967,7 +3952,7 @@ class QdDashboardTests(unittest.TestCase):
         sections = [row["section"] for row in payload["rows"]]
         for expected in ("月度核心指标", "费用/盈利", "账单费用拆解",
                          "商品结构", "退款原因", "GMV 三因子",
-                         "Cohort 留存", "白酒节点弹性", "渠道日销快报",
+                         "Cohort 留存", "渠道日销快报",
                          "热卖品监控", "库存补货提醒", "采购入库（近24小时）",
                          "订单风险防控"):
             self.assertIn(expected, sections)

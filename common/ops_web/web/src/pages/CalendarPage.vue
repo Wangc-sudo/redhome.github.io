@@ -1,16 +1,17 @@
 <script setup>
 /**
- * 工作日历（/calendar）——迁移自旧 SSR 页面（保真：app.py 旧 calendar_page + _PAGE_JS）。
+ * 播报日历（/calendar）——纯播报口径（2026-10-16 运维裁决）。
  *
- * 读面 GET /api/calendar?month=YYYY-MM；写面 toggle / import-year / reset-month。
- * 月网格周一列起（用后端 first_weekday 计算前置空格）；三源徽标 法/裁/兜。
+ * 默认每天都是播报日（is_workday=1），休息日只来自人工裁决（点日期切换）。
+ * 法定节假日不再默认休息，holiday-cn 导入已退役。
+ * 读面 GET /api/calendar?month=YYYY-MM；写面 toggle / reset-month。
+ * 月网格周一列起（用后端 first_weekday 计算前置空格）；徽标 裁=人工裁决。
  */
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   getCalendar,
   toggleCalendarDay,
-  importCalendarYear,
   resetCalendarMonth,
 } from '../api.js';
 
@@ -21,13 +22,10 @@ const cal = ref(null);
 const loading = ref(false);
 const error = ref('');
 const msg = ref(null);
-const importYear = ref('');
 
-//: 日历源徽标（cell 角标；local=种子/规则基线不标）——与后端 _CAL_SOURCE_BADGE 对齐。
+//: 日历源徽标（cell 角标；基线=全播报不标）。
 const BADGES = {
-  holiday_cn: { text: '法', cls: 'cal-src-holiday_cn' },
   manual: { text: '裁', cls: 'cal-src-manual' },
-  rule_fallback: { text: '兜', cls: 'cal-src-rule_fallback' },
 };
 
 function badge(source) {
@@ -51,6 +49,14 @@ const weeks = computed(() => {
 
 const pad = (n) => String(n).padStart(2, '0');
 const monthInput = computed(() => (cal.value ? cal.value.month : ''));
+
+/** 月度统计：播报日 / 人工裁决休息日数（可视化条）。 */
+const stats = computed(() => {
+  const days = (cal.value && cal.value.days) || [];
+  const rest = days.filter((d) => d.is_workday === 0).length;
+  return { broadcast: days.length - rest, rest, total: days.length };
+});
+
 function setMsg(type, text) {
   msg.value = { type, text };
 }
@@ -61,7 +67,6 @@ async function load() {
   try {
     const data = await getCalendar(route.query.month);
     cal.value = data;
-    importYear.value = String(data.month_no >= 10 ? data.year + 1 : data.year);
   } catch (err) {
     error.value = err.message;
     cal.value = null;
@@ -98,7 +103,7 @@ function onCell(cell) {
 async function onToggle(cell) {
   const date = `${cal.value.month}-${pad(cell.day)}`;
   const willWork = !cell.is_workday;
-  const action = willWork ? '改为上班' : '改为休息';
+  const action = willWork ? '改为播报' : '改为休息';
   if (!window.confirm(`确认将 ${date} ${action}？（当月日历立即重写）`)) return;
   try {
     await toggleCalendarDay({ date, is_workday: willWork, note: '' });
@@ -109,33 +114,14 @@ async function onToggle(cell) {
   }
 }
 
-async function onImportYear() {
-  const year = Number(importYear.value);
-  if (!Number.isInteger(year)) {
-    setMsg('err', '请输入合法年份');
-    return;
-  }
-  if (!window.confirm(
-    `确认导入 ${year} 年法定节假日？（该年法定导入行整年替换，人工裁决不动；`
-    + '随后按当前口径重写全年日历）',
-  )) return;
-  try {
-    await importCalendarYear({ year });
-    setMsg('ok', `${year} 年法定假日已导入`);
-    await load();
-  } catch (err) {
-    setMsg('err', `操作失败：${err.message}`);
-  }
-}
-
 async function onResetMonth() {
   const month = cal.value.month;
   if (!window.confirm(
-    `确认清除 ${month} 的人工裁决（法定假日导入保留），恢复规则口径？`,
+    `确认清除 ${month} 的人工裁决，恢复全播报基线（每天都是播报日）？`,
   )) return;
   try {
     await resetCalendarMonth({ month });
-    setMsg('ok', `${month} 已恢复规则口径`);
+    setMsg('ok', `${month} 已恢复全播报基线`);
     await load();
   } catch (err) {
     setMsg('err', `操作失败：${err.message}`);
@@ -145,7 +131,7 @@ async function onResetMonth() {
 
 <template>
   <div class="page">
-    <h1>工作日历{{ cal ? `（${cal.year} 年 ${cal.month_no} 月）` : '' }}</h1>
+    <h1>播报日历{{ cal ? `（${cal.year} 年 ${cal.month_no} 月）` : '' }}</h1>
 
     <div v-if="msg" class="flash" :class="msg.type">{{ msg.text }}</div>
     <div v-if="error" class="state error">{{ error }}</div>
@@ -161,10 +147,15 @@ async function onResetMonth() {
       </div>
 
       <p class="hint">
-        蓝底=休息 · 白底=上班 · 徽标：法=法定节假日导入 / 裁=人工裁决 / 兜=规则兜底
-        （种子未覆盖月，法定假未知按工作日计） · 点任意日期可切换 上班/休息
-        （立即重写当月日历，全部操作留审计）
+        白底=播报日（默认每天播报） · 蓝底=休息（仅人工裁决） · 徽标：裁=人工裁决 ·
+        点任意日期可切换 播报/休息（立即重写当月日历，全部操作留审计）
       </p>
+
+      <div class="cal-stats">
+        <span class="cal-stat">播报日 <b>{{ stats.broadcast }}</b> 天</span>
+        <span class="cal-stat rest">休息 <b>{{ stats.rest }}</b> 天</span>
+        <span class="cal-stat muted">全月 {{ stats.total }} 天</span>
+      </div>
 
       <table class="cal-table">
         <tr>
@@ -190,20 +181,10 @@ async function onResetMonth() {
         </tr>
       </table>
 
-      <h2>导入法定节假日（holiday-cn 官方转录）</h2>
-      <form class="inline" @submit.prevent="onImportYear">
-        <input v-model="importYear" type="number" min="2020" max="2100" required>
-        <button type="submit">一键导入该年法定假日</button>
-        <span class="hint">
-          该年法定导入行整年替换，人工裁决（裁）不动；随后按当前口径重写全年日历。
-          国务院一般 10-11 月发布次年安排。
-        </span>
-      </form>
-
-      <h2>恢复规则</h2>
+      <h2>恢复基线</h2>
       <form class="inline" @submit.prevent="onResetMonth">
         <button type="submit">清除 {{ cal.month }} 人工裁决</button>
-        <span class="hint">只清「裁」行（法定导入「法」保留），当月回到规则基线口径。</span>
+        <span class="hint">清掉当月全部「裁」行，回到全播报基线（每天都是播报日）。</span>
       </form>
 
       <h2>最近修正记录</h2>
@@ -281,16 +262,23 @@ async function onResetMonth() {
   border-radius: 3px;
   margin-left: 4px;
 }
-.cal-src-holiday_cn {
-  background: #d8e8ff;
-  color: #1f3a5f;
-}
 .cal-src-manual {
   background: #ffe9c7;
   color: #8a5a00;
 }
-.cal-src-rule_fallback {
-  background: #ececf0;
-  color: #777;
+.cal-stats {
+  display: flex;
+  gap: 16px;
+  margin: 8px 0 10px;
+  font-size: 13px;
+}
+.cal-stat b {
+  font-size: 16px;
+}
+.cal-stat.rest b {
+  color: #1f3a5f;
+}
+.cal-stat.muted {
+  color: #9aa0a8;
 }
 </style>

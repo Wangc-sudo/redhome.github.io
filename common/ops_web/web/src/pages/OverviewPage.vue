@@ -24,8 +24,8 @@ const entries = computed(() => {
   if (hasCapability('calendar')) {
     cards.push({
       to: '/calendar',
-      title: '工作日历',
-      desc: '逐日人工裁决上班/休息，导入法定节假日，修正催办节奏。',
+      title: '播报日历',
+      desc: '默认每天播报；逐日人工裁决播报/休息，修正催办节奏。',
     });
   }
   if (hasCapability('pipelines')) {
@@ -72,9 +72,9 @@ const hints = computed(() => [
     show: hasCapability('roster'),
   },
   {
-    text: '检查工作日历：确认本月节假日与调休，避免催办节奏错位。',
+    text: '检查播报日历：确认本月人工裁决的休息日，避免催办节奏错位。',
     to: '/calendar',
-    label: '工作日历',
+    label: '播报日历',
     show: hasCapability('calendar'),
   },
   {

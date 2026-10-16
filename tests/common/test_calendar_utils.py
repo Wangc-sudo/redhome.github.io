@@ -311,15 +311,15 @@ class _SeedFile:
 
 
 class TestShippedCalendarSeed(unittest.TestCase):
-    """真正发版的种子必须能复现 spec §10 的规则。"""
+    """纯播报口径（2026-10-16 裁决）：种子月基线 rest 恒为空。"""
 
-    def test_shipped_seed_reproduces_september_2026_rest_days(self):
-        """回归锚点：扩年后 2026-09 条目不动力（24 工作日、9/20 调休上班）。"""
+    def test_shipped_seed_rest_days_always_empty(self):
+        """每天都是播报日；种子 rule 数组仅作历史档案，不参与推导。"""
         months = load_calendar_seed(SEED_PATH)
         by_month = {(year, month): (rest_days, source)
                     for year, month, rest_days, source in months}
         rest_days, source = by_month[(2026, 9)]
-        self.assertEqual(rest_days, [6, 13, 19, 25, 26, 27])
+        self.assertEqual(rest_days, [])
         self.assertEqual(source, SOURCE_LOCAL)
 
     def test_shipped_seed_covers_2025_01_through_2026_12(self):
@@ -334,44 +334,16 @@ class TestShippedCalendarSeed(unittest.TestCase):
             self.assertEqual(source, SOURCE_LOCAL)
 
     def test_shipped_seed_pins_every_month_rest_days(self):
-        """逐月钉死 rest_days 推导结果（种子 diff 即审计轨迹，改动必撞此表）。
+        """逐月钉死：纯播报口径下所有种子月 rest_days 均为空列表。
 
-        口径备忘：2025 年各月周六一律休（main 2026-09-18 裁定，宁漏报不
-        误报红，待 HR 回补），调休周六 2/8、10/11 已显式恢复；2026 年
-        维持锚点同口径（每月第 3 个周六大休）。
+        休息日只来自 DB dim_calendar_override 人工裁决（如 2026-10-31
+        大休），不在种子承载。
         """
-        expected = {
-            (2025, 1): [1, 4, 5, 11, 12, 18, 19, 25, 28, 29, 30, 31],
-            (2025, 2): [1, 2, 3, 4, 9, 15, 16, 22, 23],
-            (2025, 3): [1, 2, 8, 9, 15, 16, 22, 23, 29, 30],
-            (2025, 4): [4, 5, 6, 12, 13, 19, 20, 26],
-            (2025, 5): [1, 2, 3, 4, 5, 10, 11, 17, 18, 24, 25, 31],
-            (2025, 6): [1, 2, 7, 8, 14, 15, 21, 22, 28, 29],
-            (2025, 7): [5, 6, 12, 13, 19, 20, 26, 27],
-            (2025, 8): [2, 3, 9, 10, 16, 17, 23, 24, 30, 31],
-            (2025, 9): [6, 7, 13, 14, 20, 21, 27],
-            (2025, 10): [1, 2, 3, 4, 5, 6, 7, 8, 12, 18, 19, 25, 26],
-            (2025, 11): [1, 2, 8, 9, 15, 16, 22, 23, 29, 30],
-            (2025, 12): [6, 7, 13, 14, 20, 21, 27, 28],
-            (2026, 1): [1, 2, 3, 11, 17, 18, 25],
-            (2026, 2): [1, 8, 15, 16, 17, 18, 19, 20, 21, 22, 23],
-            (2026, 3): [1, 8, 15, 21, 22, 29],
-            (2026, 4): [4, 5, 6, 12, 18, 19, 26],
-            (2026, 5): [1, 2, 3, 4, 5, 10, 16, 17, 24, 31],
-            (2026, 6): [7, 14, 19, 20, 21, 28],
-            (2026, 7): [5, 12, 18, 19, 26],
-            (2026, 8): [2, 9, 15, 16, 23, 30],
-            (2026, 9): [6, 13, 19, 25, 26, 27],
-            # 2026-10 为法定口径（1-7 国庆）；「10-07 改上班、10-31 改大休」
-            # 的播报裁决在 DB dim_calendar_override（不在种子承载）
-            (2026, 10): [1, 2, 3, 4, 5, 6, 7, 11, 17, 18, 25],
-            (2026, 11): [1, 8, 15, 21, 22, 29],
-            (2026, 12): [6, 13, 19, 20, 27],
-        }
         months = load_calendar_seed(SEED_PATH, fallback=False)
         self.assertEqual(
             {(year, month): rest_days for year, month, rest_days, _ in months},
-            expected,
+            {(year, month): []
+             for year in (2025, 2026) for month in range(1, 13)},
         )
 
     def test_shipped_seed_never_declares_a_derived_rest_days_list(self):
@@ -382,13 +354,13 @@ class TestShippedCalendarSeed(unittest.TestCase):
 
 
 class TestLoadCalendarSeed(unittest.TestCase):
-    def test_missing_rule_entries_fall_back_to_sundays_only(self):
+    def test_missing_rule_entries_mean_all_broadcast(self):
         path = _SeedFile(self, {
             "version": 1,
             "months": [{"year": 2026, "month": 9}],
         }).path
         _, _, rest_days, _ = load_calendar_seed(path)[0]
-        self.assertEqual(rest_days, [6, 13, 20, 27])
+        self.assertEqual(rest_days, [])
 
     def test_source_defaults_to_local(self):
         path = _SeedFile(self, {
@@ -476,12 +448,12 @@ class TestRuleFallbackMonths(unittest.TestCase):
         self.assertTrue(
             all(source == RULE_FALLBACK_SOURCE for _, _, _, source in rows))
 
-    def test_fallback_rest_uses_third_saturday_rule(self):
+    def test_fallback_rest_is_all_broadcast(self):
+        """纯播报口径：兜底月 rest=∅（不再按周日休+大休合成）。"""
         rows = synthesize_fallback_months(set(), today=date(2026, 10, 10))
-        jan = next(r for r in rows if (r[0], r[1]) == (2027, 1))
-        # 2027-01 周六 = 2/9/16/23/30，第 3 个 = 16；休息日 = 周日 + 16
-        self.assertEqual(
-            generate_rest_days(2027, 1, big_rest_saturdays=[16]), jan[2])
+        self.assertTrue(rows)
+        for _, _, rest_days, _ in rows:
+            self.assertEqual([], rest_days)
 
     def test_load_seed_appends_fallback_by_default(self):
         path = _SeedFile(self, {
@@ -512,21 +484,15 @@ class TestLoadCalendarSeedValidation(unittest.TestCase):
         with self.assertRaises(CalendarError):
             load_calendar_seed(path)
 
-    def test_rejects_a_day_outside_the_month(self):
+    def test_rule_arrays_are_archive_only(self):
+        """纯播报口径后 rule 数组不再参与推导（历史档案），非法日号不再抛错。"""
         path = _SeedFile(self, {
             "version": 1,
-            "months": [{"year": 2026, "month": 9, "holidays": [31]}],
+            "months": [{"year": 2026, "month": 9, "holidays": [31],
+                        "bigRestSaturdays": [16]}],
         }).path
-        with self.assertRaises(CalendarError):
-            load_calendar_seed(path)
-
-    def test_rejects_a_non_saturday_big_rest_day(self):
-        path = _SeedFile(self, {
-            "version": 1,
-            "months": [{"year": 2026, "month": 9, "bigRestSaturdays": [16]}],
-        }).path
-        with self.assertRaises(CalendarError):
-            load_calendar_seed(path)
+        _, _, rest_days, _ = load_calendar_seed(path)[0]
+        self.assertEqual([], rest_days)
 
     def test_rejects_a_missing_file(self):
         with self.assertRaises(CalendarError):

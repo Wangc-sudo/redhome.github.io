@@ -826,71 +826,6 @@ def build_cohort_retention_panel(connection, *, today):
 
 
 # ---------------------------------------------------------------------------
-# 0.6 白酒节点弹性——节日节点窗口日均 GMV 相对平日倍数（材料二 P1）
-# ---------------------------------------------------------------------------
-
-def build_baijiu_node_panel(connection, *, today):
-    """白酒节点弹性：节点日均 GMV ÷ 平日日均 GMV（依赖 dim_calendar 节点标记）。
-
-    节点标记来自 dim_calendar.note（holiday-cn 导入的节假日名称）；窗口内
-    无节点标记时显式标注「数据缺失」并给出补数方案，不臆造节点。
-    """
-    from common.broadcast.queries import fetch_baijiu_node_elasticity
-
-    data = fetch_baijiu_node_elasticity(connection, today=today)
-    if not data.get("has_data"):
-        return _placeholder_panel(
-            "🍶 白酒节点弹性", "暂无订单数据（fact_order_line 为空）"
-        )
-
-    def _mult(v):
-        if v is None:
-            return '<span class="muted">—</span>'
-        cls = "g" if v >= 1 else "r"
-        return f'<span class="{cls}">{v:.2f}×</span>'
-
-    baseline = (
-        f'平日基线日均 GMV {_fmt_wan(data["baseline_daily"])}'
-        f'（{data["baseline_days"]} 个非节点日）'
-    )
-    if data["nodes"]:
-        trs = "".join(
-            f'<tr><td class="strong">{_esc(n["node"])}</td>'
-            f'<td class="num">{n["days"]}</td>'
-            f'<td class="num">{_fmt_wan(n["gmv"])}</td>'
-            f'<td class="num">{_fmt_wan(n["daily_avg"])}</td>'
-            f'<td class="num">{_mult(n["elasticity"])}</td></tr>'
-            for n in data["nodes"]
-        )
-        body = (
-            f'<div class="small muted" style="margin:0 0 4px">{baseline}</div>'
-            f'<table><thead><tr><th>节点</th><th>天数</th><th>GMV</th>'
-            f'<th>日均</th><th>弹性</th></tr></thead><tbody>{trs}</tbody></table>'
-        )
-    else:
-        reason = (
-            "日历无记录" if not data["has_calendar"] else "note 无节假日名称"
-        )
-        body = (
-            f'<div class="small" style="color:#b26a00">'
-            f'⚠️ 数据缺失：指定窗口内 dim_calendar 未含节点标记（{reason}），'
-            f'无法拆分节点弹性。补数方案：在 ops-web「工作日历」导入法定节假日，'
-            f'节点标记写入 dim_calendar.note 后自动生效</div>'
-            f'<div class="small muted" style="margin-top:4px">{baseline}</div>'
-        )
-    return _panel(
-        "🍶 白酒节点弹性", body,
-        note=(
-            "口径：节点标记=dim_calendar.note 命中节日关键词（春节/中秋/国庆/元旦/"
-            "端午/清明/劳动节/双十一/618）且 is_workday=0（调休上班日不计）· "
-            "GMV=Σpaid_amount 按 DATE(trade_time) 归日（剔除取消单）· "
-            "弹性=节点日均 GMV÷平日（非节点）日均 GMV（有效窗口=数据首日~数据末日，"
-            "避免空日稀释基线）· >1 表示节点旺"
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
 # 装配
 # ---------------------------------------------------------------------------
 
@@ -907,7 +842,6 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
         ("退款原因分析", lambda: build_refund_reason_panel(connection, today=business_date)),
         ("GMV 三因子拆解", lambda: build_gmv_factor_panel(connection, today=business_date)),
         ("Cohort 留存矩阵", lambda: build_cohort_retention_panel(connection, today=business_date)),
-        ("白酒节点弹性", lambda: build_baijiu_node_panel(connection, today=business_date)),
         ("渠道日销快报", lambda: build_channel_daily_panel(
             connection,
             business_date=business_date,
@@ -930,7 +864,6 @@ def build_qudao_panels(connection, *, business_date, now, workdays, monthly_targ
 
 
 __all__ = [
-    "build_baijiu_node_panel",
     "build_channel_daily_panel",
     "build_cohort_retention_panel",
     "build_expense_panel",

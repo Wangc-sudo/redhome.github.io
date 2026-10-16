@@ -32,7 +32,6 @@ from common.public_data import (
     bi_authz, calendar_store, channel_target, ops_control,
     recipient_override, report_roster,
 )
-from common.public_data.calendar_import import CalendarImportError
 from common.public_data.pipeline_config import StaticConfigSource
 
 from tests.common.test_bi_web_app import _fake_settings
@@ -2331,10 +2330,10 @@ class RecordsPageTests(unittest.TestCase):
         with self._patched():
             data = self._client().get("/api/records").json()
         self.assertEqual("ok", data["status"])
-        self.assertEqual(["授权", "定时任务", "填报名册", "工作日历",
+        self.assertEqual(["授权", "定时任务", "填报名册", "播报日历",
                           "收件人覆盖", "定时运行"], data["sources"])
         sources = {r["source"] for r in data["records"]}
-        for source in ("授权", "定时任务", "填报名册", "工作日历", "定时运行"):
+        for source in ("授权", "定时任务", "填报名册", "播报日历", "定时运行"):
             self.assertIn(source, sources)
         targets = [r["target"] for r in data["records"]]
         self.assertIn("fin", targets)          # 授权对象（grant_key）
@@ -2391,7 +2390,7 @@ class RecordsPageTests(unittest.TestCase):
 
 
 class CalendarPageTests(unittest.TestCase):
-    """工作日历页（2026-10-10 DB 裁决层操作面：非技术同学用）。"""
+    """播报日历页（DB 裁决层操作面：非技术同学用；2026-10-16 纯播报口径）。"""
 
     def _calendar_app(self, connection=None):
         settings = SimpleNamespace(
@@ -2480,40 +2479,12 @@ class CalendarPageTests(unittest.TestCase):
                 msg=repr(payload),
             )
 
-    def test_import_year_applies_and_rewrites_twelve_months(self):
-        with mock.patch(
-            "common.ops_web.app.calendar_store.import_year_overrides",
-            return_value={"deleted": 1, "inserted": 3, "holidays": 2,
-                          "makeup": 1},
-        ) as imp, mock.patch(
-            "common.ops_web.app.calendar_store.rewrite_month", return_value=31
-        ) as rewrite:
-            client = TestClient(self._calendar_app(_Connection()))
-            _login(client)
-            resp = client.post("/api/calendar/import-year", json={"year": 2027})
-
-        self.assertEqual(200, resp.status_code)
-        body = resp.json()
-        self.assertEqual(3, body["inserted"])
-        self.assertEqual(31 * 12, body["rewritten"])
-        self.assertEqual(ADMIN_USERID, imp.call_args.kwargs["actor"])
-        self.assertEqual(12, rewrite.call_count)
-        self.assertTrue(
-            all(call.kwargs.get("strict") is False
-                for call in rewrite.call_args_list)
-        )
-
-    def test_import_year_holiday_cn_failure_returns_502_with_reason(self):
-        with mock.patch(
-            "common.ops_web.app.calendar_store.import_year_overrides",
-            side_effect=CalendarImportError("holiday-cn 2099 尚未发布"),
-        ):
-            client = TestClient(self._calendar_app(_Connection()))
-            _login(client)
-            resp = client.post("/api/calendar/import-year", json={"year": 2099})
-
-        self.assertEqual(502, resp.status_code)
-        self.assertIn("尚未发布", resp.json()["reason"])
+    def test_import_year_endpoint_removed(self):
+        """法定节假日导入随纯播报口径退役（2026-10-16）：端点不复存在。"""
+        client = TestClient(self._calendar_app(_Connection()))
+        _login(client)
+        resp = client.post("/api/calendar/import-year", json={"year": 2027})
+        self.assertIn(resp.status_code, (404, 405))
 
     def test_reset_month_clears_manual_and_rewrites(self):
         with mock.patch(

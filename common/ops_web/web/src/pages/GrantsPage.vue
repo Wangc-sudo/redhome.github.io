@@ -35,7 +35,7 @@ const CAPABILITIES = [
   { key: 'org', label: '组织编排（区域级暂按全局生效）' },
   { key: 'pipelines', label: '定时任务' },
   { key: 'audit', label: '操作记录' },
-  { key: 'calendar', label: '工作日历' },
+  { key: 'calendar', label: '播报日历' },
 ];
 
 const grants = ref([]);
