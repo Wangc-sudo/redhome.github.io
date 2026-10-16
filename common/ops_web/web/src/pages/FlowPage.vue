@@ -43,6 +43,25 @@ import {
   updatePipelineTimes,
 } from '../api.js';
 import { hasCapability, isAdmin, me, setFlash, flash } from '../store/me.js';
+// 建图/布局纯逻辑已抽出（2026-10-16 F1）：flow/graph.js + flow/layout.js，
+// 本文件只保留状态、交互与抽屉编排。
+import { buildGraph as buildGraphModel, fmt } from '../flow/graph.js';
+import {
+  AGG_SIZE,
+  GLOBAL_H,
+  GLOBAL_W,
+  POOL_W,
+  REGION_W,
+  TASK_W,
+  TOP_Y,
+  buildDepEdges,
+  buildEdgePaths,
+  canvasSize as canvasSizeFor,
+  edgePath,
+  layoutNodes,
+  moduleH as moduleNodeH,
+  nodeRects,
+} from '../flow/layout.js';
 
 const route = useRoute();
 
@@ -145,20 +164,6 @@ function resetAllPos() {
   layout();
 }
 
-// -- 布局常量 ------------------------------------------------------------------
-const POOL_W = 220;
-const POOL_ROW_H = 30;
-const POOL_HEAD_H = 44;
-const REGION_W = 300;
-const REGION_H = 168;
-const TASK_W = 330;
-const TASK_GAP = 14;
-const REGION_X = 330;
-const TASK_X = 850;
-const TOP_Y = 40;
-const DEPT_ROW_H = 26;
-const MEMBER_ROW_H = 26;
-
 //: 成员行展开状态（区域节点默认收起成员列表，保持画布清爽）
 const expandedRegions = ref(new Set());
 
@@ -168,18 +173,6 @@ function toggleRegionMembers(node) {
   else next.add(node.id);
   expandedRegions.value = next;
   layout();   // 高度变化影响连线端点与层距
-}
-
-/** 区域节点动态高度：头+指标+脚 + 部门行 +（展开时）成员行。 */
-function regionH(node) {
-  if (node.isAggregate) return AGG_SIZE;
-  if (node.isPlatform) return 120;
-  let h = 34 + 52 + 30 + 10;                     // head+metrics+foot+padding
-  h += 22 + (node.depts ? node.depts.length : 0) * DEPT_ROW_H;   // 部门槽
-  if (expandedRegions.value.has(node.id)) {
-    h += 24 + (node.members ? node.members.length : 0) * MEMBER_ROW_H;
-  }
-  return h;
 }
 
 function startNodeDrag(evt, node) {
@@ -307,9 +300,7 @@ async function dropWire(target, member) {
 
 const wireDraftPath = computed(() => {
   const w = wireDraft.value;
-  if (!w) return '';
-  const dx = Math.max(60, Math.abs(w.x2 - w.x1) / 2);
-  return `M ${w.x1} ${w.y1} C ${w.x1 + dx} ${w.y1}, ${w.x2 - dx} ${w.y2}, ${w.x2} ${w.y2}`;
+  return w ? edgePath(w.x1, w.y1, w.x2, w.y2) : '';
 });
 
 // -- 拉线（模块 → 模块 ＝ 任务依赖；2026-10-16「拉线改后端」）---------------
@@ -394,9 +385,7 @@ async function onDepEdgeClick(dep) {
 
 const depDraftPath = computed(() => {
   const w = depDraft.value;
-  if (!w) return '';
-  const dx = Math.max(60, Math.abs(w.x2 - w.x1) / 2);
-  return `M ${w.x1} ${w.y1} C ${w.x1 + dx} ${w.y1}, ${w.x2 - dx} ${w.y2}, ${w.x2} ${w.y2}`;
+  return w ? edgePath(w.x1, w.y1, w.x2, w.y2) : '';
 });
 
 // -- 抽屉 ----------------------------------------------------------------------
@@ -510,8 +499,6 @@ async function onSaveTargets() {
 }
 
 // -- 全局节点（P3：播报日历 / 操作记录 上画布）--------------------------------
-const GLOBAL_W = 220;
-const GLOBAL_H = 64;
 const globalNodes = ref([
   { id: 'global:calendar', label: '播报日历', desc: '点日期改播报/休息', x: 40, y: 400 },
   { id: 'global:records', label: '操作记录', desc: '六源审计流水', x: 40, y: 480 },
@@ -908,239 +895,22 @@ async function onRunOnce(node) {
 // -- 数据派生 -------------------------------------------------------------------
 const lastRaw = ref(null);
 
-function regionBadge(rosterCount, targetCount, taskCount) {
-  if (rosterCount === 0) return { text: '缺名册', cls: 'warn' };
-  if (targetCount === 0) return { text: '缺目标', cls: 'warn' };
-  if (!taskCount) return { text: '待下游', cls: 'warn' };
-  return { text: '已闭环', cls: 'ok' };
-}
+//: 聚合节点/补集桶常量与建图纯函数在 flow/graph.js（AGGREGATE_REGIONS、
+//: COMPLEMENT_REGION、regionBadge、taskBroken、familyOf、familyLabel、fmt）。
 
-function fmt(value) {
-  const num = Number(value) || 0;
-  return Number.isInteger(num) ? String(num) : num.toFixed(1);
-}
-
-function taskBroken(service) {
-  if (!service.enabled) return true;
-  const latest = service.latest;
-  return !!(latest && latest.status === 'failed');
-}
-
-// -- 聚合节点（2026-10-16：线下整体=杭州+绍兴+其他，圆形形态）-----------------
-//: 聚合区域 → 组成它的区域键。聚合节点指标=成员桶求和，不做名册门禁
-//: （它不填报，只汇总）；形态=圆形（与矩形业务节点视觉分层）。
-const AGGREGATE_REGIONS = {
-  offline_all: { label: '线下整体', parts: ['hangzhou', 'shaoxing', 'other'] },
-};
-const AGG_SIZE = 176;   // 聚合节点圆形直径
-
-//: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
-//: overview.regions 不含它——从名册/目标数据派生）。
-const COMPLEMENT_REGION = 'other';
-
+/** raw → 图模型（纯函数在 flow/graph.js）；此处只灌状态并重排。 */
 function buildGraph(raw) {
-  const { overview, roster, groups } = raw;
-  const rosterRows = (roster && roster.roster) || [];
-  const targets = (roster && roster.targets) || {};
-  const regions = (overview && overview.regions) || [];
-
-  poolMembers.value = ((overview && overview.pool) || []).slice(0, 50);
-
-  const servicesByRegion = {};
-  for (const group of groups || []) {
-    servicesByRegion[group.region === null ? '__platform__' : group.region] =
-      group.services || [];
-  }
-
-  const nextRegions = [];
-  const nextTasks = [];
-  const nextEdges = [];
-  // 聚合区域从普通循环里摘出（最后单独成圆形聚合节点）
-  const regionSpecs = regions
-    .map((region) => ({ key: region.key, region }))
-    .filter((spec) => !(spec.key in AGGREGATE_REGIONS));
-  const platform = servicesByRegion.__platform__ || [];
-  if (platform.length) {
-    regionSpecs.push({ key: '__platform__', region: null });
-  }
-  // 补集桶虚拟节点（组织树无成员但名册/目标存在时补出）
-  if (!regions.some((r) => r.key === COMPLEMENT_REGION)
-      && (rosterRows.some((row) => row.scope === COMPLEMENT_REGION
-                                    && Number(row.enabled) === 1)
-          || (targets[COMPLEMENT_REGION]))) {
-    regionSpecs.push({ key: COMPLEMENT_REGION, region: null });
-  }
-
-  for (const spec of regionSpecs) {
-    const key = spec.key;
-    const isPlatform = key === '__platform__';
-    const isComplement = key === COMPLEMENT_REGION && !spec.region;
-    // 部门/成员随节点携带（部门输入端口 + 成员输出口拉线的数据底）
-    const depts = isPlatform || !spec.region ? [] : (spec.region.depts || [])
-      .map((dept) => ({
-        dept_id: dept.dept_id || '',
-        dept_name: dept.dept_name || dept.label || '',
-        memberCount: (dept.members || []).length,
-      }));
-    const members = isPlatform || !spec.region ? []
-      : (spec.region.depts || []).flatMap((dept) =>
-        (dept.members || []).map((m) => ({
-          user_id: m.user_id,
-          name: m.name,
-          region: key,
-          dept_id: dept.dept_id || '',
-          dept_name: dept.dept_name || '',
-        })));
-    const memberCount = members.length;
-    const rosterCount = isPlatform ? 0 : rosterRows
-      .filter((row) => row.scope === key && Number(row.enabled) === 1).length;
-    const targetMap = (targets[key]) || {};
-    const targetCount = Object.keys(targetMap).length;
-    const targetSum = Object.values(targetMap)
-      .reduce((sum, value) => sum + (Number(value) || 0), 0);
-    const services = servicesByRegion[key] || [];
-    const badge = isPlatform
-      ? { text: '平台线', cls: 'plain' }
-      : isComplement
-        ? { text: '补集', cls: 'plain' }
-        : regionBadge(rosterCount, targetCount, services.length);
-    nextRegions.push({
-      id: `region:${key}`,
-      key,
-      label: isPlatform ? '平台 / 无群'
-        : isComplement ? '其他（补集）'
-        : (spec.region.label || key),
-      badge,
-      rosterCount,
-      targetCount,
-      targetSum,
-      memberCount,
-      depts,
-      members,
-      taskCount: services.length,
-      isPlatform,
-      x: REGION_X,
-      y: TOP_Y,
-    });
-    // 家族模块化（2026-10-16）：同一区域下同家族任务折叠为模块节点——
-    // 家族=模板、区域=实例（robot-hangzhou/robot-shaoxing 同属 robot-*）。
-    // 连线 N:1 收敛为 区域→模块；状态聚合（全绿/有停用/有失败）。
-    const families = {};
-    for (const service of services) {
-      const family = familyOf(service.service_id, key);
-      if (!families[family]) families[family] = [];
-      families[family].push(service);
-    }
-    for (const [family, members] of Object.entries(families)) {
-      const moduleId = `module:${key}:${family}`;
-      const brokenCount = members.filter(taskBroken).length;
-      nextTasks.push({
-        id: moduleId,
-        regionKey: key,
-        family,
-        label: familyLabel(family, members[0]),
-        services: members,
-        brokenCount,
-        x: TASK_X,
-        y: TOP_Y,
-      });
-      nextEdges.push({
-        id: `e:${key}:${family}`,
-        from: `region:${key}`,
-        to: moduleId,
-        broken: badge.cls === 'warn' || brokenCount > 0,
-      });
-    }
-  }
-  // 聚合节点：指标=组成桶求和；汇聚边 桶→聚合；下游任务照常成模块。
-  for (const [aggKey, spec] of Object.entries(AGGREGATE_REGIONS)) {
-    const services = servicesByRegion[aggKey] || [];
-    const partNodes = nextRegions.filter((n) => spec.parts.includes(n.key));
-    const agg = {
-      id: `region:${aggKey}`,
-      key: aggKey,
-      label: spec.label,
-      badge: { text: '聚合', cls: 'agg' },
-      rosterCount: partNodes.reduce((s, n) => s + n.rosterCount, 0),
-      targetCount: partNodes.reduce((s, n) => s + n.targetCount, 0),
-      targetSum: partNodes.reduce((s, n) => s + n.targetSum, 0),
-      memberCount: partNodes.reduce((s, n) => s + n.memberCount, 0),
-      taskCount: services.length,
-      isAggregate: true,
-      parts: spec.parts,
-      x: REGION_X,
-      y: TOP_Y,
-    };
-    nextRegions.push(agg);
-    for (const part of partNodes) {
-      nextEdges.push({
-        id: `cv:${part.key}:${aggKey}`,
-        from: part.id,
-        to: agg.id,
-        broken: false,
-        converge: true,
-      });
-    }
-    const families = {};
-    for (const service of services) {
-      const family = familyOf(service.service_id, aggKey);
-      if (!families[family]) families[family] = [];
-      families[family].push(service);
-    }
-    for (const [family, members] of Object.entries(families)) {
-      const moduleId = `module:${aggKey}:${family}`;
-      const brokenCount = members.filter(taskBroken).length;
-      nextTasks.push({
-        id: moduleId,
-        regionKey: aggKey,
-        family,
-        label: familyLabel(family, members[0]),
-        services: members,
-        brokenCount,
-        x: TASK_X,
-        y: TOP_Y,
-      });
-      nextEdges.push({
-        id: `e:${aggKey}:${family}`,
-        from: agg.id,
-        to: moduleId,
-        broken: brokenCount > 0,
-      });
-    }
-  }
-  regionNodes.value = nextRegions;
-  taskNodes.value = nextTasks;
-  edges.value = nextEdges;
+  const graph = buildGraphModel(raw);
+  poolMembers.value = graph.poolMembers;
+  regionNodes.value = graph.regionNodes;
+  taskNodes.value = graph.taskNodes;
+  edges.value = graph.edges;
   layout();
 }
 
-/** 管道家族键：剥掉区域后缀（robot-check-hangzhou → robot-check）。 */
-function familyOf(serviceId, regionKey) {
-  const suffix = `-${regionKey}`;
-  if (regionKey !== '__platform__' && serviceId.endsWith(suffix)) {
-    return serviceId.slice(0, -suffix.length);
-  }
-  return serviceId;
-}
-
-/** 家族展示名（先映射表，缺省用首成员的类别标签）。 */
-const FAMILY_LABEL = {
-  'robot': '填报提醒',
-  'robot-check': '催办未填 + DING',
-  'pages': '榜单页生成',
-  'leaderboard': '榜单群播报',
-  'leaderboard-html': '榜单页生成',
-  'channel-missing-check': '渠道到齐检查',
-};
-function familyLabel(family, firstService) {
-  return FAMILY_LABEL[family]
-    || `${(firstService && firstService.category_label) || '任务'}·${family}`;
-}
-
-/** 模块节点高度（折叠 64；展开按成员行数）。 */
+/** 模块节点高度（纯函数在 flow/layout.js，此处注入当前展开态）。 */
 function moduleH(node) {
-  const expanded = expandedModules.value.has(node.id);
-  return expanded ? 44 + node.services.length * 78 : 64;
+  return moduleNodeH(node, expandedModules.value);
 }
 
 const expandedModules = ref(new Set());
@@ -1162,128 +932,31 @@ function toggleExpandAll() {
   layout();
 }
 
+/** 自动布局（纯函数在 flow/layout.js）；池节点对象整体替换。 */
 function layout() {
-  const saved = nodePos.value;
-  let cursorY = TOP_Y;
-  const poolH = POOL_HEAD_H + poolMembers.value.length * POOL_ROW_H + 12;
-  const savedPool = saved.pool;
-  poolNode.value = {
-    id: 'pool',
-    x: savedPool ? savedPool.x : 40,
-    y: savedPool ? savedPool.y : TOP_Y,
-  };
-  // 全局节点：池下方纵向排列（可被拖动覆盖）
-  const poolBottom = poolH + poolNode.value.y + 28;
-  globalNodes.value.forEach((node, index) => {
-    const savedPos = saved[node.id];
-    node.x = savedPos ? savedPos.x : 40;
-    node.y = savedPos ? savedPos.y : poolBottom + index * (GLOBAL_H + 16);
+  poolNode.value = layoutNodes({
+    regionNodes: regionNodes.value,
+    taskNodes: taskNodes.value,
+    poolMembers: poolMembers.value,
+    globalNodes: globalNodes.value,
+    savedPos: nodePos.value,
+    expandedRegions: expandedRegions.value,
+    expandedModules: expandedModules.value,
   });
-  for (const region of regionNodes.value) {
-    const stack = taskNodes.value.filter((t) => t.regionKey === region.key);
-    const stackTop = cursorY;
-    stack.forEach((task) => {
-      const savedPos = saved[task.id];
-      task.x = savedPos ? savedPos.x : TASK_X;
-      task.y = savedPos ? savedPos.y : cursorY;
-      cursorY += moduleH(task) + TASK_GAP;
-    });
-    const stackH = cursorY - stackTop - TASK_GAP;
-    const rh = regionH(region);
-    const regionY = stack.length
-      ? stackTop + Math.max(0, (stackH - rh) / 2)
-      : cursorY;
-    if (!stack.length) cursorY += rh;
-    cursorY += 26;
-    const savedPos = saved[region.id];
-    region.x = savedPos ? savedPos.x : REGION_X;
-    region.y = savedPos ? savedPos.y : Math.round(regionY);
-  }
-  void poolH;
 }
 
-// -- 连线几何 -------------------------------------------------------------------
-const nodeById = computed(() => {
-  const map = {};
-  for (const n of regionNodes.value) {
-    map[n.id] = n.isAggregate
-      ? { ...n, w: AGG_SIZE, h: AGG_SIZE }
-      : { ...n, w: REGION_W, h: regionH(n) };
-  }
-  for (const n of taskNodes.value) map[n.id] = { ...n, w: TASK_W, h: moduleH(n) };
-  return map;
-});
+// -- 连线几何（纯函数在 flow/layout.js，此处注入当前图状态）---------------------
+const nodeById = computed(() => nodeRects(
+  regionNodes.value, taskNodes.value,
+  expandedRegions.value, expandedModules.value,
+));
 
-const edgePaths = computed(() => edges.value.map((edge) => {
-  const from = nodeById.value[edge.from];
-  const to = nodeById.value[edge.to];
-  if (!from || !to) return { ...edge, d: '' };
-  const x1 = from.x + from.w;
-  const y1 = from.y + from.h / 2;
-  const x2 = to.x;
-  const y2 = to.y + 40;
-  const dx = Math.max(60, (x2 - x1) / 2);
-  return {
-    ...edge,
-    d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
-  };
-}));
+const edgePaths = computed(() => buildEdgePaths(edges.value, nodeById.value));
 
 /** 依赖线（模块→模块）：成员服务 depends_on 聚合到家族模块层。 */
-const depEdges = computed(() => {
-  const moduleOfService = {};
-  for (const n of taskNodes.value) {
-    for (const s of n.services) moduleOfService[s.service_id] = n;
-  }
-  const seen = new Set();
-  const out = [];
-  for (const n of taskNodes.value) {
-    const sourceIds = new Set();
-    for (const s of n.services) {
-      for (const dep of s.depends_on || []) {
-        const from = moduleOfService[dep];
-        if (from && from.id !== n.id) sourceIds.add(from.id);
-      }
-    }
-    for (const fromId of sourceIds) {
-      const key = `${fromId}→${n.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const from = nodeById.value[fromId];
-      const to = nodeById.value[n.id];
-      if (!from || !to) continue;
-      const fromModule = taskNodes.value.find((m) => m.id === fromId);
-      const x1 = from.x + from.w;
-      const y1 = from.y + from.h / 2;
-      const x2 = to.x;
-      const y2 = to.y + 34;
-      const dx = Math.max(60, Math.abs(x2 - x1) / 2);
-      out.push({
-        id: key,
-        fromLabel: fromModule.label,
-        toLabel: n.label,
-        fromModule,
-        toModule: n,
-        sourceIds: fromModule.services.map((s) => s.service_id),
-        d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
-      });
-    }
-  }
-  return out;
-});
+const depEdges = computed(() => buildDepEdges(taskNodes.value, nodeById.value));
 
-const canvasSize = computed(() => {
-  let maxX = 1300;
-  let maxY = 480;
-  for (const n of Object.values(nodeById.value)) {
-    maxX = Math.max(maxX, n.x + n.w + 60);
-    maxY = Math.max(maxY, n.y + n.h + 60);
-  }
-  for (const n of globalNodes.value) {
-    maxY = Math.max(maxY, n.y + GLOBAL_H + 60);
-  }
-  return { w: maxX, h: maxY };
-});
+const canvasSize = computed(() => canvasSizeFor(nodeById.value, globalNodes.value));
 
 // -- 锚点 ------------------------------------------------------------------------
 async function applyAnchor() {
