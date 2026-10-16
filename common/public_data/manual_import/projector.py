@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from common.public_data.db import transaction
 from common.public_data.manual_import.schema import MART_FACT_TABLE
 
 
@@ -95,24 +96,26 @@ class ManualProjector:
             "`source_run_id` = VALUES(`source_run_id`), "
             "`synced_at` = VALUES(`synced_at`)"
         )
-        with contextlib.closing(self._connection.cursor()) as cursor:
-            cursor.execute(
-                delete_sql, (first.dataset, first.period_type, first.period_start)
-            )
-            for fact in facts:
-                cursor.execute(insert_sql, (
-                    fact.dataset,
-                    fact.period_type,
-                    fact.period_start,
-                    fact.period_end,
-                    fact.dim_scope,
-                    fact.dimension_value,
-                    fact.metric,
-                    fact.value,
-                    fact.unit,
-                    fact.source_run_id,
-                    synced_at,
-                ))
+        # 同样须显式提交（autocommit=False），否则进程退出即回滚。
+        with transaction(self._connection):
+            with contextlib.closing(self._connection.cursor()) as cursor:
+                cursor.execute(
+                    delete_sql, (first.dataset, first.period_type, first.period_start)
+                )
+                for fact in facts:
+                    cursor.execute(insert_sql, (
+                        fact.dataset,
+                        fact.period_type,
+                        fact.period_start,
+                        fact.period_end,
+                        fact.dim_scope,
+                        fact.dimension_value,
+                        fact.metric,
+                        fact.value,
+                        fact.unit,
+                        fact.source_run_id,
+                        synced_at,
+                    ))
         return len(facts)
 
 
