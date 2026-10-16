@@ -19,7 +19,10 @@ import GrantsPage from './pages/GrantsPage.vue';
 import FlowPage from './pages/FlowPage.vue';
 
 const routes = [
-  { path: '/', name: 'overview', component: OverviewPage },
+  // P4（2026-10-16 画布即应用）：首页直达画布；OverviewPage 退役
+  // （其 hints/卡片功能已由画布节点与全局节点承载），/overview 别名留档。
+  { path: '/', redirect: '/flow' },
+  { path: '/overview', name: 'overview', component: OverviewPage },
   {
     path: '/org',
     alias: '/members',
