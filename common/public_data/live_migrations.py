@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from common.kb_qa.schema import kb_ddl_statements
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
+from common.public_data.data_fix import data_fix_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
     table_definition,
@@ -466,6 +467,8 @@ _MIGRATIONS = (
     ("mart-ops-bi-authz-v1", "mart", _build_mart_bi_authz_ddl()),
     ("raw-manual-v1", "manual", _build_raw_manual_ddl()),
     ("mart-ops-manual-report-v1", "mart", _build_mart_manual_ddl()),
+    # 数据修正通道审计表（2026-10-16：类型化修数 API 的留痕）。
+    ("mart-ops-data-fix-v1", "mart", data_fix_ddl_statements()),
     (
         "mart-ops-agg-offline-daily-v1",
         "mart",

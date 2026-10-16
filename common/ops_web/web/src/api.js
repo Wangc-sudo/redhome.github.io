@@ -355,6 +355,17 @@ export function updatePipelineDeps(payload) {
   return post('/api/pipelines/deps', payload);
 }
 
+/** 数据修正：人员归属归位预览/执行。payload: {person_name, from_region,
+ *  to_region, apply?}（apply 缺省=预览）。 */
+export function dataFixRealign(payload) {
+  return post('/api/data-fix/realign', payload);
+}
+
+/** 数据修正审计读面。 */
+export function getDataFixAudits() {
+  return request('/api/data-fix/audits', { method: 'GET' });
+}
+
 /** 新增/重启用一条收件人覆盖。payload: {service_id, mode, target_type,
  *  target_value, note?}。 */
 export function addRecipientOverride(payload) {

@@ -19,10 +19,12 @@ import {
   addRecipientOverride,
   addRosterEntry,
   assignMember,
+  dataFixRealign,
   deleteGrant,
   deleteRecipientOverride,
   deleteRosterEntry,
   getCalendar,
+  getDataFixAudits,
   getGrants,
   getOverview,
   getPipelines,
@@ -455,7 +457,78 @@ const globalNodes = ref([
   { id: 'global:calendar', label: '播报日历', desc: '点日期改播报/休息', x: 40, y: 400 },
   { id: 'global:records', label: '操作记录', desc: '六源审计流水', x: 40, y: 480 },
   { id: 'global:grants', label: '授权', desc: '能力×区域授权', x: 40, y: 560, admin: true },
+  { id: 'global:datafix', label: '数据修正', desc: '类型化修数（预览→落库）', x: 40, y: 640, cap: 'datafix' },
 ]);
+
+// -- 数据修正抽屉（P5：类型化修数 API 上画布）---------------------------------
+const fixForm = ref({ person_name: '', from_region: '', to_region: '' });
+const fixPreview = ref(null);    // 预览结果（执行前必须预览）
+const fixAudits = ref([]);
+
+async function loadFixAudits() {
+  try {
+    const data = await getDataFixAudits();
+    fixAudits.value = (data && data.audits) || [];
+  } catch (err) {
+    fixAudits.value = [];
+  }
+}
+
+function openDataFixDrawer() {
+  drawer.value = { kind: 'datafix' };
+  fixPreview.value = null;
+  loadFixAudits();
+}
+
+async function onFixPreview() {
+  const f = fixForm.value;
+  if (!f.person_name.trim() || !f.from_region || !f.to_region) {
+    setFlash('err', '姓名与起止区域必填');
+    return;
+  }
+  busy.value = true;
+  try {
+    fixPreview.value = await dataFixRealign({
+      person_name: f.person_name.trim(),
+      from_region: f.from_region,
+      to_region: f.to_region,
+    });
+  } catch (err) {
+    fixPreview.value = null;
+    setFlash('err', `预览失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onFixApply() {
+  const p = fixPreview.value;
+  if (!p || !p.row_count) return;
+  const ok = window.confirm(
+    `确认执行归属归位？\n「${p.person_name}」${p.row_count} 行 `
+    + `（${p.date_from}~${p.date_to}，Σ${p.sales_amount}）\n`
+    + `${p.from_region} → ${p.to_region}（同事务 UPDATE + 审计）`,
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    const res = await dataFixRealign({
+      person_name: p.person_name,
+      from_region: p.from_region,
+      to_region: p.to_region,
+      apply: true,
+    });
+    setFlash('ok', `已归位「${res.person_name}」${res.row_count} 行`);
+    fixPreview.value = null;
+    fixForm.value.person_name = '';
+    await loadFixAudits();
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `执行失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
 
 // -- 授权抽屉（P4，admin 专属）-------------------------------------------------
 const GRANT_CAPS = [
@@ -464,6 +537,7 @@ const GRANT_CAPS = [
   { key: 'pipelines', label: '定时任务' },
   { key: 'audit', label: '操作记录' },
   { key: 'calendar', label: '播报日历' },
+  { key: 'datafix', label: '数据修正' },
 ];
 const grantRows = ref([]);
 const grantForm = ref({
@@ -631,10 +705,12 @@ function onGlobalNodeClick(node) {
   if (node.id === 'global:calendar') openCalendarDrawer();
   else if (node.id === 'global:records') openRecordsDrawer();
   else if (node.id === 'global:grants') openGrantsDrawer();
+  else if (node.id === 'global:datafix') openDataFixDrawer();
 }
 
 const visibleGlobalNodes = computed(() =>
-  globalNodes.value.filter((n) => !n.admin || isAdmin()));
+  globalNodes.value.filter((n) =>
+    (!n.admin || isAdmin()) && (!n.cap || hasAnyCap(n.cap))));
 
 // -- 任务抽屉收件人段（P3：吃收件人总览页的单线微调）------------------------------
 const RCPT_MODE = { include: '追加', exclude: '移除' };
@@ -1521,6 +1597,53 @@ watch(() => route.query.region, () => applyAnchor());
             <p v-if="!grantRows.length" class="drawer-line muted">暂无授权记录</p>
           </div>
         </template>
+        <template v-else-if="drawer.kind === 'datafix'">
+          <h2>数据修正</h2>
+          <p class="drawer-sub">类型化修数（第一期：线下事实行人员归属归位）；预览→确认落库，全程审计</p>
+          <div class="drawer-sec">
+            <h3>归属归位</h3>
+            <div class="roster-add">
+              <input v-model="fixForm.person_name" placeholder="姓名" class="roster-input">
+            </div>
+            <div class="roster-add">
+              <select v-model="fixForm.from_region" class="roster-select">
+                <option value="">从区域…</option>
+                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
+              </select>
+              <span class="drawer-line">→</span>
+              <select v-model="fixForm.to_region" class="roster-select">
+                <option value="">到区域…</option>
+                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
+              </select>
+            </div>
+            <div class="roster-add">
+              <button class="btn mini" :disabled="busy" @click="onFixPreview">预览影响面</button>
+              <button
+                class="btn mini primary"
+                :disabled="busy || !fixPreview || !fixPreview.row_count"
+                @click="onFixApply"
+              >执行归位</button>
+            </div>
+            <div v-if="fixPreview" class="fix-preview">
+              <template v-if="fixPreview.row_count">
+                命中 <b>{{ fixPreview.row_count }}</b> 行 ·
+                {{ fixPreview.date_from }} ~ {{ fixPreview.date_to }} ·
+                Σ {{ fixPreview.sales_amount }} 元
+              </template>
+              <span v-else class="muted">零命中（不落审计）</span>
+            </div>
+          </div>
+          <div class="drawer-sec">
+            <h3>修正记录（{{ fixAudits.length }}）</h3>
+            <div v-for="(a, i) in fixAudits" :key="i" class="rec-row">
+              <span class="rec-time">{{ a.created_at }}</span>
+              <span class="rec-action">{{ a.action_label }}</span>
+              <span class="rec-target">{{ a.fix_type_label }} · {{ a.target }}</span>
+              <span class="rec-detail">{{ a.detail }} · {{ a.actor }}</span>
+            </div>
+            <p v-if="!fixAudits.length" class="drawer-line muted">暂无修正记录</p>
+          </div>
+        </template>
         <button class="drawer-close" @click="closeDrawer">✕</button>
       </aside>
     </transition>
@@ -2195,6 +2318,14 @@ watch(() => route.query.region, () => applyAnchor());
 .rec-detail {
   width: 100%;
   color: #6b7280;
+}
+.fix-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+  font-size: 12px;
 }
 .drawer-mask {
   position: fixed;

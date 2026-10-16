@@ -50,6 +50,9 @@ _DDL_WHITELIST = frozenset(
         # 的 DDL 源：dim_recipient_override / dim_recipient_override_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/public_data/recipient_override.py",
+        # 数据修正通道 schema 定义模块（mart-ops-data-fix-v1 的 DDL 源：
+        # dim_data_fix_audit；被 live_migrations 引用，同上引用关系）
+        "common/public_data/data_fix.py",
         # 组织归属覆盖 schema 定义模块（mart-ops-org-assignment-override-v1
         # 的 DDL 源：dim_org_assignment_override /
         # dim_org_assignment_override_audit；被 live_migrations 引用，同上）

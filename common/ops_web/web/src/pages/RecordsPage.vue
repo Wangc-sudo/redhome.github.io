@@ -14,7 +14,7 @@ const route = useRoute();
 const router = useRouter();
 
 //: 六源集合（顺序即下拉顺序）——与后端 _RECORD_SOURCES 一致，作兜底。
-const DEFAULT_SOURCES = ['授权', '定时任务', '填报名册', '播报日历', '收件人覆盖', '定时运行'];
+const DEFAULT_SOURCES = ['授权', '定时任务', '填报名册', '播报日历', '收件人覆盖', '定时运行', '数据修正'];
 
 //: 名册记录 target 首词是 scope 中文标签（后端 _SCOPE_LABEL 渲染），
 //: 深链需反查回 region key（否则 `?region=其他` 匹配不到 `sec-other`）。
