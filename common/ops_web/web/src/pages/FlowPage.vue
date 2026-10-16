@@ -15,12 +15,16 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import {
+  addRosterEntry,
   assignMember,
+  deleteRosterEntry,
   getOverview,
   getPipelines,
   getRoster,
   runPipelineOnce,
+  saveRegionTargets,
   togglePipeline,
+  toggleRosterEntry,
   updatePipelineTimes,
 } from '../api.js';
 import { hasCapability, me, setFlash, flash } from '../store/me.js';
@@ -251,8 +255,98 @@ function openTaskDrawer(node) {
   drawerTimes.value = times.length ? times : [{ hour: 8, minute: 30 }];
 }
 
+// -- 区域抽屉（P2：名册+月目标编辑收进画布）------------------------------------
+const drawerRoster = ref([]);      // 该区域名册行（可编辑副本）
+const drawerTargets = ref({});     // {person_name: 目标万元}
+const drawerNewName = ref('');
+const drawerNewRole = ref('owner');
+
 function openRegionDrawer(node) {
   drawer.value = { kind: 'region', node };
+  const roster = (lastRaw.value && lastRaw.value.roster) || {};
+  drawerRoster.value = ((roster.roster) || [])
+    .filter((row) => row.scope === node.key)
+    .map((row) => ({ ...row }));
+  drawerTargets.value = { ...((roster.targets || {})[node.key] || {}) };
+  drawerNewName.value = '';
+  drawerNewRole.value = 'owner';
+}
+
+async function onToggleRosterRow(row) {
+  busy.value = true;
+  try {
+    await toggleRosterEntry({ id: row.id, enabled: !Number(row.enabled) });
+    setFlash('ok', `已${Number(row.enabled) ? '停用' : '启用'}「${row.person_name}」`);
+    await load({ silent: true });
+    openRegionDrawer(drawer.value.node);   // 抽屉随新数据刷新
+  } catch (err) {
+    setFlash('err', `名册操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onDeleteRosterRow(row) {
+  if (!window.confirm(`确认从名册删除「${row.person_name}」？（留审计）`)) return;
+  busy.value = true;
+  try {
+    await deleteRosterEntry({ id: row.id });
+    setFlash('ok', `已删除名册项「${row.person_name}」`);
+    await load({ silent: true });
+    openRegionDrawer(drawer.value.node);
+  } catch (err) {
+    setFlash('err', `删除失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onAddRosterRow() {
+  const node = drawer.value && drawer.value.node;
+  const name = drawerNewName.value.trim();
+  if (!node || !name) {
+    setFlash('err', '请填姓名');
+    return;
+  }
+  busy.value = true;
+  try {
+    await addRosterEntry({
+      scope: node.key,
+      entity_type: 'person',
+      entity_key: node.label,
+      person_name: name,
+      role: drawerNewRole.value,
+      note: '',
+    });
+    setFlash('ok', `已把「${name}」补录到 ${node.label} 名册`);
+    drawerNewName.value = '';
+    await load({ silent: true });
+    openRegionDrawer(node);
+  } catch (err) {
+    setFlash('err', `补录失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onSaveTargets() {
+  const node = drawer.value && drawer.value.node;
+  if (!node) return;
+  const rows = Object.entries(drawerTargets.value)
+    .map(([person_name, value]) => ({
+      person_name,
+      monthly_target: Number(value) || 0,
+    }));
+  busy.value = true;
+  try {
+    await saveRegionTargets({ scope: node.key, rows });
+    setFlash('ok', `已保存 ${node.label} 月目标（${rows.length} 人）`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `保存目标失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
 }
 
 function closeDrawer() {
@@ -704,24 +798,61 @@ watch(() => route.query.region, () => applyAnchor());
         </template>
         <template v-else-if="drawer.kind === 'region'">
           <h2>{{ drawer.node.label }}</h2>
-          <p class="drawer-sub">{{ drawer.node.key }}</p>
+          <p class="drawer-sub">
+            {{ drawer.node.key }} · 成员 {{ drawer.node.memberCount }} ·
+            下游任务 {{ drawer.node.taskCount }} · 目标月份 {{ month }}
+          </p>
           <div class="drawer-sec">
-            <h3>链路状态</h3>
-            <p class="drawer-line">
-              名册 {{ drawer.node.rosterCount }} · 目标人 {{ drawer.node.targetCount }} ·
-              Σ {{ fmt(drawer.node.targetSum) }} 万元 · 成员 {{ drawer.node.memberCount }} ·
-              下游任务 {{ drawer.node.taskCount }}
+            <h3>名册（{{ drawerRoster.length }}）</h3>
+            <div v-for="row in drawerRoster" :key="row.id" class="roster-row">
+              <span class="roster-name" :class="{ off: !Number(row.enabled) }">
+                {{ row.person_name }}
+              </span>
+              <span class="roster-role">{{ row.role === 'deputy' ? '代填' : '负责' }}</span>
+              <button
+                class="switch"
+                :class="{ on: Number(row.enabled) }"
+                :disabled="busy"
+                @click="onToggleRosterRow(row)"
+              ><i /></button>
+              <button
+                class="btn mini ghost"
+                :disabled="busy"
+                @click="onDeleteRosterRow(row)"
+              >删</button>
+            </div>
+            <div class="roster-add">
+              <input v-model="drawerNewName" placeholder="姓名" class="roster-input">
+              <select v-model="drawerNewRole" class="roster-select">
+                <option value="owner">负责人</option>
+                <option value="deputy">代填人</option>
+              </select>
+              <button class="btn mini" :disabled="busy" @click="onAddRosterRow">补录</button>
+            </div>
+          </div>
+          <div class="drawer-sec">
+            <h3>月目标（万元）</h3>
+            <div
+              v-for="row in drawerRoster.filter((r) => Number(r.enabled))"
+              :key="'t' + row.id"
+              class="target-row"
+            >
+              <span class="roster-name">{{ row.person_name }}</span>
+              <input
+                v-model="drawerTargets[row.person_name]"
+                type="number"
+                min="0"
+                step="0.1"
+                class="target-input"
+              >
+            </div>
+            <button class="btn mini primary" :disabled="busy" @click="onSaveTargets">
+              保存月目标
+            </button>
+            <p class="drawer-line muted">
+              保存即写当月快照真源（dim_report_target）；发布快照/月份切换暂留名册页。
             </p>
           </div>
-          <div class="drawer-sec">
-            <router-link class="drawer-link"
-              :to="{ path: '/roster', query: { region: drawer.node.key } }"
-              @click="closeDrawer">名册与月目标 →</router-link>
-            <router-link class="drawer-link"
-              :to="{ path: '/org', query: { region: drawer.node.key } }"
-              @click="closeDrawer">组织编排 →</router-link>
-          </div>
-          <p class="drawer-line muted">名册/目标编辑将于 P2 收进本抽屉。</p>
         </template>
         <button class="drawer-close" @click="closeDrawer">✕</button>
       </aside>
@@ -1177,6 +1308,53 @@ watch(() => route.query.region, () => applyAnchor());
   font-size: 16px;
   color: #9ca3af;
   cursor: pointer;
+}
+.roster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.roster-name {
+  min-width: 72px;
+  font-weight: 600;
+}
+.roster-name.off {
+  color: #9ca3af;
+  text-decoration: line-through;
+}
+.roster-role {
+  font-size: 11px;
+  color: #6b7280;
+}
+.roster-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.roster-input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.roster-select {
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.target-input {
+  width: 100px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
 }
 .drawer-mask {
   position: fixed;
