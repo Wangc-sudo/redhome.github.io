@@ -180,7 +180,7 @@ onMounted(() => {
     <p class="drawer-line muted" v-if="rcpt.loading">读取中…</p>
     <template v-else>
       <p class="drawer-line muted">
-        基名单 {{ rcpt.base.length }} 人（{{ rcpt.base.join('、') || '—' }}）
+        基名单 {{ rcpt.base.length }} 人（{{ rcpt.base.map((p) => p.name || p.user_id || p).join('、') || '—' }}）
       </p>
       <div v-for="o in rcpt.rows" :key="o.id" class="roster-row">
         <span class="rcpt-mode" :class="o.mode">{{ RCPT_MODE[o.mode] || o.mode }}</span>
