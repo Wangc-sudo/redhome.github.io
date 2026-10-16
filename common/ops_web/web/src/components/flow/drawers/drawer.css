@@ -1,0 +1,297 @@
+/**
+ * 画布抽屉共享样式（2026-10-16 F2 从 FlowPage.vue scoped 样式抽出）。
+ * 全部规则挂在 .flow-drawer 命名空间下——styles.css 另有其他页面的全局
+ * .drawer/.btn，裸类名会互相串扰；.btn/.switch 在抽屉内的变体也带前缀，
+ *  specificity (0,2,0) 压过全局 (0,1,0)，与旧 scoped 渲染一致。
+ */
+
+/* 壳与动效 */
+.flow-drawer {
+  position: fixed;
+  right: 0;
+  top: 52px;
+  bottom: 0;
+  width: 360px;
+  background: #fff;
+  border-left: 1px solid #e5e7eb;
+  box-shadow: -4px 0 16px rgba(16, 24, 40, 0.08);
+  padding: 18px;
+  z-index: 30;
+  overflow-y: auto;
+}
+.flow-drawer h2 {
+  margin: 0 0 2px;
+  font-size: 16px;
+}
+.flow-drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+.flowdrawer-enter-active,
+.flowdrawer-leave-active {
+  transition: transform 0.18s ease;
+}
+.flowdrawer-enter-from,
+.flowdrawer-leave-to {
+  transform: translateX(100%);
+}
+
+/* 通用小节 */
+.flow-drawer .drawer-sub {
+  margin: 0 0 12px;
+  color: #9ca3af;
+  font-size: 12px;
+}
+.flow-drawer .drawer-sec {
+  margin-bottom: 16px;
+}
+.flow-drawer .drawer-sec h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #4b5563;
+}
+.flow-drawer .drawer-line {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.flow-drawer .drawer-line.muted {
+  color: #9ca3af;
+}
+.flow-drawer .drawer-link {
+  display: block;
+  margin: 4px 0;
+  color: #2563eb;
+  font-size: 13px;
+  text-decoration: none;
+}
+.flow-drawer .drawer-close {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  border: none;
+  background: none;
+  font-size: 16px;
+  color: #9ca3af;
+  cursor: pointer;
+}
+
+/* 按钮/开关（抽屉内变体，与旧 FlowPage scoped 一致） */
+.flow-drawer .btn {
+  padding: 7px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2933;
+  font-size: 13px;
+  cursor: pointer;
+}
+.flow-drawer .btn:hover {
+  background: #f9fafb;
+}
+.flow-drawer .btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.flow-drawer .btn.mini {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.flow-drawer .btn.ghost {
+  border-color: transparent;
+  color: #4b5563;
+}
+.flow-drawer .btn.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+  margin-left: 8px;
+}
+.flow-drawer .switch {
+  width: 34px;
+  height: 18px;
+  border: 1px solid #d1d5db;
+  border-radius: 9px;
+  background: #e5e7eb;
+  cursor: pointer;
+  position: relative;
+  padding: 0;
+}
+.flow-drawer .switch i {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.flow-drawer .switch.on {
+  background: #10b981;
+  border-color: #10b981;
+}
+.flow-drawer .switch.on i {
+  left: 18px;
+}
+
+/* 任务抽屉：播报时间 */
+.flow-drawer .time-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.flow-drawer .time-row input {
+  width: 56px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+/* 名册/收件人行 */
+.flow-drawer .roster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.flow-drawer .roster-name {
+  min-width: 72px;
+  font-weight: 600;
+}
+.flow-drawer .roster-name.off {
+  color: #9ca3af;
+  text-decoration: line-through;
+}
+.flow-drawer .roster-role {
+  font-size: 11px;
+  color: #6b7280;
+}
+.flow-drawer .roster-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.flow-drawer .roster-input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.flow-drawer .roster-select {
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.flow-drawer .rcpt-mode {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #047857;
+}
+.flow-drawer .rcpt-mode.exclude {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* 月目标 */
+.flow-drawer .target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.flow-drawer .target-input {
+  width: 100px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+/* 播报日历 */
+.flow-drawer .cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.flow-drawer .cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.flow-drawer .cal-wd {
+  text-align: center;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.flow-drawer .cal-cell {
+  padding: 6px 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.flow-drawer .cal-cell.rest {
+  background: #dbe7ff;
+  color: #1f3a5f;
+}
+.flow-drawer .cal-cell.manual {
+  border-color: #f59e0b;
+}
+.flow-drawer .cal-cell.empty {
+  border: none;
+  background: none;
+  cursor: default;
+}
+
+/* 审计/授权/修数记录行 */
+.flow-drawer .rec-filter {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.flow-drawer .rec-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 0;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 12px;
+}
+.flow-drawer .rec-time {
+  color: #9ca3af;
+}
+.flow-drawer .rec-source {
+  color: #4338ca;
+}
+.flow-drawer .rec-action {
+  font-weight: 600;
+}
+.flow-drawer .rec-target {
+  color: #4b5563;
+}
+.flow-drawer .rec-detail {
+  width: 100%;
+  color: #6b7280;
+}
+
+/* 数据修正预览 */
+.flow-drawer .fix-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+  font-size: 12px;
+}
+.flow-drawer .fix-preview .muted {
+  color: #9ca3af;
+}
