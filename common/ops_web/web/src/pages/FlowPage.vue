@@ -15,37 +15,22 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import {
-  addGrant,
-  addRecipientOverride,
-  addRosterEntry,
   assignMember,
-  dataFixRealign,
-  deleteGrant,
-  deleteRecipientOverride,
-  deleteRosterEntry,
-  getCalendar,
-  getDataFixAudits,
-  getGrants,
   getOverview,
   getPipelines,
-  getRecipientOverride,
-  getRecords,
   getRoster,
   moveMember,
-  resetCalendarMonth,
   runPipelineOnce,
-  saveRegionTargets,
-  toggleCalendarDay,
   togglePipeline,
-  toggleRecipientOverride,
-  toggleRosterEntry,
   updatePipelineDeps,
-  updatePipelineTimes,
 } from '../api.js';
 import { hasCapability, isAdmin, me, setFlash, flash } from '../store/me.js';
-// 建图/布局纯逻辑已抽出（2026-10-16 F1）：flow/graph.js + flow/layout.js，
-// 本文件只保留状态、交互与抽屉编排。
+// 建图/布局纯逻辑已抽出（2026-10-16 F1）：flow/graph.js + flow/layout.js；
+// 抽屉已组件化（2026-10-17 F2）：components/flow/drawers/ + flow/useDrawer.js，
+// 本文件只保留画布状态、拉线/拖拽交互与装载编排。
 import { buildGraph as buildGraphModel, fmt } from '../flow/graph.js';
+import { globalNodeKind, useDrawer } from '../flow/useDrawer.js';
+import DrawerHost from '../components/flow/drawers/DrawerHost.vue';
 import {
   AGG_SIZE,
   GLOBAL_H,
@@ -388,115 +373,9 @@ const depDraftPath = computed(() => {
   return w ? edgePath(w.x1, w.y1, w.x2, w.y2) : '';
 });
 
-// -- 抽屉 ----------------------------------------------------------------------
-const drawer = ref(null);      // {kind: 'task'|'region', node}
-const drawerTimes = ref([]);   // 任务抽屉：播报时间编辑 [{hour, minute}]
-
-function openTaskDrawer(node) {
-  drawer.value = { kind: 'task', node };
-  const zh = node.service.schedule_zh || '';
-  // 从 schedule_zh（每天 HH:MM / 工作日 HH:MM）解析出时间点列表；解析不出给空
-  const times = [];
-  for (const m of zh.matchAll(/(\d{1,2}):(\d{2})/g)) {
-    times.push({ hour: Number(m[1]), minute: Number(m[2]) });
-  }
-  drawerTimes.value = times.length ? times : [{ hour: 8, minute: 30 }];
-  loadRcpt(node.service.service_id);
-}
-
-// -- 区域抽屉（P2：名册+月目标编辑收进画布）------------------------------------
-const drawerRoster = ref([]);      // 该区域名册行（可编辑副本）
-const drawerTargets = ref({});     // {person_name: 目标万元}
-const drawerNewName = ref('');
-const drawerNewRole = ref('owner');
-
-function openRegionDrawer(node) {
-  drawer.value = { kind: 'region', node };
-  const roster = (lastRaw.value && lastRaw.value.roster) || {};
-  drawerRoster.value = ((roster.roster) || [])
-    .filter((row) => row.scope === node.key)
-    .map((row) => ({ ...row }));
-  drawerTargets.value = { ...((roster.targets || {})[node.key] || {}) };
-  drawerNewName.value = '';
-  drawerNewRole.value = 'owner';
-}
-
-async function onToggleRosterRow(row) {
-  busy.value = true;
-  try {
-    await toggleRosterEntry({ id: row.id, enabled: !Number(row.enabled) });
-    setFlash('ok', `已${Number(row.enabled) ? '停用' : '启用'}「${row.person_name}」`);
-    await load({ silent: true });
-    openRegionDrawer(drawer.value.node);   // 抽屉随新数据刷新
-  } catch (err) {
-    setFlash('err', `名册操作失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onDeleteRosterRow(row) {
-  if (!window.confirm(`确认从名册删除「${row.person_name}」？（留审计）`)) return;
-  busy.value = true;
-  try {
-    await deleteRosterEntry({ id: row.id });
-    setFlash('ok', `已删除名册项「${row.person_name}」`);
-    await load({ silent: true });
-    openRegionDrawer(drawer.value.node);
-  } catch (err) {
-    setFlash('err', `删除失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onAddRosterRow() {
-  const node = drawer.value && drawer.value.node;
-  const name = drawerNewName.value.trim();
-  if (!node || !name) {
-    setFlash('err', '请填姓名');
-    return;
-  }
-  busy.value = true;
-  try {
-    await addRosterEntry({
-      scope: node.key,
-      entity_type: 'person',
-      entity_key: node.label,
-      person_name: name,
-      role: drawerNewRole.value,
-      note: '',
-    });
-    setFlash('ok', `已把「${name}」补录到 ${node.label} 名册`);
-    drawerNewName.value = '';
-    await load({ silent: true });
-    openRegionDrawer(node);
-  } catch (err) {
-    setFlash('err', `补录失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onSaveTargets() {
-  const node = drawer.value && drawer.value.node;
-  if (!node) return;
-  const rows = Object.entries(drawerTargets.value)
-    .map(([person_name, value]) => ({
-      person_name,
-      monthly_target: Number(value) || 0,
-    }));
-  busy.value = true;
-  try {
-    await saveRegionTargets({ scope: node.key, rows });
-    setFlash('ok', `已保存 ${node.label} 月目标（${rows.length} 人）`);
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `保存目标失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
+// -- 抽屉（F2：状态机 + 组件化，实现见 components/flow/drawers/）-----------------
+const { drawer, openDrawer, closeDrawer } = useDrawer();
+const reloadSilent = () => load({ silent: true });
 
 // -- 全局节点（P3：播报日历 / 操作记录 上画布）--------------------------------
 const globalNodes = ref([
@@ -506,360 +385,20 @@ const globalNodes = ref([
   { id: 'global:datafix', label: '数据修正', desc: '类型化修数（预览→落库）', x: 40, y: 640, cap: 'datafix' },
 ]);
 
-// -- 数据修正抽屉（P5：类型化修数 API 上画布）---------------------------------
-const fixForm = ref({ person_name: '', from_region: '', to_region: '' });
-const fixPreview = ref(null);    // 预览结果（执行前必须预览）
-const fixAudits = ref([]);
+//: 数据修正/授权抽屉实现 → components/flow/drawers/{DataFixDrawer,GrantsDrawer}.vue
 
-async function loadFixAudits() {
-  try {
-    const data = await getDataFixAudits();
-    fixAudits.value = (data && data.audits) || [];
-  } catch (err) {
-    fixAudits.value = [];
-  }
-}
-
-function openDataFixDrawer() {
-  drawer.value = { kind: 'datafix' };
-  fixPreview.value = null;
-  loadFixAudits();
-}
-
-async function onFixPreview() {
-  const f = fixForm.value;
-  if (!f.person_name.trim() || !f.from_region || !f.to_region) {
-    setFlash('err', '姓名与起止区域必填');
-    return;
-  }
-  busy.value = true;
-  try {
-    fixPreview.value = await dataFixRealign({
-      person_name: f.person_name.trim(),
-      from_region: f.from_region,
-      to_region: f.to_region,
-    });
-  } catch (err) {
-    fixPreview.value = null;
-    setFlash('err', `预览失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onFixApply() {
-  const p = fixPreview.value;
-  if (!p || !p.row_count) return;
-  const ok = window.confirm(
-    `确认执行归属归位？\n「${p.person_name}」${p.row_count} 行 `
-    + `（${p.date_from}~${p.date_to}，Σ${p.sales_amount}）\n`
-    + `${p.from_region} → ${p.to_region}（同事务 UPDATE + 审计）`,
-  );
-  if (!ok) return;
-  busy.value = true;
-  try {
-    const res = await dataFixRealign({
-      person_name: p.person_name,
-      from_region: p.from_region,
-      to_region: p.to_region,
-      apply: true,
-    });
-    setFlash('ok', `已归位「${res.person_name}」${res.row_count} 行`);
-    fixPreview.value = null;
-    fixForm.value.person_name = '';
-    await loadFixAudits();
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `执行失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-// -- 授权抽屉（P4，admin 专属）-------------------------------------------------
-const GRANT_CAPS = [
-  { key: 'roster', label: '名册与目标' },
-  { key: 'org', label: '组织编排' },
-  { key: 'pipelines', label: '定时任务' },
-  { key: 'audit', label: '操作记录' },
-  { key: 'calendar', label: '播报日历' },
-  { key: 'datafix', label: '数据修正' },
-];
-const grantRows = ref([]);
-const grantForm = ref({
-  user_id: '', grant_type: 'scope', cap: 'roster', region: '', note: '',
-});
-
-async function loadGrants() {
-  busy.value = true;
-  try {
-    const data = await getGrants();
-    grantRows.value = (data && data.grants) || [];
-  } catch (err) {
-    setFlash('err', `授权读取失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function grantKeyOf(f) {
-  if (f.grant_type === 'admin') return '-';
-  if (f.grant_type === 'region') return f.region;
-  return f.region ? `${f.cap}:${f.region}` : f.cap;
-}
-
-async function onGrantAdd() {
-  const f = grantForm.value;
-  if (!f.user_id.trim()) {
-    setFlash('err', '请填钉钉 userid');
-    return;
-  }
-  if (f.grant_type !== 'admin' && !grantKeyOf(f)) {
-    setFlash('err', '请选择能力/区域');
-    return;
-  }
-  busy.value = true;
-  try {
-    await addGrant({
-      user_id: f.user_id.trim(),
-      grant_type: f.grant_type,
-      grant_key: grantKeyOf(f),
-      note: f.note.trim(),
-    });
-    setFlash('ok', '授权已添加（生效有分钟级延迟）');
-    grantForm.value.user_id = '';
-    grantForm.value.note = '';
-    await loadGrants();
-  } catch (err) {
-    setFlash('err', `添加失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onGrantDelete(row) {
-  if (!window.confirm(
-    `删除授权？\n${row.user_id} · ${row.grant_type_label} · ${row.grant_key}`,
-  )) return;
-  busy.value = true;
-  try {
-    await deleteGrant({
-      user_id: row.user_id,
-      grant_type: row.grant_type,
-      grant_key: row.grant_key,
-    });
-    setFlash('ok', '已删除授权');
-    await loadGrants();
-  } catch (err) {
-    setFlash('err', `删除失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function openGrantsDrawer() {
-  drawer.value = { kind: 'grants' };
-  loadGrants();
-}
-
-// -- 日历抽屉 -------------------------------------------------------------------
-const calData = ref(null);
-const calMonth = ref('');
-
-async function loadCalendar(month) {
-  busy.value = true;
-  try {
-    calData.value = await getCalendar(month);
-    calMonth.value = calData.value.month;
-  } catch (err) {
-    setFlash('err', `日历读取失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function openCalendarDrawer() {
-  drawer.value = { kind: 'calendar' };
-  loadCalendar(calMonth.value || undefined);
-}
-
-const calCells = computed(() => {
-  if (!calData.value) return [];
-  const cells = [];
-  for (let i = 0; i < (calData.value.first_weekday || 0); i += 1) cells.push(null);
-  for (const day of calData.value.days || []) cells.push(day);
-  return cells;
-});
-
-async function onToggleCalDay(cell) {
-  if (!cell) return;
-  const date = `${calData.value.month}-${String(cell.day).padStart(2, '0')}`;
-  const willWork = !cell.is_workday;
-  busy.value = true;
-  try {
-    await toggleCalendarDay({ date, is_workday: willWork, note: '' });
-    setFlash('ok', `${date} 已改为${willWork ? '播报' : '休息'}`);
-    await loadCalendar(calMonth.value);
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onResetCalMonth() {
-  if (!window.confirm(`清除 ${calMonth.value} 的人工裁决，回到全播报基线？`)) return;
-  busy.value = true;
-  try {
-    await resetCalendarMonth({ month: calMonth.value });
-    setFlash('ok', `${calMonth.value} 已恢复全播报基线`);
-    await loadCalendar(calMonth.value);
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-// -- 记录抽屉 -------------------------------------------------------------------
-const recRows = ref([]);
-const recSources = ref([]);
-const recFilter = ref({ source: '', actor: '' });
-
-async function loadRecords() {
-  busy.value = true;
-  try {
-    const data = await getRecords({
-      source: recFilter.value.source || undefined,
-      actor: recFilter.value.actor || undefined,
-    });
-    recRows.value = (data && data.records) || [];
-    recSources.value = (data && data.sources) || [];
-  } catch (err) {
-    setFlash('err', `记录读取失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function openRecordsDrawer() {
-  drawer.value = { kind: 'records' };
-  loadRecords();
-}
+//: 日历/记录抽屉实现 → components/flow/drawers/{CalendarDrawer,RecordsDrawer}.vue
 
 function onGlobalNodeClick(node) {
-  if (node.id === 'global:calendar') openCalendarDrawer();
-  else if (node.id === 'global:records') openRecordsDrawer();
-  else if (node.id === 'global:grants') openGrantsDrawer();
-  else if (node.id === 'global:datafix') openDataFixDrawer();
+  const kind = globalNodeKind(node.id);
+  if (kind) openDrawer(kind);
 }
 
 const visibleGlobalNodes = computed(() =>
   globalNodes.value.filter((n) =>
     (!n.admin || isAdmin()) && (!n.cap || hasAnyCap(n.cap))));
 
-// -- 任务抽屉收件人段（P3：吃收件人总览页的单线微调）------------------------------
-const RCPT_MODE = { include: '追加', exclude: '移除' };
-const RCPT_TYPE = { user_id: '账号', name: '姓名' };
-const rcpt = ref({ loading: false, base: [], rows: [], explain: [] });
-const rcptForm = ref({ mode: 'include', target_type: 'user_id', target_value: '', note: '' });
-
-async function loadRcpt(serviceId) {
-  rcpt.value.loading = true;
-  try {
-    const data = await getRecipientOverride(serviceId);
-    rcpt.value = {
-      loading: false,
-      base: (data && data.base) || [],
-      rows: (data && data.overrides) || [],
-      explain: (data && data.explain) || [],
-    };
-  } catch (err) {
-    rcpt.value = { loading: false, base: [], rows: [], explain: [] };
-    setFlash('err', `收件人读取失败：${err.message}`);
-  }
-}
-
-async function onRcptAdd(serviceId) {
-  const value = rcptForm.value.target_value.trim();
-  if (!value) return;
-  busy.value = true;
-  try {
-    await addRecipientOverride({
-      service_id: serviceId,
-      mode: rcptForm.value.mode,
-      target_type: rcptForm.value.target_type,
-      target_value: value,
-      note: rcptForm.value.note.trim(),
-    });
-    setFlash('ok', '收件人覆盖已添加');
-    rcptForm.value.target_value = '';
-    rcptForm.value.note = '';
-    await loadRcpt(serviceId);
-  } catch (err) {
-    setFlash('err', `添加失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onRcptToggle(serviceId, row) {
-  busy.value = true;
-  try {
-    await toggleRecipientOverride({ id: row.id, enabled: !Number(row.enabled) });
-    await loadRcpt(serviceId);
-  } catch (err) {
-    setFlash('err', `操作失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onRcptDelete(serviceId, row) {
-  if (!window.confirm(`删除覆盖「${RCPT_MODE[row.mode]} ${row.target_value}」？`)) return;
-  busy.value = true;
-  try {
-    await deleteRecipientOverride({ id: row.id });
-    await loadRcpt(serviceId);
-  } catch (err) {
-    setFlash('err', `删除失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-function closeDrawer() {
-  drawer.value = null;
-}
-
-function addTimeRow() {
-  drawerTimes.value.push({ hour: 12, minute: 0 });
-}
-function removeTimeRow(index) {
-  drawerTimes.value.splice(index, 1);
-}
-
-async function onSaveTimes() {
-  const node = drawer.value && drawer.value.node;
-  if (!node) return;
-  const times = drawerTimes.value
-    .filter((t) => Number.isInteger(t.hour) && Number.isInteger(t.minute));
-  if (!times.length) {
-    setFlash('err', '至少保留一个播报时间');
-    return;
-  }
-  busy.value = true;
-  try {
-    await updatePipelineTimes({ service_id: node.service.service_id, times });
-    setFlash('ok', `已改「${node.service.service_label}」播报时间`);
-    closeDrawer();
-    await load({ silent: true });
-  } catch (err) {
-    setFlash('err', `改播报时间失败：${err.message}`);
-  } finally {
-    busy.value = false;
-  }
-}
+//: 任务抽屉收件人段/播报时间编辑 → components/flow/drawers/TaskDrawer.vue
 
 async function onToggleTask(node) {
   const target = !node.service.enabled;
@@ -1104,7 +643,7 @@ watch(() => route.query.region, () => applyAnchor());
                   <b>{{ node.rosterCount }}</b><span>名册</span>
                   <b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span>
                 </div>
-                <button class="btn mini ghost" @mousedown.stop @click="openRegionDrawer(node)">详情</button>
+                <button class="btn mini ghost" @mousedown.stop @click="openDrawer('region', node)">详情</button>
               </div>
             </template>
             <template v-else>
@@ -1158,7 +697,7 @@ watch(() => route.query.region, () => applyAnchor());
               </div>
               <div class="node-foot">
                 <span class="task-count">下游任务 {{ node.taskCount }}</span>
-                <button class="btn mini ghost" @click="openRegionDrawer(node)">详情</button>
+                <button class="btn mini ghost" @click="openDrawer('region', node)">详情</button>
               </div>
             </template>
             <span class="port out" title="驱动下游任务" />
@@ -1228,7 +767,7 @@ watch(() => route.query.region, () => applyAnchor());
                     @click="onToggleTask({ service })"
                   ><i /></button>
                   <button class="btn mini" :disabled="busy" @click="onRunOnce({ service })">运行一次</button>
-                  <button class="btn mini ghost" @click="openTaskDrawer({ service })">详情</button>
+                  <button class="btn mini ghost" @click="openDrawer('task', { service })">详情</button>
                 </div>
               </div>
             </div>
@@ -1245,302 +784,17 @@ watch(() => route.query.region, () => applyAnchor());
       </div>
     </div>
 
-    <!-- 节点抽屉 -->
-    <transition name="drawer">
-      <aside v-if="drawer" class="drawer">
-        <template v-if="drawer.kind === 'task'">
-          <h2>{{ drawer.node.service.service_label }}</h2>
-          <p class="drawer-sub">{{ drawer.node.service.service_id }}</p>
-          <div class="drawer-sec">
-            <h3>播报时间</h3>
-            <div
-              v-for="(t, index) in drawerTimes"
-              :key="index"
-              class="time-row"
-            >
-              <input v-model.number="t.hour" type="number" min="0" max="23"> 时
-              <input v-model.number="t.minute" type="number" min="0" max="59"> 分
-              <button
-                class="btn mini ghost"
-                :disabled="drawerTimes.length <= 1"
-                @click="removeTimeRow(index)"
-              >删</button>
-            </div>
-            <button class="btn mini" @click="addTimeRow">+ 加一个时点</button>
-            <button class="btn mini primary" :disabled="busy" @click="onSaveTimes">保存时间</button>
-          </div>
-          <div class="drawer-sec">
-            <h3>最近运行</h3>
-            <p v-if="drawer.node.service.latest" class="drawer-line">
-              {{ drawer.node.service.latest.status_label }} ·
-              {{ drawer.node.service.latest.created_at }} ·
-              {{ drawer.node.service.latest.requested_by }}
-            </p>
-            <p v-else class="drawer-line muted">无运行记录</p>
-            <router-link class="drawer-link" to="/pipelines/history" @click="closeDrawer">
-              完整执行流水 →
-            </router-link>
-          </div>
-          <div class="drawer-sec" v-if="drawer.node.service.depends_on.length">
-            <h3>依赖</h3>
-            <p class="drawer-line">{{ drawer.node.service.depends_on.join('、') }}</p>
-          </div>
-          <div class="drawer-sec">
-            <h3>收件人覆盖</h3>
-            <p class="drawer-line muted" v-if="rcpt.loading">读取中…</p>
-            <template v-else>
-              <p class="drawer-line muted">
-                基名单 {{ rcpt.base.length }} 人（{{ rcpt.base.join('、') || '—' }}）
-              </p>
-              <div v-for="o in rcpt.rows" :key="o.id" class="roster-row">
-                <span class="rcpt-mode" :class="o.mode">{{ RCPT_MODE[o.mode] || o.mode }}</span>
-                <span class="roster-name">{{ o.target_value }}</span>
-                <span class="roster-role">{{ RCPT_TYPE[o.target_type] || o.target_type }}</span>
-                <button
-                  class="switch"
-                  :class="{ on: Number(o.enabled) }"
-                  :disabled="busy"
-                  @click="onRcptToggle(drawer.node.service.service_id, o)"
-                ><i /></button>
-                <button
-                  class="btn mini ghost"
-                  :disabled="busy"
-                  @click="onRcptDelete(drawer.node.service.service_id, o)"
-                >删</button>
-              </div>
-              <p v-if="!rcpt.rows.length" class="drawer-line muted">
-                暂无覆盖（按名册口径发送）。
-              </p>
-              <div class="roster-add">
-                <select v-model="rcptForm.mode" class="roster-select">
-                  <option value="include">追加</option>
-                  <option value="exclude">移除</option>
-                </select>
-                <select v-model="rcptForm.target_type" class="roster-select">
-                  <option value="user_id">账号</option>
-                  <option value="name">姓名</option>
-                </select>
-                <input v-model="rcptForm.target_value" placeholder="账号或姓名" class="roster-input">
-                <button
-                  class="btn mini"
-                  :disabled="busy"
-                  @click="onRcptAdd(drawer.node.service.service_id)"
-                >添加</button>
-              </div>
-            </template>
-          </div>
-        </template>
-        <template v-else-if="drawer.kind === 'region'">
-          <h2>{{ drawer.node.label }}</h2>
-          <p class="drawer-sub">
-            {{ drawer.node.key }} · 成员 {{ drawer.node.memberCount }} ·
-            下游任务 {{ drawer.node.taskCount }} · 目标月份 {{ month }}
-          </p>
-          <div class="drawer-sec">
-            <h3>名册（{{ drawerRoster.length }}）</h3>
-            <div v-for="row in drawerRoster" :key="row.id" class="roster-row">
-              <span class="roster-name" :class="{ off: !Number(row.enabled) }">
-                {{ row.person_name }}
-              </span>
-              <span class="roster-role">{{ row.role === 'deputy' ? '代填' : '负责' }}</span>
-              <button
-                class="switch"
-                :class="{ on: Number(row.enabled) }"
-                :disabled="busy"
-                @click="onToggleRosterRow(row)"
-              ><i /></button>
-              <button
-                class="btn mini ghost"
-                :disabled="busy"
-                @click="onDeleteRosterRow(row)"
-              >删</button>
-            </div>
-            <div class="roster-add">
-              <input v-model="drawerNewName" placeholder="姓名" class="roster-input">
-              <select v-model="drawerNewRole" class="roster-select">
-                <option value="owner">负责人</option>
-                <option value="deputy">代填人</option>
-              </select>
-              <button class="btn mini" :disabled="busy" @click="onAddRosterRow">补录</button>
-            </div>
-          </div>
-          <div class="drawer-sec">
-            <h3>月目标（万元）</h3>
-            <div
-              v-for="row in drawerRoster.filter((r) => Number(r.enabled))"
-              :key="'t' + row.id"
-              class="target-row"
-            >
-              <span class="roster-name">{{ row.person_name }}</span>
-              <input
-                v-model="drawerTargets[row.person_name]"
-                type="number"
-                min="0"
-                step="0.1"
-                class="target-input"
-              >
-            </div>
-            <button class="btn mini primary" :disabled="busy" @click="onSaveTargets">
-              保存月目标
-            </button>
-            <p class="drawer-line muted">
-              保存即写当月快照真源（dim_report_target）；发布快照/月份切换暂留名册页。
-            </p>
-          </div>
-        </template>
-        <template v-else-if="drawer.kind === 'calendar'">
-          <h2>播报日历</h2>
-          <p class="drawer-sub">默认每天播报；点日期=切换 播报/休息（人工裁决，留审计）</p>
-          <div class="drawer-sec" v-if="calData">
-            <div class="cal-nav">
-              <button class="btn mini" @click="loadCalendar(calData.prev_month)">← 上月</button>
-              <b>{{ calData.year }} 年 {{ calData.month_no }} 月</b>
-              <button class="btn mini" @click="loadCalendar(calData.next_month)">下月 →</button>
-            </div>
-            <div class="cal-grid">
-              <span v-for="w in ['一','二','三','四','五','六','日']" :key="w" class="cal-wd">{{ w }}</span>
-              <template v-for="(cell, i) in calCells" :key="i">
-                <span v-if="!cell" class="cal-cell empty" />
-                <button
-                  v-else
-                  class="cal-cell"
-                  :class="{ rest: !cell.is_workday, manual: cell.source === 'manual' }"
-                  :title="`${cell.day} 日 ${cell.is_workday ? '播报' : '休息'}${cell.note ? ' · ' + cell.note : ''}`"
-                  @click="onToggleCalDay(cell)"
-                >{{ cell.day }}</button>
-              </template>
-            </div>
-            <p class="drawer-line muted">
-              播报日 {{ calData.days.filter((d) => d.is_workday).length }} 天 ·
-              休息 {{ calData.days.filter((d) => !d.is_workday).length }} 天
-            </p>
-            <button class="btn mini" :disabled="busy" @click="onResetCalMonth">
-              清除本月人工裁决（回全播报）
-            </button>
-          </div>
-        </template>
-        <template v-else-if="drawer.kind === 'records'">
-          <h2>操作记录</h2>
-          <p class="drawer-sub">六源聚合审计（授权/定时任务/名册/播报日历/收件人/定时运行）</p>
-          <div class="drawer-sec">
-            <div class="rec-filter">
-              <select v-model="recFilter.source" class="roster-select" @change="loadRecords">
-                <option value="">全部来源</option>
-                <option v-for="s in recSources" :key="s" :value="s">{{ s }}</option>
-              </select>
-              <input
-                v-model="recFilter.actor"
-                placeholder="操作人"
-                class="roster-input"
-                @change="loadRecords"
-              >
-            </div>
-            <div v-for="(r, i) in recRows" :key="i" class="rec-row">
-              <span class="rec-time">{{ r.created_at }}</span>
-              <span class="rec-source">{{ r.source }}</span>
-              <span class="rec-action">{{ r.action_label }}</span>
-              <span class="rec-target">{{ r.actor }} → {{ r.target }}</span>
-              <span class="rec-detail">{{ r.detail }}</span>
-            </div>
-            <p v-if="!recRows.length" class="drawer-line muted">无记录</p>
-          </div>
-        </template>
-        <template v-else-if="drawer.kind === 'grants'">
-          <h2>授权</h2>
-          <p class="drawer-sub">能力×区域授权（admin 专属；生效有分钟级延迟）</p>
-          <div class="drawer-sec">
-            <h3>新增授权</h3>
-            <div class="roster-add">
-              <input v-model="grantForm.user_id" placeholder="钉钉 userid" class="roster-input">
-              <select v-model="grantForm.grant_type" class="roster-select">
-                <option value="scope">能力</option>
-                <option value="region">看板区域</option>
-                <option value="admin">管理员</option>
-              </select>
-            </div>
-            <div class="roster-add" v-if="grantForm.grant_type === 'scope'">
-              <select v-model="grantForm.cap" class="roster-select">
-                <option v-for="c in GRANT_CAPS" :key="c.key" :value="c.key">{{ c.label }}</option>
-              </select>
-              <select v-model="grantForm.region" class="roster-select">
-                <option value="">全局</option>
-                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
-              </select>
-            </div>
-            <div class="roster-add" v-else-if="grantForm.grant_type === 'region'">
-              <select v-model="grantForm.region" class="roster-select">
-                <option value="">— 选择区域 —</option>
-                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
-              </select>
-            </div>
-            <div class="roster-add">
-              <input v-model="grantForm.note" placeholder="备注（可空）" class="roster-input">
-              <button class="btn mini primary" :disabled="busy" @click="onGrantAdd">添加</button>
-            </div>
-          </div>
-          <div class="drawer-sec">
-            <h3>授权现状（{{ grantRows.length }}）</h3>
-            <div v-for="(row, i) in grantRows" :key="i" class="rec-row">
-              <span class="rec-target">{{ row.user_id }}</span>
-              <span class="rec-action">{{ row.grant_type_label }}</span>
-              <span class="rec-source">{{ row.grant_key }}</span>
-              <button class="btn mini ghost" :disabled="busy" @click="onGrantDelete(row)">删</button>
-              <span class="rec-detail">{{ row.note }} · {{ row.created_at }}</span>
-            </div>
-            <p v-if="!grantRows.length" class="drawer-line muted">暂无授权记录</p>
-          </div>
-        </template>
-        <template v-else-if="drawer.kind === 'datafix'">
-          <h2>数据修正</h2>
-          <p class="drawer-sub">类型化修数（第一期：线下事实行人员归属归位）；预览→确认落库，全程审计</p>
-          <div class="drawer-sec">
-            <h3>归属归位</h3>
-            <div class="roster-add">
-              <input v-model="fixForm.person_name" placeholder="姓名" class="roster-input">
-            </div>
-            <div class="roster-add">
-              <select v-model="fixForm.from_region" class="roster-select">
-                <option value="">从区域…</option>
-                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
-              </select>
-              <span class="drawer-line">→</span>
-              <select v-model="fixForm.to_region" class="roster-select">
-                <option value="">到区域…</option>
-                <option v-for="n in regionNodes" :key="n.key" :value="n.key">{{ n.label }}</option>
-              </select>
-            </div>
-            <div class="roster-add">
-              <button class="btn mini" :disabled="busy" @click="onFixPreview">预览影响面</button>
-              <button
-                class="btn mini primary"
-                :disabled="busy || !fixPreview || !fixPreview.row_count"
-                @click="onFixApply"
-              >执行归位</button>
-            </div>
-            <div v-if="fixPreview" class="fix-preview">
-              <template v-if="fixPreview.row_count">
-                命中 <b>{{ fixPreview.row_count }}</b> 行 ·
-                {{ fixPreview.date_from }} ~ {{ fixPreview.date_to }} ·
-                Σ {{ fixPreview.sales_amount }} 元
-              </template>
-              <span v-else class="muted">零命中（不落审计）</span>
-            </div>
-          </div>
-          <div class="drawer-sec">
-            <h3>修正记录（{{ fixAudits.length }}）</h3>
-            <div v-for="(a, i) in fixAudits" :key="i" class="rec-row">
-              <span class="rec-time">{{ a.created_at }}</span>
-              <span class="rec-action">{{ a.action_label }}</span>
-              <span class="rec-target">{{ a.fix_type_label }} · {{ a.target }}</span>
-              <span class="rec-detail">{{ a.detail }} · {{ a.actor }}</span>
-            </div>
-            <p v-if="!fixAudits.length" class="drawer-line muted">暂无修正记录</p>
-          </div>
-        </template>
-        <button class="drawer-close" @click="closeDrawer">✕</button>
-      </aside>
-    </transition>
-    <div v-if="drawer" class="drawer-mask" @click="closeDrawer" />
+    <!-- 节点抽屉（F2：宿主 + 按 kind 动态分发到 drawers/ 组件） -->
+    <DrawerHost
+      :drawer="drawer"
+      :busy="busy"
+      :month="month"
+      :roster="lastRaw && lastRaw.roster"
+      :region-nodes="regionNodes"
+      :reload="reloadSilent"
+      @close="closeDrawer"
+      @update:busy="busy = $event"
+    />
   </div>
 </template>
 
@@ -2111,121 +1365,7 @@ watch(() => route.query.region, () => applyAnchor());
   border-top: 2.5px solid #6366f1;
 }
 
-/* 抽屉 */
-.drawer {
-  position: fixed;
-  right: 0;
-  top: 52px;
-  bottom: 0;
-  width: 360px;
-  background: #fff;
-  border-left: 1px solid #e5e7eb;
-  box-shadow: -4px 0 16px rgba(16, 24, 40, 0.08);
-  padding: 18px;
-  z-index: 30;
-  overflow-y: auto;
-}
-.drawer h2 {
-  margin: 0 0 2px;
-  font-size: 16px;
-}
-.drawer-sub {
-  margin: 0 0 12px;
-  color: #9ca3af;
-  font-size: 12px;
-}
-.drawer-sec {
-  margin-bottom: 16px;
-}
-.drawer-sec h3 {
-  margin: 0 0 6px;
-  font-size: 13px;
-  color: #4b5563;
-}
-.drawer-line {
-  margin: 0 0 6px;
-  font-size: 13px;
-}
-.drawer-line.muted {
-  color: #9ca3af;
-}
-.drawer-link {
-  display: block;
-  margin: 4px 0;
-  color: #2563eb;
-  font-size: 13px;
-  text-decoration: none;
-}
-.time-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-size: 13px;
-}
-.time-row input {
-  width: 56px;
-  padding: 4px 6px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-}
-.drawer-close {
-  position: absolute;
-  right: 12px;
-  top: 12px;
-  border: none;
-  background: none;
-  font-size: 16px;
-  color: #9ca3af;
-  cursor: pointer;
-}
-.roster-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  font-size: 13px;
-}
-.roster-name {
-  min-width: 72px;
-  font-weight: 600;
-}
-.roster-name.off {
-  color: #9ca3af;
-  text-decoration: line-through;
-}
-.roster-role {
-  font-size: 11px;
-  color: #6b7280;
-}
-.roster-add {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-}
-.roster-input {
-  flex: 1;
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-}
-.roster-select {
-  padding: 4px 6px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-}
-.target-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-}
-.target-input {
-  width: 100px;
-  padding: 4px 6px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-}
+/* 抽屉样式已抽到 components/flow/drawers/drawer.css（.flow-drawer 命名空间） */
 .global-node {
   padding-bottom: 4px;
   border-style: dashed;
@@ -2241,103 +1381,5 @@ watch(() => route.query.region, () => applyAnchor());
   font-size: 12px;
   cursor: pointer;
   text-align: left;
-}
-.rcpt-mode {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: #ecfdf5;
-  color: #047857;
-}
-.rcpt-mode.exclude {
-  background: #fef2f2;
-  color: #b91c1c;
-}
-.cal-nav {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.cal-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 4px;
-  margin-bottom: 8px;
-}
-.cal-wd {
-  text-align: center;
-  font-size: 11px;
-  color: #9ca3af;
-}
-.cal-cell {
-  padding: 6px 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  font-size: 12px;
-  cursor: pointer;
-}
-.cal-cell.rest {
-  background: #dbe7ff;
-  color: #1f3a5f;
-}
-.cal-cell.manual {
-  border-color: #f59e0b;
-}
-.cal-cell.empty {
-  border: none;
-  background: none;
-  cursor: default;
-}
-.rec-filter {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.rec-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 5px 0;
-  border-bottom: 1px solid #f3f4f6;
-  font-size: 12px;
-}
-.rec-time {
-  color: #9ca3af;
-}
-.rec-source {
-  color: #4338ca;
-}
-.rec-action {
-  font-weight: 600;
-}
-.rec-target {
-  color: #4b5563;
-}
-.rec-detail {
-  width: 100%;
-  color: #6b7280;
-}
-.fix-preview {
-  margin-top: 8px;
-  padding: 8px 10px;
-  border: 1px solid #fde68a;
-  border-radius: 8px;
-  background: #fffbeb;
-  font-size: 12px;
-}
-.drawer-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-}
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: transform 0.18s ease;
-}
-.drawer-enter-from,
-.drawer-leave-to {
-  transform: translateX(100%);
 }
 </style>
