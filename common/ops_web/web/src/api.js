@@ -350,6 +350,11 @@ export function runPipelineOnce(payload) {
   return post('/api/pipelines/run-once', payload);
 }
 
+/** 改任务依赖（画布拉线）。payload: {service_id, depends_on:[service_id,...]}。 */
+export function updatePipelineDeps(payload) {
+  return post('/api/pipelines/deps', payload);
+}
+
 /** 新增/重启用一条收件人覆盖。payload: {service_id, mode, target_type,
  *  target_value, note?}。 */
 export function addRecipientOverride(payload) {

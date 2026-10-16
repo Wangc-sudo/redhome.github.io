@@ -36,6 +36,7 @@ import {
   togglePipeline,
   toggleRecipientOverride,
   toggleRosterEntry,
+  updatePipelineDeps,
   updatePipelineTimes,
 } from '../api.js';
 import { hasCapability, isAdmin, me, setFlash, flash } from '../store/me.js';
@@ -245,6 +246,93 @@ async function dropWireOnRegion(member, regionKey) {
 
 const wireDraftPath = computed(() => {
   const w = wireDraft.value;
+  if (!w) return '';
+  const dx = Math.max(60, Math.abs(w.x2 - w.x1) / 2);
+  return `M ${w.x1} ${w.y1} C ${w.x1 + dx} ${w.y1}, ${w.x2 - dx} ${w.y2}, ${w.x2} ${w.y2}`;
+});
+
+// -- 拉线（模块 → 模块 ＝ 任务依赖；2026-10-16「拉线改后端」）---------------
+// 语义：从「先跑」模块的输出端口拉线到「后跑」模块的输入端口，
+// 目标模块全部成员的 depends_on 追加源模块全部成员（逐成员调 deps API）。
+const depDraft = ref(null);    // {fromModule, x1, y1, x2, y2}
+
+function startDepWire(evt, node) {
+  if (evt.button !== 0 || busy.value || !canPipelines.value) return;
+  evt.stopPropagation();
+  evt.preventDefault();
+  const x1 = node.x + TASK_W;
+  const y1 = node.y + moduleH(node) / 2;
+  const canvasEl = evt.target.closest('.canvas');
+  const rect = canvasEl.getBoundingClientRect();
+  depDraft.value = { fromModule: node, x1, y1, x2: x1, y2: y1 };
+  function onMove(moveEvt) {
+    depDraft.value.x2 = (moveEvt.clientX - rect.left - panX.value) / zoom.value;
+    depDraft.value.y2 = (moveEvt.clientY - rect.top - panY.value) / zoom.value;
+  }
+  function onUp(upEvt) {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    const draft = depDraft.value;
+    depDraft.value = null;
+    const hit = document.elementFromPoint(upEvt.clientX, upEvt.clientY);
+    const port = hit && hit.closest ? hit.closest('[data-module-in]') : null;
+    if (!port) return;
+    const targetId = port.getAttribute('data-module-in');
+    const target = taskNodes.value.find((n) => n.id === targetId);
+    if (target) dropDepWire(draft.fromModule, target);
+  }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+async function dropDepWire(fromModule, toModule) {
+  if (fromModule.id === toModule.id) return;
+  const sourceIds = fromModule.services.map((s) => s.service_id);
+  const ok = window.confirm(
+    `建立依赖：「${toModule.label}」的全部任务 依赖 「${fromModule.label}」？\n`
+    + `（${toModule.services.map((s) => s.service_id).join('、')} `
+    + `depends_on += ${sourceIds.join('、')}）`,
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    for (const service of toModule.services) {
+      const next = [...new Set([...(service.depends_on || []), ...sourceIds])];
+      await updatePipelineDeps({ service_id: service.service_id, depends_on: next });
+    }
+    setFlash('ok', `已建立依赖：${toModule.label} ← ${fromModule.label}`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `建立依赖失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 点选依赖线＝解除（目标模块成员 depends_on 移除源模块成员）。 */
+async function onDepEdgeClick(dep) {
+  const ok = window.confirm(
+    `解除依赖：「${dep.toLabel}」 不再依赖 「${dep.fromLabel}」？`,
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    for (const service of dep.toModule.services) {
+      const next = (service.depends_on || [])
+        .filter((d) => !dep.sourceIds.includes(d));
+      await updatePipelineDeps({ service_id: service.service_id, depends_on: next });
+    }
+    setFlash('ok', `已解除依赖：${dep.toLabel} ✕ ${dep.fromLabel}`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `解除依赖失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+const depDraftPath = computed(() => {
+  const w = depDraft.value;
   if (!w) return '';
   const dx = Math.max(60, Math.abs(w.x2 - w.x1) / 2);
   return `M ${w.x1} ${w.y1} C ${w.x1 + dx} ${w.y1}, ${w.x2 - dx} ${w.y2}, ${w.x2} ${w.y2}`;
@@ -901,6 +989,49 @@ const edgePaths = computed(() => edges.value.map((edge) => {
   };
 }));
 
+/** 依赖线（模块→模块）：成员服务 depends_on 聚合到家族模块层。 */
+const depEdges = computed(() => {
+  const moduleOfService = {};
+  for (const n of taskNodes.value) {
+    for (const s of n.services) moduleOfService[s.service_id] = n;
+  }
+  const seen = new Set();
+  const out = [];
+  for (const n of taskNodes.value) {
+    const sourceIds = new Set();
+    for (const s of n.services) {
+      for (const dep of s.depends_on || []) {
+        const from = moduleOfService[dep];
+        if (from && from.id !== n.id) sourceIds.add(from.id);
+      }
+    }
+    for (const fromId of sourceIds) {
+      const key = `${fromId}→${n.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const from = nodeById.value[fromId];
+      const to = nodeById.value[n.id];
+      if (!from || !to) continue;
+      const fromModule = taskNodes.value.find((m) => m.id === fromId);
+      const x1 = from.x + from.w;
+      const y1 = from.y + from.h / 2;
+      const x2 = to.x;
+      const y2 = to.y + 34;
+      const dx = Math.max(60, Math.abs(x2 - x1) / 2);
+      out.push({
+        id: key,
+        fromLabel: fromModule.label,
+        toLabel: n.label,
+        fromModule,
+        toModule: n,
+        sourceIds: fromModule.services.map((s) => s.service_id),
+        d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
+      });
+    }
+  }
+  return out;
+});
+
 const canvasSize = computed(() => {
   let maxX = 1300;
   let maxY = 480;
@@ -999,6 +1130,16 @@ watch(() => route.query.region, () => applyAnchor());
               :class="{ broken: edge.broken }"
             />
             <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
+            <path v-if="depDraft" :d="depDraftPath" class="edge dep-drafting" />
+            <path
+              v-for="dep in depEdges"
+              :key="dep.id"
+              :d="dep.d"
+              class="edge dep"
+              :data-dep-id="dep.id"
+              @mousedown.stop
+              @click="onDepEdgeClick(dep)"
+            ><title>依赖：{{ dep.fromLabel }} → {{ dep.toLabel }}（点击解除）</title></path>
           </svg>
 
           <!-- 未归类池节点（成员输出端口：拉线到区域＝归口） -->
@@ -1078,7 +1219,13 @@ watch(() => route.query.region, () => applyAnchor());
             :class="{ broken: node.brokenCount > 0, expanded: expandedModules.has(node.id) }"
             :style="{ left: node.x + 'px', top: node.y + 'px', width: TASK_W + 'px' }"
           >
-            <span class="port in" />
+            <span class="port in module-in" :data-module-in="node.id" title="依赖输入（拉线至此＝本模块依赖来源模块）" />
+            <span
+              class="port out module-out"
+              :class="{ busy }"
+              title="依赖输出（拉线到别的模块＝对方依赖本模块）"
+              @mousedown="startDepWire($event, node)"
+            />
             <div class="node-head module-head" title="拖动移动；点击展开/收起成员" @mousedown="startNodeDrag($event, node)">
               <h4>{{ node.label }}</h4>
               <span class="badge" :class="node.brokenCount ? 'warn' : 'ok'">
@@ -1527,6 +1674,33 @@ watch(() => route.query.region, () => applyAnchor());
 .edge.drafting {
   stroke: #2563eb;
   stroke-dasharray: 4 4;
+}
+.edge.dep {
+  stroke: #8b5cf6;
+  stroke-width: 2;
+  stroke-dasharray: 2 3;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.edge.dep:hover {
+  stroke: #7c3aed;
+  stroke-width: 3;
+}
+.edge.dep-drafting {
+  stroke: #8b5cf6;
+  stroke-dasharray: 4 4;
+}
+.port.module-out {
+  background: #8b5cf6;
+  cursor: crosshair;
+}
+.port.module-out.busy {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.port.module-in {
+  background: #8b5cf6;
+  cursor: crosshair;
 }
 
 .node {
