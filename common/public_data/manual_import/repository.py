@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from common.public_data.db import transaction
 from common.public_data.manual_import.schema import (
     RAW_MANUAL_ROWS_TABLE,
     RAW_MANUAL_RUNS_TABLE,
@@ -107,11 +108,14 @@ class ManualImportRepository:
             "`imported_by`, `imported_at`) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
-        with contextlib.closing(self._connection.cursor()) as cursor:
-            cursor.execute(sql, (
-                run_id, dataset, template_version, file_name, file_sha256,
-                period, 0, 0, status, imported_by, imported_at,
-            ))
+        # autocommit=False（db.connect 铁律）：不显式事务包裹，进程退出即
+        # 回滚——2026-10-16 云上实测 apply 打印 imported 但库里零行。
+        with transaction(self._connection):
+            with contextlib.closing(self._connection.cursor()) as cursor:
+                cursor.execute(sql, (
+                    run_id, dataset, template_version, file_name, file_sha256,
+                    period, 0, 0, status, imported_by, imported_at,
+                ))
 
     def finish_run(
         self, run_id: str, *, rows_ok: int, rows_bad: int, status: str
@@ -121,8 +125,9 @@ class ManualImportRepository:
             "SET `rows_ok` = %s, `rows_bad` = %s, `status` = %s "
             "WHERE `run_id` = %s"
         )
-        with contextlib.closing(self._connection.cursor()) as cursor:
-            cursor.execute(sql, (rows_ok, rows_bad, status, run_id))
+        with transaction(self._connection):
+            with contextlib.closing(self._connection.cursor()) as cursor:
+                cursor.execute(sql, (rows_ok, rows_bad, status, run_id))
 
     def replace_rows(
         self,
@@ -148,18 +153,19 @@ class ManualImportRepository:
             "`source_json`, `fields_json`, `imported_at`) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s)"
         )
-        with contextlib.closing(self._connection.cursor()) as cursor:
-            cursor.execute(delete_sql, (dataset, period))
-            for row in rows:
-                cursor.execute(insert_sql, (
-                    run_id,
-                    row.row_no,
-                    dataset,
-                    period,
-                    _canonical_json(row.source),
-                    _canonical_json(
-                        {k: _json_safe(v) for k, v in row.fields.items()}
-                    ),
-                    imported_at,
-                ))
+        with transaction(self._connection):
+            with contextlib.closing(self._connection.cursor()) as cursor:
+                cursor.execute(delete_sql, (dataset, period))
+                for row in rows:
+                    cursor.execute(insert_sql, (
+                        run_id,
+                        row.row_no,
+                        dataset,
+                        period,
+                        _canonical_json(row.source),
+                        _canonical_json(
+                            {k: _json_safe(v) for k, v in row.fields.items()}
+                        ),
+                        imported_at,
+                    ))
         return len(rows)

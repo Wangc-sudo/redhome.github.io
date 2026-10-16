@@ -709,6 +709,23 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual("run-1", params[0])
         self.assertEqual("alice", params[9])
 
+    def test_write_methods_commit(self):
+        """回归（2026-10-16 云上事故）：autocommit=False 下不显式 commit，
+        apply 打印 imported 但进程退出即回滚、库里零行。"""
+        self.repository.start_run(
+            run_id="run-1", dataset="d", template_version=1,
+            file_name="f.csv", file_sha256="a" * 64, period="2026-08",
+            status="imported", imported_by="alice",
+            imported_at="2026-09-15 10:00:00")
+        self.repository.replace_rows(
+            run_id="run-1", dataset="d", period="2026-08",
+            rows=[ManualRow(row_no=1, fields={"x": 1}, source={})],
+            imported_at="2026-09-15 10:00:00")
+        self.repository.finish_run("run-1", rows_ok=1, rows_bad=0,
+                                   status="imported")
+        self.assertEqual(3, self.connection.commit_calls)
+        self.assertEqual(0, self.connection.rollback_calls)
+
     def test_find_run_returns_none_when_the_file_is_new(self):
         self.assertIsNone(self.repository.find_run("ecommerce_monthly", "2026-08", "a" * 64))
 
@@ -865,6 +882,14 @@ class ProjectorTests(ManualImportTestCase):
 
         self.assertEqual(0, ManualProjector(connection).replace_facts((), synced_at="t"))
         self.assertEqual([], connection.events)
+
+    def test_replace_facts_commits(self):
+        """回归：投影写库必须显式 commit（autocommit=False）。"""
+        connection = FakeConnection()
+        facts = self._build_two_versions()[:1]
+        ManualProjector(connection).replace_facts(facts, synced_at="t1")
+        self.assertEqual(1, connection.commit_calls)
+        self.assertEqual(0, connection.rollback_calls)
 
 
 # ---------------------------------------------------------------------------
