@@ -15,15 +15,23 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import {
+  addRecipientOverride,
   addRosterEntry,
   assignMember,
+  deleteRecipientOverride,
   deleteRosterEntry,
+  getCalendar,
   getOverview,
   getPipelines,
+  getRecipientOverride,
+  getRecords,
   getRoster,
+  resetCalendarMonth,
   runPipelineOnce,
   saveRegionTargets,
+  toggleCalendarDay,
   togglePipeline,
+  toggleRecipientOverride,
   toggleRosterEntry,
   updatePipelineTimes,
 } from '../api.js';
@@ -253,6 +261,7 @@ function openTaskDrawer(node) {
     times.push({ hour: Number(m[1]), minute: Number(m[2]) });
   }
   drawerTimes.value = times.length ? times : [{ hour: 8, minute: 30 }];
+  loadRcpt(node.service.service_id);
 }
 
 // -- 区域抽屉（P2：名册+月目标编辑收进画布）------------------------------------
@@ -344,6 +353,174 @@ async function onSaveTargets() {
     await load({ silent: true });
   } catch (err) {
     setFlash('err', `保存目标失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+// -- 全局节点（P3：播报日历 / 操作记录 上画布）--------------------------------
+const GLOBAL_W = 220;
+const GLOBAL_H = 64;
+const globalNodes = ref([
+  { id: 'global:calendar', label: '播报日历', desc: '点日期改播报/休息', x: 40, y: 400 },
+  { id: 'global:records', label: '操作记录', desc: '六源审计流水', x: 40, y: 480 },
+]);
+
+// -- 日历抽屉 -------------------------------------------------------------------
+const calData = ref(null);
+const calMonth = ref('');
+
+async function loadCalendar(month) {
+  busy.value = true;
+  try {
+    calData.value = await getCalendar(month);
+    calMonth.value = calData.value.month;
+  } catch (err) {
+    setFlash('err', `日历读取失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+function openCalendarDrawer() {
+  drawer.value = { kind: 'calendar' };
+  loadCalendar(calMonth.value || undefined);
+}
+
+const calCells = computed(() => {
+  if (!calData.value) return [];
+  const cells = [];
+  for (let i = 0; i < (calData.value.first_weekday || 0); i += 1) cells.push(null);
+  for (const day of calData.value.days || []) cells.push(day);
+  return cells;
+});
+
+async function onToggleCalDay(cell) {
+  if (!cell) return;
+  const date = `${calData.value.month}-${String(cell.day).padStart(2, '0')}`;
+  const willWork = !cell.is_workday;
+  busy.value = true;
+  try {
+    await toggleCalendarDay({ date, is_workday: willWork, note: '' });
+    setFlash('ok', `${date} 已改为${willWork ? '播报' : '休息'}`);
+    await loadCalendar(calMonth.value);
+  } catch (err) {
+    setFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onResetCalMonth() {
+  if (!window.confirm(`清除 ${calMonth.value} 的人工裁决，回到全播报基线？`)) return;
+  busy.value = true;
+  try {
+    await resetCalendarMonth({ month: calMonth.value });
+    setFlash('ok', `${calMonth.value} 已恢复全播报基线`);
+    await loadCalendar(calMonth.value);
+  } catch (err) {
+    setFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+// -- 记录抽屉 -------------------------------------------------------------------
+const recRows = ref([]);
+const recSources = ref([]);
+const recFilter = ref({ source: '', actor: '' });
+
+async function loadRecords() {
+  busy.value = true;
+  try {
+    const data = await getRecords({
+      source: recFilter.value.source || undefined,
+      actor: recFilter.value.actor || undefined,
+    });
+    recRows.value = (data && data.records) || [];
+    recSources.value = (data && data.sources) || [];
+  } catch (err) {
+    setFlash('err', `记录读取失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+function openRecordsDrawer() {
+  drawer.value = { kind: 'records' };
+  loadRecords();
+}
+
+function onGlobalNodeClick(node) {
+  if (node.id === 'global:calendar') openCalendarDrawer();
+  else if (node.id === 'global:records') openRecordsDrawer();
+}
+
+// -- 任务抽屉收件人段（P3：吃收件人总览页的单线微调）------------------------------
+const RCPT_MODE = { include: '追加', exclude: '移除' };
+const RCPT_TYPE = { user_id: '账号', name: '姓名' };
+const rcpt = ref({ loading: false, base: [], rows: [], explain: [] });
+const rcptForm = ref({ mode: 'include', target_type: 'user_id', target_value: '', note: '' });
+
+async function loadRcpt(serviceId) {
+  rcpt.value.loading = true;
+  try {
+    const data = await getRecipientOverride(serviceId);
+    rcpt.value = {
+      loading: false,
+      base: (data && data.base) || [],
+      rows: (data && data.overrides) || [],
+      explain: (data && data.explain) || [],
+    };
+  } catch (err) {
+    rcpt.value = { loading: false, base: [], rows: [], explain: [] };
+    setFlash('err', `收件人读取失败：${err.message}`);
+  }
+}
+
+async function onRcptAdd(serviceId) {
+  const value = rcptForm.value.target_value.trim();
+  if (!value) return;
+  busy.value = true;
+  try {
+    await addRecipientOverride({
+      service_id: serviceId,
+      mode: rcptForm.value.mode,
+      target_type: rcptForm.value.target_type,
+      target_value: value,
+      note: rcptForm.value.note.trim(),
+    });
+    setFlash('ok', '收件人覆盖已添加');
+    rcptForm.value.target_value = '';
+    rcptForm.value.note = '';
+    await loadRcpt(serviceId);
+  } catch (err) {
+    setFlash('err', `添加失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onRcptToggle(serviceId, row) {
+  busy.value = true;
+  try {
+    await toggleRecipientOverride({ id: row.id, enabled: !Number(row.enabled) });
+    await loadRcpt(serviceId);
+  } catch (err) {
+    setFlash('err', `操作失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onRcptDelete(serviceId, row) {
+  if (!window.confirm(`删除覆盖「${RCPT_MODE[row.mode]} ${row.target_value}」？`)) return;
+  busy.value = true;
+  try {
+    await deleteRecipientOverride({ id: row.id });
+    await loadRcpt(serviceId);
+  } catch (err) {
+    setFlash('err', `删除失败：${err.message}`);
   } finally {
     busy.value = false;
   }
@@ -520,6 +697,13 @@ function layout() {
     x: savedPool ? savedPool.x : 40,
     y: savedPool ? savedPool.y : TOP_Y,
   };
+  // 全局节点：池下方纵向排列（可被拖动覆盖）
+  const poolBottom = poolH + poolNode.value.y + 28;
+  globalNodes.value.forEach((node, index) => {
+    const savedPos = saved[node.id];
+    node.x = savedPos ? savedPos.x : 40;
+    node.y = savedPos ? savedPos.y : poolBottom + index * (GLOBAL_H + 16);
+  });
   for (const region of regionNodes.value) {
     const stack = taskNodes.value.filter((t) => t.regionKey === region.key);
     const stackTop = cursorY;
@@ -571,6 +755,9 @@ const canvasSize = computed(() => {
   for (const n of Object.values(nodeById.value)) {
     maxX = Math.max(maxX, n.x + n.w + 60);
     maxY = Math.max(maxY, n.y + n.h + 60);
+  }
+  for (const n of globalNodes.value) {
+    maxY = Math.max(maxY, n.y + GLOBAL_H + 60);
   }
   return { w: maxX, h: maxY };
 });
@@ -713,6 +900,21 @@ watch(() => route.query.region, () => applyAnchor());
             <span class="port out" title="驱动下游任务" />
           </article>
 
+          <!-- 全局节点（播报日历 / 操作记录） -->
+          <article
+            v-for="node in globalNodes"
+            :key="node.id"
+            class="node global-node"
+            :style="{ left: node.x + 'px', top: node.y + 'px', width: GLOBAL_W + 'px', height: GLOBAL_H + 'px' }"
+          >
+            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
+              <h4>{{ node.label }}</h4>
+            </div>
+            <button class="global-open" @click="onGlobalNodeClick(node)">
+              {{ node.desc }} →
+            </button>
+          </article>
+
           <!-- 任务节点（节点即控件） -->
           <article
             v-for="node in taskNodes"
@@ -795,6 +997,50 @@ watch(() => route.query.region, () => applyAnchor());
             <h3>依赖</h3>
             <p class="drawer-line">{{ drawer.node.service.depends_on.join('、') }}</p>
           </div>
+          <div class="drawer-sec">
+            <h3>收件人覆盖</h3>
+            <p class="drawer-line muted" v-if="rcpt.loading">读取中…</p>
+            <template v-else>
+              <p class="drawer-line muted">
+                基名单 {{ rcpt.base.length }} 人（{{ rcpt.base.join('、') || '—' }}）
+              </p>
+              <div v-for="o in rcpt.rows" :key="o.id" class="roster-row">
+                <span class="rcpt-mode" :class="o.mode">{{ RCPT_MODE[o.mode] || o.mode }}</span>
+                <span class="roster-name">{{ o.target_value }}</span>
+                <span class="roster-role">{{ RCPT_TYPE[o.target_type] || o.target_type }}</span>
+                <button
+                  class="switch"
+                  :class="{ on: Number(o.enabled) }"
+                  :disabled="busy"
+                  @click="onRcptToggle(drawer.node.service.service_id, o)"
+                ><i /></button>
+                <button
+                  class="btn mini ghost"
+                  :disabled="busy"
+                  @click="onRcptDelete(drawer.node.service.service_id, o)"
+                >删</button>
+              </div>
+              <p v-if="!rcpt.rows.length" class="drawer-line muted">
+                暂无覆盖（按名册口径发送）。
+              </p>
+              <div class="roster-add">
+                <select v-model="rcptForm.mode" class="roster-select">
+                  <option value="include">追加</option>
+                  <option value="exclude">移除</option>
+                </select>
+                <select v-model="rcptForm.target_type" class="roster-select">
+                  <option value="user_id">账号</option>
+                  <option value="name">姓名</option>
+                </select>
+                <input v-model="rcptForm.target_value" placeholder="账号或姓名" class="roster-input">
+                <button
+                  class="btn mini"
+                  :disabled="busy"
+                  @click="onRcptAdd(drawer.node.service.service_id)"
+                >添加</button>
+              </div>
+            </template>
+          </div>
         </template>
         <template v-else-if="drawer.kind === 'region'">
           <h2>{{ drawer.node.label }}</h2>
@@ -852,6 +1098,63 @@ watch(() => route.query.region, () => applyAnchor());
             <p class="drawer-line muted">
               保存即写当月快照真源（dim_report_target）；发布快照/月份切换暂留名册页。
             </p>
+          </div>
+        </template>
+        <template v-else-if="drawer.kind === 'calendar'">
+          <h2>播报日历</h2>
+          <p class="drawer-sub">默认每天播报；点日期=切换 播报/休息（人工裁决，留审计）</p>
+          <div class="drawer-sec" v-if="calData">
+            <div class="cal-nav">
+              <button class="btn mini" @click="loadCalendar(calData.prev_month)">← 上月</button>
+              <b>{{ calData.year }} 年 {{ calData.month_no }} 月</b>
+              <button class="btn mini" @click="loadCalendar(calData.next_month)">下月 →</button>
+            </div>
+            <div class="cal-grid">
+              <span v-for="w in ['一','二','三','四','五','六','日']" :key="w" class="cal-wd">{{ w }}</span>
+              <template v-for="(cell, i) in calCells" :key="i">
+                <span v-if="!cell" class="cal-cell empty" />
+                <button
+                  v-else
+                  class="cal-cell"
+                  :class="{ rest: !cell.is_workday, manual: cell.source === 'manual' }"
+                  :title="`${cell.day} 日 ${cell.is_workday ? '播报' : '休息'}${cell.note ? ' · ' + cell.note : ''}`"
+                  @click="onToggleCalDay(cell)"
+                >{{ cell.day }}</button>
+              </template>
+            </div>
+            <p class="drawer-line muted">
+              播报日 {{ calData.days.filter((d) => d.is_workday).length }} 天 ·
+              休息 {{ calData.days.filter((d) => !d.is_workday).length }} 天
+            </p>
+            <button class="btn mini" :disabled="busy" @click="onResetCalMonth">
+              清除本月人工裁决（回全播报）
+            </button>
+          </div>
+        </template>
+        <template v-else-if="drawer.kind === 'records'">
+          <h2>操作记录</h2>
+          <p class="drawer-sub">六源聚合审计（授权/定时任务/名册/播报日历/收件人/定时运行）</p>
+          <div class="drawer-sec">
+            <div class="rec-filter">
+              <select v-model="recFilter.source" class="roster-select" @change="loadRecords">
+                <option value="">全部来源</option>
+                <option v-for="s in recSources" :key="s" :value="s">{{ s }}</option>
+              </select>
+              <input
+                v-model="recFilter.actor"
+                placeholder="操作人"
+                class="roster-input"
+                @change="loadRecords"
+              >
+            </div>
+            <div v-for="(r, i) in recRows" :key="i" class="rec-row">
+              <span class="rec-time">{{ r.created_at }}</span>
+              <span class="rec-source">{{ r.source }}</span>
+              <span class="rec-action">{{ r.action_label }}</span>
+              <span class="rec-target">{{ r.actor }} → {{ r.target }}</span>
+              <span class="rec-detail">{{ r.detail }}</span>
+            </div>
+            <p v-if="!recRows.length" class="drawer-line muted">无记录</p>
           </div>
         </template>
         <button class="drawer-close" @click="closeDrawer">✕</button>
@@ -1355,6 +1658,99 @@ watch(() => route.query.region, () => applyAnchor());
   padding: 4px 6px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
+}
+.global-node {
+  padding-bottom: 4px;
+  border-style: dashed;
+  background: #fdfdff;
+}
+.global-open {
+  display: block;
+  margin: 0 10px;
+  padding: 2px 0 6px;
+  border: none;
+  background: none;
+  color: #2563eb;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.rcpt-mode {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #047857;
+}
+.rcpt-mode.exclude {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.cal-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.cal-wd {
+  text-align: center;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.cal-cell {
+  padding: 6px 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cal-cell.rest {
+  background: #dbe7ff;
+  color: #1f3a5f;
+}
+.cal-cell.manual {
+  border-color: #f59e0b;
+}
+.cal-cell.empty {
+  border: none;
+  background: none;
+  cursor: default;
+}
+.rec-filter {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.rec-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 0;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 12px;
+}
+.rec-time {
+  color: #9ca3af;
+}
+.rec-source {
+  color: #4338ca;
+}
+.rec-action {
+  font-weight: 600;
+}
+.rec-target {
+  color: #4b5563;
+}
+.rec-detail {
+  width: 100%;
+  color: #6b7280;
 }
 .drawer-mask {
   position: fixed;
