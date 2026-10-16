@@ -1,28 +1,32 @@
 <script setup>
 /**
- * 闭环画布 v2（2026-10-16）：ComfyUI 式纯读拓扑画布。
+ * 闭环画布 v3（2026-10-16，P1）：ComfyUI 式画布即应用——画布逐步吃掉
+ * ops-web 各页（用户裁决「闭环画布 = ops-web」）。
  *
- * 语义裁决：画布只表达「谁驱动谁」的拓扑——写操作各归其位
- * （归属=组织编排页、名册=名册页、收件人=定时任务页），画布零写接口。
+ * ComfyUI 语义落地：
+ *   · 连线即关系写：未归类池成员节点的输出端口拉线 → 区域节点输入端口
+ *     ＝ 归属变更（assignMember，confirm 后落库）；
+ *   · 节点即控件：任务节点内嵌 启用开关 / 运行一次（写端点复用，零新增）；
+ *   · 点节点开抽屉：任务抽屉＝改播报时间 + 执行流水入口（P1c）。
  *
- * 节点两类：
- *   · 区域节点（左）：名册/目标/成员/Σ万元 四要素 + 闭环状态徽标
- *   · 任务节点（右）：该区域下游定时任务（schedule/启用态/最近运行）
- * 连线：区域输出端口 →（驱动）→ 任务输入端口，贝塞尔曲线；
- * 断链（缺名册/缺目标/任务停用/最近失败）= 琥珀虚线。
- *
- * 画布交互：滚轮缩放（光标为中心）、拖空白平移、拖节点头移动节点
- * （坐标存 localStorage，v2 不落库）、?region= 锚点定位。
- * 读面并行拉既有 GET（overview / roster / pipelines），零新增端点。
+ * 画布交互：滚轮缩放（光标锚点）、拖空白平移、拖节点头移动
+ * （坐标存 localStorage v3）。名册/收件人/日历/授权分期吸收（P2-P4）。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { getOverview, getPipelines, getRoster } from '../api.js';
-import { hasCapability, me } from '../store/me.js';
+import {
+  assignMember,
+  getOverview,
+  getPipelines,
+  getRoster,
+  runPipelineOnce,
+  togglePipeline,
+  updatePipelineTimes,
+} from '../api.js';
+import { hasCapability, me, setFlash, flash } from '../store/me.js';
 
 const route = useRoute();
 
-// -- 能力（含区域级）------------------------------------------------------
 function hasAnyCap(cap) {
   if (hasCapability(cap)) return true;
   const scoped = (me.value && me.value.scoped_capabilities
@@ -32,20 +36,21 @@ function hasAnyCap(cap) {
 const canRoster = computed(() => hasAnyCap('roster'));
 const canPipelines = computed(() => hasAnyCap('pipelines'));
 
-// -- 状态 -----------------------------------------------------------------
-const regionNodes = ref([]);   // 区域节点（含「平台/无群」伪区域）
-const taskNodes = ref([]);     // 任务节点
-const edges = ref([]);         // 连线（region → task）
-const poolMembers = ref([]);   // 未归类池（只读展示）
+// -- 图状态 -----------------------------------------------------------------
+const regionNodes = ref([]);
+const taskNodes = ref([]);
+const edges = ref([]);
+const poolMembers = ref([]);
 const month = ref('');
 const loading = ref(true);
 const loadError = ref('');
+const busy = ref(false);       // 写接口在途：暂停拉线
 
 const anchorRegion = computed(() =>
   typeof route.query.region === 'string' ? route.query.region : '',
 );
 
-// -- 画布视口（缩放/平移）-------------------------------------------------
+// -- 视口（缩放/平移）-------------------------------------------------------
 const zoom = ref(1);
 const panX = ref(0);
 const panY = ref(0);
@@ -65,7 +70,6 @@ function onWheel(evt) {
   const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
     old * (evt.deltaY < 0 ? 1.12 : 1 / 1.12)));
   if (next === old) return;
-  // 以光标为锚缩放：保持光标下的画布点不动
   const rect = evt.currentTarget.getBoundingClientRect();
   const cx = evt.clientX - rect.left;
   const cy = evt.clientY - rect.top;
@@ -98,8 +102,8 @@ function resetView() {
   panY.value = 0;
 }
 
-// -- 节点坐标（localStorage 持久化）---------------------------------------
-const POS_KEY = 'ops-web.flow.node-pos.v2';
+// -- 节点坐标持久化 -----------------------------------------------------------
+const POS_KEY = 'ops-web.flow.node-pos.v3';
 const nodePos = ref({});
 
 function loadPos() {
@@ -113,7 +117,7 @@ function savePos() {
   try {
     localStorage.setItem(POS_KEY, JSON.stringify(nodePos.value));
   } catch (err) {
-    /* 隐私模式/配额满：坐标持久化失败不影响展示 */
+    /* 坐标持久化失败不影响业务 */
   }
 }
 function resetAllPos() {
@@ -122,19 +126,21 @@ function resetAllPos() {
   layout();
 }
 
-// -- 布局常量 --------------------------------------------------------------
+// -- 布局常量 ------------------------------------------------------------------
+const POOL_W = 220;
+const POOL_ROW_H = 30;
+const POOL_HEAD_H = 44;
 const REGION_W = 300;
 const REGION_H = 168;
 const TASK_W = 330;
-const TASK_H = 96;
+const TASK_H = 108;
 const TASK_GAP = 14;
-const REGION_X = 40;
-const TASK_X = 560;
+const REGION_X = 330;
+const TASK_X = 850;
 const TOP_Y = 40;
 
-// -- 节点拖拽（头部拖动＝改坐标）-------------------------------------------
 function startNodeDrag(evt, node) {
-  if (evt.button !== 0) return;
+  if (evt.button !== 0 || busy.value) return;
   evt.stopPropagation();
   const startX = evt.clientX;
   const startY = evt.clientY;
@@ -154,7 +160,166 @@ function startNodeDrag(evt, node) {
   window.addEventListener('mouseup', onUp);
 }
 
-// -- 数据装载 --------------------------------------------------------------
+// -- 拉线（成员池 → 区域 ＝ 归属变更）------------------------------------------
+const wireDraft = ref(null);   // {member, x1, y1, x2, y2}
+const poolNode = ref({ id: 'pool', x: 40, y: TOP_Y });
+
+function memberPortY(index) {
+  return poolNode.value.y + POOL_HEAD_H + index * POOL_ROW_H + POOL_ROW_H / 2;
+}
+
+function startWire(evt, member, index) {
+  if (evt.button !== 0 || busy.value) return;
+  if (!canPipelines.value && !canRoster.value) return;
+  evt.stopPropagation();
+  evt.preventDefault();
+  const x1 = poolNode.value.x + POOL_W;
+  const y1 = memberPortY(index);
+  const canvasEl = evt.target.closest('.canvas');
+  const rect = canvasEl.getBoundingClientRect();
+  wireDraft.value = { member, x1, y1, x2: x1, y2: y1 };
+  function toCanvas(moveEvt) {
+    return {
+      x: (moveEvt.clientX - rect.left - panX.value) / zoom.value,
+      y: (moveEvt.clientY - rect.top - panY.value) / zoom.value,
+    };
+  }
+  function onMove(moveEvt) {
+    const p = toCanvas(moveEvt);
+    wireDraft.value.x2 = p.x;
+    wireDraft.value.y2 = p.y;
+  }
+  function onUp(upEvt) {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    const draft = wireDraft.value;
+    wireDraft.value = null;
+    const hit = document.elementFromPoint(upEvt.clientX, upEvt.clientY);
+    const port = hit && hit.closest
+      ? hit.closest('[data-region-in]') : null;
+    if (!port) return;
+    dropWireOnRegion(draft.member, port.getAttribute('data-region-in'));
+  }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
+async function dropWireOnRegion(member, regionKey) {
+  const region = regionNodes.value.find((n) => n.key === regionKey);
+  if (!region) return;
+  const ok = window.confirm(
+    `将「${member.name || member.user_id}」归入 ${region.label}？`,
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    await assignMember({
+      user_id: member.user_id,
+      region: regionKey,
+      dept_id: member.dept_id || null,
+      dept_name: member.dept_name || '',
+      name: member.name || null,
+    });
+    setFlash('ok', `已把「${member.name || member.user_id}」归入 ${region.label}`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `归属失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+const wireDraftPath = computed(() => {
+  const w = wireDraft.value;
+  if (!w) return '';
+  const dx = Math.max(60, Math.abs(w.x2 - w.x1) / 2);
+  return `M ${w.x1} ${w.y1} C ${w.x1 + dx} ${w.y1}, ${w.x2 - dx} ${w.y2}, ${w.x2} ${w.y2}`;
+});
+
+// -- 抽屉 ----------------------------------------------------------------------
+const drawer = ref(null);      // {kind: 'task'|'region', node}
+const drawerTimes = ref([]);   // 任务抽屉：播报时间编辑 [{hour, minute}]
+
+function openTaskDrawer(node) {
+  drawer.value = { kind: 'task', node };
+  const zh = node.service.schedule_zh || '';
+  // 从 schedule_zh（每天 HH:MM / 工作日 HH:MM）解析出时间点列表；解析不出给空
+  const times = [];
+  for (const m of zh.matchAll(/(\d{1,2}):(\d{2})/g)) {
+    times.push({ hour: Number(m[1]), minute: Number(m[2]) });
+  }
+  drawerTimes.value = times.length ? times : [{ hour: 8, minute: 30 }];
+}
+
+function openRegionDrawer(node) {
+  drawer.value = { kind: 'region', node };
+}
+
+function closeDrawer() {
+  drawer.value = null;
+}
+
+function addTimeRow() {
+  drawerTimes.value.push({ hour: 12, minute: 0 });
+}
+function removeTimeRow(index) {
+  drawerTimes.value.splice(index, 1);
+}
+
+async function onSaveTimes() {
+  const node = drawer.value && drawer.value.node;
+  if (!node) return;
+  const times = drawerTimes.value
+    .filter((t) => Number.isInteger(t.hour) && Number.isInteger(t.minute));
+  if (!times.length) {
+    setFlash('err', '至少保留一个播报时间');
+    return;
+  }
+  busy.value = true;
+  try {
+    await updatePipelineTimes({ service_id: node.service.service_id, times });
+    setFlash('ok', `已改「${node.service.service_label}」播报时间`);
+    closeDrawer();
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `改播报时间失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onToggleTask(node) {
+  const target = !node.service.enabled;
+  busy.value = true;
+  try {
+    await togglePipeline({ service_id: node.service.service_id, enabled: target });
+    setFlash('ok', `「${node.service.service_label}」已${target ? '启用' : '停用'}`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `开关失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function onRunOnce(node) {
+  const ok = window.confirm(
+    `立即运行一次「${node.service.service_label}」？\n（手动触发不受当日去重限制，会真实发播报/写页面）`,
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    await runPipelineOnce({ service_id: node.service.service_id });
+    setFlash('ok', `「${node.service.service_label}」已提交运行，流水见任务抽屉`);
+    await load({ silent: true });
+  } catch (err) {
+    setFlash('err', `运行失败：${err.message}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+// -- 数据派生 -------------------------------------------------------------------
 const lastRaw = ref(null);
 
 function regionBadge(rosterCount, targetCount, taskCount) {
@@ -169,14 +334,12 @@ function fmt(value) {
   return Number.isInteger(num) ? String(num) : num.toFixed(1);
 }
 
-/** 任务是否处于断链态（停用或最近运行失败）。 */
 function taskBroken(service) {
   if (!service.enabled) return true;
   const latest = service.latest;
   return !!(latest && latest.status === 'failed');
 }
 
-/** 由原始读面派生节点与连线。 */
 function buildGraph(raw) {
   const { overview, roster, groups } = raw;
   const rosterRows = (roster && roster.roster) || [];
@@ -194,37 +357,46 @@ function buildGraph(raw) {
   const nextRegions = [];
   const nextTasks = [];
   const nextEdges = [];
-  for (const region of regions) {
-    const key = region.key;
-    const memberCount = (region.depts || [])
+  const regionSpecs = regions.map((region) => ({ key: region.key, region }));
+  const platform = servicesByRegion.__platform__ || [];
+  if (platform.length) {
+    regionSpecs.push({ key: '__platform__', region: null });
+  }
+
+  for (const spec of regionSpecs) {
+    const key = spec.key;
+    const isPlatform = key === '__platform__';
+    const memberCount = isPlatform ? 0 : (spec.region.depts || [])
       .reduce((sum, dept) => sum + (dept.members || []).length, 0);
-    const rosterCount = rosterRows
+    const rosterCount = isPlatform ? 0 : rosterRows
       .filter((row) => row.scope === key && Number(row.enabled) === 1).length;
-    const targetMap = targets[key] || {};
+    const targetMap = (targets[key]) || {};
     const targetCount = Object.keys(targetMap).length;
     const targetSum = Object.values(targetMap)
       .reduce((sum, value) => sum + (Number(value) || 0), 0);
     const services = servicesByRegion[key] || [];
-    const badge = regionBadge(rosterCount, targetCount, services.length);
+    const badge = isPlatform
+      ? { text: '平台线', cls: 'plain' }
+      : regionBadge(rosterCount, targetCount, services.length);
     nextRegions.push({
       id: `region:${key}`,
       key,
-      label: region.label || key,
+      label: isPlatform ? '平台 / 无群' : (spec.region.label || key),
       badge,
       rosterCount,
       targetCount,
       targetSum,
       memberCount,
       taskCount: services.length,
+      isPlatform,
       x: REGION_X,
       y: TOP_Y,
     });
-    services.forEach((service, index) => {
+    services.forEach((service) => {
       const taskId = `task:${service.service_id}`;
       nextTasks.push({
         id: taskId,
         regionKey: key,
-        index,
         service,
         broken: taskBroken(service),
         x: TASK_X,
@@ -234,42 +406,7 @@ function buildGraph(raw) {
         id: `e:${key}:${service.service_id}`,
         from: `region:${key}`,
         to: taskId,
-        broken: badge.cls !== 'ok' || taskBroken(service),
-      });
-    });
-  }
-  // 平台/无群任务（region=None）挂到伪区域节点
-  const platform = servicesByRegion.__platform__ || [];
-  if (platform.length) {
-    nextRegions.push({
-      id: 'region:__platform__',
-      key: '__platform__',
-      label: '平台 / 无群',
-      badge: { text: '平台线', cls: 'plain' },
-      rosterCount: 0,
-      targetCount: 0,
-      targetSum: 0,
-      memberCount: 0,
-      taskCount: platform.length,
-      x: REGION_X,
-      y: TOP_Y,
-    });
-    platform.forEach((service, index) => {
-      const taskId = `task:${service.service_id}`;
-      nextTasks.push({
-        id: taskId,
-        regionKey: '__platform__',
-        index,
-        service,
-        broken: taskBroken(service),
-        x: TASK_X,
-        y: TOP_Y,
-      });
-      nextEdges.push({
-        id: `e:__platform__:${service.service_id}`,
-        from: 'region:__platform__',
-        to: taskId,
-        broken: taskBroken(service),
+        broken: badge.cls === 'warn' || taskBroken(service),
       });
     });
   }
@@ -279,36 +416,39 @@ function buildGraph(raw) {
   layout();
 }
 
-/** 默认布局：任务按所属区域纵向成摞，区域节点垂直居中对齐其任务摞。 */
 function layout() {
   const saved = nodePos.value;
-  const taskYById = {};
   let cursorY = TOP_Y;
+  const poolH = POOL_HEAD_H + poolMembers.value.length * POOL_ROW_H + 12;
+  const savedPool = saved.pool;
+  poolNode.value = {
+    id: 'pool',
+    x: savedPool ? savedPool.x : 40,
+    y: savedPool ? savedPool.y : TOP_Y,
+  };
   for (const region of regionNodes.value) {
     const stack = taskNodes.value.filter((t) => t.regionKey === region.key);
     const stackTop = cursorY;
     stack.forEach((task) => {
-      taskYById[task.id] = cursorY;
+      const savedPos = saved[task.id];
+      task.x = savedPos ? savedPos.x : TASK_X;
+      task.y = savedPos ? savedPos.y : cursorY;
       cursorY += TASK_H + TASK_GAP;
     });
     const stackH = stack.length * (TASK_H + TASK_GAP) - TASK_GAP;
     const regionY = stack.length
       ? stackTop + Math.max(0, (stackH - REGION_H) / 2)
       : cursorY;
-    cursorY = Math.max(cursorY, stack.length ? stackTop : cursorY)
-      + (stack.length ? 0 : REGION_H) + 26;
+    if (!stack.length) cursorY += REGION_H;
+    cursorY += 26;
     const savedPos = saved[region.id];
     region.x = savedPos ? savedPos.x : REGION_X;
     region.y = savedPos ? savedPos.y : Math.round(regionY);
   }
-  for (const task of taskNodes.value) {
-    const savedPos = saved[task.id];
-    task.x = savedPos ? savedPos.x : TASK_X;
-    task.y = savedPos ? savedPos.y : taskYById[task.id];
-  }
+  void poolH;
 }
 
-// -- 连线几何（贝塞尔）-----------------------------------------------------
+// -- 连线几何 -------------------------------------------------------------------
 const nodeById = computed(() => {
   const map = {};
   for (const n of regionNodes.value) map[n.id] = { ...n, w: REGION_W, h: REGION_H };
@@ -323,7 +463,7 @@ const edgePaths = computed(() => edges.value.map((edge) => {
   const x1 = from.x + from.w;
   const y1 = from.y + from.h / 2;
   const x2 = to.x;
-  const y2 = to.y + 34;
+  const y2 = to.y + 40;
   const dx = Math.max(60, (x2 - x1) / 2);
   return {
     ...edge,
@@ -332,7 +472,7 @@ const edgePaths = computed(() => edges.value.map((edge) => {
 }));
 
 const canvasSize = computed(() => {
-  let maxX = 960;
+  let maxX = 1300;
   let maxY = 480;
   for (const n of Object.values(nodeById.value)) {
     maxX = Math.max(maxX, n.x + n.w + 60);
@@ -341,20 +481,19 @@ const canvasSize = computed(() => {
   return { w: maxX, h: maxY };
 });
 
-// -- 锚点 -------------------------------------------------------------------
+// -- 锚点 ------------------------------------------------------------------------
 async function applyAnchor() {
   if (!anchorRegion.value) return;
   await nextTick();
   const node = regionNodes.value.find((n) => n.key === anchorRegion.value);
   if (!node) return;
-  // 平移视口让目标节点大致居中（缩放保持）
   panX.value = 260 - node.x * zoom.value;
   panY.value = 120 - node.y * zoom.value;
 }
 
-// -- 装载 -------------------------------------------------------------------
-async function load() {
-  loading.value = true;
+// -- 装载 ------------------------------------------------------------------------
+async function load({ silent = false } = {}) {
+  if (!silent) loading.value = true;
   loadError.value = '';
   try {
     const [overview, roster, pipelines] = await Promise.all([
@@ -372,7 +511,7 @@ async function load() {
   } catch (err) {
     loadError.value = err.message;
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
   await applyAnchor();
 }
@@ -388,9 +527,8 @@ watch(() => route.query.region, () => applyAnchor());
       <div class="head-main">
         <h1>闭环画布</h1>
         <p class="note">
-          组织 → 名册 → 目标 → 定时任务 → 记录 的拓扑总览：连线即驱动关系，
-          琥珀虚线＝断链（缺名册/缺目标/任务停用/最近失败）。纯读视图——
-          改归属去「组织编排」、改名册去「填报名册」、改收件人去「定时任务」。
+          连线即驱动关系；从池成员端口拉线到区域＝归入该区；任务节点内嵌开关与
+          「运行一次」，点节点开抽屉改播报时间。名册/日历/记录/授权陆续上画布。
         </p>
       </div>
       <div class="head-actions">
@@ -401,21 +539,14 @@ watch(() => route.query.region, () => applyAnchor());
       </div>
     </header>
 
+    <transition name="flash">
+      <div v-if="flash" class="flash" :class="flash.type">{{ flash.text }}</div>
+    </transition>
+
     <div v-if="loading" class="state">加载中…</div>
     <div v-else-if="loadError" class="state error">{{ loadError }}</div>
 
     <div v-else class="canvas-wrap">
-      <!-- 未归类池（只读角条） -->
-      <aside class="pool-bar" v-if="poolMembers.length">
-        <b>未归类池 {{ poolMembers.length }}</b>
-        <span
-          v-for="member in poolMembers"
-          :key="member.user_id"
-          class="pool-chip"
-        >{{ member.name || member.user_id }}</span>
-        <router-link class="pool-go" to="/org">去归口 →</router-link>
-      </aside>
-
       <div
         class="canvas"
         :style="gridStyle"
@@ -423,11 +554,7 @@ watch(() => route.query.region, () => applyAnchor());
         @mousedown="startPan"
       >
         <div class="viewport" :style="viewportStyle">
-          <svg
-            class="edges"
-            :width="canvasSize.w"
-            :height="canvasSize.h"
-          >
+          <svg class="edges" :width="canvasSize.w" :height="canvasSize.h">
             <path
               v-for="edge in edgePaths"
               :key="edge.id"
@@ -435,7 +562,35 @@ watch(() => route.query.region, () => applyAnchor());
               class="edge"
               :class="{ broken: edge.broken }"
             />
+            <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
           </svg>
+
+          <!-- 未归类池节点（成员输出端口：拉线到区域＝归口） -->
+          <article
+            class="node pool-node"
+            :style="{ left: poolNode.x + 'px', top: poolNode.y + 'px', width: POOL_W + 'px' }"
+          >
+            <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, poolNode)">
+              <h3>未归类池</h3>
+              <span class="badge plain">{{ poolMembers.length }}</span>
+            </div>
+            <p class="pool-hint">从成员右侧端口拉线到区域节点＝归口</p>
+            <div
+              v-for="(member, index) in poolMembers"
+              :key="member.user_id"
+              class="pool-row"
+            >
+              <span class="pool-name">{{ member.name || member.user_id }}</span>
+              <span class="pool-dept">{{ member.dept_name || '' }}</span>
+              <span
+                class="port out member-port"
+                :class="{ busy }"
+                title="拉线到区域节点＝归入该区"
+                @mousedown="startWire($event, member, index)"
+              />
+            </div>
+            <p v-if="!poolMembers.length" class="pool-hint">全员已归口</p>
+          </article>
 
           <!-- 区域节点 -->
           <article
@@ -446,29 +601,25 @@ watch(() => route.query.region, () => applyAnchor());
             :class="{ 'anchor-hit': anchorRegion === node.key }"
             :style="{ left: node.x + 'px', top: node.y + 'px', width: REGION_W + 'px' }"
           >
+            <span class="port in-region" :data-region-in="node.key" title="成员归口输入" />
             <div class="node-head" title="拖动移动节点" @mousedown="startNodeDrag($event, node)">
               <h3>{{ node.label }}</h3>
               <span class="badge" :class="node.badge.cls">{{ node.badge.text }}</span>
             </div>
-            <div class="metrics" v-if="node.key !== '__platform__'">
-              <router-link class="metric" :to="{ path: '/roster', query: { region: node.key } }">
-                <b>{{ node.rosterCount }}</b><span>名册</span>
-              </router-link>
-              <router-link class="metric" :to="{ path: '/roster', query: { region: node.key } }">
-                <b>{{ node.targetCount }}</b><span>目标人</span>
-              </router-link>
+            <div class="metrics" v-if="!node.isPlatform">
+              <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
+              <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
               <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
-              <router-link class="metric" :to="{ path: '/org', query: { region: node.key } }">
-                <b>{{ node.memberCount }}</b><span>成员</span>
-              </router-link>
+              <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
             </div>
             <div class="node-foot">
               <span class="task-count">下游任务 {{ node.taskCount }}</span>
+              <button class="btn mini ghost" @click="openRegionDrawer(node)">详情</button>
             </div>
             <span class="port out" title="驱动下游任务" />
           </article>
 
-          <!-- 任务节点 -->
+          <!-- 任务节点（节点即控件） -->
           <article
             v-for="node in taskNodes"
             :key="node.id"
@@ -483,12 +634,20 @@ watch(() => route.query.region, () => applyAnchor());
             </div>
             <div class="task-meta">
               <span>{{ node.service.schedule_zh || node.service.schedule || '—' }}</span>
-              <span :class="node.service.enabled ? 'on' : 'off'">
-                {{ node.service.enabled ? '启用' : '停用' }}
-              </span>
               <span v-if="node.service.latest" class="latest">
                 最近 {{ node.service.latest.status_label }}
               </span>
+            </div>
+            <div class="task-actions">
+              <button
+                class="switch"
+                :class="{ on: node.service.enabled }"
+                :disabled="busy"
+                :title="node.service.enabled ? '点击停用' : '点击启用'"
+                @click="onToggleTask(node)"
+              ><i /></button>
+              <button class="btn mini" :disabled="busy" @click="onRunOnce(node)">运行一次</button>
+              <button class="btn mini ghost" @click="openTaskDrawer(node)">详情</button>
             </div>
           </article>
         </div>
@@ -497,9 +656,77 @@ watch(() => route.query.region, () => applyAnchor());
       <div class="legend">
         <span class="lg"><i class="line ok" /> 正常驱动</span>
         <span class="lg"><i class="line broken" /> 断链（缺名册/缺目标/停用/失败）</span>
+        <span class="lg"><i class="line drafting" /> 拉线中＝归口</span>
         <span class="lg">滚轮缩放 · 拖空白平移 · 拖节点头移动</span>
       </div>
     </div>
+
+    <!-- 节点抽屉 -->
+    <transition name="drawer">
+      <aside v-if="drawer" class="drawer">
+        <template v-if="drawer.kind === 'task'">
+          <h2>{{ drawer.node.service.service_label }}</h2>
+          <p class="drawer-sub">{{ drawer.node.service.service_id }}</p>
+          <div class="drawer-sec">
+            <h3>播报时间</h3>
+            <div
+              v-for="(t, index) in drawerTimes"
+              :key="index"
+              class="time-row"
+            >
+              <input v-model.number="t.hour" type="number" min="0" max="23"> 时
+              <input v-model.number="t.minute" type="number" min="0" max="59"> 分
+              <button
+                class="btn mini ghost"
+                :disabled="drawerTimes.length <= 1"
+                @click="removeTimeRow(index)"
+              >删</button>
+            </div>
+            <button class="btn mini" @click="addTimeRow">+ 加一个时点</button>
+            <button class="btn mini primary" :disabled="busy" @click="onSaveTimes">保存时间</button>
+          </div>
+          <div class="drawer-sec">
+            <h3>最近运行</h3>
+            <p v-if="drawer.node.service.latest" class="drawer-line">
+              {{ drawer.node.service.latest.status_label }} ·
+              {{ drawer.node.service.latest.created_at }} ·
+              {{ drawer.node.service.latest.requested_by }}
+            </p>
+            <p v-else class="drawer-line muted">无运行记录</p>
+            <router-link class="drawer-link" to="/pipelines/history" @click="closeDrawer">
+              完整执行流水 →
+            </router-link>
+          </div>
+          <div class="drawer-sec" v-if="drawer.node.service.depends_on.length">
+            <h3>依赖</h3>
+            <p class="drawer-line">{{ drawer.node.service.depends_on.join('、') }}</p>
+          </div>
+        </template>
+        <template v-else-if="drawer.kind === 'region'">
+          <h2>{{ drawer.node.label }}</h2>
+          <p class="drawer-sub">{{ drawer.node.key }}</p>
+          <div class="drawer-sec">
+            <h3>链路状态</h3>
+            <p class="drawer-line">
+              名册 {{ drawer.node.rosterCount }} · 目标人 {{ drawer.node.targetCount }} ·
+              Σ {{ fmt(drawer.node.targetSum) }} 万元 · 成员 {{ drawer.node.memberCount }} ·
+              下游任务 {{ drawer.node.taskCount }}
+            </p>
+          </div>
+          <div class="drawer-sec">
+            <router-link class="drawer-link"
+              :to="{ path: '/roster', query: { region: drawer.node.key } }"
+              @click="closeDrawer">名册与月目标 →</router-link>
+            <router-link class="drawer-link"
+              :to="{ path: '/org', query: { region: drawer.node.key } }"
+              @click="closeDrawer">组织编排 →</router-link>
+          </div>
+          <p class="drawer-line muted">名册/目标编辑将于 P2 收进本抽屉。</p>
+        </template>
+        <button class="drawer-close" @click="closeDrawer">✕</button>
+      </aside>
+    </transition>
+    <div v-if="drawer" class="drawer-mask" @click="closeDrawer" />
   </div>
 </template>
 
@@ -552,6 +779,48 @@ watch(() => route.query.region, () => applyAnchor());
 .btn:hover {
   background: #f9fafb;
 }
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn.mini {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.btn.ghost {
+  border-color: transparent;
+  color: #4b5563;
+}
+.btn.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+  margin-left: 8px;
+}
+.flash {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.flash.ok {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #047857;
+}
+.flash.err {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+}
+.flash-enter-active,
+.flash-leave-active {
+  transition: opacity 0.2s ease;
+}
+.flash-enter-from,
+.flash-leave-to {
+  opacity: 0;
+}
 .state {
   padding: 48px;
   text-align: center;
@@ -568,31 +837,6 @@ watch(() => route.query.region, () => applyAnchor());
   flex-direction: column;
   margin-top: 12px;
 }
-.pool-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
-  font-size: 12px;
-  color: #4b5563;
-}
-.pool-chip {
-  padding: 2px 8px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #f9fafb;
-}
-.pool-go {
-  margin-left: auto;
-  color: #2563eb;
-  text-decoration: none;
-}
-
 .canvas {
   flex: 1;
   min-height: 0;
@@ -628,6 +872,10 @@ watch(() => route.query.region, () => applyAnchor());
 .edge.broken {
   stroke: #f59e0b;
   stroke-dasharray: 6 4;
+}
+.edge.drafting {
+  stroke: #2563eb;
+  stroke-dasharray: 4 4;
 }
 
 .node {
@@ -690,8 +938,6 @@ watch(() => route.query.region, () => applyAnchor());
   border: 1px solid #eef0f3;
   border-radius: 6px;
   background: #f9fafb;
-  color: #1f2933;
-  text-decoration: none;
   font-size: 11px;
 }
 .metric b {
@@ -700,16 +946,51 @@ watch(() => route.query.region, () => applyAnchor());
 .metric span {
   color: #6b7280;
 }
-a.metric:hover {
-  border-color: #93c5fd;
-  background: #eff6ff;
-}
 .node-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   padding: 2px 10px 8px;
   font-size: 11px;
   color: #9ca3af;
 }
 
+/* 池节点 */
+.pool-node {
+  padding-bottom: 8px;
+}
+.pool-hint {
+  margin: 0;
+  padding: 0 10px 6px;
+  color: #9ca3af;
+  font-size: 11px;
+}
+.pool-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.pool-name {
+  font-weight: 600;
+}
+.pool-dept {
+  color: #9ca3af;
+  font-size: 11px;
+}
+.member-port {
+  right: -6px;
+  cursor: crosshair;
+}
+.member-port.busy {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* 任务节点 */
 .task-node {
   padding-bottom: 6px;
 }
@@ -733,14 +1014,44 @@ a.metric:hover {
   font-size: 11px;
   color: #6b7280;
 }
-.task-meta .on {
-  color: #047857;
-}
-.task-meta .off {
-  color: #b91c1c;
-}
 .task-meta .latest {
   color: #9ca3af;
+}
+.task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 2px;
+}
+
+/* 开关 */
+.switch {
+  width: 34px;
+  height: 18px;
+  border: 1px solid #d1d5db;
+  border-radius: 9px;
+  background: #e5e7eb;
+  cursor: pointer;
+  position: relative;
+  padding: 0;
+}
+.switch i {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.switch.on {
+  background: #10b981;
+  border-color: #10b981;
+}
+.switch.on i {
+  left: 18px;
 }
 
 /* 端口 */
@@ -758,10 +1069,21 @@ a.metric:hover {
   margin-top: -5px;
   background: #10b981;
 }
+.pool-row .port.out {
+  top: 10px;
+  margin-top: 0;
+}
 .port.in {
   left: -6px;
-  top: 29px;
+  top: 35px;
   background: #64748b;
+}
+.port.in-region {
+  left: -6px;
+  top: 50%;
+  margin-top: -5px;
+  background: #2563eb;
+  cursor: crosshair;
 }
 
 .legend {
@@ -783,5 +1105,90 @@ a.metric:hover {
 }
 .line.broken {
   border-top: 2px dashed #f59e0b;
+}
+.line.drafting {
+  border-top: 2px dashed #2563eb;
+}
+
+/* 抽屉 */
+.drawer {
+  position: fixed;
+  right: 0;
+  top: 52px;
+  bottom: 0;
+  width: 360px;
+  background: #fff;
+  border-left: 1px solid #e5e7eb;
+  box-shadow: -4px 0 16px rgba(16, 24, 40, 0.08);
+  padding: 18px;
+  z-index: 30;
+  overflow-y: auto;
+}
+.drawer h2 {
+  margin: 0 0 2px;
+  font-size: 16px;
+}
+.drawer-sub {
+  margin: 0 0 12px;
+  color: #9ca3af;
+  font-size: 12px;
+}
+.drawer-sec {
+  margin-bottom: 16px;
+}
+.drawer-sec h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #4b5563;
+}
+.drawer-line {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.drawer-line.muted {
+  color: #9ca3af;
+}
+.drawer-link {
+  display: block;
+  margin: 4px 0;
+  color: #2563eb;
+  font-size: 13px;
+  text-decoration: none;
+}
+.time-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.time-row input {
+  width: 56px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.drawer-close {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  border: none;
+  background: none;
+  font-size: 16px;
+  color: #9ca3af;
+  cursor: pointer;
+}
+.drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: transform 0.18s ease;
+}
+.drawer-enter-from,
+.drawer-leave-to {
+  transform: translateX(100%);
 }
 </style>
