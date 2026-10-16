@@ -45,7 +45,6 @@ from common.public_data import (
     report_roster,
 )
 from common.daily_robot.inspection_alert import ALERT_SERVICES
-from common.public_data.calendar_import import CalendarImportError
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.pipeline_taxonomy import (
@@ -179,7 +178,7 @@ CAPABILITY_ORG = "org"          # 组织编排（归属/区域/部门）
 CAPABILITY_ROSTER = "roster"    # 填报名册（资格 + 区域/个人月目标）
 CAPABILITY_PIPELINES = "pipelines"  # 定时任务（注册/开关/立即运行/收件人覆盖）
 CAPABILITY_AUDIT = "audit"      # 操作记录（六源聚合审计读面）
-CAPABILITY_CALENDAR = "calendar"  # 工作日历（可编辑的工作日集合）
+CAPABILITY_CALENDAR = "calendar"  # 播报日历（可编辑的播报日集合）
 
 #: 全部能力枚举（/api/me 逐项回报；SPA 菜单与路由守卫据此渲染）。
 ALL_CAPABILITIES = (
@@ -343,7 +342,7 @@ def _label(mapping, value):
 
 
 #: 「操作记录」页的来源枚举（顺序即下拉顺序）。
-_RECORD_SOURCES = ("授权", "定时任务", "填报名册", "工作日历", "收件人覆盖",
+_RECORD_SOURCES = ("授权", "定时任务", "填报名册", "播报日历", "收件人覆盖",
                    "定时运行")
 
 #: 收件人覆盖 mode / target_type 中文标签（展示层）。
@@ -407,7 +406,7 @@ def _collect_records(connection):
         when = (biz.isoformat() if isinstance(biz, date)
                 else (f"{yr}-{int(mon):02d}" if yr and mon else "—"))
         records.append((
-            get("created_at"), "工作日历", get("actor") or "",
+            get("created_at"), "播报日历", get("actor") or "",
             _label(_ACTION_LABEL, get("action")), when, get("detail") or "",
         ))
 
@@ -472,7 +471,7 @@ _SERVICE_LABELS = {
     "offline-monthly-summary": "线下整体每月汇总（上月总量 + 月环比 + 达成率排名）",
     "target-remind": "月目标核对提醒（每月 28 日 → 有目标的区域群，附名册页入口）",
     "target-rollover": "月目标自动结转（每月 1 日把上月目标幂等结转到当月，人工已录入不覆盖）",
-    "calendar-watch": "工作日历覆盖看门（每月 25 日查当月/下月日历，缺失或规则兜底 → 线下整体群告警）",
+    "calendar-watch": "播报日历覆盖看门（每月 25 日查当月/下月日历，零行缺口 → 线下整体群告警）",
     "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
     "kb-sync-products": "知识库商品同步（AI 表「产品资料」→ kb_products，小时级）",
     "kb-gateway": "知识库问答机器人（客服群，独立 Stream 应用，常驻）",
@@ -3131,15 +3130,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "missing_owners": missing, "extract_request_id": request_id,
         })
 
-    # -- 工作日历（dim_calendar_override DB 裁决层，2026-10-10「给非技术
-    # 同学用」：一键导入法定假日 + 点日期改上班/休息，不碰 git/CLI）------
-
-    #: 日历源徽标（单元格角标；local=种子/规则基线不标）。
-    _CAL_SOURCE_BADGE = {
-        "holiday_cn": '<span class="cal-src cal-src-holiday_cn">法</span>',
-        "manual": '<span class="cal-src cal-src-manual">裁</span>',
-        "rule_fallback": '<span class="cal-src cal-src-rule_fallback">兜</span>',
-    }
+    # -- 播报日历（dim_calendar_override DB 裁决层，2026-10-16 纯播报口径：
+    # 默认每天播报，点日期改 播报/休息，不碰 git/CLI）---------------------
 
     def _calendar_seed_path():
         seed_path = getattr(settings, "calendar_seed_path", None)
@@ -3149,12 +3141,12 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.get("/calendar")
     def calendar_page():
-        """工作日历页壳（Router 渲染）。"""
+        """播报日历页壳（Router 渲染）。"""
         return _spa_shell()
 
     @app.get("/api/calendar")
     def api_calendar(request: Request):
-        """工作日历读面（JSON；替代 SSR /calendar 页数据，2026-10-14 D1）。"""
+        """播报日历读面（JSON；替代 SSR /calendar 页数据，2026-10-14 D1）。"""
         require_capability(request, CAPABILITY_CALENDAR)
         month = (request.query_params.get("month") or "").strip()
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
@@ -3250,42 +3242,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
 
-    @app.post("/api/calendar/import-year")
-    async def calendar_import_year(request: Request):
-        """一键导入法定节假日（该年 holiday_cn 行整年替换 + 全年重写）。"""
-        viewer = require_capability(request, CAPABILITY_CALENDAR)
-        payload = await _json_body(request)
-        year = payload.get("year")
-        if isinstance(year, bool) or not isinstance(year, int) \
-                or not 2020 <= year <= 2100:
-            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
-        try:
-            with db_connector() as connection:
-                stats = calendar_store.import_year_overrides(
-                    connection, year, actor=viewer.userid
-                )
-                rewritten = 0
-                for month_no in range(1, 13):
-                    rewritten += calendar_store.rewrite_month(
-                        connection, _calendar_seed_path(), year, month_no,
-                        strict=False,
-                    )
-        except CalendarImportError as exc:
-            # holiday-cn 未发布/网络失败：原因透传给前端（不含敏感信息）
-            return JSONResponse(
-                {"status": "failed", "reason": str(exc)}, status_code=502
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            _LOGGER.warning(
-                "ops-web calendar import failed: %s", type(exc).__name__)
-            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        return JSONResponse({"status": "ok", "rewritten": rewritten, **stats})
-
     @app.post("/api/calendar/reset-month")
     async def calendar_reset_month(request: Request):
-        """本月恢复规则：清除 manual 覆盖（法定导入保留）+ 即时重写。"""
+        """本月恢复规则：清除 manual 覆盖（回到全播报基线）+ 即时重写。"""
         viewer = require_capability(request, CAPABILITY_CALENDAR)
         payload = await _json_body(request)
         month = str(payload.get("month") or "")

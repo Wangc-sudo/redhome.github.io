@@ -60,13 +60,13 @@ channel fact table rather than the offline one) adds seven more
 for sixty-five.  The same board's legacy pages-web panels
 (2026-10-13, ``common/broadcast/qudao_panels.py``'s thirteen
 channel-specific panels -- the rollback root cause) are migrated one
-panel at a time into twenty-one date-anchored table cards
+panel at a time into twenty date-anchored table cards
 (``table_qd_monthly_kpi``/``table_qd_expense``/``table_qd_expense_rate``/
 ``table_qd_bill_category``/``table_qd_bill_platform``/
 ``table_qd_bill_items``/``table_qd_product_series``/
 ``table_qd_product_bands``/``table_qd_product_top``/
 ``table_qd_product_summary``/``table_qd_refund_reason``/
-``table_qd_gmv_factors``/``table_qd_cohort``/``table_qd_baijiu_node``/
+``table_qd_gmv_factors``/``table_qd_cohort``/
 ``table_qd_channel_daily``/``table_qd_hot_items``/
 ``table_qd_stock_urgent``/``table_qd_stock_oversold``/
 ``table_qd_purchase_inbound``/``table_qd_order_risk``/
@@ -328,8 +328,6 @@ _CARDS = (
           queries.run_table_qd_gmv_factors, {"date": "dates"}),
     _card("table_qd_cohort", "table",
           queries.run_table_qd_cohort, {"date": "dates"}),
-    _card("table_qd_baijiu_node", "table",
-          queries.run_table_qd_baijiu_node, {"date": "dates"}),
     _card("table_qd_channel_daily", "table",
           queries.run_table_qd_channel_daily, {"date": "dates"}),
     _card("table_qd_hot_items", "table",

@@ -127,7 +127,6 @@ STAGE_B_CARD_IDS = (
     "table_qd_refund_reason",
     "table_qd_gmv_factors",
     "table_qd_cohort",
-    "table_qd_baijiu_node",
     "table_qd_channel_daily",
     "table_qd_hot_items",
     "table_qd_stock_urgent",
@@ -230,7 +229,6 @@ EXPECTED_CHARTS = {
     "table_qd_refund_reason": "table",
     "table_qd_gmv_factors": "table",
     "table_qd_cohort": "table",
-    "table_qd_baijiu_node": "table",
     "table_qd_channel_daily": "table",
     "table_qd_hot_items": "table",
     "table_qd_stock_urgent": "table",
@@ -320,7 +318,6 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_qd_refund_reason": queries.run_table_qd_refund_reason,
     "table_qd_gmv_factors": queries.run_table_qd_gmv_factors,
     "table_qd_cohort": queries.run_table_qd_cohort,
-    "table_qd_baijiu_node": queries.run_table_qd_baijiu_node,
     "table_qd_channel_daily": queries.run_table_qd_channel_daily,
     "table_qd_hot_items": queries.run_table_qd_hot_items,
     "table_qd_stock_urgent": queries.run_table_qd_stock_urgent,
@@ -434,7 +431,6 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_qd_refund_reason": {"date": "dates"},
     "table_qd_gmv_factors": {"date": "dates"},
     "table_qd_cohort": {"date": "dates"},
-    "table_qd_baijiu_node": {"date": "dates"},
     "table_qd_channel_daily": {"date": "dates"},
     "table_qd_hot_items": {"date": "dates"},
     "table_qd_stock_urgent": {"date": "dates"},
@@ -489,7 +485,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(86, len(REGISTRY))
+        self.assertEqual(85, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

@@ -4208,30 +4208,7 @@ def run_table_qd_cohort(connection, params) -> dict:
     return _qd_table(columns, rows, anchor)
 
 
-def run_table_qd_baijiu_node(connection, params) -> dict:
-    """面板8 白酒节点弹性（table）：``fetch_baijiu_node_elasticity`` nodes。"""
-    from common.broadcast.queries import fetch_baijiu_node_elasticity
 
-    anchor = _hz_anchor(params)
-    data = fetch_baijiu_node_elasticity(connection, today=anchor)
-    rows = [
-        {
-            "node": node["node"],
-            "days": node["days"],
-            "gmv": node["gmv"],
-            "daily_avg": node["daily_avg"],
-            "elasticity": node["elasticity"],
-        }
-        for node in data["nodes"]
-    ]
-    columns = [
-        {"key": "node", "title": "节点"},
-        {"key": "days", "title": "天数", "format": "number"},
-        {"key": "gmv", "title": "GMV", "format": "wan"},
-        {"key": "daily_avg", "title": "日均", "format": "wan"},
-        {"key": "elasticity", "title": "弹性", "format": "ratio"},
-    ]
-    return _qd_table(columns, rows, anchor)
 
 
 def run_table_qd_channel_daily(connection, params) -> dict:
@@ -4545,14 +4522,6 @@ def run_table_qd_notes(connection, params) -> dict:
         "加权平均=Σ已满 k 月队列当月活跃买家÷Σ已满 k 月队列规模"
         "（未满 k 月的队列不计入）· "
         "无 buyer_id 行（拼多多按隐私协议）不入队列，不臆造"
-    )))
-
-    notes.append(("白酒节点弹性", (
-        "口径：节点标记=dim_calendar.note 命中节日关键词（春节/中秋/国庆/元旦/"
-        "端午/清明/劳动节/双十一/618）且 is_workday=0（调休上班日不计）· "
-        "GMV=Σpaid_amount 按 DATE(trade_time) 归日（剔除取消单）· "
-        "弹性=节点日均 GMV÷平日（非节点）日均 GMV（有效窗口=数据首日~数据末日，"
-        "避免空日稀释基线）· >1 表示节点旺"
     )))
 
     month_facts = fetch_channel_month_facts(

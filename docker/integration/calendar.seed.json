@@ -1,5 +1,5 @@
 {
-  "_说明": "版本受控的工作日历种子。只记录规则（rule），restDays 一律由 common.calendar_utils.generate_rest_days 推导，故渲染结果不可能与规则漂移。口径分层（2026-10-10 运维裁决「后端给非技术同学用」）：本文件冻结为 2025-2026 历史基线（法定假 + 大小休锚点；holidays/makeupWorkdays 转录自国务院办公厅《关于2025年部分节假日安排的通知》（2024-11 发布）与《关于2026年部分节假日安排的通知》（2025-11-04 发布））；逐日裁决（法定节假日 + 公司改判）一律进 DB dim_calendar_override——ops-web「工作日历」页一键导入 holiday-cn、点日期改上班/休息，非技术同学不碰本文件；种子未覆盖月份由规则兜底（周日休+第3周六大休）保不断档，覆盖缺口由 calendar-watch 管道告警。2025 年口径（main 2026-09-18 裁定）：HR 书面大小休数据缺席，宁漏报不误报红——各月周六一律按休息落（bigRestSaturdays 列全当月周六），待 HR 确认后回补；调休上班周六（2/8、10/11）已显式写入 makeupWorkdays 恢复为工作日。",
+  "_说明": "版本受控的播报日历种子（2026-10-16 纯播报口径裁决）。基线 rest 恒为空——每天都是播报日，法定节假日/周末不再默认休息；休息日只来自 DB dim_calendar_override 人工裁决（ops-web「播报日历」页点日期改 播报/休息）。months 退化为覆盖声明（哪些月份有基线行）；各月 bigRestSaturdays/holidays/makeupWorkdays 保留为历史档案（2025-2026 法定假+大小休锚点，转录自国务院办公厅节假日通知），不再参与 rest 推导。种子未覆盖月份由规则兜底（rest 同样为空）保不断档，零行缺口由 calendar-watch 管道告警。",
   "version": 1,
   "source": "local",
   "months": [

@@ -14,7 +14,7 @@ const route = useRoute();
 const router = useRouter();
 
 //: 六源集合（顺序即下拉顺序）——与后端 _RECORD_SOURCES 一致，作兜底。
-const DEFAULT_SOURCES = ['授权', '定时任务', '填报名册', '工作日历', '收件人覆盖', '定时运行'];
+const DEFAULT_SOURCES = ['授权', '定时任务', '填报名册', '播报日历', '收件人覆盖', '定时运行'];
 
 //: 名册记录 target 首词是 scope 中文标签（后端 _SCOPE_LABEL 渲染），
 //: 深链需反查回 region key（否则 `?region=其他` 匹配不到 `sec-other`）。
@@ -113,7 +113,7 @@ function deepLink(row) {
     const key = SCOPE_KEY_BY_LABEL[first] || first;
     return key ? { path: '/roster', query: { region: key } } : { path: '/roster' };
   }
-  if (src === '工作日历') {
+  if (src === '播报日历') {
     const ym = target.slice(0, 7);
     return /^\d{4}-\d{2}$/.test(ym)
       ? { path: '/calendar', query: { month: ym } }
@@ -172,7 +172,7 @@ function deepLink(row) {
     </table>
 
     <p class="hint">
-      汇总授权 / 定时任务变更 / 填报名册 / 工作日历 / 收件人覆盖五类人工操作，
+      汇总授权 / 定时任务变更 / 填报名册 / 播报日历 / 收件人覆盖五类人工操作，
       加定时运行流水；按时间倒序，最多 200 条。时间为北京时间。
     </p>
   </div>

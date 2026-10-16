@@ -530,59 +530,6 @@ class CohortRetentionPanelTests(unittest.TestCase):
         self.assertIn("暂无买家数据", html)
 
 
-class BaijiuNodePanelTests(unittest.TestCase):
-
-    def test_renders_node_elasticity(self):
-        data = {
-            "nodes": [
-                {"node": "国庆", "days": 7, "gmv": 700000.0,
-                 "daily_avg": 100000.0, "elasticity": 2.0},
-            ],
-            "baseline_daily": 50000.0,
-            "baseline_days": 30,
-            "window": ["2026-05", "2026-09", "2026-10"],
-            "has_calendar": True,
-            "has_data": True,
-            "as_of": date(2026, 10, 13),
-        }
-        with patch("common.broadcast.queries.fetch_baijiu_node_elasticity",
-                   return_value=data):
-            html = qudao_panels.build_baijiu_node_panel(
-                Mock(), today=date(2026, 10, 13)
-            )
-        self.assertIn("🍶 白酒节点弹性", html)
-        self.assertIn("国庆", html)
-        self.assertIn("2.00×", html)
-        self.assertIn("平日基线日均 GMV", html)
-        self.assertIn("弹性=节点日均 GMV÷平日（非节点）日均 GMV", html)
-
-    def test_missing_node_marker_shows_data_gap(self):
-        data = {
-            "nodes": [], "baseline_daily": 50000.0, "baseline_days": 30,
-            "window": ["2026-09", "2026-10"], "has_calendar": True,
-            "has_data": True, "as_of": date(2026, 10, 13),
-        }
-        with patch("common.broadcast.queries.fetch_baijiu_node_elasticity",
-                   return_value=data):
-            html = qudao_panels.build_baijiu_node_panel(
-                Mock(), today=date(2026, 10, 13)
-            )
-        self.assertIn("数据缺失", html)
-        self.assertIn("dim_calendar 未含节点标记", html)
-        self.assertIn("导入法定节假日", html)
-
-    def test_no_order_data_degrades_to_placeholder(self):
-        data = {"nodes": [], "baseline_daily": None, "baseline_days": 0,
-                "window": [], "has_calendar": False, "has_data": False,
-                "as_of": date(2026, 10, 13)}
-        with patch("common.broadcast.queries.fetch_baijiu_node_elasticity",
-                   return_value=data):
-            html = qudao_panels.build_baijiu_node_panel(
-                Mock(), today=date(2026, 10, 13)
-            )
-        self.assertIn("暂无订单数据", html)
-
-
 class PlatformBillPanelTests(unittest.TestCase):
 
     def _data(self):
@@ -665,7 +612,7 @@ class AssemblyTests(unittest.TestCase):
                 workdays=_WORKDAYS,
                 monthly_targets={},
             )
-        self.assertEqual(len(panels), 13)
+        self.assertEqual(len(panels), 12)
         degraded = [p for p in panels if "数据暂缺" in p]
         # 热卖品（boom）+ 渠道（空连接无数据走"暂无"占位文案不同）→ 至少热卖品一个
         self.assertTrue(any("热卖品监控" in p for p in degraded))
