@@ -142,7 +142,7 @@ _TRIGGER_LABEL = {"cron": "定时", "run_once": "手动"}
 _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
-    "update": "修正", "schedule": "改定时", "carry": "结转",
+    "update": "修正", "schedule": "改定时", "carry": "结转", "deps": "改依赖",
     "params": "改告警参数",
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
@@ -2613,6 +2613,69 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "params": params})
+
+    @app.post("/api/pipelines/deps")
+    async def pipeline_deps_update(request: Request):
+        """修改既有线的依赖 ``depends_on``（画布拉线：模块口→模块口）。
+
+        请求体 ``{service_id, depends_on:[<service_id>, ...]}``——全量覆盖
+        该线的依赖集（画布侧做增量加减后整体提交）；依赖必须都在舰队内且
+        不等于自身；重复自动去重（保序）。read-modify-write + 审计，
+        与改定时/改参数同型。
+        """
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
+        if config_publisher is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        depends_on = payload.get("depends_on")
+        if (not ops_control.SERVICE_ID_RE.match(service_id or "")
+                or not isinstance(depends_on, list)):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        fleet = set(_fleet())
+        if service_id not in fleet:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        clean = []
+        for dep in depends_on:
+            if (not isinstance(dep, str)
+                    or not ops_control.SERVICE_ID_RE.match(dep)
+                    or dep not in fleet
+                    or dep == service_id):
+                raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+            if dep not in clean:
+                clean.append(dep)
+        try:
+            config = config_source.get_pipeline(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            # 借校验器过一遍（croniter 等全字段），返回值不用于发布。
+            ops_control.validate_pipeline_fields(
+                service_id, config.kind, config.schedule,
+                enabled=config.enabled, description=config.description,
+                depends_on=clean, category=config.category,
+            )
+        except ops_control.OpsControlError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config_publisher(replace(config, depends_on=clean))
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid, "deps", service_id,
+                    detail=",".join(clean) or "cleared",
+                )
+        except Exception as exc:
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER publish: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "depends_on": clean})
 
     @app.post("/api/pipelines/add")
     async def pipeline_add(request: Request):
