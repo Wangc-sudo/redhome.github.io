@@ -446,6 +446,10 @@ def _next_fire(schedule, now):
 _DEP_SUMMARY_PROBES = {
     "sync-channel-sales": ("dingtalk", "channel_daily_sales%", (10, 30)),
     "extract-channel": ("extract", "ecom_people", (10, 34)),
+    # pages-*（08:30 榜单页）依赖门禁的上游（2026-10-16 画布拉线首用）：
+    # 07:00 批次的 extract 完成才生成页面——失败时暂缓+补发，治停机日
+    # 页面静默陈旧。daily_report_offline 是每次 extract 的核心数据集。
+    "extract-mart": ("extract", "daily_report_offline", (7, 0)),
 }
 
 
