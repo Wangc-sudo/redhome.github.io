@@ -1,0 +1,47 @@
+# 平台账单月报（渠道BI 阶段4 B 方案，2026-10-16 裁决）：平台 × 店铺 × 费用科目 × 月。
+#
+# 数据来源：财务/运营每月从各平台后台导出账单（直通车/拼多多推广/京准通/千川
+# 消耗 + 平台扣点 + 发货/税/运费），整理成四列后导入。A 方案（平台 API 直连）
+# 上线前的人工过渡通道，字段命名与 A 的 mart 投影对齐，切换时 BI 查询只需换源。
+#
+# 用法（默认 dry-run，只打印校验报告）：
+#   python -m common.public_data.cli import-manual \
+#       --template platform_bill_monthly --file 平台账单-2026-10.xlsx --period 2026-10
+# 确认无误后加 --apply --imported-by <姓名> 落库；同月换文件重导=整月覆盖。
+version: 1
+dataset: platform_bill_monthly
+target_table: manual_platform_bill_monthly
+period_type: month
+description: 平台账单月报（平台×店铺×费用科目，金额）
+# 单项费用绝对值超过 1 亿提示（单位填错是最常见的事故）
+extreme_value_threshold: 100000000
+columns:
+  - source: 月份
+    field: period
+    role: period
+    type: period
+    required: true
+  - source: 平台
+    field: platform
+    role: dimension
+    type: string
+    required: true
+    enum: [天猫, 京东, 拼多多, 抖音, 快手, 视频号, 猫超, 即时零售, 私域, 其他]
+  - source: 店铺
+    field: store
+    role: dimension
+    type: string
+    required: false
+  - source: 费用科目
+    field: fee_item
+    role: dimension
+    type: string
+    required: true
+    enum: [平台扣点, 推广-关键词, 推广-人群, 推广-全站, 推广-其他, 发货费, 电商税, 运费险, 服务费, 其他]
+  - source: 金额
+    field: amount
+    role: metric
+    type: decimal
+    required: true
+    unit: 元
+    label: 金额
