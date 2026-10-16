@@ -36,6 +36,7 @@ const CAPABILITIES = [
   { key: 'pipelines', label: '定时任务' },
   { key: 'audit', label: '操作记录' },
   { key: 'calendar', label: '播报日历' },
+  { key: 'datafix', label: '数据修正' },
 ];
 
 const grants = ref([]);

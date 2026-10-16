@@ -38,6 +38,7 @@ from common.public_data import (
     bi_authz,
     calendar_store,
     channel_target,
+    data_fix,
     ops_control,
     org_assignment_override,
     org_catalog,
@@ -143,7 +144,7 @@ _ACTION_LABEL = {
     "add": "新增", "enable": "启用", "disable": "停用",
     "delete": "删除", "seed": "种子导入", "publish": "发布快照",
     "update": "修正", "schedule": "改定时", "carry": "结转", "deps": "改依赖",
-    "params": "改告警参数",
+    "params": "改告警参数", "realign": "归位",
     "upsert": "改判", "reset": "恢复规则", "import": "法定导入",
     "reset_month": "月度恢复",
     "target": "月目标",
@@ -177,13 +178,14 @@ _ROLE_LABEL = {"owner": "负责人", "deputy": "代填报人"}
 CAPABILITY_ORG = "org"          # 组织编排（归属/区域/部门）
 CAPABILITY_ROSTER = "roster"    # 填报名册（资格 + 区域/个人月目标）
 CAPABILITY_PIPELINES = "pipelines"  # 定时任务（注册/开关/立即运行/收件人覆盖）
-CAPABILITY_AUDIT = "audit"      # 操作记录（六源聚合审计读面）
+CAPABILITY_AUDIT = "audit"      # 操作记录（聚合审计读面）
 CAPABILITY_CALENDAR = "calendar"  # 播报日历（可编辑的播报日集合）
+CAPABILITY_DATAFIX = "datafix"  # 数据修正（类型化修数：预览/落库，全程审计）
 
 #: 全部能力枚举（/api/me 逐项回报；SPA 菜单与路由守卫据此渲染）。
 ALL_CAPABILITIES = (
     CAPABILITY_ORG, CAPABILITY_ROSTER, CAPABILITY_PIPELINES,
-    CAPABILITY_AUDIT, CAPABILITY_CALENDAR,
+    CAPABILITY_AUDIT, CAPABILITY_CALENDAR, CAPABILITY_DATAFIX,
 )
 
 
@@ -343,10 +345,15 @@ def _label(mapping, value):
 
 #: 「操作记录」页的来源枚举（顺序即下拉顺序）。
 _RECORD_SOURCES = ("授权", "定时任务", "填报名册", "播报日历", "收件人覆盖",
-                   "定时运行")
+                   "定时运行", "数据修正")
 
 #: 收件人覆盖 mode / target_type 中文标签（展示层）。
 _MODE_LABEL = {"include": "追加", "exclude": "移除"}
+
+#: 数据修正 fix_type 中文标签（展示层）。
+_FIX_TYPE_LABEL = {
+    "offline_person_region_realign": "线下人员归属归位",
+}
 _TARGET_TYPE_LABEL = {"user_id": "账号", "name": "姓名"}
 
 
@@ -431,6 +438,25 @@ def _collect_records(connection):
             get("created_at"), "收件人覆盖", get("actor") or "",
             _label(_ACTION_LABEL, get("action")),
             " ".join(x for x in (get("service_id"), target) if x),
+            get("detail") or "",
+        ))
+
+    # 数据修正审计（第七源，2026-10-16）：fail-soft 同覆盖审计
+    # （未迁移/读失败只跳过该来源，不拖垮整页）。
+    try:
+        data_fix_audits = data_fix.fetch_recent_audits(connection, limit=200)
+    except Exception as exc:
+        _LOGGER.warning("ops-web data fix audit load failed: %s",
+                        type(exc).__name__)
+        data_fix_audits = ()
+    for row in data_fix_audits:
+        get = _audit_get(row, ("actor", "action", "fix_type", "target",
+                               "detail", "row_count", "created_at"))
+        records.append((
+            get("created_at"), "数据修正", get("actor") or "",
+            _label(_ACTION_LABEL, get("action")),
+            " ".join(x for x in (
+                _label(_FIX_TYPE_LABEL, get("fix_type")), get("target")) if x),
             get("detail") or "",
         ))
 
@@ -2676,6 +2702,78 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             )
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "depends_on": clean})
+
+    # -- 数据修正（类型化修数通道，2026-10-16：画布拉线之外的写面收口）-----
+
+    @app.post("/api/data-fix/realign")
+    async def data_fix_realign(request: Request):
+        """线下事实行人员归属归位（preview/apply 一体）。
+
+        请求体 ``{person_name, from_region, to_region, apply?}``：
+        ``apply`` 缺省 false = 预览（命中行数/金额/日期范围，零写入）；
+        true = 同事务 UPDATE + 审计。区域必须都在区域注册表内且不相同；
+        零命中不落审计（空操作不算修正）。
+        """
+        viewer = require_capability(request, CAPABILITY_DATAFIX)
+        payload = await _json_body(request)
+        person_name = (payload.get("person_name") or "").strip()
+        from_region = (payload.get("from_region") or "").strip()
+        to_region = (payload.get("to_region") or "").strip()
+        apply = bool(payload.get("apply"))
+        if not person_name or not from_region or not to_region:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if from_region == to_region:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                known = set(org_catalog.fetch_region_keys(connection))
+                if from_region not in known or to_region not in known:
+                    raise HTTPException(
+                        status_code=400, detail=ErrorDetail.BAD_REQUEST)
+                if apply:
+                    stats = data_fix.realign_offline_person_region(
+                        connection, person_name=person_name,
+                        from_region=from_region, to_region=to_region,
+                        actor=viewer.userid)
+                else:
+                    stats = data_fix.preview_person_region_realign(
+                        connection, person_name=person_name,
+                        from_region=from_region, to_region=to_region)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning("ops-web data fix failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "applied": apply, **stats})
+
+    @app.get("/api/data-fix/audits")
+    def api_data_fix_audits(request: Request):
+        """数据修正审计读面（JSON，created_at 倒序最多 50 条）。"""
+        require_capability(request, CAPABILITY_DATAFIX)
+        try:
+            with db_connector() as connection:
+                rows = data_fix.fetch_recent_audits(connection, limit=50)
+        except Exception as exc:
+            _LOGGER.warning("ops-web data fix audit load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        get = lambda row: _audit_get(row, ("actor", "action", "fix_type",
+                                           "target", "detail", "row_count",
+                                           "created_at"))
+        return JSONResponse({
+            "status": "ok",
+            "audits": [{
+                "created_at": _fmt_time(get(row)("created_at")),
+                "actor": get(row)("actor"),
+                "action": get(row)("action"),
+                "action_label": _label(_ACTION_LABEL, get(row)("action")),
+                "fix_type": get(row)("fix_type"),
+                "fix_type_label": _label(_FIX_TYPE_LABEL, get(row)("fix_type")),
+                "target": get(row)("target"),
+                "detail": get(row)("detail"),
+                "row_count": get(row)("row_count"),
+            } for row in rows],
+        })
 
     @app.post("/api/pipelines/add")
     async def pipeline_add(request: Request):
