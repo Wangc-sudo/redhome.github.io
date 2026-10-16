@@ -1,0 +1,326 @@
+<script setup>
+/**
+ * 区域节点（2026-10-17 F3 从 FlowPage.vue 抽出）：聚合=圆形、业务=矩形。
+ * 部门槽（蓝色输入端口：成员拉线至此＝归口到部门）+ 成员行展开（每人绿色
+ * 输出端口：拉他区＝搬迁、本区部门口＝区内调部门）。纯展示+事件上抛。
+ */
+import { fmt } from '../../flow/graph.js';
+import { AGG_SIZE, REGION_W } from '../../flow/layout.js';
+
+defineProps({
+  node: { type: Object, required: true },
+  expanded: { type: Boolean, default: false },
+  anchorHit: { type: Boolean, default: false },
+  busy: { type: Boolean, default: false },
+});
+const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'open-drawer']);
+</script>
+
+<template>
+  <article
+    :id="`flow-${node.key}`"
+    class="node region-node"
+    :class="{ 'anchor-hit': anchorHit, 'agg-node': node.isAggregate }"
+    :style="node.isAggregate
+      ? { left: node.x + 'px', top: node.y + 'px', width: AGG_SIZE + 'px', height: AGG_SIZE + 'px' }
+      : { left: node.x + 'px', top: node.y + 'px', width: REGION_W + 'px' }"
+  >
+    <span v-if="!node.isAggregate" class="port in-region" :data-region-in="node.key" title="成员归口输入" />
+    <span v-else class="port in-region agg-in" title="汇聚输入（组成桶汇入）" />
+    <!-- 聚合节点：圆形内容居中 -->
+    <template v-if="node.isAggregate">
+      <div class="agg-body" @mousedown="emit('drag', $event, node)">
+        <h3>{{ node.label }}</h3>
+        <span class="badge agg">{{ node.badge.text }}</span>
+        <div class="agg-metrics">
+          <b>{{ node.rosterCount }}</b><span>名册</span>
+          <b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span>
+        </div>
+        <button class="btn mini ghost" @mousedown.stop @click="emit('open-drawer', node)">详情</button>
+      </div>
+    </template>
+    <template v-else>
+      <div class="node-head" title="拖动移动节点" @mousedown="emit('drag', $event, node)">
+        <h3>{{ node.label }}</h3>
+        <span class="badge" :class="node.badge.cls">{{ node.badge.text }}</span>
+      </div>
+      <div class="metrics" v-if="!node.isPlatform">
+        <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
+        <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
+        <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
+        <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
+      </div>
+      <!-- 部门槽（部门输入端口：成员拉线至此=归口到该部门） -->
+      <div v-if="node.depts && node.depts.length" class="dept-slot">
+        <div
+          v-for="dept in node.depts"
+          :key="dept.dept_id || dept.dept_name"
+          class="dept-row"
+        >
+          <span
+            class="port in-dept"
+            :data-dept-in="`${node.key}|${dept.dept_id}|${dept.dept_name}`"
+            title="成员拉线至此＝归口到该部门"
+          />
+          <span class="dept-name">{{ dept.dept_name || '（无 ID 部门）' }}</span>
+          <span class="dept-count">{{ dept.memberCount }}</span>
+        </div>
+      </div>
+      <!-- 成员行（展开后每人一个输出端口：拉到他区=搬迁、本区部门=调部门） -->
+      <div class="member-slot">
+        <button class="btn mini ghost expand-members" @click="emit('toggle-members', node)">
+          {{ expanded ? '收起成员 ⌃' : `成员 ${node.memberCount} ⌄` }}
+        </button>
+        <template v-if="expanded">
+          <div
+            v-for="member in node.members"
+            :key="member.user_id"
+            class="member-row-wire"
+          >
+            <span class="member-name">{{ member.name || member.user_id }}</span>
+            <span class="member-dept">{{ member.dept_name }}</span>
+            <span
+              class="port out member-port"
+              :class="{ busy }"
+              title="拉到他区/部门口＝搬迁；本区部门口＝调部门"
+              @mousedown="emit('wire-start', $event, member)"
+            />
+          </div>
+        </template>
+      </div>
+      <div class="node-foot">
+        <span class="task-count">下游任务 {{ node.taskCount }}</span>
+        <button class="btn mini ghost" @click="emit('open-drawer', node)">详情</button>
+      </div>
+    </template>
+    <span class="port out" title="驱动下游任务" />
+  </article>
+</template>
+
+<style scoped>
+/* 按钮（复制旧 FlowPage scoped 变体，scoped 不外泄） */
+.btn {
+  padding: 7px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2933;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn:hover {
+  background: #f9fafb;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn.mini {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.btn.ghost {
+  border-color: transparent;
+  color: #4b5563;
+}
+.node {
+  position: absolute;
+  border: 1px solid #e2e5ea;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+}
+.node.anchor-hit {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+.node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 4px;
+  cursor: move;
+  user-select: none;
+}
+.node-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.node-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 10px 8px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.badge {
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+.badge.ok {
+  background: #ecfdf5;
+  color: #047857;
+}
+.badge.warn {
+  background: #fffbeb;
+  color: #b45309;
+}
+.badge.plain {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.badge.agg {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+.metrics {
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px;
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 52px;
+  padding: 3px 6px;
+  border: 1px solid #eef0f3;
+  border-radius: 6px;
+  background: #f9fafb;
+  font-size: 11px;
+}
+.metric b {
+  font-size: 14px;
+}
+.metric span {
+  color: #6b7280;
+}
+
+/* 聚合节点（圆形）：与矩形业务节点视觉分层 */
+.node.agg-node {
+  border-radius: 50%;
+  border: 2px solid #6366f1;
+  background: radial-gradient(circle at 35% 30%, #eef2ff, #e0e7ff);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.18);
+}
+.agg-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: move;
+  user-select: none;
+  text-align: center;
+}
+.agg-body h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.agg-metrics {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: #4b5563;
+}
+.agg-metrics b {
+  font-size: 15px;
+  color: #1f2933;
+}
+
+/* 部门槽（输入端口） */
+.dept-slot {
+  margin: 2px 10px 4px;
+  padding: 4px 0;
+  border-top: 1px dashed #eef0f3;
+}
+.dept-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding-left: 14px;
+  font-size: 12px;
+}
+.dept-name {
+  color: #374151;
+}
+.dept-count {
+  margin-left: auto;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+/* 成员行（输出端口） */
+.member-slot {
+  padding: 0 10px 4px;
+}
+.expand-members {
+  margin: 2px 0;
+}
+.member-row-wire {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  font-size: 12px;
+}
+.member-name {
+  font-weight: 600;
+}
+.member-dept {
+  color: #9ca3af;
+  font-size: 11px;
+}
+.member-row-wire .member-port {
+  right: -6px;
+  top: 8px;
+  margin-top: 0;
+}
+.member-port {
+  cursor: crosshair;
+}
+.member-port.busy {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* 端口 */
+.port {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #cbd2da;
+}
+.port.out {
+  right: -6px;
+  top: 50%;
+  margin-top: -5px;
+  background: #10b981;
+}
+.port.in-region {
+  left: -6px;
+  top: 50%;
+  margin-top: -5px;
+  background: #2563eb;
+  cursor: crosshair;
+}
+.port.agg-in {
+  background: #6366f1;
+}
+.port.in-dept {
+  left: 0;
+  top: 8px;
+  width: 8px;
+  height: 8px;
+  background: #2563eb;
+  cursor: crosshair;
+}
+</style>
