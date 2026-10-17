@@ -44,7 +44,6 @@ import {
   buildEdgePaths,
   canvasSize as canvasSizeFor,
   layoutNodes,
-  moduleH as moduleNodeH,
   nodeRects,
 } from '../flow/layout.js';
 
@@ -120,7 +119,6 @@ const { wireDraft, wireDraftPath, startWire } = useMemberWire({
 });
 const { depDraft, depDraftPath, startDepWire, onDepEdgeClick } = useDepWire({
   busy, panX, panY, zoom, taskNodes,
-  moduleHOf: (node) => moduleNodeH(node, expandedModules.value),
   canPipelines, reload: reloadSilent,
 });
 

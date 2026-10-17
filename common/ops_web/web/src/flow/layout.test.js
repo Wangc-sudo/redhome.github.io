@@ -1,6 +1,7 @@
 /**
- * flow/layout.js 单测（2026-10-16 F1）：布局堆叠、动态高度、边路径生成器、
- * 依赖线聚合、画布尺寸——钉住与重构前逐像素一致的行为。
+ * flow/layout.js 单测（2026-10-16 F1；2026-10-17 F5 重写连线部分）：
+ * 布局堆叠、动态高度、多方向边路径（pickSides/portAnchor/edgePathSides/
+ * draftPath）、依赖线聚合、画布尺寸。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -17,10 +18,13 @@ import {
   buildDepEdges,
   buildEdgePaths,
   canvasSize,
-  edgePath,
+  draftPath,
+  edgePathSides,
   layoutNodes,
   moduleH,
   nodeRects,
+  pickSides,
+  portAnchor,
   regionH,
 } from './layout.js';
 
@@ -127,33 +131,77 @@ describe('layoutNodes', () => {
   });
 });
 
-describe('edgePath（统一生成器）', () => {
-  it('缺省 abs=true：目标在左时控制点仍按间距张开', () => {
-    expect(edgePath(100, 10, 300, 50))
-      .toBe('M 100 10 C 200 10, 200 50, 300 50');
-    // 反向（目标在源左侧）：abs 语义 dx=|x2-x1|/2
-    expect(edgePath(300, 10, 100, 50))
-      .toBe('M 300 10 C 400 10, 0 50, 100 50');
+describe('F5 多方向：pickSides / portAnchor / edgePathSides / draftPath', () => {
+  const rectA = { x: 0, y: 0, w: 100, h: 100 };      // 中心 (50,50)
+  const rectR = { x: 400, y: 0, w: 100, h: 100 };    // 右
+  const rectL = { x: -400, y: 0, w: 100, h: 100 };   // 左
+  const rectB = { x: 0, y: 400, w: 100, h: 100 };    // 下
+  const rectT = { x: 0, y: -400, w: 100, h: 100 };   // 上
+
+  it('pickSides 按相对方位选对边', () => {
+    expect(pickSides(rectA, rectR)).toEqual(['right', 'left']);
+    expect(pickSides(rectA, rectL)).toEqual(['left', 'right']);
+    expect(pickSides(rectA, rectB)).toEqual(['bottom', 'top']);
+    expect(pickSides(rectA, rectT)).toEqual(['top', 'bottom']);
   });
-  it('abs=false 保留历史有符号语义（区域→模块边）', () => {
-    // 目标在左：旧实现 dx=max(60, (x2-x1)/2)=60
-    expect(edgePath(300, 10, 100, 50, { abs: false }))
-      .toBe('M 300 10 C 360 10, 40 50, 100 50');
+  it('portAnchor 取边中点', () => {
+    expect(portAnchor(rectA, 'left')).toEqual({ x: 0, y: 50 });
+    expect(portAnchor(rectA, 'right')).toEqual({ x: 100, y: 50 });
+    expect(portAnchor(rectA, 'top')).toEqual({ x: 50, y: 0 });
+    expect(portAnchor(rectA, 'bottom')).toEqual({ x: 50, y: 100 });
   });
-  it('间距小于 slack 时按 slack 张开', () => {
-    expect(edgePath(0, 0, 50, 0)).toBe('M 0 0 C 60 0, -10 0, 50 0');
+  it('edgePathSides 控制点沿法线延伸（右→左等价旧水平形态）', () => {
+    // 右出左入、距离 200：c=max(60, 100)=100 → 与旧实现数值一致
+    expect(edgePathSides(0, 50, 'right', 200, 50, 'left'))
+      .toBe('M 0 50 C 100 50, 100 50, 200 50');
+  });
+  it('edgePathSides 垂直对边走垂直贝塞尔', () => {
+    expect(edgePathSides(50, 100, 'bottom', 50, 300, 'top'))
+      .toBe('M 50 100 C 50 200, 50 200, 50 300');
+  });
+  it('draftPath 拖向左不再绕圈（从左边出）', () => {
+    // 旧实现此场景控制点恒向右（钩状回绕）；新实现沿主导方位出
+    expect(draftPath(300, 50, 100, 50))
+      .toBe(edgePathSides(300, 50, 'left', 100, 50, 'right'));
+  });
+  it('draftPath 拖向下走垂直', () => {
+    expect(draftPath(50, 0, 60, 300))
+      .toBe(edgePathSides(50, 0, 'bottom', 60, 300, 'top'));
+  });
+  it('slack 兜底：贴脸距离也张开', () => {
+    expect(edgePathSides(0, 0, 'right', 50, 0, 'left'))
+      .toBe('M 0 0 C 60 0, -10 0, 50 0');
   });
 });
 
 describe('buildEdgePaths', () => {
-  it('源右缘中点 → 目标左缘 y+40', () => {
+  it('默认摆位（目标在右）：右出左入', () => {
     const edges = [{ id: 'e:a:f', from: 'region:a', to: 'module:a:f' }];
     const rects = {
       'region:a': { x: REGION_X, y: 100, w: REGION_W, h: 200 },
       'module:a:f': { x: TASK_X, y: 90, w: TASK_W, h: 64 },
     };
     const [p] = buildEdgePaths(edges, rects);
-    expect(p.d).toBe(edgePath(REGION_X + REGION_W, 200, TASK_X, 130, { abs: false }));
+    expect(p.d).toBe(edgePathSides(
+      REGION_X + REGION_W, 200, 'right', TASK_X, 90 + 32, 'left'));
+  });
+  it('自由拖动到左侧后：自动改从左出（不绕圈）', () => {
+    const edges = [{ id: 'cv:a:agg', from: 'region:a', to: 'region:agg', converge: true }];
+    const rects = {
+      'region:a': { x: 800, y: 100, w: REGION_W, h: 200 },
+      'region:agg': { x: 100, y: 100, w: AGG_SIZE, h: AGG_SIZE },
+    };
+    const [p] = buildEdgePaths(edges, rects);
+    expect(p.d).toBe(edgePathSides(800, 200, 'left', 100 + AGG_SIZE, 188, 'right'));
+  });
+  it('上下堆叠：走垂直贝塞尔（汇聚边场景）', () => {
+    const edges = [{ id: 'cv:a:agg', from: 'region:a', to: 'region:agg' }];
+    const rects = {
+      'region:a': { x: 300, y: 0, w: REGION_W, h: 150 },
+      'region:agg': { x: 300, y: 400, w: AGG_SIZE, h: AGG_SIZE },
+    };
+    const [p] = buildEdgePaths(edges, rects);
+    expect(p.d).toBe(edgePathSides(450, 150, 'bottom', 388, 400, 'top'));
   });
   it('缺矩形时 d 为空串', () => {
     const [p] = buildEdgePaths([{ id: 'x', from: 'no', to: 'none' }], {});
@@ -173,14 +221,16 @@ describe('buildDepEdges', () => {
   mods[0].x = TASK_X; mods[0].y = 40;
   mods[1].x = TASK_X; mods[1].y = 300;
 
-  it('成员 depends_on 聚合到模块层，源服务 ID 全带上', () => {
+  it('成员 depends_on 聚合到模块层，源服务 ID 全带上（同列堆叠走垂直）', () => {
     const rects = nodeRects([], mods, NO_EXPAND, NO_EXPAND);
     const [dep] = buildDepEdges(mods, rects);
     expect(dep.id).toBe('module:__platform__:extract-mart→module:hangzhou:pages');
     expect(dep.fromLabel).toBe('extract-mart');
     expect(dep.toLabel).toBe('pages');
     expect(dep.sourceIds).toEqual(['extract-mart']);
-    expect(dep.d).toBe(edgePath(TASK_X + TASK_W, 300 + 32, TASK_X, 40 + 34));
+    // 源模块在下（y=300）、目标在上（y=40）：源顶出 → 目标底入
+    expect(dep.d).toBe(edgePathSides(
+      TASK_X + TASK_W / 2, 300, 'top', TASK_X + TASK_W / 2, 40 + 64, 'bottom'));
   });
   it('自依赖与重复依赖去重', () => {
     const dup = [
