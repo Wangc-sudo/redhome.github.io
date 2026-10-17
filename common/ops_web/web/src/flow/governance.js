@@ -13,8 +13,19 @@ const PROBED_UPSTREAMS = new Set([
   'extract-mart',
 ]);
 
-//: 僵尸判定阈值（启用但最近运行超过 N 天）。
-const ZOMBIE_DAYS = 7;
+//: 僵尸判定阈值按调度周期分级（2026-10-17 用户裁决：月检/周检本来就不该
+//: 7 天内跑过——calendar-watch（每月25日）/target-remind（每月28日）这类
+//: 算僵尸是误报）：每天/工作日→7 天，每周→9 天，每月/仅日次→32 天，
+//: 解析不出周期→7 天兜底。
+const ZOMBIE_GRACE = { daily: 7, weekly: 9, monthly: 32 };
+
+/** schedule_zh → 宽限天数。 */
+export function graceDays(scheduleZh) {
+  const zh = scheduleZh || '';
+  if (/每月|\d+日/.test(zh)) return ZOMBIE_GRACE.monthly;
+  if (/每周|周[一二三四五六日]/.test(zh)) return ZOMBIE_GRACE.weekly;
+  return ZOMBIE_GRACE.daily;
+}
 
 function flattenServices(groups) {
   const out = [];
@@ -46,20 +57,28 @@ export function disabledAudit(services, today) {
  * health = /api/pipelines/health 的 {service_id: {started_at}}（真源
  * pd_ops_run_history 真实 cron 运行史；勿用 service.latest——那是手动
  * 「运行一次」请求表，2026-10-17 P1 误报事故的根因）。 */
-export function zombieAudit(services, today, days = ZOMBIE_DAYS, health = {}) {
+export function zombieAudit(services, today, days = null, health = {}) {
   const rows = [];
   for (const s of services) {
     if (!s.enabled) continue;
+    const grace = days ?? graceDays(s.schedule_zh);
     const startedAt = health[s.service_id] && health[s.service_id].started_at;
     if (!startedAt) {
-      rows.push({ service_id: s.service_id, label: s.service_label || s.service_id, last: '无记录' });
+      // 从未跑过：日检级仍算僵尸；周/月检刚启用属正常（首期未到）
+      if (grace <= ZOMBIE_GRACE.daily) {
+        rows.push({
+          service_id: s.service_id,
+          label: s.service_label || s.service_id,
+          last: '无记录',
+        });
+      }
       continue;
     }
     const ageDays = Math.floor(
       (Date.parse(`${today}T00:00:00Z`) - Date.parse(startedAt.replace(' ', 'T')))
       / 86400000,
     );
-    if (ageDays > days) {
+    if (ageDays > grace) {
       rows.push({
         service_id: s.service_id,
         label: s.service_label || s.service_id,
