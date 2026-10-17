@@ -125,10 +125,11 @@ const { depDraft, depDraftPath, startDepWire, onDepEdgeClick } = useDepWire({
 // -- 抽屉（F2：状态机 + 组件化，实现见 components/flow/drawers/）-----------------
 const { drawer, openDrawer, closeDrawer } = useDrawer();
 
-// -- 全局节点（P3：播报日历 / 操作记录 上画布）--------------------------------
+// -- 全局节点（P3：播报日历 / 操作记录；P4 授权/修正；治理 P1 治理报告）--------
 const globalNodes = ref([
   { id: 'global:calendar', label: '播报日历', desc: '点日期改播报/休息', x: 40, y: 400 },
   { id: 'global:records', label: '操作记录', desc: '六源审计流水', x: 40, y: 480 },
+  { id: 'global:governance', label: '治理报告', desc: '停用/僵尸/依赖线体检', x: 40, y: 560, cap: 'pipelines' },
   { id: 'global:grants', label: '授权', desc: '能力×区域授权', x: 40, y: 560, admin: true },
   { id: 'global:datafix', label: '数据修正', desc: '类型化修数（预览→落库）', x: 40, y: 640, cap: 'datafix' },
 ]);
@@ -454,6 +455,7 @@ watch(() => route.query.region, () => applyAnchor());
       :month="month"
       :roster="lastRaw && lastRaw.roster"
       :region-nodes="regionNodes"
+      :groups="lastRaw && lastRaw.groups"
       :reload="reloadSilent"
       @close="closeDrawer"
       @update:busy="busy = $event"

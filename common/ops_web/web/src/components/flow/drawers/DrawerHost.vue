@@ -11,6 +11,7 @@ import CalendarDrawer from './CalendarDrawer.vue';
 import RecordsDrawer from './RecordsDrawer.vue';
 import GrantsDrawer from './GrantsDrawer.vue';
 import DataFixDrawer from './DataFixDrawer.vue';
+import GovernanceDrawer from './GovernanceDrawer.vue';
 import './drawer.css';
 
 const props = defineProps({
@@ -19,6 +20,7 @@ const props = defineProps({
   month: { type: String, default: '' },      // 目标月份（区域抽屉副标题）
   roster: { type: Object, default: null },   // lastRaw.roster（区域抽屉数据源）
   regionNodes: { type: Array, default: () => [] },  // 授权/修数抽屉的区域选项
+  groups: { type: Array, default: () => [] },       // 任务组（治理抽屉数据源）
   reload: { type: Function, required: true },       // () => Promise 静默全量刷新
 });
 
@@ -31,6 +33,7 @@ const KIND_COMPONENT = {
   records: RecordsDrawer,
   grants: GrantsDrawer,
   datafix: DataFixDrawer,
+  governance: GovernanceDrawer,
 };
 
 const comp = computed(() =>
@@ -52,6 +55,7 @@ const compKey = computed(() => (props.drawer
         :month="month"
         :roster="roster"
         :region-nodes="regionNodes"
+        :groups="groups"
         :reload="reload"
         @close="emit('close')"
         @update:busy="emit('update:busy', $event)"
