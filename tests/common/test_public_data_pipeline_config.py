@@ -237,6 +237,27 @@ class ParamsFieldTests(unittest.TestCase):
         self.assertEqual({}, config.params)
         self.assertNotIn("params", config.to_mapping())
 
+    def test_governance_fields_round_trip(self):
+        """停用治理字段（2026-10-17 P0）：reason/review_after 往返。"""
+        config = parse_pipeline_config("robot-hangzhou", {
+            "enabled": False,
+            "disabled_reason": "合并进页面面板",
+            "review_after": "2026-11-01",
+        })
+        self.assertEqual("合并进页面面板", config.disabled_reason)
+        self.assertEqual("2026-11-01", config.review_after)
+        self.assertEqual(
+            parse_pipeline_config("robot-hangzhou", config.to_mapping()), config)
+
+    def test_governance_fields_default_omitted_and_validated(self):
+        config = parse_pipeline_config("sync-wdt", {"kind": "apps"})
+        self.assertEqual("", config.disabled_reason)
+        self.assertEqual("", config.review_after)
+        self.assertNotIn("disabled_reason", config.to_mapping())
+        self.assertNotIn("review_after", config.to_mapping())
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config("x", {"review_after": "11-01"})
+
     def test_params_keys_are_stripped(self):
         config = parse_pipeline_config("x", {"params": {" k ": 1}})
         self.assertEqual({"k": 1}, config.params)

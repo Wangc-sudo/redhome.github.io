@@ -941,17 +941,54 @@ class PipelineToggleTests(unittest.TestCase):
         with store.patch_audit():
             response = client.post(
                 "/api/pipelines/toggle",
-                json={"service_id": "robot-hangzhou", "enabled": False},
+                json={"service_id": "robot-hangzhou", "enabled": False,
+                      "reason": "合并进页面面板", "review_after": "2026-11-01"},
             )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(1, len(publisher.published))
         self.assertEqual("robot-hangzhou", publisher.published[0].service_id)
         self.assertEqual(False, publisher.published[0].enabled)
+        # 治理字段随停用落库（2026-10-17 P0）
+        self.assertEqual("合并进页面面板", publisher.published[0].disabled_reason)
+        self.assertEqual("2026-11-01", publisher.published[0].review_after)
         self.assertEqual(
-            [(ADMIN_USERID, "disable", "robot-hangzhou", "0 2 * * *")],
+            [(ADMIN_USERID, "disable", "robot-hangzhou",
+              "合并进页面面板（复查 2026-11-01）")],
             store.audit,
         )
+
+    def test_toggle_enable_clears_governance_fields(self):
+        store = _PipelineStore()
+        publisher = _RecordingPublisher()
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(), publisher=publisher))
+        _login(client)
+        with store.patch_audit():
+            response = client.post(
+                "/api/pipelines/toggle",
+                json={"service_id": "robot-hangzhou", "enabled": True},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("", publisher.published[0].disabled_reason)
+        self.assertEqual("", publisher.published[0].review_after)
+
+    def test_toggle_disable_requires_reason(self):
+        """治理门禁：停用不带原因 400（2026-10-17 P0）。同态停用（enabled
+        不变）视为治理元数据补录，同样需要原因。"""
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        _login(client)
+        for payload in (
+            {"service_id": "robot-hangzhou", "enabled": False},
+            {"service_id": "robot-hangzhou", "enabled": False, "reason": "  "},
+            {"service_id": "robot-hangzhou", "enabled": False,
+             "reason": "x", "review_after": "11-01"},   # 非 ISO 日期
+        ):
+            self.assertEqual(
+                400,
+                client.post("/api/pipelines/toggle", json=payload).status_code,
+                payload,
+            )
 
     def test_toggle_requires_admin(self):
         store = _PipelineStore()

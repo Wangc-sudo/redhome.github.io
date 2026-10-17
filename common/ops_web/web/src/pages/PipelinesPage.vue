@@ -67,11 +67,27 @@ async function load(initial = true) {
 /* ---------------------------- 行操作 --------------------------------- */
 async function toggleTask(s) {
   const enable = !s.enabled;
+  let reason = '';
+  let reviewAfter = '';
+  if (!enable) {
+    // 治理门禁（2026-10-17）：停用必须带原因，可选复查日
+    reason = (window.prompt(
+      '停用 ' + s.service_id + ' 的原因？（必填，进审计）',
+      s.disabled_reason || '',
+    ) || '').trim();
+    if (!reason) return;
+    reviewAfter = (window.prompt(
+      '预计复查日（YYYY-MM-DD，可空）', s.review_after || '',
+    ) || '').trim();
+  }
   if (!window.confirm(
     '确认' + (enable ? '启用' : '停用') + ' ' + s.service_id +
     '？（下一个调度 tick 生效，≤30s）')) return;
   try {
-    await togglePipeline({ service_id: s.service_id, enabled: enable });
+    await togglePipeline({
+      service_id: s.service_id, enabled: enable,
+      reason, review_after: reviewAfter,
+    });
     setFlash('ok', (enable ? '已启用 ' : '已停用 ') + s.service_id + '（≤30s 生效）');
     await load(false);
   } catch (err) {
