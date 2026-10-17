@@ -13,8 +13,6 @@ export const POOL_HEAD_H = 44;
 export const REGION_W = 300;
 export const TASK_W = 330;
 export const TASK_GAP = 14;
-export const REGION_X = 330;
-export const TASK_X = 850;
 export const TOP_Y = 40;
 export const DEPT_ROW_H = 26;
 export const MEMBER_ROW_H = 26;
@@ -22,6 +20,24 @@ export const GLOBAL_W = 220;
 export const GLOBAL_H = 64;
 export const AGG_SIZE = 176;   // 聚合节点圆形直径
 export const POOL_X = 40;      // 左列（池/全局节点）默认 x
+
+// -- 流水线泳道（2026-10-17 五层流水线改版）：源 → 采集 → 加工 → 区域 → 应用 --
+export const LANE_X = {
+  source: 40,
+  collect: 300,
+  process: 700,
+  region: 1110,
+  app: 1490,
+};
+export const LANE_W = {
+  source: 200,
+  collect: TASK_W,
+  process: TASK_W,
+  region: REGION_W,
+  app: TASK_W,
+};
+export const REGION_X = LANE_X.region;
+export const TASK_X = LANE_X.app;
 
 /** 区域节点动态高度：头+指标+脚 + 部门行 +（展开时）成员行。 */
 export function regionH(node, expandedRegions) {
@@ -53,6 +69,7 @@ export function layoutNodes({
   taskNodes,
   poolMembers,
   globalNodes,
+  sourceNodes = [],
   savedPos = {},
   expandedRegions,
   expandedModules,
@@ -75,8 +92,27 @@ export function layoutNodes({
   });
   const stripBottom = stripY + Math.max(poolH, GLOBAL_H) + 40;
 
+  // -- 流水线泳道（2026-10-17）：源/采集/加工层纵向堆叠，区域/应用照旧 -------
+  // 源节点与采集/加工模块从条带下方开始按泳道堆叠。
+  const laneCursor = {};
+  const stackLane = (stage, nodes, w) => {
+    let y = laneCursor[stage] || (stripBottom + 26);
+    for (const n of nodes) {
+      const saved = savedPos[n.id];
+      n.x = saved ? saved.x : LANE_X[stage];
+      n.y = saved ? saved.y : y;
+      const h = stage === 'source' ? 56 : moduleH(n, expandedModules);
+      if (!saved) y += h + TASK_GAP;
+    }
+    laneCursor[stage] = y;
+    void w;
+  };
+  stackLane('source', sourceNodes || []);
+  stackLane('collect', taskNodes.filter((t) => t.stage === 'collect'));
+  stackLane('process', taskNodes.filter((t) => t.stage === 'process'));
+
   // -- 区域/模块：条带之下，区域居中列、模块右列 ---------------------------
-  let cursorY = stripBottom;
+  let cursorY = stripBottom + 26;
   for (const region of regionNodes) {
     const stack = taskNodes.filter((t) => t.regionKey === region.key);
     const stackTop = cursorY;
@@ -105,7 +141,7 @@ export function layoutNodes({
 /** 节点矩形表（连线端点取位用）：聚合=圆（边长 AGG_SIZE），区域高按展开态。
  * extras 可带池/全局节点（日历→提醒/催办的消费连线要锚到日历节点）。 */
 export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModules,
-                          { poolNode = null, globalNodes = [] } = {}) {
+                          { poolNode = null, globalNodes = [], sourceNodes = [] } = {}) {
   const map = {};
   for (const n of regionNodes) {
     map[n.id] = n.isAggregate
@@ -117,6 +153,9 @@ export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModul
   }
   for (const n of globalNodes) {
     map[n.id] = { ...n, w: GLOBAL_W, h: GLOBAL_H };
+  }
+  for (const n of sourceNodes) {
+    map[n.id] = { ...n, w: LANE_W.source, h: 56 };
   }
   if (poolNode) map.pool = { ...poolNode, w: POOL_W, h: GLOBAL_H };
   return map;
@@ -243,7 +282,7 @@ export function buildDepEdges(taskNodes, rects) {
 
 /** 画布滚动面尺寸：节点外接矩形 + 60 余量，下限 1300×480。 */
 export function canvasSize(rects, globalNodes) {
-  let maxX = 1300;
+  let maxX = 1900;   // 五泳道下限
   let maxY = 480;
   for (const n of Object.values(rects)) {
     maxX = Math.max(maxX, n.x + n.w + 60);

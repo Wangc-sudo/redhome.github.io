@@ -189,14 +189,14 @@ describe('buildGraph', () => {
     expect(nodes[0].label).toBe('其他区');
   });
 
-  it('平台线：region=null 的服务组挂到「平台 / 无群」节点', () => {
+  it('平台线：region=null 的服务散落加工泳道模块（流水线分层，2026-10-17）', () => {
     const g = buildGraph(raw({
       groups: [{ region: null, services: [svc('extract-mart')] }],
     }));
-    const platform = g.regionNodes.find((n) => n.isPlatform);
-    expect(platform.label).toBe('平台 / 无群');
-    expect(platform.badge).toEqual({ text: '平台线', cls: 'plain' });
+    // 不再有「平台/无群」区域节点；服务进加工泳道模块
+    expect(g.regionNodes.find((n) => n.isPlatform)).toBeUndefined();
     expect(g.taskNodes[0].family).toBe('extract-mart');   // 不剥后缀
+    expect(g.taskNodes[0].stage).toBe('process');
   });
 
   it('成员/部门随区域节点携带；池截断 50', () => {

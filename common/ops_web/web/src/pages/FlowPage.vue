@@ -27,7 +27,7 @@ import { hasCapability, isAdmin, me, setFlash, flash } from '../store/me.js';
 // F3（2026-10-17）：节点组件化（components/flow/）+ 交互 composable
 // （useViewport/useNodePositions/useMemberWire/useDepWire）。
 // 本文件=壳：图状态、装载编排、展开态、布局与连线的 computed 接线。
-import { buildGraph as buildGraphModel } from '../flow/graph.js';
+import { buildGraph as buildGraphModel, STAGE_LABEL } from '../flow/graph.js';
 import { globalNodeKind, useDrawer } from '../flow/useDrawer.js';
 import { useViewport } from '../flow/useViewport.js';
 import { useNodePositions } from '../flow/useNodePositions.js';
@@ -39,6 +39,7 @@ import RegionNode from '../components/flow/RegionNode.vue';
 import ModuleNode from '../components/flow/ModuleNode.vue';
 import GlobalNodes from '../components/flow/GlobalNodes.vue';
 import {
+  LANE_X,
   TOP_Y,
   buildDepEdges,
   buildEdgePaths,
@@ -212,11 +213,15 @@ const lastRaw = ref(null);
 function buildGraph(raw) {
   const graph = buildGraphModel(raw);
   poolMembers.value = graph.poolMembers;
+  sourceNodes.value = graph.sourceNodes || [];
   regionNodes.value = graph.regionNodes;
   taskNodes.value = graph.taskNodes;
   edges.value = graph.edges;
   layout();
 }
+
+//: 流水线源节点（源→采集→加工泳道，2026-10-17 五层流水线改版）
+const sourceNodes = ref([]);
 
 const expandedModules = ref(new Set());
 const expandAll = ref(false);
@@ -244,6 +249,7 @@ function layout() {
     taskNodes: taskNodes.value,
     poolMembers: poolMembers.value,
     globalNodes: globalNodes.value,
+    sourceNodes: sourceNodes.value,
     savedPos: nodePos.value,
     expandedRegions: expandedRegions.value,
     expandedModules: expandedModules.value,
@@ -254,10 +260,23 @@ function layout() {
 const nodeById = computed(() => nodeRects(
   regionNodes.value, taskNodes.value,
   expandedRegions.value, expandedModules.value,
-  { poolNode: poolNode.value, globalNodes: globalNodes.value },
+  { poolNode: poolNode.value, globalNodes: globalNodes.value,
+    sourceNodes: sourceNodes.value },
 ));
 
-const edgePaths = computed(() => buildEdgePaths(edges.value, nodeById.value));
+//: 五层流水线泳道标题（源→采集→加工→区域→应用）。
+const LANES = Object.entries(STAGE_LABEL)
+  .map(([key, label]) => ({ key, label, x: LANE_X[key] }));
+const laneY = computed(() =>
+  stripBand.value.y + stripBand.value.h + 6);
+
+// 收线器（2026-10-17 用户裁决）：日历驱动消费线是画布最大噪音源
+// （顶条扇出到每个提醒/催办模块），默认收起、头部开关按需展开。
+const showConsumeEdges = ref(false);
+
+const edgePaths = computed(() =>
+  buildEdgePaths(edges.value, nodeById.value)
+    .filter((e) => !e.consumes || showConsumeEdges.value));
 
 /** 依赖线（模块→模块）：成员服务 depends_on 聚合到家族模块层。 */
 const depEdges = computed(() => buildDepEdges(taskNodes.value, nodeById.value));
@@ -344,6 +363,13 @@ watch(() => route.query.region, () => applyAnchor());
         <button class="btn" @click="toggleExpandAll">
           {{ expandAll ? '收起全部模块' : '展开全部模块' }}
         </button>
+        <button
+          class="btn"
+          :class="{ 'btn-active': showConsumeEdges }"
+          @click="showConsumeEdges = !showConsumeEdges"
+        >
+          {{ showConsumeEdges ? '收起日历驱动线' : '日历驱动线' }}
+        </button>
         <button class="btn" @click="onResetAllPos">复位布局</button>
         <button class="btn" @click="resetView">复位视图</button>
         <button class="btn" :disabled="loading" @click="load()">刷新</button>
@@ -376,7 +402,7 @@ watch(() => route.query.region, () => applyAnchor());
               :key="edge.id"
               :d="edge.d"
               class="edge"
-              :class="{ broken: edge.broken, converge: edge.converge, consumes: edge.consumes }"
+              :class="{ broken: edge.broken, converge: edge.converge, consumes: edge.consumes, feed: edge.feed }"
             />
             <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
             <path v-if="depDraft" :d="depDraftPath" class="edge dep-drafting" />
@@ -390,6 +416,25 @@ watch(() => route.query.region, () => applyAnchor());
               @click="onDepEdgeClick(dep)"
             ><title>依赖：{{ dep.fromLabel }} → {{ dep.toLabel }}（点击解除）</title></path>
           </svg>
+
+          <!-- 泳道标题（五层流水线：源→采集→加工→区域→应用） -->
+          <div
+            v-for="lane in LANES"
+            :key="lane.key"
+            class="lane-title"
+            :style="{ left: lane.x + 'px', top: laneY + 'px' }"
+          >{{ lane.label }}</div>
+
+          <!-- 数据源节点（静态展板，只读） -->
+          <article
+            v-for="node in sourceNodes"
+            :key="node.id"
+            class="node source-node"
+            :style="{ left: node.x + 'px', top: node.y + 'px' }"
+          >
+            <b>{{ node.label }}</b>
+            <span class="src-desc">{{ node.desc }}</span>
+          </article>
 
           <!-- 未归类池节点（成员输出端口：拉线到区域＝归口） -->
           <PoolNode
@@ -442,9 +487,11 @@ watch(() => route.query.region, () => applyAnchor());
         <span class="lg"><i class="line ok" /> 正常驱动</span>
         <span class="lg"><i class="line broken" /> 断链（缺名册/缺目标/停用/失败）</span>
         <span class="lg"><i class="line converge" /> 汇聚（桶→聚合）</span>
-        <span class="lg"><i class="line consumes" /> 日历驱动（播报节奏）</span>
+        <span class="lg"><i class="line feed" /> 数据流（源→采集→加工）</span>
+        <span class="lg"><i class="line dep" /> 依赖（调度门禁）</span>
+        <span class="lg"><i class="line consumes" /> 日历驱动（默认收起，头部开关展开）</span>
         <span class="lg"><i class="line drafting" /> 拉线中＝归口</span>
-        <span class="lg">圆形＝聚合节点 · 顶部条带＝功能区 · 滚轮缩放 · 拖空白平移</span>
+        <span class="lg">泳道＝流水线分层 · 圆形＝聚合节点 · 顶部条带＝功能区</span>
       </div>
     </div>
 
@@ -508,6 +555,11 @@ watch(() => route.query.region, () => applyAnchor());
   color: #1f2933;
   font-size: 13px;
   cursor: pointer;
+}
+.btn.btn-active {
+  border-color: #0ea5e9;
+  color: #0369a1;
+  background: #f0f9ff;
 }
 .btn:hover {
   background: #f9fafb;
@@ -610,6 +662,39 @@ watch(() => route.query.region, () => applyAnchor());
   stroke: #6366f1;
   stroke-width: 2.5;
 }
+.edge.feed {
+  stroke: #94a3b8;
+  stroke-width: 1.8;
+  stroke-dasharray: 1 0;
+}
+/* 泳道标题与源节点 */
+.lane-title {
+  position: absolute;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #64748b;
+  pointer-events: none;
+}
+.source-node {
+  position: absolute;
+  width: 200px;
+  padding: 8px 12px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.source-node b {
+  font-size: 13px;
+}
+.src-desc {
+  color: #94a3b8;
+  font-size: 11px;
+}
 
 /* 节点样式已随 F3 组件化迁往 components/flow/{PoolNode,RegionNode,ModuleNode,GlobalNodes}.vue */
 .edge.drafting {
@@ -656,6 +741,12 @@ watch(() => route.query.region, () => applyAnchor());
 }
 .line.converge {
   border-top: 2.5px solid #6366f1;
+}
+.line.feed {
+  border-top: 1.8px solid #94a3b8;
+}
+.line.dep {
+  border-top: 2px dashed #8b5cf6;
 }
 .edge.consumes {
   stroke: #0ea5e9;

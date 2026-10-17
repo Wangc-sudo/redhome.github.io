@@ -50,6 +50,21 @@ describe('zombieAudit', () => {
     });
     expect(rows.map((r) => r.service_id).sort()).toEqual(['norun', 'stale']);
   });
+  it('周期宽限（2026-10-17 用户裁决）：月检/周检不按日检误报', () => {
+    const rows = zombieAudit([
+      // 月检从未跑过：首期未到，不算僵尸
+      svc('calendar-watch', { schedule_zh: '每月 25日 10:00' }),
+      // 周检 10 天没跑：宽限 9 天，超了 → 僵尸
+      svc('weekly-x', { schedule_zh: '每周一 09:30' }),
+      // 日检 8 天没跑 → 僵尸
+      svc('daily-x', { schedule_zh: '每天 08:30' }),
+    ], TODAY, undefined, {
+      // 宽限边界留足余量（UTC/本地时区混合解析会差一天）
+      'weekly-x': { started_at: '2026-10-06 09:30:00' },   // 约 11 天 > 9
+      'daily-x': { started_at: '2026-10-08 08:30:00' },    // 约 9 天 > 7
+    });
+    expect(rows.map((r) => r.service_id).sort()).toEqual(['daily-x', 'weekly-x']);
+  });
   it('service.latest（手动运行请求表）不参与僵尸判定', () => {
     // 回归（2026-10-17 误报事故）：latest 有手动运行 ≠ 真实 cron 运行
     const rows = zombieAudit([
