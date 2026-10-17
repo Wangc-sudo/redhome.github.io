@@ -53,14 +53,18 @@ export function disabledAudit(services, today) {
   return rows;
 }
 
-/** 僵尸检测：启用但无运行记录，或最近运行超过 ZOMBIE_DAYS 天。
+/** 僵尸检测：启用但无运行记录，或最近运行超过周期宽限天数。
  * health = /api/pipelines/health 的 {service_id: {started_at}}（真源
  * pd_ops_run_history 真实 cron 运行史；勿用 service.latest——那是手动
- * 「运行一次」请求表，2026-10-17 P1 误报事故的根因）。 */
+ * 「运行一次」请求表，2026-10-17 P1 误报事故的根因）。
+ * has_command === false 的服务（常驻 daemon、_UNSCHEDULABLE 手动修复
+ * 工具如 project-mart）不归 cron 管、永不产生运行历史，跳过——
+ * 2026-10-17 僵尸复核裁决（8 条疑似全是口径误报，0 真僵尸）。 */
 export function zombieAudit(services, today, days = null, health = {}) {
   const rows = [];
   for (const s of services) {
     if (!s.enabled) continue;
+    if (s.has_command === false) continue;
     const grace = days ?? graceDays(s.schedule_zh);
     const startedAt = health[s.service_id] && health[s.service_id].started_at;
     if (!startedAt) {

@@ -72,6 +72,19 @@ describe('zombieAudit', () => {
     ], TODAY, undefined, {});
     expect(rows.map((r) => r.service_id)).toEqual(['manual-only']);
   });
+  it('has_command=false（daemon/手动修复工具）不归 cron 管，跳过', () => {
+    // 2026-10-17 僵尸复核裁决：bi-web/dingtalk-gateway/kb-gateway/scheduler
+    // 常驻进程 + project-mart（_UNSCHEDULABLE）永不产生 cron 运行历史
+    const rows = zombieAudit([
+      svc('bi-web', { has_command: false }),
+      svc('project-mart', { has_command: false, schedule_zh: '每天 03:00' }),
+      svc('real-cron'),               // undefined ≠ false，不跳
+      svc('normal', { has_command: true }),
+    ], TODAY, undefined, {
+      normal: { started_at: '2026-10-16 08:30:00' },
+    });
+    expect(rows.map((r) => r.service_id)).toEqual(['real-cron']);
+  });
 });
 
 describe('decorativeDeps', () => {
