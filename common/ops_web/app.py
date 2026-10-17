@@ -2354,6 +2354,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "params": dict(config.params or {}),
                 "alertable": config.service_id in ALERT_SERVICES,
                 "description": config.description or "",
+                "disabled_reason": config.disabled_reason or "",
+                "review_after": config.review_after or "",
                 "has_command": bool(has_command(config.service_id)),
                 "latest": latest_out,
             })
@@ -2471,6 +2473,9 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     @app.post("/api/pipelines/toggle")
     async def pipeline_toggle(request: Request):
+        """启停（2026-10-17 治理 P0）：停用必须带原因（reason），可选复查日
+        （review_after，YYYY-MM-DD）；启用自动清空治理字段。重复停用同态
+        请求=治理元数据补录（enabled 不变、字段更新，审计照常）。"""
         viewer = require_capability(request, CAPABILITY_PIPELINES)
         if config_publisher is None:
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
@@ -2482,22 +2487,43 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
         if service_id not in _fleet():
             raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        reason = (payload.get("reason") or "").strip()
+        review_after = (payload.get("review_after") or "").strip()
+        if not enabled and not reason:
+            # 停用不带原因=没有上下文的死配置（治理门禁）
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if review_after:
+            try:
+                from datetime import date as _date
+                _date.fromisoformat(review_after)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=ErrorDetail.BAD_REQUEST)
         try:
             config = config_source.get_pipeline(service_id)
         except Exception as exc:
             _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         try:
-            config_publisher(replace(config, enabled=enabled))
+            config_publisher(replace(
+                config, enabled=enabled,
+                disabled_reason="" if enabled else reason,
+                review_after="" if enabled else review_after,
+            ))
         except Exception as exc:
             _LOGGER.warning("ops-web pipeline publish failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        detail = config.schedule or ""
+        if not enabled:
+            detail = f"{reason}"
+            if review_after:
+                detail += f"（复查 {review_after}）"
         try:
             with db_connector() as connection:
                 ops_control.insert_pipeline_audit(
                     connection, viewer.userid,
                     "enable" if enabled else "disable", service_id,
-                    detail=config.schedule or "",
+                    detail=detail,
                 )
         except Exception as exc:
             # 发布已生效而审计没落库：变更存在但流水缺失，必须显眼。

@@ -150,9 +150,31 @@ const visibleGlobalNodes = computed(() =>
 
 async function onToggleTask(service) {
   const target = !service.enabled;
+  let reason = '';
+  let reviewAfter = '';
+  if (!target) {
+    // 治理门禁（2026-10-17）：停用必须带原因，可选复查日
+    reason = (window.prompt(
+      `停用「${service.service_label}」的原因？（必填，进审计）`,
+      service.disabled_reason || '',
+    ) || '').trim();
+    if (!reason) {
+      setFlash('err', '已取消：停用必须填原因');
+      return;
+    }
+    reviewAfter = (window.prompt(
+      '预计复查日（YYYY-MM-DD，可空）',
+      service.review_after || '',
+    ) || '').trim();
+  }
   busy.value = true;
   try {
-    await togglePipeline({ service_id: service.service_id, enabled: target });
+    await togglePipeline({
+      service_id: service.service_id,
+      enabled: target,
+      reason,
+      review_after: reviewAfter,
+    });
     setFlash('ok', `「${service.service_label}」已${target ? '启用' : '停用'}`);
     await load({ silent: true, parts: ['pipelines'] });
   } catch (err) {

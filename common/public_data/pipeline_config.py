@@ -71,6 +71,10 @@ class PipelineConfig:
     #: ``alert_threshold``（info/warning/critical）、
     #: ``alert_cooldown_hours``（同窗口内去重）。未配置则为空。
     params: dict = field(default_factory=dict)
+    #: 停用治理（2026-10-17 舰队治理 P0）：停用必须带原因，可选复查日
+    #: （YYYY-MM-DD）。启用时两字段清空。停用不带原因=没有上下文的死配置。
+    disabled_reason: str = ""
+    review_after: str = ""
 
     def to_mapping(self):
         mapping = {"enabled": self.enabled, "kind": self.kind}
@@ -88,6 +92,10 @@ class PipelineConfig:
             mapping["depends_on"] = list(self.depends_on)
         if self.params:
             mapping["params"] = dict(self.params)
+        if self.disabled_reason:
+            mapping["disabled_reason"] = self.disabled_reason
+        if self.review_after:
+            mapping["review_after"] = self.review_after
         return mapping
 
 
@@ -144,6 +152,26 @@ def parse_pipeline_config(service_id, data):
 
     params = _validate_params(service_id, data.get("params"))
 
+    disabled_reason = data.get("disabled_reason", "")
+    if not isinstance(disabled_reason, str):
+        raise PipelineConfigError(
+            f"pipeline '{service_id}' has an invalid 'disabled_reason'"
+        )
+    review_after = data.get("review_after", "")
+    if not isinstance(review_after, str):
+        raise PipelineConfigError(
+            f"pipeline '{service_id}' has an invalid 'review_after'"
+        )
+    if review_after:
+        from datetime import date as _date
+        try:
+            _date.fromisoformat(review_after)
+        except ValueError:
+            raise PipelineConfigError(
+                f"pipeline '{service_id}' field 'review_after' must be "
+                f"YYYY-MM-DD"
+            )
+
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -155,6 +183,8 @@ def parse_pipeline_config(service_id, data):
         depends_on=tuple(depends_on),
         category=category,
         params=params,
+        disabled_reason=disabled_reason,
+        review_after=review_after,
     )
 
 
