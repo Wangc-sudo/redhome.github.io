@@ -85,6 +85,8 @@ STAGE_B_CARD_IDS = (
     "bar_hz_dept",
     "table_hz_people_progress",
     "table_hz_unfilled_today",
+    # 部门进度表（2026-10-17 部门主视角裁决）：hz/sx/oa 各一卡，共 88 张。
+    "table_hz_dept_progress",
     # 线下整体销售BI看板七卡（2026-10-10 裁决：8300/offline_all.html
     # 静态页切 BI，同 hangzhou.html 反代方案 A），共 51 张。
     "kpi_oa_mtd",
@@ -94,6 +96,7 @@ STAGE_B_CARD_IDS = (
     "bar_oa_dept",
     "table_oa_scopes",
     "table_oa_people_progress",
+    "table_oa_dept_progress",
     # 绍兴线下销售BI看板七卡（2026-10-10 裁决：8300/shaoxing.html 切
     # BI，与杭州看板同构），共 58 张。
     "kpi_sx_mtd",
@@ -103,6 +106,7 @@ STAGE_B_CARD_IDS = (
     "bar_sx_dept",
     "table_sx_people_progress",
     "table_sx_unfilled_today",
+    "table_sx_dept_progress",
     # 渠道销售BI看板七卡（2026-10-13 裁决：8300/qudao.html 切 BI，与
     # 三条线下看板同构但走渠道线事实表），共 65 张。
     "kpi_qd_mtd",
@@ -195,6 +199,7 @@ EXPECTED_CHARTS = {
     "bar_hz_dept": "bar",
     "table_hz_people_progress": "table",
     "table_hz_unfilled_today": "table",
+    "table_hz_dept_progress": "table",
     "kpi_oa_mtd": "scalar",
     "kpi_oa_today": "scalar",
     "kpi_oa_progress": "scalar",
@@ -202,6 +207,7 @@ EXPECTED_CHARTS = {
     "bar_oa_dept": "bar",
     "table_oa_scopes": "table",
     "table_oa_people_progress": "table",
+    "table_oa_dept_progress": "table",
     "kpi_sx_mtd": "scalar",
     "kpi_sx_today": "scalar",
     "kpi_sx_progress": "scalar",
@@ -209,6 +215,7 @@ EXPECTED_CHARTS = {
     "bar_sx_dept": "bar",
     "table_sx_people_progress": "table",
     "table_sx_unfilled_today": "table",
+    "table_sx_dept_progress": "table",
     "kpi_qd_mtd": "scalar",
     "kpi_qd_today": "scalar",
     "kpi_qd_progress": "scalar",
@@ -284,6 +291,7 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_hz_dept": queries.run_bar_hz_dept,
     "table_hz_people_progress": queries.run_table_hz_people_progress,
     "table_hz_unfilled_today": queries.run_table_hz_unfilled_today,
+    "table_hz_dept_progress": queries.run_table_hz_dept_progress,
     "kpi_oa_mtd": queries.run_kpi_oa_mtd,
     "kpi_oa_today": queries.run_kpi_oa_today,
     "kpi_oa_progress": queries.run_kpi_oa_progress,
@@ -291,6 +299,7 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_oa_dept": queries.run_bar_oa_dept,
     "table_oa_scopes": queries.run_table_oa_scopes,
     "table_oa_people_progress": queries.run_table_oa_people_progress,
+    "table_oa_dept_progress": queries.run_table_oa_dept_progress,
     "kpi_sx_mtd": queries.run_kpi_sx_mtd,
     "kpi_sx_today": queries.run_kpi_sx_today,
     "kpi_sx_progress": queries.run_kpi_sx_progress,
@@ -298,6 +307,7 @@ EXPECTED_RUN_FUNCTIONS = {
     "bar_sx_dept": queries.run_bar_sx_dept,
     "table_sx_people_progress": queries.run_table_sx_people_progress,
     "table_sx_unfilled_today": queries.run_table_sx_unfilled_today,
+    "table_sx_dept_progress": queries.run_table_sx_dept_progress,
     "kpi_qd_mtd": queries.run_kpi_qd_mtd,
     "kpi_qd_today": queries.run_kpi_qd_today,
     "kpi_qd_progress": queries.run_kpi_qd_progress,
@@ -388,6 +398,7 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_hz_dept": {"date": "dates"},
     "table_hz_people_progress": {"date": "dates"},
     "table_hz_unfilled_today": {"date": "dates"},
+    "table_hz_dept_progress": {"date": "dates"},
     # 线下整体看板七卡（2026-10-10）：同杭州看板锚定 date；trend 卡
     # 另开 gran 粒度白名单（三档默认日）。
     "kpi_oa_mtd": {"date": "dates"},
@@ -397,6 +408,7 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_oa_dept": {"date": "dates"},
     "table_oa_scopes": {"date": "dates"},
     "table_oa_people_progress": {"date": "dates"},
+    "table_oa_dept_progress": {"date": "dates"},
     # 绍兴看板七卡（2026-10-10）：同杭州看板锚定 date；trend 卡另开
     # gran 粒度白名单（三档默认日）。
     "kpi_sx_mtd": {"date": "dates"},
@@ -406,6 +418,7 @@ EXPECTED_PARAMS_SCHEMA = {
     "bar_sx_dept": {"date": "dates"},
     "table_sx_people_progress": {"date": "dates"},
     "table_sx_unfilled_today": {"date": "dates"},
+    "table_sx_dept_progress": {"date": "dates"},
     # 渠道看板七卡（2026-10-13）：同杭州/绍兴看板锚定 date（dates 工作日
     # 值域闸，非法值 400）；trend 卡不开 gran（run_trend_channel_daily
     # 无 gran 支持）。
@@ -485,7 +498,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(85, len(REGISTRY))
+        self.assertEqual(88, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 
@@ -617,18 +630,21 @@ REGION_SCOPED_CARD_IDS = (
     "bar_hz_dept",
     "table_hz_people_progress",
     "table_hz_unfilled_today",
+    "table_hz_dept_progress",
     "kpi_sx_mtd",
     "kpi_sx_today",
     "trend_sx_daily",
     "bar_sx_dept",
     "table_sx_people_progress",
     "table_sx_unfilled_today",
+    "table_sx_dept_progress",
     "kpi_oa_mtd",
     "kpi_oa_today",
     "trend_oa_daily",
     "bar_oa_dept",
     "table_oa_scopes",
     "table_oa_people_progress",
+    "table_oa_dept_progress",
 )
 
 

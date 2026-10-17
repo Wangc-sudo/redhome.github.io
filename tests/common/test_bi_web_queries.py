@@ -2642,6 +2642,52 @@ class HzDashboardTests(unittest.TestCase):
             connection, {"date": "2026-08-04"})
         self.assertEqual([], payload["rows"])
 
+    def test_table_hz_dept_progress_groups_by_dept(self):
+        """部门进度表（2026-10-17 部门主视角）：按部门聚合，无目标沉底。"""
+        payload = bi_web_queries.run_table_hz_dept_progress(
+            self._people_connection(), {"date": "2026-08-04"})
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["rank", "dept", "count", "completed", "target", "rate", "diff"],
+            keys)
+        rows = payload["rows"]
+        self.assertEqual(2, len(rows))
+        # 零售一组：张三 30+40=70 / 目标 100 → rate 0.7，进度差 0.7-2/3
+        first = rows[0]
+        self.assertEqual("零售一组", first["dept"])
+        self.assertEqual(1, first["count"])
+        self.assertEqual(70.0, first["completed"])
+        self.assertEqual(100.0, first["target"])
+        self.assertAlmostEqual(0.7, first["rate"])
+        self.assertAlmostEqual(0.7 - 2 / 3, first["diff"])
+        # 李四无部门/无目标 → 未分组沉底、rate None
+        second = rows[1]
+        self.assertEqual("未分组", second["dept"])
+        self.assertIsNone(second["rate"])
+        self.assertIsNone(second["diff"])
+
+    def test_table_sx_dept_progress_pins_shaoxing(self):
+        """绍兴部门进度表：区域钉 shaoxing。"""
+        facts = [
+            {"region": "shaoxing", "responsible_person": "王五",
+             "department": "绍兴一组", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("90"), "monthly_target": Decimal("100")},
+        ]
+        connection = _PeopleFakeConnection(
+            rowsets={
+                "dim_calendar": self._calendar_rows(),
+                "fact_daily_report_offline": facts,
+            }
+        )
+        payload = bi_web_queries.run_table_sx_dept_progress(
+            connection, {"date": "2026-08-04"})
+        self.assertEqual(1, len(payload["rows"]))
+        self.assertEqual("绍兴一组", payload["rows"][0]["dept"])
+        self.assertAlmostEqual(0.9, payload["rows"][0]["rate"])
+        # SQL 钉 shaoxing
+        bound = [p for _, params in connection.executed for p in (params or ())]
+        self.assertIn("shaoxing", bound)
+
     def test_anchor_falls_back_to_today_on_bad_date(self):
         anchor = bi_web_queries._hz_anchor({"date": "not-a-date"})
         self.assertEqual(datetime.now().date(), anchor)
@@ -2899,6 +2945,24 @@ class OfflineAllDashboardTests(unittest.TestCase):
         trend.assert_called_once_with(
             connection, {"month": "2026-08", "gran": "day"}
         )
+
+    def test_table_oa_dept_progress_aggregates_by_realigned_dept(self):
+        """线下整体部门进度表（2026-10-17 部门主视角）：归位后部门聚合。"""
+        payload = bi_web_queries.run_table_oa_dept_progress(
+            self._people_connection(), {"date": "2026-08-04"})
+        keys = [column["key"] for column in payload["columns"]]
+        self.assertEqual(
+            ["rank", "dept", "count", "completed", "target", "rate", "diff"],
+            keys)
+        rows = payload["rows"]
+        # 省外 150/100=1.5 > 绍兴一组 0.9 > 杭中 0.7（合计行不进榜）
+        self.assertEqual(["省外", "绍兴一组", "杭中"],
+                         [row["dept"] for row in rows])
+        self.assertEqual([1, 1, 1], [row["count"] for row in rows])
+        self.assertEqual(150.0, rows[0]["completed"])
+        self.assertEqual(100.0, rows[0]["target"])
+        self.assertAlmostEqual(1.5, rows[0]["rate"])
+        self.assertEqual("2026-08-04", payload["date"])
 
     def test_bar_oa_dept_groups_by_realigned_dept(self):
         payload = bi_web_queries.run_bar_oa_dept(

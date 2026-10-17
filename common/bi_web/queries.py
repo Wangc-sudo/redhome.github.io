@@ -3505,6 +3505,105 @@ def _oa_people(connection, anchor, scope=None):
         return [], frozenset()
 
 
+def _dept_progress_from_people(people, progress):
+    """人员行（归位后 dept）→ 部门进度聚合（2026-10-17 部门主视角裁决）。
+
+    部门月目标 = 成员月目标加总（同「MAX 后求和」纪律的聚合形态——people
+    行已是逐人单值）；达成率 = Σ完成/Σ目标（无目标 → None，沉底不参与
+    达成率排序，与人员榜 rate=None 同语义）；进度差 = 达成率 − 工作日
+    进度基准。排序：有目标按达成率降序，无目标沉底按完成额降序。
+    """
+    groups = {}
+    for person in people:
+        dept = person.get("dept") or "未分组"
+        bucket = groups.setdefault(dept, {"count": 0, "completed": 0.0,
+                                          "target": 0.0})
+        bucket["count"] += 1
+        bucket["completed"] += float(person.get("completed") or 0.0)
+        bucket["target"] += float(person.get("target") or 0.0)
+    rows = []
+    for dept, bucket in groups.items():
+        target = bucket["target"]
+        completed = bucket["completed"]
+        rate = (completed / target) if target > 0 else None
+        rows.append({
+            "dept": dept,
+            "count": bucket["count"],
+            "completed": completed,
+            "target": target,
+            "rate": rate,
+            "diff": (rate - progress) if rate is not None else None,
+        })
+    rows.sort(key=lambda r: (r["rate"] is None, -(r["rate"] or 0.0),
+                             -r["completed"]))
+    return [
+        {"rank": index, **row} for index, row in enumerate(rows, start=1)
+    ]
+
+
+_DEPT_PROGRESS_COLUMNS = [
+    {"key": "rank", "title": "排名"},
+    {"key": "dept", "title": "部门"},
+    {"key": "count", "title": "人数"},
+    {"key": "completed", "title": "月累计", "format": "wan"},
+    {"key": "target", "title": "月目标", "format": "wan"},
+    {"key": "rate", "title": "达成率", "format": "percent"},
+    {"key": "diff", "title": "进度差", "format": "percent"},
+]
+
+
+def _region_dept_progress(connection, region, anchor, scope=None):
+    """hz/sx 部门进度卡载荷：人员榜同源采集 + 通讯录归位部门后聚合。
+
+    部门归属以通讯录为准（fetch_member_dept_map，无匹配保留表内值——
+    2026-09-23「人与部门不要混乱」裁决的部门口径），与 oa 部门卡一致。
+    """
+    if not _scope_allows_regions(scope, region):
+        data = None
+    else:
+        try:
+            data = mart_collect(
+                connection, region=region, business_date=anchor,
+                include_today=True,
+            )
+        except MartTaskError:
+            data = None
+    rows = []
+    if data is not None and data.workdays:
+        progress = len(data.elapsed) / len(data.workdays)
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        dept_map = fetch_member_dept_map(connection, (region,))
+        people = []
+        for person in data.people:
+            people.append({
+                "dept": dept_map.get((region, person["name"]),
+                                     person["dept"] or "未分组"),
+                "completed": person["completed"],
+                "target": person["target"],
+            })
+        rows = _dept_progress_from_people(people, progress)
+    return {
+        "chart": "table",
+        "columns": list(_DEPT_PROGRESS_COLUMNS),
+        "rows": rows,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_table_hz_dept_progress(connection, params) -> dict:
+    """杭州部门进度表（table）：部门×人数×月累计/月目标/达成率/进度差。"""
+    anchor = _hz_anchor(params)
+    return _region_dept_progress(connection, "hangzhou", anchor,
+                                 scope_from_params(params))
+
+
+def run_table_sx_dept_progress(connection, params) -> dict:
+    """绍兴部门进度表（table）：同杭州形态（日期锚点与 hz 共用 _hz_anchor）。"""
+    anchor = _hz_anchor(params)
+    return _region_dept_progress(connection, "shaoxing", anchor,
+                                 scope_from_params(params))
+
+
 def run_bar_oa_dept(connection, params) -> dict:
     """线下整体部门本月排行（bar）：按部门 Σ完成额 降序。
 
@@ -3573,6 +3672,28 @@ def run_table_oa_people_progress(connection, params) -> dict:
             {"key": "proj", "title": "预计月末", "format": "percent"},
             {"key": "unfilled", "title": "未填"},
         ],
+        "rows": rows,
+        "date": anchor.isoformat(),
+    }
+
+
+def run_table_oa_dept_progress(connection, params) -> dict:
+    """线下整体部门进度表（table，2026-10-17 部门主视角裁决）。
+
+    部门 = 归位后口径（杭/绍通讯录归位、补集表内值兜底——同
+    ``run_bar_oa_dept`` 真源）；部门月目标=成员目标加总；无目标部门
+    达成率 None 沉底。行级 scope 与人员榜同门（fail-closed）。
+    """
+    anchor = _hz_anchor(params)
+    people, workdays = _oa_people(connection, anchor, scope_from_params(params))
+    rows = []
+    if workdays:
+        progress = len(elapsed_workdays(workdays, today=anchor,
+                                        include_today=True)) / len(workdays)
+        rows = _dept_progress_from_people(people, progress)
+    return {
+        "chart": "table",
+        "columns": list(_DEPT_PROGRESS_COLUMNS),
         "rows": rows,
         "date": anchor.isoformat(),
     }

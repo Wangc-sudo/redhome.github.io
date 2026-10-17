@@ -100,6 +100,11 @@ hz-offline-sales:
       title: "当日未填报人"
       source: "钉钉AI表格 · 销售日报 + 通讯录"
       span: 12
+    # 部门进度表（2026-10-17 部门主视角裁决）：部门×达成率
+    - card: table_hz_dept_progress
+      title: "部门进度表"
+      source: "钉钉AI表格 · 销售日报 + 通讯录"
+      span: 12
 # 线下整体销售BI看板（2026-10-10 运维裁决：8300/offline_all.html 静态榜
 # 单页切 BI，URL 保留走 nginx 反代方案 A——同 hangzhou.html 先例，仅此
 # 看板与杭州看板经 8300 暴露，其余看板仍锁 18080 办公网白名单）。汇总卡
@@ -140,6 +145,11 @@ offline-all-sales:
     - card: table_oa_scopes
       title: "板块日/周/月总览"
       source: "钉钉AI表格 · 销售日报"
+      span: 12
+    # 部门进度表（2026-10-17 部门主视角裁决）：部门×达成率
+    - card: table_oa_dept_progress
+      title: "部门进度表"
+      source: "钉钉AI表格 · 销售日报 + 通讯录"
       span: 12
     - card: table_oa_people_progress
       title: "个人完成率榜"
@@ -185,6 +195,11 @@ sx-offline-sales:
       span: 12
     - card: table_sx_unfilled_today
       title: "当日未填报人"
+      source: "钉钉AI表格 · 销售日报 + 通讯录"
+      span: 12
+    # 部门进度表（2026-10-17 部门主视角裁决）
+    - card: table_sx_dept_progress
+      title: "部门进度表"
       source: "钉钉AI表格 · 销售日报 + 通讯录"
       span: 12
 qd-channel-sales:
