@@ -42,7 +42,9 @@ export function moduleH(node, expandedModules) {
 }
 
 /**
- * 自动布局：池/全局节点在左列；每区域的模块栈纵向堆叠、区域节点相对栈居中。
+ * 自动布局（2026-10-17 顶部功能条改版）：
+ * **功能模块横排成顶部条带**（池 + 全局节点左起横排），区域列从条带下方
+ * 开始（居中列），模块栈在右列纵向堆叠、区域节点相对栈居中。
  * savedPos 命中的节点保持用户拖动位置。直接改写传入节点的 x/y、
  * 返回池节点对象（与历史行为一致）。
  */
@@ -55,7 +57,7 @@ export function layoutNodes({
   expandedRegions,
   expandedModules,
 }) {
-  let cursorY = TOP_Y;
+  // -- 顶部功能条：池 + 全局节点横排 ------------------------------------
   const poolH = POOL_HEAD_H + poolMembers.length * POOL_ROW_H + 12;
   const savedPool = savedPos.pool;
   const poolNode = {
@@ -63,13 +65,18 @@ export function layoutNodes({
     x: savedPool ? savedPool.x : POOL_X,
     y: savedPool ? savedPool.y : TOP_Y,
   };
-  // 全局节点：池下方纵向排列（可被拖动覆盖）
-  const poolBottom = poolH + poolNode.y + 28;
-  globalNodes.forEach((node, index) => {
+  let stripX = poolNode.x + POOL_W + 24;
+  const stripY = poolNode.y;
+  globalNodes.forEach((node) => {
     const saved = savedPos[node.id];
-    node.x = saved ? saved.x : POOL_X;
-    node.y = saved ? saved.y : poolBottom + index * (GLOBAL_H + 16);
+    node.x = saved ? saved.x : stripX;
+    node.y = saved ? saved.y : stripY;
+    if (!saved) stripX += GLOBAL_W + 24;
   });
+  const stripBottom = stripY + Math.max(poolH, GLOBAL_H) + 40;
+
+  // -- 区域/模块：条带之下，区域居中列、模块右列 ---------------------------
+  let cursorY = stripBottom;
   for (const region of regionNodes) {
     const stack = taskNodes.filter((t) => t.regionKey === region.key);
     const stackTop = cursorY;
@@ -95,8 +102,10 @@ export function layoutNodes({
 
 // -- 连线几何 -------------------------------------------------------------------
 
-/** 节点矩形表（连线端点取位用）：聚合=圆（边长 AGG_SIZE），区域高按展开态。 */
-export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModules) {
+/** 节点矩形表（连线端点取位用）：聚合=圆（边长 AGG_SIZE），区域高按展开态。
+ * extras 可带池/全局节点（日历→提醒/催办的消费连线要锚到日历节点）。 */
+export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModules,
+                          { poolNode = null, globalNodes = [] } = {}) {
   const map = {};
   for (const n of regionNodes) {
     map[n.id] = n.isAggregate
@@ -106,6 +115,10 @@ export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModul
   for (const n of taskNodes) {
     map[n.id] = { ...n, w: TASK_W, h: moduleH(n, expandedModules) };
   }
+  for (const n of globalNodes) {
+    map[n.id] = { ...n, w: GLOBAL_W, h: GLOBAL_H };
+  }
+  if (poolNode) map.pool = { ...poolNode, w: POOL_W, h: GLOBAL_H };
   return map;
 }
 

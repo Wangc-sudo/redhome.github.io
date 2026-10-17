@@ -19,6 +19,10 @@ export const COMPLEMENT_REGION = 'other';
 //: 平台线（region=null 的服务组）的虚拟区域键。
 export const PLATFORM_KEY = '__platform__';
 
+//: 播报日历的消费家族（读 dim_calendar 决定播报节奏的管线）——
+//: 日历节点到这些家族模块画「消费」连线（只读拓扑）。
+export const CALENDAR_CONSUMER_FAMILIES = new Set(['robot', 'robot-check']);
+
 //: 未归类池最多展示人数（超出截断，防节点过长）。
 export const POOL_LIMIT = 50;
 
@@ -223,6 +227,19 @@ export function buildGraph(raw) {
     const { tasks, edges: familyEdges } = collectFamilyModules(aggKey, services);
     nextTasks.push(...tasks);
     nextEdges.push(...familyEdges);
+  }
+  // 播报日历入管线（2026-10-17）：日历节点 →（驱动节奏）→ 填报提醒/催办
+  // 模块。消费关系只读展示（真实消费在 remind/check 读 dim_calendar）。
+  for (const module of nextTasks) {
+    if (CALENDAR_CONSUMER_FAMILIES.has(module.family)) {
+      nextEdges.push({
+        id: `cal:${module.id}`,
+        from: 'global:calendar',
+        to: module.id,
+        broken: !module.services.some((s) => s.enabled),
+        consumes: true,
+      });
+    }
   }
   return {
     poolMembers,

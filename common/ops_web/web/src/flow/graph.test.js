@@ -105,12 +105,18 @@ describe('buildGraph', () => {
     const modules = g.taskNodes.map((n) => n.family).sort();
     expect(modules).toEqual(['pages', 'robot', 'robot-check']);
     expect(g.taskNodes.every((n) => n.regionKey === 'hangzhou')).toBe(true);
-    // 区域→模块 N:1 边（不含汇聚边——聚合节点恒创建，hangzhou 是其组成桶）
-    const familyEdges = g.edges.filter((e) => !e.converge);
+    // 区域→模块 N:1 边（不含汇聚边与日历消费边）
+    const familyEdges = g.edges.filter((e) => !e.converge && !e.consumes);
     expect(familyEdges.map((e) => e.id).sort()).toEqual([
       'e:hangzhou:pages', 'e:hangzhou:robot', 'e:hangzhou:robot-check',
     ]);
     expect(familyEdges.every((e) => e.from === 'region:hangzhou')).toBe(true);
+    // 日历消费边：robot/robot-check 家族挂 global:calendar（2026-10-17）
+    const consumeEdges = g.edges.filter((e) => e.consumes);
+    expect(consumeEdges.map((e) => e.to).sort()).toEqual([
+      'module:hangzhou:robot', 'module:hangzhou:robot-check',
+    ]);
+    expect(consumeEdges.every((e) => e.from === 'global:calendar')).toBe(true);
     // 名册/目标计数
     const hz = g.regionNodes.find((n) => n.key === 'hangzhou');
     expect(hz.rosterCount).toBe(1);

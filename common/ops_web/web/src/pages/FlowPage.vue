@@ -231,6 +231,7 @@ function layout() {
 const nodeById = computed(() => nodeRects(
   regionNodes.value, taskNodes.value,
   expandedRegions.value, expandedModules.value,
+  { poolNode: poolNode.value, globalNodes: globalNodes.value },
 ));
 
 const edgePaths = computed(() => buildEdgePaths(edges.value, nodeById.value));
@@ -239,6 +240,22 @@ const edgePaths = computed(() => buildEdgePaths(edges.value, nodeById.value));
 const depEdges = computed(() => buildDepEdges(taskNodes.value, nodeById.value));
 
 const canvasSize = computed(() => canvasSizeFor(nodeById.value, globalNodes.value));
+
+/** 顶部功能条带的底板范围（池 + 全局节点外接矩形 + 内边距）。 */
+const stripBand = computed(() => {
+  let right = 0;
+  let bottom = 0;
+  const nodes = [poolNode.value, ...globalNodes.value];
+  for (const n of nodes) {
+    if (!n) continue;
+    right = Math.max(right, (n.x || 0) + (n.id === 'pool' ? 220 : 220));
+    bottom = Math.max(bottom, (n.y || 0) + 64);
+  }
+  // 池行高按成员数实际高度
+  const poolH = 44 + poolMembers.value.length * 30 + 12;
+  bottom = Math.max(bottom, poolNode.value.y + poolH);
+  return { x: 16, y: poolNode.value.y - 16, w: right + 16, h: bottom - poolNode.value.y + 32 };
+});
 
 // -- 锚点 ------------------------------------------------------------------------
 async function applyAnchor() {
@@ -325,13 +342,18 @@ watch(() => route.query.region, () => applyAnchor());
         @mousedown="startPan"
       >
         <div class="viewport" :style="viewportStyle">
+          <!-- 顶部功能条带底板（功能模块区视觉分层） -->
+          <div
+            class="strip-band"
+            :style="{ left: stripBand.x + 'px', top: stripBand.y + 'px', width: stripBand.w + 'px', height: stripBand.h + 'px' }"
+          ><span class="strip-label">功能区</span></div>
           <svg class="edges" :width="canvasSize.w" :height="canvasSize.h">
             <path
               v-for="edge in edgePaths"
               :key="edge.id"
               :d="edge.d"
               class="edge"
-              :class="{ broken: edge.broken, converge: edge.converge }"
+              :class="{ broken: edge.broken, converge: edge.converge, consumes: edge.consumes }"
             />
             <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
             <path v-if="depDraft" :d="depDraftPath" class="edge dep-drafting" />
@@ -397,8 +419,9 @@ watch(() => route.query.region, () => applyAnchor());
         <span class="lg"><i class="line ok" /> 正常驱动</span>
         <span class="lg"><i class="line broken" /> 断链（缺名册/缺目标/停用/失败）</span>
         <span class="lg"><i class="line converge" /> 汇聚（桶→聚合）</span>
+        <span class="lg"><i class="line consumes" /> 日历驱动（播报节奏）</span>
         <span class="lg"><i class="line drafting" /> 拉线中＝归口</span>
-        <span class="lg">圆形＝聚合节点 · 滚轮缩放 · 拖空白平移 · 拖节点头移动</span>
+        <span class="lg">圆形＝聚合节点 · 顶部条带＝功能区 · 滚轮缩放 · 拖空白平移</span>
       </div>
     </div>
 
@@ -609,6 +632,33 @@ watch(() => route.query.region, () => applyAnchor());
 }
 .line.converge {
   border-top: 2.5px solid #6366f1;
+}
+.edge.consumes {
+  stroke: #0ea5e9;
+  stroke-width: 1.6;
+  stroke-dasharray: 3 3;
+}
+.line.consumes {
+  border-top: 1.6px dashed #0ea5e9;
+}
+
+/* 顶部功能条带底板 */
+.strip-band {
+  position: absolute;
+  border: 1px solid #e3e8ef;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f4f7fb 0%, #fafbfd 100%);
+  pointer-events: none;
+}
+.strip-label {
+  position: absolute;
+  left: 12px;
+  top: -9px;
+  padding: 0 6px;
+  background: #f7f8fa;
+  font-size: 11px;
+  color: #94a3b8;
+  letter-spacing: 1px;
 }
 
 /* 抽屉样式在 components/flow/drawers/drawer.css（.flow-drawer 命名空间） */
