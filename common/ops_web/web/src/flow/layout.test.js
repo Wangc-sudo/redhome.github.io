@@ -67,8 +67,9 @@ describe('regionH / moduleH', () => {
 
 describe('layoutNodes', () => {
   // 2026-10-17 顶部功能条改版：区域/模块从条带下方开始
-  // （空池 56 高 vs 全局节点 64 高 → 条带底 = TOP_Y + 64 + 40）。
-  const STRIP_BOTTOM = TOP_Y + 64 + 40;
+  // （空池 56 高 vs 全局节点 64 高 → 条带底 = TOP_Y + 64 + 40）；
+  // 泳道改版再 +26（泳道标题行间隙）。
+  const STRIP_BOTTOM = TOP_Y + 64 + 40 + 26;
 
   it('模块栈纵向堆叠，区域相对栈居中（条带之下）', () => {
     const region = regionNode('hangzhou', { depts: [{}] });
@@ -268,8 +269,8 @@ describe('nodeRects / canvasSize', () => {
     expect(rects['region:offline_all']).toMatchObject({ w: AGG_SIZE, h: AGG_SIZE });
     expect(rects['region:hangzhou'].h).toBe(regionH(biz, NO_EXPAND));
   });
-  it('画布尺寸=节点外接+60 余量，下限 1300×480', () => {
-    expect(canvasSize({}, [])).toEqual({ w: 1300, h: 480 });
+  it('画布尺寸=节点外接+60 余量，下限 1900×480（五泳道）', () => {
+    expect(canvasSize({}, [])).toEqual({ w: 1900, h: 480 });
     const rects = { a: { x: 2000, y: 900, w: 100, h: 50 } };
     expect(canvasSize(rects, [{ y: 1000 }])).toEqual({
       w: 2000 + 100 + 60,

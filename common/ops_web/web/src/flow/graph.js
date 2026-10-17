@@ -19,6 +19,46 @@ export const COMPLEMENT_REGION = 'other';
 //: 平台线（region=null 的服务组）的虚拟区域键。
 export const PLATFORM_KEY = '__platform__';
 
+// -- 流水线分层（2026-10-17 用户裁决「做成流水线，多几个层级显示」）-----------
+//: 五层泳道：源 → 采集 → 加工 → 区域 → 应用。平台线（region=null）不再是
+//: 区域节点，其服务按家族前缀分到 采集/加工/巡检 层。
+export const STAGE_LABEL = {
+  source: '数据源',
+  collect: '采集',
+  process: '加工',
+  region: '区域',
+  app: '应用',
+};
+
+/** 家族 → 泳道层。区域模块一律 app；平台服务按前缀分流。 */
+export function stageOf(family, regionKey) {
+  if (regionKey !== PLATFORM_KEY) return 'app';
+  if (/^(sync-|kb-sync|rag-index)/.test(family)) return 'collect';
+  if (/^(roll-manifest|extract-)/.test(family)) return 'process';
+  return 'process';   // 巡检/看门/目标结转等治理线并入加工层
+}
+
+//: 数据源节点（静态展板：sync 管线读谁）。edges 在建图时按在跑的采集模块派生。
+export const SOURCE_NODES = [
+  { id: 'src:aitable', label: '钉钉 AI 表格', desc: '日报/财务/渠道台账', stage: 'source' },
+  { id: 'src:wdt', label: '旺店通 WDT', desc: '订单/退款/采购', stage: 'source' },
+  { id: 'src:org', label: '钉钉通讯录', desc: '人员/部门/群', stage: 'source' },
+];
+
+//: 源 → 采集模块的映射（source node id → 采集家族集合）。
+const SOURCE_FEEDS = {
+  'src:aitable': ['sync-dingtalk', 'sync-channel-sales'],
+  'src:wdt': ['sync-wdt'],
+  'src:org': ['sync-dingtalk'],
+};
+
+//: 采集 → 加工的数据流（数据流边，区别于调度依赖边 dep）。
+const COLLECT_TO_PROCESS = {
+  'sync-dingtalk': ['extract-mart'],
+  'sync-wdt': ['extract-mart'],
+  'sync-channel-sales': ['extract-channel'],
+};
+
 //: 播报日历的消费家族（读 dim_calendar 决定播报节奏的管线）——
 //: 日历节点到这些家族模块画「消费」连线（只读拓扑）。
 export const CALENDAR_CONSUMER_FAMILIES = new Set(['robot', 'robot-check']);
@@ -80,6 +120,7 @@ function collectFamilyModules(key, services, { badge = null } = {}) {
   }
   const tasks = [];
   const edges = [];
+  const isPlatform = key === PLATFORM_KEY;
   for (const [family, members] of Object.entries(families)) {
     const moduleId = `module:${key}:${family}`;
     const brokenCount = members.filter(taskBroken).length;
@@ -87,12 +128,15 @@ function collectFamilyModules(key, services, { badge = null } = {}) {
       id: moduleId,
       regionKey: key,
       family,
+      stage: stageOf(family, key),
       label: familyLabel(family, members[0]),
       services: members,
       brokenCount,
       x: TASK_X,
       y: TOP_Y,
     });
+    // 平台线没有区域节点（流水线分层后散落采集/加工泳道），不画区域驱动边
+    if (isPlatform) continue;
     edges.push({
       id: `e:${key}:${family}`,
       from: `region:${key}`,
@@ -125,10 +169,9 @@ export function buildGraph(raw) {
   const regionSpecs = regions
     .map((region) => ({ key: region.key, region }))
     .filter((spec) => !(spec.key in AGGREGATE_REGIONS));
+  // 平台线（region=null）不再是区域节点（2026-10-17 流水线分层）：其服务
+  // 按 stageOf 散落 采集/加工 泳道成模块，源→采集→加工画数据流边。
   const platform = servicesByRegion[PLATFORM_KEY] || [];
-  if (platform.length) {
-    regionSpecs.push({ key: PLATFORM_KEY, region: null });
-  }
   // 补集桶虚拟节点（组织树无成员但名册/目标存在时补出）
   if (!regions.some((r) => r.key === COMPLEMENT_REGION)
       && (rosterRows.some((row) => row.scope === COMPLEMENT_REGION
@@ -241,8 +284,64 @@ export function buildGraph(raw) {
       });
     }
   }
+  // 平台线模块入泳道 + 数据流边（流水线分层，2026-10-17）：
+  // 源 →（feed）→ 采集 →（feed）→ 加工。与调度依赖边（紫）区分。
+  const platformFamilies = {};
+  for (const service of platform) {
+    const family = familyOf(service.service_id, PLATFORM_KEY);
+    if (!platformFamilies[family]) platformFamilies[family] = [];
+    platformFamilies[family].push(service);
+  }
+  for (const [family, members] of Object.entries(platformFamilies)) {
+    const moduleId = `module:${PLATFORM_KEY}:${family}`;
+    const brokenCount = members.filter(taskBroken).length;
+    nextTasks.push({
+      id: moduleId,
+      regionKey: PLATFORM_KEY,
+      family,
+      stage: stageOf(family, PLATFORM_KEY),
+      label: familyLabel(family, members[0]),
+      services: members,
+      brokenCount,
+      x: TASK_X,
+      y: TOP_Y,
+    });
+  }
+  const moduleIds = new Set(nextTasks.map((n) => n.id));
+  const sourceNodes = [];
+  for (const src of SOURCE_NODES) {
+    const feeds = (SOURCE_FEEDS[src.id] || [])
+      .filter((f) => moduleIds.has(`module:${PLATFORM_KEY}:${f}`));
+    if (!feeds.length) continue;
+    sourceNodes.push({ ...src, x: 0, y: TOP_Y });
+    for (const family of feeds) {
+      nextEdges.push({
+        id: `feed:${src.id}:${family}`,
+        from: src.id,
+        to: `module:${PLATFORM_KEY}:${family}`,
+        broken: false,
+        feed: true,
+      });
+    }
+  }
+  for (const [collect, processes] of Object.entries(COLLECT_TO_PROCESS)) {
+    const fromId = `module:${PLATFORM_KEY}:${collect}`;
+    if (!moduleIds.has(fromId)) continue;
+    for (const proc of processes) {
+      const toId = `module:${PLATFORM_KEY}:${proc}`;
+      if (!moduleIds.has(toId)) continue;
+      nextEdges.push({
+        id: `feed:${collect}:${proc}`,
+        from: fromId,
+        to: toId,
+        broken: false,
+        feed: true,
+      });
+    }
+  }
   return {
     poolMembers,
+    sourceNodes,
     regionNodes: nextRegions,
     taskNodes: nextTasks,
     edges: nextEdges,
