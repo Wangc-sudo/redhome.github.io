@@ -66,7 +66,11 @@ describe('regionH / moduleH', () => {
 });
 
 describe('layoutNodes', () => {
-  it('模块栈纵向堆叠，区域相对栈居中', () => {
+  // 2026-10-17 顶部功能条改版：区域/模块从条带下方开始
+  // （空池 56 高 vs 全局节点 64 高 → 条带底 = TOP_Y + 64 + 40）。
+  const STRIP_BOTTOM = TOP_Y + 64 + 40;
+
+  it('模块栈纵向堆叠，区域相对栈居中（条带之下）', () => {
     const region = regionNode('hangzhou', { depts: [{}] });
     const t1 = taskNode('hangzhou', 'robot', [{}]);
     const t2 = taskNode('hangzhou', 'pages', [{}]);
@@ -77,12 +81,12 @@ describe('layoutNodes', () => {
       globalNodes: [],
     });
     expect(pool).toEqual({ id: 'pool', x: 40, y: TOP_Y });
-    expect(t1).toMatchObject({ x: TASK_X, y: TOP_Y });
-    expect(t2).toMatchObject({ x: TASK_X, y: TOP_Y + 64 + TASK_GAP });
+    expect(t1).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM });
+    expect(t2).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM + 64 + TASK_GAP });
     const stackH = 64 + TASK_GAP + 64;
     const rh = regionH(region, NO_EXPAND);
     expect(region.x).toBe(REGION_X);
-    expect(region.y).toBe(Math.round(TOP_Y + Math.max(0, (stackH - rh) / 2)));
+    expect(region.y).toBe(Math.round(STRIP_BOTTOM + Math.max(0, (stackH - rh) / 2)));
   });
 
   it('无模块区域：y 推进自身高度 + 26 间距', () => {
@@ -92,8 +96,8 @@ describe('layoutNodes', () => {
       regionNodes: [r1, r2], taskNodes: [], poolMembers: [], globalNodes: [],
     });
     const rh = regionH(r1, NO_EXPAND);
-    expect(r1.y).toBe(TOP_Y);
-    expect(r2.y).toBe(TOP_Y + rh + 26);
+    expect(r1.y).toBe(STRIP_BOTTOM);
+    expect(r2.y).toBe(STRIP_BOTTOM + rh + 26);
   });
 
   it('savedPos 命中的节点保持拖动位置', () => {
@@ -118,16 +122,16 @@ describe('layoutNodes', () => {
     expect(globalNode).toMatchObject({ x: 60, y: 700 });
   });
 
-  it('全局节点排在池下方', () => {
+  it('全局节点与池横排成顶部功能条（2026-10-17）', () => {
     const g1 = { id: 'global:a', x: 0, y: 0 };
     const g2 = { id: 'global:b', x: 0, y: 0 };
     layoutNodes({
       regionNodes: [], taskNodes: [], poolMembers: [{}, {}],
       globalNodes: [g1, g2],
     });
-    const poolH = 44 + 2 * 30 + 12;
-    expect(g1).toMatchObject({ x: 40, y: poolH + TOP_Y + 28 });
-    expect(g2.y).toBe(g1.y + GLOBAL_H + 16);
+    // 条带 y=TOP_Y；池 40 起，全局节点紧跟右侧横排
+    expect(g1).toMatchObject({ x: 40 + 220 + 24, y: TOP_Y });
+    expect(g2).toMatchObject({ x: 40 + 220 + 24 + 220 + 24, y: TOP_Y });
   });
 });
 
