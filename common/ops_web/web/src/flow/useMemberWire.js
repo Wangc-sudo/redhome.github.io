@@ -103,7 +103,8 @@ export function useMemberWire({
         });
         setFlash('ok', `已把「${name}」归入 ${region.label}${deptText}`);
       }
-      await reload();
+      // F4 按域局部刷新：归口/搬迁只影响组织归属（overview）与名册计数（roster）
+      await reload(['overview', 'roster']);
     } catch (err) {
       setFlash('err', `操作失败：${err.message}`);
     } finally {

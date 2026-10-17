@@ -71,7 +71,8 @@ async function onFixApply() {
     fixPreview.value = null;
     fixForm.value.person_name = '';
     await loadFixAudits();
-    await props.reload();
+    // F4：归位影响组织归属口径与名册指标，任务域不动
+    await props.reload(['overview', 'roster']);
   } catch (err) {
     setFlash('err', `执行失败：${err.message}`);
   } finally {
