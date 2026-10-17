@@ -236,6 +236,10 @@ _CARDS = (
     # 同真源（mart_tasks._unfilled，名册绑定 fail-open）。
     _card("table_hz_unfilled_today", "table",
           queries.run_table_hz_unfilled_today, {"date": "dates"}),
+    # 部门进度表（2026-10-17 部门主视角裁决）：部门×人数×月累计/月目标/
+    # 达成率/进度差；部门归属=通讯录归位（与 oa 部门卡同口径）。
+    _card("table_hz_dept_progress", "table",
+          queries.run_table_hz_dept_progress, {"date": "dates"}),
     # 线下整体销售BI看板（offline-all-sales，2026-10-10 裁决）：线下线
     # 全域（汇总卡）+ 三区合并人员/部门/板块（真源同播报/静态页函数）；
     # 静态榜单页（8300/offline_all.html）的 BI 替身，nginx 反代保留原 URL。
@@ -256,6 +260,8 @@ _CARDS = (
           queries.run_table_oa_scopes, {"date": "dates"}),
     _card("table_oa_people_progress", "table",
           queries.run_table_oa_people_progress, {"date": "dates"}),
+    _card("table_oa_dept_progress", "table",
+          queries.run_table_oa_dept_progress, {"date": "dates"}),
     # 绍兴线下销售BI看板（sx-offline-sales，2026-10-10 裁决）：与杭州
     # 看板同构（区域钉绍兴）；8300/shaoxing.html 的 BI 替身，nginx
     # 反代保留原 URL。
@@ -276,6 +282,8 @@ _CARDS = (
           queries.run_table_sx_people_progress, {"date": "dates"}),
     _card("table_sx_unfilled_today", "table",
           queries.run_table_sx_unfilled_today, {"date": "dates"}),
+    _card("table_sx_dept_progress", "table",
+          queries.run_table_sx_dept_progress, {"date": "dates"}),
     # 渠道销售BI看板（qd-channel-sales，2026-10-13 裁决）：与三条线下
     # 看板同构（业务线为渠道），8300/qudao.html 的 BI 替身，nginx 反代
     # 保留原 URL。真源 = 渠道线事实表（汇总/趋势/排行/店铺）与渠道催办
@@ -441,12 +449,15 @@ _REGION_SCOPED_CARD_IDS = frozenset({
     # 杭州大屏（钉 hangzhou）
     "kpi_hz_mtd", "kpi_hz_today", "trend_hz_daily", "bar_hz_dept",
     "table_hz_people_progress", "table_hz_unfilled_today",
+    "table_hz_dept_progress",
     # 绍兴大屏（钉 shaoxing）
     "kpi_sx_mtd", "kpi_sx_today", "trend_sx_daily", "bar_sx_dept",
     "table_sx_people_progress", "table_sx_unfilled_today",
+    "table_sx_dept_progress",
     # 线下整体大屏（三区合并，整表放行/关闭）
     "kpi_oa_mtd", "kpi_oa_today", "trend_oa_daily", "bar_oa_dept",
     "table_oa_scopes", "table_oa_people_progress",
+    "table_oa_dept_progress",
 })
 
 _UNKNOWN_SCOPED = _REGION_SCOPED_CARD_IDS - {c.card_id for c in _CARDS}

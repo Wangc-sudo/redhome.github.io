@@ -700,11 +700,13 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             ("kpi_sx_mtd", "kpi_sx_today", "kpi_sx_progress",
              "trend_sx_daily", "bar_sx_dept",
-             "table_sx_people_progress", "table_sx_unfilled_today"),
+             "table_sx_people_progress", "table_sx_unfilled_today",
+             # 部门进度表（2026-10-17 部门主视角裁决）
+             "table_sx_dept_progress"),
             tuple(placement.card for placement in sx.cards),
         )
         self.assertEqual(
-            (4, 4, 4, 8, 4, 12, 12),
+            (4, 4, 4, 8, 4, 12, 12, 12),
             tuple(placement.span for placement in sx.cards),
         )
 
@@ -722,11 +724,13 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             ("kpi_oa_mtd", "kpi_oa_today", "kpi_oa_progress",
              "trend_oa_daily", "bar_oa_dept",
-             "table_oa_scopes", "table_oa_people_progress"),
+             "table_oa_scopes",
+             # 部门进度表（2026-10-17 部门主视角裁决，人员榜之前）
+             "table_oa_dept_progress", "table_oa_people_progress"),
             tuple(placement.card for placement in oa.cards),
         )
         self.assertEqual(
-            (4, 4, 4, 8, 4, 12, 12),
+            (4, 4, 4, 8, 4, 12, 12, 12),
             tuple(placement.span for placement in oa.cards),
         )
 
