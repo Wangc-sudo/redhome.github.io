@@ -2791,9 +2791,10 @@ class _OaFakeConnection(FakeConnection):
 
     def _region_rows(self):
         sql, params = self.executed[-1]
-        # 补集（「其他」桶，2026-10-16 三桶口径）：region NOT IN (杭,绍,vanke)
+        # 补集（「其他」桶，2026-10-16 三桶口径；2026-10-17 补排 qudao）：
+        # region NOT IN (杭,绍,vanke,qudao)
         if "NOT IN" in sql:
-            excludes = set(params[:3])
+            excludes = set(params[:4])
             return [
                 row
                 for row in self._rowsets.get("fact_daily_report_offline", [])
@@ -2945,6 +2946,26 @@ class OfflineAllDashboardTests(unittest.TestCase):
         trend.assert_called_once_with(
             connection, {"month": "2026-08", "gran": "day"}
         )
+
+    def test_table_oa_dept_progress_excludes_qudao(self):
+        """回归（2026-10-17）：渠道日报行（region=qudao，10 月 2194 万
+        实锤）不得漏进「其他」桶/部门进度表。"""
+        rows = self._three_region_rows() + [
+            {"region": "qudao", "responsible_person": "窦超",
+             "department": "拼多多", "business_date": date(2026, 8, 3),
+             "sales_amount": Decimal("31393"), "monthly_target": Decimal("50000")},
+        ]
+        connection = _OaFakeConnection(
+            rowsets={
+                "dim_calendar": self._calendar_rows(),
+                "fact_daily_report_offline": rows,
+            }
+        )
+        payload = bi_web_queries.run_table_oa_dept_progress(
+            connection, {"date": "2026-08-04"})
+        depts = [row["dept"] for row in payload["rows"]]
+        self.assertEqual(["省外", "绍兴一组", "杭中"], depts)
+        self.assertNotIn("拼多多", depts)
 
     def test_table_oa_dept_progress_aggregates_by_realigned_dept(self):
         """线下整体部门进度表（2026-10-17 部门主视角）：归位后部门聚合。"""

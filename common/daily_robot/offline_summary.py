@@ -34,8 +34,10 @@ from common.metrics.daily_report import achievement_rate
 #: vanke 不算线下总体（同日裁决，vanke 独立观察）。
 OFFLINE_OTHER_REGION = "__offline_other__"
 
-#: 补集排除的 region（核心桶 + vanke）。
-_OFFLINE_OTHER_EXCLUDES = ("hangzhou", "shaoxing", "vanke")
+#: 补集排除的 region（核心桶 + vanke + qudao——2026-10-17 实锤：渠道线
+#: 日报行（region=qudao，10 月 2194 万）也落在本表，不排则「其他」桶
+#: 虚增渠道销售额；渠道线走渠道事实表/渠道看板，与线下三桶互斥）。
+_OFFLINE_OTHER_EXCLUDES = ("hangzhou", "shaoxing", "vanke", "qudao")
 
 AGG_SCOPES = (
     ("hangzhou", "杭州", "hangzhou", None),

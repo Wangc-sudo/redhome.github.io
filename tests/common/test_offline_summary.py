@@ -446,9 +446,14 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(["hangzhou", "shaoxing", "other"], keys)
         anchors = {scope: anchor for scope, _, _, anchor in AGG_SCOPES}
         self.assertEqual(anchors["shaoxing"], None)   # 李树军拆分退役，并入绍兴
-        from common.daily_robot.offline_summary import OFFLINE_OTHER_REGION
+        from common.daily_robot.offline_summary import (
+            OFFLINE_OTHER_REGION, _OFFLINE_OTHER_EXCLUDES)
         regions = {scope: region for scope, _, region, _ in AGG_SCOPES}
         self.assertEqual(regions["other"], OFFLINE_OTHER_REGION)
+        # 补集排除集含 qudao（2026-10-17：渠道日报行漏入「其他」桶实锤修复）
+        self.assertEqual(
+            set(_OFFLINE_OTHER_EXCLUDES),
+            {"hangzhou", "shaoxing", "vanke", "qudao"})
 
     def test_daily_markdown_contains_other_row(self):
         """「其他」桶成行（省外+总经办并入）；李树军不再单独成行。"""
