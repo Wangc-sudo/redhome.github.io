@@ -59,7 +59,7 @@ export function useDepWire({
         await updatePipelineDeps({ service_id: service.service_id, depends_on: next });
       }
       setFlash('ok', `已建立依赖：${toModule.label} ← ${fromModule.label}`);
-      await reload();
+      await reload(['pipelines']);   // F4：依赖只影响任务域
     } catch (err) {
       setFlash('err', `建立依赖失败：${err.message}`);
     } finally {
@@ -81,7 +81,7 @@ export function useDepWire({
         await updatePipelineDeps({ service_id: service.service_id, depends_on: next });
       }
       setFlash('ok', `已解除依赖：${dep.toLabel} ✕ ${dep.fromLabel}`);
-      await reload();
+      await reload(['pipelines']);   // F4：依赖只影响任务域
     } catch (err) {
       setFlash('err', `解除依赖失败：${err.message}`);
     } finally {

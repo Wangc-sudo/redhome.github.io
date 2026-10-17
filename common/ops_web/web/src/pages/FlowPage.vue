@@ -107,8 +107,9 @@ function toggleRegionMembers(node) {
   layout();   // 高度变化影响连线端点与层距
 }
 
-//: 写操作后的静默全量刷新（拉线/抽屉共用；load 声明在下方，函数提升兜底）
-const reloadSilent = () => load({ silent: true });
+//: 写操作后的静默刷新（F4：调用方带 parts 按域局部拉取；load 声明在下方，
+//: 函数提升兜底）
+const reloadSilent = (parts) => load({ silent: true, parts });
 
 const poolNode = ref({ id: 'pool', x: 40, y: TOP_Y });
 
@@ -155,7 +156,7 @@ async function onToggleTask(service) {
   try {
     await togglePipeline({ service_id: service.service_id, enabled: target });
     setFlash('ok', `「${service.service_label}」已${target ? '启用' : '停用'}`);
-    await load({ silent: true });
+    await load({ silent: true, parts: ['pipelines'] });
   } catch (err) {
     setFlash('err', `开关失败：${err.message}`);
   } finally {
@@ -172,7 +173,7 @@ async function onRunOnce(service) {
   try {
     await runPipelineOnce({ service_id: service.service_id });
     setFlash('ok', `「${service.service_label}」已提交运行，流水见任务抽屉`);
-    await load({ silent: true });
+    await load({ silent: true, parts: ['pipelines'] });
   } catch (err) {
     setFlash('err', `运行失败：${err.message}`);
   } finally {
@@ -250,20 +251,31 @@ async function applyAnchor() {
 }
 
 // -- 装载 ------------------------------------------------------------------------
-async function load({ silent = false } = {}) {
+//: F4（2026-10-17）按域局部刷新：parts 子集时只重拉受影响域并并入 lastRaw
+//: （未拉域沿用旧值），图重建管线不变（视觉语义零变化）；缺省三域全拉
+//: （初次装载/手动刷新/未知影响面）。
+async function load({ silent = false, parts = null } = {}) {
   if (!silent) loading.value = true;
   loadError.value = '';
+  const want = parts || ['overview', 'roster', 'pipelines'];
+  const prev = lastRaw.value || {};
   try {
     const [overview, roster, pipelines] = await Promise.all([
-      getOverview(),
-      canRoster.value ? getRoster() : Promise.resolve(null),
-      canPipelines.value ? getPipelines() : Promise.resolve(null),
+      want.includes('overview')
+        ? getOverview()
+        : Promise.resolve(prev.overview || null),
+      want.includes('roster')
+        ? (canRoster.value ? getRoster() : Promise.resolve(null))
+        : Promise.resolve(prev.roster || null),
+      want.includes('pipelines')
+        ? (canPipelines.value ? getPipelines() : Promise.resolve(null))
+        : Promise.resolve(prev.pipelines || null),
     ]);
-    month.value = (roster && roster.month) || '';
+    month.value = (roster && roster.month) || month.value;
     lastRaw.value = {
       overview,
       roster,
-      groups: (pipelines && pipelines.groups) || [],
+      groups: pipelines ? pipelines.groups : (prev.groups || []),
     };
     buildGraph(lastRaw.value);
   } catch (err) {

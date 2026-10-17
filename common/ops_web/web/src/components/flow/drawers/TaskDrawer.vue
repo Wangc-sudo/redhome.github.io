@@ -54,7 +54,7 @@ async function onSaveTimes() {
     await updatePipelineTimes({ service_id: props.node.service.service_id, times });
     setFlash('ok', `已改「${props.node.service.service_label}」播报时间`);
     emit('close');
-    await props.reload();
+    await props.reload(['pipelines']);   // F4：播报时间只影响任务域
   } catch (err) {
     setFlash('err', `改播报时间失败：${err.message}`);
   } finally {

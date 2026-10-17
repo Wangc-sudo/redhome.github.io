@@ -44,7 +44,7 @@ async function onToggleRosterRow(row) {
   try {
     await toggleRosterEntry({ id: row.id, enabled: !Number(row.enabled) });
     setFlash('ok', `已${Number(row.enabled) ? '停用' : '启用'}「${row.person_name}」`);
-    await props.reload();
+    await props.reload(['roster']);   // F4：名册/月目标只影响名册域
   } catch (err) {
     setFlash('err', `名册操作失败：${err.message}`);
   } finally {
@@ -58,7 +58,7 @@ async function onDeleteRosterRow(row) {
   try {
     await deleteRosterEntry({ id: row.id });
     setFlash('ok', `已删除名册项「${row.person_name}」`);
-    await props.reload();
+    await props.reload(['roster']);   // F4：名册/月目标只影响名册域
   } catch (err) {
     setFlash('err', `删除失败：${err.message}`);
   } finally {
@@ -84,7 +84,7 @@ async function onAddRosterRow() {
     });
     setFlash('ok', `已把「${name}」补录到 ${props.node.label} 名册`);
     drawerNewName.value = '';
-    await props.reload();
+    await props.reload(['roster']);   // F4：名册/月目标只影响名册域
   } catch (err) {
     setFlash('err', `补录失败：${err.message}`);
   } finally {
@@ -102,7 +102,7 @@ async function onSaveTargets() {
   try {
     await saveRegionTargets({ scope: props.node.key, rows });
     setFlash('ok', `已保存 ${props.node.label} 月目标（${rows.length} 人）`);
-    await props.reload();
+    await props.reload(['roster']);   // F4：名册/月目标只影响名册域
   } catch (err) {
     setFlash('err', `保存目标失败：${err.message}`);
   } finally {
