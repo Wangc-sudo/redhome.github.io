@@ -4,7 +4,8 @@
  * 纯展示（计算在 flow/governance.js）；用户裁决：治理产出不发群播报，
  * 只在画布看板。
  */
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
+import { getPipelinesHealth } from '../../../api.js';
 import { governanceReport } from '../../../flow/governance.js';
 
 const props = defineProps({
@@ -12,7 +13,15 @@ const props = defineProps({
 });
 
 const today = new Date().toISOString().slice(0, 10);
-const report = computed(() => governanceReport(props.groups, today));
+// 僵尸检测真源=真实 cron 运行史（勿用 service.latest——手动请求表）
+const health = ref({});
+onMounted(async () => {
+  try {
+    const data = await getPipelinesHealth();
+    health.value = (data && data.latest) || {};
+  } catch { health.value = {}; }
+});
+const report = computed(() => governanceReport(props.groups, today, health.value));
 </script>
 
 <template>

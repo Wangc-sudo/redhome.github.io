@@ -38,14 +38,24 @@ describe('disabledAudit', () => {
 });
 
 describe('zombieAudit', () => {
-  it('启用但无记录=僵尸；超龄=僵尸', () => {
+  it('启用但无记录=僵尸；超龄=僵尸（真源=健康读面）', () => {
     const rows = zombieAudit([
       svc('norun'),
-      svc('fresh', { latest: { started_at: '2026-10-16 08:30:00' } }),
-      svc('stale', { latest: { started_at: '2026-10-01 08:30:00' } }),
+      svc('fresh'),
+      svc('stale'),
       svc('off', { enabled: false }),
-    ], TODAY);
+    ], TODAY, undefined, {
+      fresh: { started_at: '2026-10-16 08:30:00' },
+      stale: { started_at: '2026-10-01 08:30:00' },
+    });
     expect(rows.map((r) => r.service_id).sort()).toEqual(['norun', 'stale']);
+  });
+  it('service.latest（手动运行请求表）不参与僵尸判定', () => {
+    // 回归（2026-10-17 误报事故）：latest 有手动运行 ≠ 真实 cron 运行
+    const rows = zombieAudit([
+      svc('manual-only', { latest: { started_at: '2026-10-16 08:30:00' } }),
+    ], TODAY, undefined, {});
+    expect(rows.map((r) => r.service_id)).toEqual(['manual-only']);
   });
 });
 
@@ -81,10 +91,10 @@ describe('governanceReport', () => {
   it('四节装配 + 总数/启用计数', () => {
     const report = governanceReport(groupsOf(
       svc('a'), svc('b', { enabled: false, disabled_reason: 'r' }),
-    ), TODAY);
+    ), TODAY, { a: { started_at: '2026-10-17 08:30:00' } });
     expect(report.total).toBe(2);
     expect(report.enabled).toBe(1);
     expect(report.disabled).toHaveLength(1);
-    expect(report.zombies).toHaveLength(1);       // a 无运行记录
+    expect(report.zombies).toHaveLength(0);       // a 今早已跑
   });
 });
