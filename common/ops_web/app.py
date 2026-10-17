@@ -2729,6 +2729,39 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "depends_on": clean})
 
+    @app.get("/api/pipelines/health")
+    def api_pipelines_health(request: Request):
+        """舰队健康读面（治理抽屉用）：每服务最近一次真实 cron 运行。
+
+        真源 ``pd_ops_run_history``（调度器落表）；注意与
+        ``pd_ops_run_request``（手动「运行一次」请求）区分——治理的僵尸
+        检测必须用前者，2026-10-17 P1 误报事故即混用所致。
+        返回 ``{service_id: {"started_at", "status"}}``。
+        """
+        require_capability(request, CAPABILITY_PIPELINES)
+        try:
+            with db_connector() as connection:
+                rows = ops_control.fetch_run_history(connection, limit=500)
+        except Exception as exc:
+            _LOGGER.warning("ops-web run history load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        latest = {}
+        for row in rows:  # id DESC，首见即最新
+            get = (row.get if isinstance(row, dict)
+                   else None)
+            if get is None:
+                sid, status, started = row[1], row[3], row[6]
+            else:
+                sid, status, started = (
+                    get("service_id"), get("status"), get("started_at"))
+            if sid not in latest:
+                latest[sid] = {
+                    "started_at": _fmt_time(started),
+                    "status": status,
+                }
+        return JSONResponse({"status": "ok", "latest": latest})
+
     # -- 数据修正（类型化修数通道，2026-10-16：画布拉线之外的写面收口）-----
 
     @app.post("/api/data-fix/realign")

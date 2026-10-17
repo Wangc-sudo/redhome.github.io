@@ -42,13 +42,15 @@ export function disabledAudit(services, today) {
   return rows;
 }
 
-/** 僵尸检测：启用但无运行记录，或最近运行超过 ZOMBIE_DAYS 天。 */
-export function zombieAudit(services, today, days = ZOMBIE_DAYS) {
+/** 僵尸检测：启用但无运行记录，或最近运行超过 ZOMBIE_DAYS 天。
+ * health = /api/pipelines/health 的 {service_id: {started_at}}（真源
+ * pd_ops_run_history 真实 cron 运行史；勿用 service.latest——那是手动
+ * 「运行一次」请求表，2026-10-17 P1 误报事故的根因）。 */
+export function zombieAudit(services, today, days = ZOMBIE_DAYS, health = {}) {
   const rows = [];
   for (const s of services) {
     if (!s.enabled) continue;
-    const latest = s.latest || null;
-    const startedAt = latest && latest.started_at;
+    const startedAt = health[s.service_id] && health[s.service_id].started_at;
     if (!startedAt) {
       rows.push({ service_id: s.service_id, label: s.service_label || s.service_id, last: '无记录' });
       continue;
@@ -100,14 +102,14 @@ export function cronPileup(services, threshold = 3) {
     .sort((a, b) => b.count - a.count);
 }
 
-/** 总报告装配。 */
-export function governanceReport(groups, today) {
+/** 总报告装配。health = 健康读面（僵尸检测真源）。 */
+export function governanceReport(groups, today, health = {}) {
   const services = flattenServices(groups);
   return {
     total: services.length,
     enabled: services.filter((s) => s.enabled).length,
     disabled: disabledAudit(services, today),
-    zombies: zombieAudit(services, today),
+    zombies: zombieAudit(services, today, undefined, health),
     decorativeDeps: decorativeDeps(services),
     pileups: cronPileup(services),
   };

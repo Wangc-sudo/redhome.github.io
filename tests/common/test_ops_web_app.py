@@ -1428,6 +1428,40 @@ class PipelineScheduleUpdateTests(unittest.TestCase):
         )
 
 
+class PipelinesHealthTests(unittest.TestCase):
+    """舰队健康读面（治理 P1）：每服务最近一次真实 cron 运行。"""
+
+    def test_health_returns_latest_per_service(self):
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        _login(client)
+        with mock.patch(
+            "common.ops_web.app.ops_control.fetch_run_history",
+            return_value=[
+                # id DESC 序：首见即最新
+                {"service_id": "robot-hangzhou", "status": "finished",
+                 "started_at": "2026-10-17 08:30:00"},
+                {"service_id": "robot-hangzhou", "status": "failed",
+                 "started_at": "2026-10-16 08:30:00"},
+                {"service_id": "extract-mart", "status": "finished",
+                 "started_at": "2026-10-17 07:00:00"},
+            ],
+        ):
+            resp = client.get("/api/pipelines/health")
+        self.assertEqual(200, resp.status_code)
+        latest = resp.json()["latest"]
+        self.assertEqual("finished", latest["robot-hangzhou"]["status"])
+        # started_at 存 UTC，读面 _fmt_time 转北京时间（+8h）
+        self.assertEqual("2026-10-17 16:30:00",
+                         latest["robot-hangzhou"]["started_at"])
+        self.assertIn("extract-mart", latest)
+
+    def test_health_requires_login(self):
+        client = TestClient(_pipeline_app(viewer=_admin_viewer(),
+                                          publisher=_RecordingPublisher()))
+        self.assertEqual(401, client.get("/api/pipelines/health").status_code)
+
+
 class PipelineRunOnceTests(unittest.TestCase):
     def test_run_once_inserts_request_with_actor(self):
         store = _PipelineStore()
