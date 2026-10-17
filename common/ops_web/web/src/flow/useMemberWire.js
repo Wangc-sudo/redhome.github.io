@@ -9,7 +9,7 @@
 import { computed, ref } from 'vue';
 import { assignMember, moveMember } from '../api.js';
 import { setFlash } from '../store/me.js';
-import { edgePath } from './layout.js';
+import { draftPath } from './layout.js';
 
 export function useMemberWire({
   busy, panX, panY, zoom, regionNodes, canWire, reload,
@@ -114,7 +114,7 @@ export function useMemberWire({
 
   const wireDraftPath = computed(() => {
     const w = wireDraft.value;
-    return w ? edgePath(w.x1, w.y1, w.x2, w.y2) : '';
+    return w ? draftPath(w.x1, w.y1, w.x2, w.y2) : '';
   });
 
   return { wireDraft, wireDraftPath, startWire };

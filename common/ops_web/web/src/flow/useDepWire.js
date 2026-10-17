@@ -7,10 +7,10 @@
 import { computed, ref } from 'vue';
 import { updatePipelineDeps } from '../api.js';
 import { setFlash } from '../store/me.js';
-import { TASK_W, edgePath } from './layout.js';
+import { draftPath } from './layout.js';
 
 export function useDepWire({
-  busy, panX, panY, zoom, taskNodes, moduleHOf, canPipelines, reload,
+  busy, panX, panY, zoom, taskNodes, canPipelines, reload,
 }) {
   const depDraft = ref(null);    // {fromModule, x1, y1, x2, y2}
 
@@ -18,10 +18,13 @@ export function useDepWire({
     if (evt.button !== 0 || busy.value || !canPipelines.value) return;
     evt.stopPropagation();
     evt.preventDefault();
-    const x1 = node.x + TASK_W;
-    const y1 = node.y + moduleHOf(node) / 2;
     const canvasEl = evt.target.closest('.canvas');
     const rect = canvasEl.getBoundingClientRect();
+    // F5：起点=被按下的端口圆心（DOM 实测，与成员口同手法），
+    // 不再钉死节点右缘几何
+    const portRect = evt.target.getBoundingClientRect();
+    const x1 = (portRect.left + portRect.width / 2 - rect.left - panX.value) / zoom.value;
+    const y1 = (portRect.top + portRect.height / 2 - rect.top - panY.value) / zoom.value;
     depDraft.value = { fromModule: node, x1, y1, x2: x1, y2: y1 };
     function onMove(moveEvt) {
       depDraft.value.x2 = (moveEvt.clientX - rect.left - panX.value) / zoom.value;
@@ -91,7 +94,7 @@ export function useDepWire({
 
   const depDraftPath = computed(() => {
     const w = depDraft.value;
-    return w ? edgePath(w.x1, w.y1, w.x2, w.y2) : '';
+    return w ? draftPath(w.x1, w.y1, w.x2, w.y2) : '';
   });
 
   return { depDraft, depDraftPath, startDepWire, onDepEdgeClick };

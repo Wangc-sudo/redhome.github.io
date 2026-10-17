@@ -1,7 +1,9 @@
 /**
- * 闭环画布·布局与连线几何纯函数（2026-10-16 F1 从 FlowPage.vue 抽出，行为零变化）。
+ * 闭环画布·布局与连线几何纯函数（2026-10-16 F1 从 FlowPage.vue 抽出；
+ * 2026-10-17 F5 多方向拉线落地）。
  * 零依赖（不 import vue）：展开态/持久化坐标一律以参数传入——可单测。
- * edgePath 是全部连线路径的唯一收口点（F5 多方向拉线在此扩展 side 参数）。
+ * 连线唯一收口：edgePathSides（方向自适应贝塞尔）+ pickSides/portAnchor
+ * 方位选择 + draftPath（拉线草稿）；F1 的 edgePath（水平钉死）已退役。
  */
 
 // -- 布局常量 ------------------------------------------------------------------
@@ -107,28 +109,80 @@ export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModul
   return map;
 }
 
-/**
- * 统一边路径生成器（F5 多方向拉线的唯一收口点）。
- * 现状=水平贝塞尔：控制点沿 ±x 延伸 dx。
- * abs=false 保留区域→模块边的历史有符号语义（目标在源左侧时 dx 恒退化为
- * slack，形态与旧实现逐像素一致）；abs=true（缺省）用于依赖线/草稿线。
- */
-export function edgePath(x1, y1, x2, y2, { abs = true, slack = 60 } = {}) {
-  const dx = Math.max(slack, (abs ? Math.abs(x2 - x1) : (x2 - x1)) / 2);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+// -- 多方向拉线（2026-10-17 F5）-------------------------------------------------
+// 端口方位 → 边法线单位向量（控制点沿法线延伸，连线从就近边自然进出）。
+const SIDE_NORMAL = {
+  left: [-1, 0],
+  right: [1, 0],
+  top: [0, -1],
+  bottom: [0, 1],
+};
+
+/** 端口在节点矩形上的锚点（边中点）。 */
+export function portAnchor(rect, side) {
+  switch (side) {
+    case 'left': return { x: rect.x, y: rect.y + rect.h / 2 };
+    case 'right': return { x: rect.x + rect.w, y: rect.y + rect.h / 2 };
+    case 'top': return { x: rect.x + rect.w / 2, y: rect.y };
+    case 'bottom': return { x: rect.x + rect.w / 2, y: rect.y + rect.h };
+    default: return { x: rect.x + rect.w, y: rect.y + rect.h / 2 };
+  }
 }
 
-/** 区域→模块边路径（端点：源右缘中点 → 目标左缘 y+40）。 */
+/**
+ * 端口方位自动选择：按两矩形中心相对方位取对边——水平占优取 left/right 对，
+ * 垂直占优取 top/bottom 对（默认三栏布局下结果=旧的「右出左入」）。
+ */
+export function pickSides(from, to) {
+  const dx = (to.x + to.w / 2) - (from.x + from.w / 2);
+  const dy = (to.y + to.h / 2) - (from.y + from.h / 2);
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0 ? ['right', 'left'] : ['left', 'right'];
+  }
+  return dy >= 0 ? ['bottom', 'top'] : ['top', 'bottom'];
+}
+
+/**
+ * 统一边路径生成器（方向自适应贝塞尔）：控制点沿各端点所在边的法线方向
+ * 延伸 max(slack, 端点距离/2)。全部连线的唯一收口点。
+ */
+export function edgePathSides(x1, y1, side1, x2, y2, side2, { slack = 60 } = {}) {
+  const dist = Math.hypot(x2 - x1, y2 - y1);
+  const c = Math.max(slack, dist / 2);
+  const [nx1, ny1] = SIDE_NORMAL[side1] || SIDE_NORMAL.right;
+  const [nx2, ny2] = SIDE_NORMAL[side2] || SIDE_NORMAL.left;
+  return `M ${x1} ${y1} C ${x1 + nx1 * c} ${y1 + ny1 * c}, ${x2 + nx2 * c} ${y2 + ny2 * c}, ${x2} ${y2}`;
+}
+
+/**
+ * 拉线草稿路径：自由端无节点，按光标相对起点的方位动态选边
+ * （拖向左就从左边出、拖向下就从下边出，不再绕圈）。
+ */
+export function draftPath(x1, y1, x2, y2, { slack = 60 } = {}) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  let side1;
+  let side2;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    side1 = dx >= 0 ? 'right' : 'left';
+    side2 = dx >= 0 ? 'left' : 'right';
+  } else {
+    side1 = dy >= 0 ? 'bottom' : 'top';
+    side2 = dy >= 0 ? 'top' : 'bottom';
+  }
+  return edgePathSides(x1, y1, side1, x2, y2, side2, { slack });
+}
+
+/** 区域→模块/汇聚边路径：按实际摆位自动选边（自由拖动后不变形）。 */
 export function buildEdgePaths(edges, rects) {
   return edges.map((edge) => {
     const from = rects[edge.from];
     const to = rects[edge.to];
     if (!from || !to) return { ...edge, d: '' };
-    return {
-      ...edge,
-      d: edgePath(from.x + from.w, from.y + from.h / 2, to.x, to.y + 40,
-        { abs: false }),
-    };
+    const [s1, s2] = pickSides(from, to);
+    const a = portAnchor(from, s1);
+    const b = portAnchor(to, s2);
+    return { ...edge, d: edgePathSides(a.x, a.y, s1, b.x, b.y, s2) };
   });
 }
 
@@ -156,6 +210,10 @@ export function buildDepEdges(taskNodes, rects) {
       const to = rects[n.id];
       if (!from || !to) continue;
       const fromModule = taskNodes.find((m) => m.id === fromId);
+      // F5：依赖线也按实际摆位自动选边（上下堆叠走垂直贝塞尔）
+      const [s1, s2] = pickSides(from, to);
+      const a = portAnchor(from, s1);
+      const b = portAnchor(to, s2);
       out.push({
         id: key,
         fromLabel: fromModule.label,
@@ -163,7 +221,7 @@ export function buildDepEdges(taskNodes, rects) {
         fromModule,
         toModule: n,
         sourceIds: fromModule.services.map((s) => s.service_id),
-        d: edgePath(from.x + from.w, from.y + from.h / 2, to.x, to.y + 34),
+        d: edgePathSides(a.x, a.y, s1, b.x, b.y, s2),
       });
     }
   }
