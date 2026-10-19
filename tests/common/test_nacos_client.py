@@ -12,13 +12,16 @@ from common.public_data.nacos_client import (
 
 
 class FakeHttp:
-    def __init__(self, *, login_payload=None, get_responses=None, post_responses=None):
+    def __init__(self, *, login_payload=None, get_responses=None,
+                 post_responses=None, delete_responses=None):
         self.login_calls = []
         self.get_calls = []
         self.post_calls = []
+        self.delete_calls = []
         self.login_payload = login_payload or {"accessToken": "tok-1", "tokenTtl": 18000}
         self.get_responses = get_responses or {}
         self.post_responses = post_responses or {}
+        self.delete_responses = delete_responses or {}
 
     def get(self, url, timeout):
         self.get_calls.append(url)
@@ -31,6 +34,10 @@ class FakeHttp:
         self.post_calls.append((url, form))
         return self.post_responses.get("post", (200, "true"))
 
+    def delete(self, url, timeout):
+        self.delete_calls.append(url)
+        return self.delete_responses.get("delete", (200, "true"))
+
 
 def _client(fake, **kwargs):
     return RestNacosClient(
@@ -40,6 +47,7 @@ def _client(fake, **kwargs):
         password="secret",
         http_get=fake.get,
         http_post=fake.post,
+        http_delete=fake.delete,
         **kwargs,
     )
 
@@ -103,6 +111,26 @@ class RestNacosClientTests(unittest.TestCase):
 
         with self.assertRaises(NacosAuthError):
             client.publish_config("a.yaml", "G", "x")
+
+    def test_remove_config_deletes_with_token_and_tenant(self):
+        """归档动作（2026-10-19）：DELETE /nacos/v1/cs/configs。"""
+        fake = FakeHttp()
+        client = _client(fake)
+
+        self.assertTrue(client.remove_config("a.yaml", "G"))
+
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(fake.delete_calls[0]).query)
+        self.assertEqual(["a.yaml"], query["dataId"])
+        self.assertEqual(["G"], query["group"])
+        self.assertEqual(["production"], query["tenant"])
+        self.assertEqual(["tok-1"], query["accessToken"])
+
+    def test_remove_config_rejects_non_true_response(self):
+        fake = FakeHttp(delete_responses={"delete": (200, "false")})
+        client = _client(fake)
+        with self.assertRaises(NacosAuthError):
+            client.remove_config("a.yaml", "G")
 
     def test_login_failure_raises(self):
         fake = FakeHttp()

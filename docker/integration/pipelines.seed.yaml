@@ -372,15 +372,8 @@ dingtalk-gateway:
   enabled: true
   reads: [mart_ops]
   description: "robot_outbox delivery + DingTalk interaction gateway"
-sync-runner:
-  kind: apps
-  category: 同步
-  # legacy 合并同步：拆为 sync-dingtalk / sync-wdt 两跳后运行态停用
-  # （Nacos enabled=false，2026-10-13 对账确认）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "0 2 * * *"
-  reads: [raw_dingtalk, raw_wdt, mart_ops]
-  description: "legacy combined sync (both sources)"
+# sync-runner 已归档（2026-10-19 治理 P2 裁决：Nacos 摘除 + seed 删条目 +
+# git 历史即档案；legacy 合并同步早被 sync-dingtalk/sync-wdt 取代）。
 bi-web:
   kind: business
   category: 平台

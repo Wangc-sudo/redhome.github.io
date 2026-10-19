@@ -14,6 +14,7 @@ import { useRoute } from 'vue-router';
 import {
   getPipelines,
   togglePipeline,
+  archivePipeline,
   updatePipelineTimes,
   updatePipelineParams,
   addPipeline,
@@ -102,6 +103,25 @@ async function runOnce(s) {
   try {
     await runPipelineOnce({ service_id: s.service_id });
     setFlash('ok', '已提交立即运行 ' + s.service_id);
+    await load(false);
+  } catch (err) {
+    setFlash('err', err.message);
+  }
+}
+
+/* ---------------------------- 归档（2026-10-19 治理 P2）--------------- */
+async function archiveTask(s) {
+  if (!window.confirm(
+    '确认归档 ' + s.service_id +
+    '？归档 = 从注册表摘除该条目（审计留痕，git 历史即档案），'
+    + '服务将从舰队消失、不可再调度。此操作不可在前端撤销。')) return;
+  try {
+    const resp = await archivePipeline({ service_id: s.service_id });
+    let msg = '已归档 ' + s.service_id;
+    if (resp && resp.seed_registered) {
+      msg += '（注意：seed 仍有条目，需代码 PR 同步删除防复活）';
+    }
+    setFlash('ok', msg);
     await load(false);
   } catch (err) {
     setFlash('err', err.message);
@@ -635,6 +655,7 @@ onBeforeUnmount(() => {
                 <button class="btn mini" @click="openSchedule(s)">改播报时间</button>
                 <button v-if="s.alertable" class="btn mini" @click="openAlertSettings(s)">告警设置</button>
                 <button v-if="s.has_command" class="btn mini" @click="runOnce(s)">运行一次</button>
+                <button v-if="!s.enabled" class="btn mini" @click="archiveTask(s)">归档</button>
               </td>
             </tr>
           </tbody>

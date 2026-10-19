@@ -64,6 +64,7 @@ class ErrorDetail:
     FORBIDDEN = "forbidden"
     UNAVAILABLE = "unavailable"
     BAD_REQUEST = "bad_request"
+    CONFLICT = "conflict"
 
 
 def load_settings():
@@ -502,7 +503,6 @@ _SERVICE_LABELS = {
     "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
     "kb-sync-products": "知识库商品同步（AI 表「产品资料」→ kb_products，小时级）",
     "kb-gateway": "知识库问答机器人（客服群，独立 Stream 应用，常驻）",
-    "sync-runner": "旧版合并同步（双源，遗留入口）",
     "fleet-audit": "舰队月检（每月 2 日四节体检快照 → 治理抽屉，不发群播报）",
     "bi-web": "BI 看板（L1/L2，只读 mart_ops，常驻）",
     "scheduler": "调度器（按注册表定时触发各管道，自身无定时，常驻）",
@@ -670,7 +670,6 @@ _SERVICE_NAMES = {
     "dingtalk-gateway": "钉钉网关",
     "kb-sync-products": "知识库商品同步",
     "kb-gateway": "知识库问答机器人",
-    "sync-runner": "合并同步（旧）",
     "fleet-audit": "舰队月检",
     "bi-web": "BI 看板",
     "scheduler": "调度器",
@@ -1239,7 +1238,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
                browser_login_token=None,
                fleet_source=None, config_source=None,
-               config_publisher=None, corp_id=None, agent_id=None) -> FastAPI:
+               config_publisher=None, config_deleter=None,
+               corp_id=None, agent_id=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -2537,6 +2537,62 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
 
+    @app.post("/api/pipelines/archive")
+    async def pipeline_archive(request: Request):
+        """归档（2026-10-19 治理 P2 裁决）：Nacos 摘除条目 + 审计留痕。
+
+        前置门禁：**只允许归档已停用的服务**（先停用后归档，防误删活线）。
+        归档语义 = Nacos 摘除 + seed 删条目（代码 PR）+ git 历史即档案；
+        响应带 ``seed_registered`` 提示——seed 里的条目不在本端点职责内，
+        须同 PR 删除，否则下次 ``publish-pipelines --if-missing`` 会复活。
+        """
+        viewer = require_capability(request, CAPABILITY_PIPELINES)
+        if config_deleter is None:
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        payload = await _json_body(request)
+        service_id = payload.get("service_id")
+        if not ops_control.SERVICE_ID_RE.match(service_id or ""):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if service_id not in _fleet():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            config = config_source.get_pipeline(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline read failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if config.enabled:
+            # 活线不可归档：先走停用（带原因）再归档
+            raise HTTPException(status_code=409, detail=ErrorDetail.CONFLICT)
+        seed_path = (os.environ.get("PUBLIC_DATA_PIPELINE_SEED") or "").strip()
+        seed_registered = False
+        if seed_path:
+            try:
+                from common.public_data.pipeline_config import load_seed
+                seed_registered = service_id in load_seed(seed_path)
+            except Exception:
+                _LOGGER.warning("ops-web seed probe failed: archive anyway")
+        try:
+            config_deleter(service_id)
+        except Exception as exc:
+            _LOGGER.warning("ops-web pipeline archive failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        try:
+            with db_connector() as connection:
+                ops_control.insert_pipeline_audit(
+                    connection, viewer.userid, "archive", service_id,
+                    detail=config.disabled_reason or "",
+                )
+        except Exception as exc:
+            # 删除已生效而审计没落库：变更存在但流水缺失，必须显眼。
+            _LOGGER.error(
+                "ops-web pipeline audit write failed AFTER archive: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok",
+                             "seed_registered": seed_registered})
+
     @app.post("/api/pipelines/update")
     async def pipeline_schedule_update(request: Request):
         """修改既有线的播报时间（read-modify-write，只换 cron 的分/时两段）。
@@ -3704,6 +3760,7 @@ def main():
     """从环境装配并启动；启动失败只打印一行安全消息（同 bi-web 纪律）。"""
     try:
         from common.public_data.pipeline_config import (
+            build_config_deleter,
             build_config_publisher,
             build_config_source,
         )
@@ -3744,6 +3801,7 @@ def main():
             fleet_source=fleet_source,
             config_source=config_source,
             config_publisher=build_config_publisher(),
+            config_deleter=build_config_deleter(),
             corp_id=corp_id,
             agent_id=agent_id,
         )

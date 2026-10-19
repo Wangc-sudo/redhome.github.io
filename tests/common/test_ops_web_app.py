@@ -483,9 +483,24 @@ class _PipelineStore:
                   if service_id is None or r["service_id"] == service_id))
 
 
+class _RecordingDeleter:
+    """config_deleter 替身：记录每次删除；可注入异常模拟 Nacos 故障。"""
+
+    def __init__(self, error=None):
+        self.deleted = []
+        self._error = error
+
+    def __call__(self, service_id):
+        if self._error is not None:
+            raise self._error
+        self.deleted.append(service_id)
+
+
 def _pipeline_app(*, viewer=None, fleet=("robot-hangzhou",), publisher=None,
+                  deleter=None, configs=None,
                   connection=None, connector_error=None):
-    configs = {"robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True}}
+    if configs is None:
+        configs = {"robot-hangzhou": {"schedule": "0 2 * * *", "enabled": True}}
     return create_app(
         settings=_fake_settings(),
         session_secret=SECRET,
@@ -494,6 +509,7 @@ def _pipeline_app(*, viewer=None, fleet=("robot-hangzhou",), publisher=None,
         fleet_source=lambda: fleet,
         config_source=StaticConfigSource(configs),
         config_publisher=publisher,
+        config_deleter=deleter,
     )
 
 
@@ -1025,6 +1041,75 @@ class PipelineToggleTests(unittest.TestCase):
                 client.post("/api/pipelines/toggle", json=payload).status_code,
                 payload,
             )
+
+
+class PipelineArchiveTests(unittest.TestCase):
+    """归档端点（2026-10-19 治理 P2 裁决）：Nacos 摘除+审计留痕，
+    git 历史即档案；只允许归档已停用服务。"""
+
+    _DISABLED = {"sync-runner": {"schedule": "0 2 * * *", "enabled": False,
+                                 "disabled_reason": "legacy 被双跳取代"}}
+
+    def _app(self, deleter=None, fleet=("sync-runner",)):
+        return _pipeline_app(viewer=_admin_viewer(), fleet=fleet,
+                             configs=dict(self._DISABLED),
+                             deleter=deleter if deleter is not None
+                             else _RecordingDeleter())
+
+    def test_archive_disabled_service_deletes_and_audits(self):
+        store = _PipelineStore()
+        deleter = _RecordingDeleter()
+        client = TestClient(self._app(deleter=deleter))
+        _login(client)
+        with store.patch_audit():
+            response = client.post("/api/pipelines/archive",
+                                   json={"service_id": "sync-runner"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["sync-runner"], deleter.deleted)
+        self.assertEqual(1, len(store.audit))
+        actor, action, sid, detail = store.audit[0]
+        self.assertEqual((ADMIN_USERID, "archive", "sync-runner"),
+                         (actor, action, sid))
+        self.assertIn("legacy", detail)
+
+    def test_archive_enabled_service_conflict(self):
+        """活线不可归档：409，先停用（带原因）再归档。"""
+        deleter = _RecordingDeleter()
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), deleter=deleter))  # 缺省 enabled=True
+        _login(client)
+        response = client.post("/api/pipelines/archive",
+                               json={"service_id": "robot-hangzhou"})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual([], deleter.deleted)
+
+    def test_archive_rejects_unknown_and_bad_id(self):
+        client = TestClient(self._app())
+        _login(client)
+        for payload in (
+            {"service_id": "nope"},        # 不在舰队
+            {"service_id": "BAD ID"},      # 非法 id
+            {},                            # 缺字段
+        ):
+            self.assertEqual(
+                400, client.post("/api/pipelines/archive",
+                                 json=payload).status_code, payload)
+
+    def test_archive_503_when_no_deleter(self):
+        client = TestClient(_pipeline_app(
+            viewer=_admin_viewer(), fleet=("sync-runner",),
+            configs=dict(self._DISABLED), deleter=None))
+        _login(client)
+        # deleter=None 即「未接线」：端点降级 503
+        self.assertEqual(503, client.post(
+            "/api/pipelines/archive",
+            json={"service_id": "sync-runner"}).status_code)
+
+    def test_archive_requires_admin(self):
+        client = TestClient(self._app())
+        self.assertEqual(401, client.post(
+            "/api/pipelines/archive",
+            json={"service_id": "sync-runner"}).status_code)
 
 
 class PipelineAddTests(unittest.TestCase):

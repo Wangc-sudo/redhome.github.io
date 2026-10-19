@@ -134,7 +134,6 @@ _PAGES_REGIONS = (
 _LEADERBOARD_REGIONS = ("hangzhou", "shaoxing", "vanke", "qudao", "offline_all")
 
 _COMMAND_TABLE = {
-    "sync-runner": _sync_entry(),
     "sync-dingtalk": _sync_entry("--source", "dingtalk"),
     "sync-wdt": _sync_entry("--source", "wdt"),
     # 知识库商品同步（2026-10-10 客服问答机器人 P1）：AI 表「产品资料」→
