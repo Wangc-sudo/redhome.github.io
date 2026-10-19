@@ -50,16 +50,25 @@ class ComputeDailyTest(unittest.TestCase):
             facts=facts, business_date=date(2026, 9, 23), month_target=1000.0,
         )
         self.assertEqual(m.sales, 250.0)
+        self.assertEqual(m.yesterday_sales, 100.0)  # 昨日（9-22）
         # 日环比：对前一自然日（9-22）
         self.assertEqual(m.dod_amount, 150.0)
         self.assertAlmostEqual(m.dod_rate, 1.5)
-        # 周环比：对上周同星期几（9-16）
-        self.assertEqual(m.wow_amount, 200.0)
-        self.assertAlmostEqual(m.wow_rate, 4.0)
+        # 本周（周一 9-21 至今）= 9-22 + 9-23 = 350
+        # 上周同期（上周一 9-14 ~ 上周同星期几 9-16）= 9-16 = 50
+        self.assertEqual(m.week_completed, 350.0)
+        self.assertEqual(m.prev_week_completed, 50.0)
+        # 周环比：本周 350 对上周同期 50（周口径）
+        self.assertEqual(m.wow_amount, 300.0)
+        self.assertAlmostEqual(m.wow_rate, 6.0)
         # 月累计 = 9-16 + 9-22 + 9-23
         self.assertEqual(m.month_completed, 400.0)
         self.assertEqual(m.month_target, 1000.0)
         self.assertAlmostEqual(m.month_rate, 0.4)
+        # 上月累计（8-1~8-23）= 80 + 40 = 120；无上月目标 → 上月达成率 None
+        self.assertEqual(m.prev_month_completed, 120.0)
+        self.assertIsNone(m.prev_month_target)
+        self.assertIsNone(m.prev_month_rate)
         # 月环比：本月 1~23 累计 对 上月 1~23 累计（80+40=120）
         self.assertEqual(m.mom_amount, 280.0)
         self.assertAlmostEqual(m.mom_rate, 280.0 / 120.0)
@@ -185,12 +194,17 @@ class RenderTest(unittest.TestCase):
         self.assertIn("今日合计：**2.0万 元**", body)
         self.assertIn("**一、区域**", body)
         self.assertIn(
-            "| 区域 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |", body,
+            "| 区域 | 今日 | 昨日 | 日环比 | 本周 | 上周 | 周环比 | 月累计 "
+            "| 月目标 | 上月累计 | 上月目标 | 本月达成率 | 上月达成率 |", body,
         )
         # 未传 dept_rows 时不出部门段（向后兼容）
         self.assertNotIn("**二、部门**", body)
-        self.assertIn("| 杭州 | 2.0万 | +100.0% | -- | 3.0万 | 10.0万 | 30.0% |", body)
-        self.assertIn("| 绍兴 | 0 | -- | -- | 0 | -- | -- |", body)
+        self.assertIn(
+            "| 杭州 | 2.0万 | 1.0万 | +100.0% | 3.0万 | 0 | -- | 3.0万 "
+            "| 10.0万 | 0 | -- | 30.0% | -- |", body)
+        self.assertIn(
+            "| 绍兴 | 0 | 0 | -- | 0 | 0 | -- | 0 | -- | 0 | -- | -- | -- |",
+            body)
         self.assertIn("| **线下整体** |", body)
 
     def test_weekly_markdown_ranking(self):
@@ -816,8 +830,9 @@ class DeptSectionTests(unittest.TestCase):
             dept_rows=dept_rows, dept_total=dept_total)
         self.assertIn("**一、区域**", body)
         self.assertIn("**二、部门**", body)
-        self.assertIn("| 部门 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
-                      body)
+        self.assertIn(
+            "| 部门 | 今日 | 昨日 | 日环比 | 本周 | 上周 | 周环比 | 月累计 "
+            "| 月目标 | 上月累计 | 上月目标 | 本月达成率 | 上月达成率 |", body)
         self.assertIn("| 杭中项目部 | 1.5万 |", body)
         self.assertIn("| 诸暨项目部 | 5,000 |", body)
         # 两部分各自合计都等于线下整体（不是相加）
