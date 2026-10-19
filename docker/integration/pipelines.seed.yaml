@@ -419,3 +419,14 @@ rag-index-products:
   schedule: "47 * * * *"
   reads: [mart_ops]
   description: "RAG vector index (DingTalk aitable -> jina-clip-v2 -> Milvus Lite)"
+# RAG 第二期（2026-10-19）：知识库文档（销售总结/规划/制度等）按标题结构
+# 切片后写进同一个 collection，与商品图文同向量空间、同检索入口混排召回。
+# 数据源 = 本地清单 JSON（钉钉 doc/wiki OpenAPI 未授权，本机 dws 导出后导入）；
+# 缺 JINA_API_KEY 或缺清单文件时打印 skipped 静默跳过。
+rag-index-docs:
+  kind: apps
+  category: 同步
+  enabled: true
+  schedule: "17 3 * * *"
+  reads: []
+  description: "RAG vector index for docs (DingTalk knowledge-base markdown -> jina-clip-v2 -> Milvus Lite)"

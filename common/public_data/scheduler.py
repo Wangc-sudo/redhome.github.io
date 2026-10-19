@@ -154,6 +154,16 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
+    # RAG 第二期（2026-10-19）：知识库文档切片 embedding → 同一个 collection。
+    # 输入是本地清单 JSON（默认 /opt/dops/config-local/kb_docs.json，可用
+    # env RAG_DOCS_INPUT 覆盖），无外部调用故走 business 门禁；缺 key/缺文件
+    # 静默 skipped。幂等（按 doc:{doc_id}: 前缀先清），手动触发无需 --force。
+    "rag-index-docs": {
+        "argv": [
+            "common.rag.index_docs",
+            "--confirm-local-test-write",
+        ],
+    },
     "roll-manifest": {
         "argv": [
             "common.public_data.cli", "roll-manifest",
