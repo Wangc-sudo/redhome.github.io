@@ -213,13 +213,35 @@ def fetch_all_member_regions(connection):
     return tuple(out)
 
 
-def fetch_dept_daily_facts(connection, *, start, end, dept_of):
+UNMAPPED_DEPT = "(未归位)"
+
+
+def _resolve_dept(person, fact_dept, dept_of, canvas_names):
+    """部门归属：画布归位优先；回退的事实表部门名须属于画布部门集合。
+
+    被 ``dept_of``（画布归位）覆盖的人直接采用其部门；未覆盖的人回退事实表
+    ``department``，但**仅当该名字在画布部门集合 ``canvas_names`` 内**才认——
+    门店由此归位（「诸暨门店」→诸暨项目部、「绍兴门店」→绍兴项目部）。
+    历史脏值（人名当部门、旧简写，如「谢坚钰」「滨萧」）一律落
+    ``UNMAPPED_DEPT``，由调用方决定是否展示。
+
+    用户裁决（2026-10-19）：部门严格只认画布，画布上没有的一律不展示。
+    """
+    dept = dept_of.get(person)
+    if dept:
+        return dept
+    if fact_dept and (canvas_names is None or fact_dept in canvas_names):
+        return fact_dept
+    return UNMAPPED_DEPT
+
+
+def fetch_dept_daily_facts(connection, *, start, end, dept_of,
+                           canvas_names=None):
     """线下整体口径按部门取日销：``{dept: {date: amount}}``。
 
     部门取**画布口径**（``dept_of``=``fetch_member_dept_map`` 的姓名→部门，
-    即基成员 ∘ 归位覆盖后的结果，与闭环画布同源）。未归位的人回退事实表
-    ``department``——门店行由此归位（「诸暨门店」→诸暨项目部、「绍兴门店」
-    →绍兴项目部），仍为空则落「(未归位)」桶。
+    即基成员 ∘ 归位覆盖后的结果，与闭环画布同源）；回退走 ``_resolve_dept``
+    （严格只认画布，脏值落 ``UNMAPPED_DEPT``）。
 
     区域口径与 ``AGG_SCOPES`` 三桶一致：杭+绍+补集（排除 vanke/qudao）。
     """
@@ -242,13 +264,14 @@ def fetch_dept_daily_facts(connection, *, start, end, dept_of):
         fact_dept = get("fd") if get else row[2]
         day = get("d") if get else row[0]
         amount = get("s") if get else row[3]
-        dept = dept_of.get(person) or fact_dept or "(未归位)"
+        dept = _resolve_dept(person, fact_dept, dept_of, canvas_names)
         bucket = result.setdefault(dept, {})
         bucket[day] = bucket.get(day, 0.0) + float(amount or 0)
     return result
 
 
-def fetch_dept_month_targets(connection, *, year, month, dept_of):
+def fetch_dept_month_targets(connection, *, year, month, dept_of,
+                             canvas_names=None):
     """按部门汇总当月目标；口径同 ``fetch_scope_month_target``。
 
     先按人取 MAX（melt 行重复携带，绝不可 SUM），再按部门求和；「合计」行
@@ -276,7 +299,7 @@ def fetch_dept_month_targets(connection, *, year, month, dept_of):
         target = get("t") if get else row[2]
         if target is None:
             continue
-        dept = dept_of.get(person) or fact_dept or "(未归位)"
+        dept = _resolve_dept(person, fact_dept, dept_of, canvas_names)
         targets[dept] = targets.get(dept, 0.0) + float(target)
     return targets
 
@@ -594,17 +617,17 @@ def run_daily_summary(connection, outbox, *, business_date, now,
     )
 
     # 部门部分（闭环画布口径）：基成员 ∘ 归位覆盖 → 姓名→部门，再聚合。
-    dept_of = {
-        name: dept
-        for (_, name), dept in fetch_member_dept_map(
-            connection, fetch_all_member_regions(connection)).items()
-    }
+    dept_map = fetch_member_dept_map(
+        connection, fetch_all_member_regions(connection))
+    dept_of = {name: dept for (_, name), dept in dept_map.items()}
+    canvas_names = set(dept_map.values())  # 严格只认画布：回退值须在此集合内
     dept_facts = fetch_dept_daily_facts(
         connection, start=prev_first, end=business_date, dept_of=dept_of,
+        canvas_names=canvas_names,
     )
     dept_targets = fetch_dept_month_targets(
         connection, year=business_date.year, month=business_date.month,
-        dept_of=dept_of,
+        dept_of=dept_of, canvas_names=canvas_names,
     )
     dept_rows = sorted(
         (
@@ -618,6 +641,12 @@ def run_daily_summary(connection, outbox, *, business_date, now,
         ),
         key=lambda m: -m.sales,
     )
+    # 未归位桶（历史脏部门名）无量时不展示；有量则保留，避免悄悄丢数。
+    dept_rows = [
+        m for m in dept_rows
+        if not (m.scope == UNMAPPED_DEPT and not m.sales
+                and not m.month_completed)
+    ]
     dept_total = compute_daily_metrics(
         TOTAL_SCOPE_KEY, TOTAL_LABEL,
         facts=merge_facts(dept_facts.values()),

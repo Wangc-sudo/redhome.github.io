@@ -21,6 +21,7 @@ from common.daily_robot.offline_summary import (
     compute_weekly_metrics,
     fetch_dept_daily_facts,
     fetch_dept_month_targets,
+    UNMAPPED_DEPT,
     merge_facts,
     merge_targets,
     previous_month,
@@ -853,6 +854,30 @@ class DeptSectionTests(unittest.TestCase):
         facts = fetch_dept_daily_facts(
             conn, start=date(2026, 10, 1), end=day, dept_of={})
         self.assertEqual(50.0, facts["(未归位)"][day])
+
+    def test_strict_canvas_rejects_dirty_department(self):
+        """严格只认画布：回退的历史脏部门名落未归位桶，不单独成行。
+
+        用户裁决（2026-10-19）：部门表只出现画布上存在的部门。门店的
+        ``department`` 是干净的「诸暨项目部」，在画布集合内 → 正常归位；
+        「谢坚钰」（人名当部门）、「滨萧」（旧简写）不在 → 并入未归位桶。
+        """
+        day = date(2026, 10, 19)
+        conn = _FactConn(
+            fact_rows=[
+                {"d": day, "p": "诸暨门店", "fd": "诸暨项目部", "s": 200.0},
+                {"d": day, "p": "谢坚钰", "fd": "谢坚钰", "s": 300.0},
+                {"d": day, "p": "旧数据", "fd": "滨萧", "s": 400.0},
+            ],
+            target_rows=[])
+        canvas_names = {"诸暨项目部", "绍兴项目部", "杭州销售部"}
+        facts = fetch_dept_daily_facts(
+            conn, start=date(2026, 10, 1), end=day, dept_of={},
+            canvas_names=canvas_names)
+        self.assertEqual(200.0, facts["诸暨项目部"][day])  # 门店：在画布内
+        self.assertEqual(700.0, facts[UNMAPPED_DEPT][day])  # 脏值并入未归位
+        self.assertNotIn("谢坚钰", facts)
+        self.assertNotIn("滨萧", facts)
 
 
 if __name__ == "__main__":
