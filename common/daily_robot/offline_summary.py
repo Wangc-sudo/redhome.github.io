@@ -48,6 +48,11 @@ AGG_SCOPES = (
 TOTAL_SCOPE_KEY = "offline_total"
 TOTAL_LABEL = "线下整体"
 
+#: 部门表只保留这些区域的部门（2026-10-19 用户裁决：部门只看杭州、绍兴）。
+DEPT_TABLE_REGIONS = ("hangzhou", "shaoxing")
+#: 部门表合计行标签——部门表不含「其他」区域，合计=杭州+绍兴（≠线下整体）。
+DEPT_TABLE_TOTAL_LABEL = "杭州+绍兴"
+
 DAILY_KIND = "offline_daily"
 WEEKLY_KIND = "offline_weekly"
 MONTHLY_KIND = "offline_monthly"
@@ -75,6 +80,13 @@ class ScopeMetrics:
     month_completed: float = 0.0
     month_target: float | None = None
     month_rate: float | None = None
+    # 13 列扩展（2026-10-19 用户裁决）：昨日/本周/上周/上月累计/上月目标/上月达成率
+    yesterday_sales: float = 0.0
+    week_completed: float = 0.0
+    prev_week_completed: float = 0.0
+    prev_month_completed: float = 0.0
+    prev_month_target: float | None = None
+    prev_month_rate: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +370,31 @@ def _sum_window(facts, start, end):
     return sum(amount for d, amount in facts.items() if start <= d <= end)
 
 
-def compute_daily_metrics(scope, label, *, facts, business_date, month_target):
-    """日报指标：当日 + 日/周环比 + 月累计/达成 + 月环比。
+def compute_daily_metrics(scope, label, *, facts, business_date, month_target,
+                          prev_month_target=None):
+    """日报指标（13 列）：今日/昨日/日环比、本周/上周/周环比、
+    月累计/月目标/本月达成率、上月累计/上月目标/上月达成率。
+
+    口径（2026-10-19 用户裁决）：本周=周一至今；上周=上周同期（上周一至
+    上周同星期几），周环比按「本周 vs 上周同期」的周口径；上月累计=上月
+    同期（上月 1 日至上月同日），上月达成率=上月累计/上月目标。
 
     *facts* 须覆盖上月 1 日至 *business_date*（缺日 = 0）。
     """
     today = business_date
     sales = facts.get(today, 0.0)
-    dod_amount, dod_rate = _diff_rate(sales, facts.get(today - timedelta(days=1)))
-    wow_amount, wow_rate = _diff_rate(sales, facts.get(today - timedelta(days=7)))
+    yesterday_sales = facts.get(today - timedelta(days=1), 0.0)
+    dod_amount, dod_rate = _diff_rate(
+        sales, facts.get(today - timedelta(days=1)))
+
+    # 本周（周一至今）/ 上周同期（上周一至上周同星期几）；周环比按周口径
+    week_start = today - timedelta(days=today.weekday())
+    week_completed = _sum_window(facts, week_start, today)
+    prev_week_start = week_start - timedelta(days=7)
+    prev_week_end = today - timedelta(days=7)
+    prev_week_completed = _sum_window(facts, prev_week_start, prev_week_end)
+    wow_amount, wow_rate = _diff_rate(
+        week_completed, prev_week_completed if prev_week_completed else None)
 
     month_first = today.replace(day=1)
     month_completed = _sum_window(facts, month_first, today)
@@ -381,8 +409,11 @@ def compute_daily_metrics(scope, label, *, facts, business_date, month_target):
         scope=scope,
         label=label,
         sales=sales,
+        yesterday_sales=yesterday_sales,
         dod_amount=dod_amount,
         dod_rate=dod_rate,
+        week_completed=week_completed,
+        prev_week_completed=prev_week_completed,
         wow_amount=wow_amount,
         wow_rate=wow_rate,
         mom_amount=mom_amount,
@@ -390,6 +421,9 @@ def compute_daily_metrics(scope, label, *, facts, business_date, month_target):
         month_completed=month_completed,
         month_target=month_target,
         month_rate=achievement_rate(month_completed, month_target),
+        prev_month_completed=prev_completed,
+        prev_month_target=prev_month_target,
+        prev_month_rate=achievement_rate(prev_completed, prev_month_target),
     )
 
 
@@ -450,19 +484,33 @@ def _signed_pct(rate):
 
 
 def _scope_table(*, header, items, total):
-    """板块/部门共用的表体（列一致，仅表头首列名不同）。"""
+    """板块/部门共用的 13 列表体（纯 markdown 表格，同「完成率榜」样式）。
+
+    列：名称 | 今日 昨日 日环比 | 本周 上周 周环比 | 月累计 月目标 |
+    上月累计 上月目标 | 本月达成率 上月达成率（口径见 ``compute_daily_metrics``）。
+    """
     lines = [
-        f"| {header} | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
-        "|---|---|---|---|---|---|---|",
+        f"| {header} | 今日 | 昨日 | 日环比 | 本周 | 上周 | 周环比 | 月累计 "
+        "| 月目标 | 上月累计 | 上月目标 | 本月达成率 | 上月达成率 |",
+        "|:--|--:|--:|:--:|--:|--:|:--:|--:|--:|--:|--:|:--:|:--:|",
     ]
     for m in (*items, total):
         label = f"**{m.label}**" if m.scope == TOTAL_SCOPE_KEY else m.label
-        target_txt = _fmt_wan(m.month_target) if m.month_target else "--"
-        rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
+        month_target = _fmt_wan(m.month_target) if m.month_target else "--"
+        prev_target = (
+            _fmt_wan(m.prev_month_target) if m.prev_month_target else "--")
+        month_rate = (
+            _fmt_pct(m.month_rate) if m.month_rate is not None else "--")
+        prev_rate = (
+            _fmt_pct(m.prev_month_rate)
+            if m.prev_month_rate is not None else "--")
         lines.append(
-            f"| {label} | {_fmt_wan(m.sales)} | {_signed_pct(m.dod_rate)} "
-            f"| {_signed_pct(m.wow_rate)} | {_fmt_wan(m.month_completed)} "
-            f"| {target_txt} | {rate_txt} |"
+            f"| {label} | {_fmt_wan(m.sales)} | {_fmt_wan(m.yesterday_sales)} "
+            f"| {_signed_pct(m.dod_rate)} | {_fmt_wan(m.week_completed)} "
+            f"| {_fmt_wan(m.prev_week_completed)} | {_signed_pct(m.wow_rate)} "
+            f"| {_fmt_wan(m.month_completed)} | {month_target} "
+            f"| {_fmt_wan(m.prev_month_completed)} | {prev_target} "
+            f"| {month_rate} | {prev_rate} |"
         )
     return lines
 
@@ -587,8 +635,10 @@ def run_daily_summary(connection, outbox, *, business_date, now,
     手动触发 `--force` 传入）另起去重键强制重发。
     """
     prev_first, _ = previous_month(business_date)
+    prev_year, prev_month = prev_first.year, prev_first.month
     facts_by_scope = {}
     targets = {}
+    prev_targets = {}
     for scope, label, region, anchor in AGG_SCOPES:
         facts = _fetch_window(
             connection, region=region, anchor=anchor,
@@ -599,6 +649,10 @@ def run_daily_summary(connection, outbox, *, business_date, now,
             connection, region=region, anchor=anchor,
             year=business_date.year, month=business_date.month,
         )
+        prev_targets[scope] = fetch_scope_month_target(
+            connection, region=region, anchor=anchor,
+            year=prev_year, month=prev_month,
+        )
 
     rows = [
         compute_daily_metrics(
@@ -606,6 +660,7 @@ def run_daily_summary(connection, outbox, *, business_date, now,
             facts=facts_by_scope[scope],
             business_date=business_date,
             month_target=targets[scope],
+            prev_month_target=prev_targets[scope],
         )
         for scope, label, _, _ in AGG_SCOPES
     ]
@@ -614,19 +669,32 @@ def run_daily_summary(connection, outbox, *, business_date, now,
         facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
         business_date=business_date,
         month_target=merge_targets(targets.values()),
+        prev_month_target=merge_targets(prev_targets.values()),
     )
 
-    # 部门部分（闭环画布口径）：基成员 ∘ 归位覆盖 → 姓名→部门，再聚合。
+    # 部门部分（闭环画布口径，仅杭州、绍兴区域）：基成员 ∘ 归位覆盖 →
+    # 姓名→部门，再聚合。用户裁决（2026-10-19）：部门表只看杭州、绍兴。
     dept_map = fetch_member_dept_map(
         connection, fetch_all_member_regions(connection))
     dept_of = {name: dept for (_, name), dept in dept_map.items()}
     canvas_names = set(dept_map.values())  # 严格只认画布：回退值须在此集合内
-    dept_facts = fetch_dept_daily_facts(
-        connection, start=prev_first, end=business_date, dept_of=dept_of,
-        canvas_names=canvas_names,
-    )
+    dept_region = {}
+    for (region, name), dept in dept_map.items():
+        dept_region.setdefault(dept, region)
+    dept_facts = {
+        dept: facts
+        for dept, facts in fetch_dept_daily_facts(
+            connection, start=prev_first, end=business_date, dept_of=dept_of,
+            canvas_names=canvas_names,
+        ).items()
+        if dept_region.get(dept) in DEPT_TABLE_REGIONS
+    }
     dept_targets = fetch_dept_month_targets(
         connection, year=business_date.year, month=business_date.month,
+        dept_of=dept_of, canvas_names=canvas_names,
+    )
+    dept_prev_targets = fetch_dept_month_targets(
+        connection, year=prev_year, month=prev_month,
         dept_of=dept_of, canvas_names=canvas_names,
     )
     dept_rows = sorted(
@@ -636,6 +704,7 @@ def run_daily_summary(connection, outbox, *, business_date, now,
                 facts=facts,
                 business_date=business_date,
                 month_target=dept_targets.get(dept),
+                prev_month_target=dept_prev_targets.get(dept),
             )
             for dept, facts in dept_facts.items()
         ),
@@ -648,10 +717,12 @@ def run_daily_summary(connection, outbox, *, business_date, now,
                 and not m.month_completed)
     ]
     dept_total = compute_daily_metrics(
-        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        TOTAL_SCOPE_KEY, DEPT_TABLE_TOTAL_LABEL,
         facts=merge_facts(dept_facts.values()),
         business_date=business_date,
-        month_target=merge_targets(dept_targets.values()),
+        month_target=merge_targets(dept_targets.get(d) for d in dept_facts),
+        prev_month_target=merge_targets(
+            dept_prev_targets.get(d) for d in dept_facts),
     ) if dept_rows else None
 
     upsert_agg_daily(
