@@ -14,6 +14,10 @@ from common.public_data.manual_import.schema import (
     mart_manual_ddl_statements,
     raw_manual_ddl_statements,
 )
+from common.public_data.ops_credential import (
+    ops_web_credential_ddl_statements,
+)
+from common.public_data.ops_token import ops_web_token_ddl_statements
 from common.public_data.mart_extract_schema import (
     _AGG_OFFLINE_DAILY_DDL,
     _CHANNEL_SALES_ROBOT_INBOX_DDL,
@@ -304,6 +308,21 @@ _DIM_ROBOT_MEMBER_UNION_ID_DDL = (
 
 def _build_mart_robot_member_union_id_ddl() -> tuple[str, ...]:
     return (_DIM_ROBOT_MEMBER_UNION_ID_DDL,)
+
+
+# 登录用户名（2026-10-19 用户裁决「用户名=工号」）：dim_robot_member 补
+# job_number 列，源为 payload_json.job_number（钉钉通讯录列表接口已自带该
+# 字段，与 unionid 同一层 JSON，无需新增接口或权限申请——「密码用手机号」
+# 方案被否正因手机号只在详情接口且属敏感字段）。raw 无该字段时落 NULL，
+# 读侧按 user_id 兜底。独立版本而非改写 mart-extract-v1，避免校验和漂移。
+_DIM_ROBOT_MEMBER_JOB_NUMBER_DDL = (
+    "ALTER TABLE `dim_robot_member`\n"
+    "  ADD COLUMN `job_number` VARCHAR(64) DEFAULT NULL AFTER `union_id`"
+)
+
+
+def _build_mart_robot_member_job_number_ddl() -> tuple[str, ...]:
+    return (_DIM_ROBOT_MEMBER_JOB_NUMBER_DDL,)
 
 
 # 年度目标维度（版本受控种子 docker/integration/target.seed.json 整体重放：
@@ -613,6 +632,30 @@ _MIGRATIONS = (
     ("mart-facts-v1", "mart_facts", _build_mart_facts_ddl()),
     ("mart-dims-v1", "mart_dims", _build_mart_dims_ddl()),
     ("mart-queue-v1", "mart_queue", _build_mart_queue_ddl()),
+    (
+        # 登录用户名真源（2026-10-19 用户裁决「用户名=工号」）：
+        # dim_robot_member.job_number。顺序纪律同 relay-v1——ALTER 必须排在
+        # 建表版本（mart-extract-v1）之后，故置于列表末尾。
+        "mart-ops-robot-member-job-number-v1",
+        "mart",
+        _build_mart_robot_member_job_number_ddl(),
+    ),
+    (
+        # 运维后台登录凭据（2026-10-19 用户裁决「系统生成随机初始密码」）：
+        # ops_web_credential——工号登录名的口令侧真源。密码存 PBKDF2 哈希
+        # （stdlib，不引新依赖），支持自改、失败限流与锁定。
+        "mart-ops-credential-v1",
+        "mart",
+        ops_web_credential_ddl_statements(),
+    ),
+    (
+        # 按人登录口令（2026-10-19 过渡期裁决）：ops_web_token——替代「一枚
+        # 全局共享口令 + 任意 user_id」的冒用面。已签发按人口令的人，全局
+        # 共享口令对其失效；未签发者仍走共享口令作逃生口。
+        "mart-ops-token-v1",
+        "mart",
+        ops_web_token_ddl_statements(),
+    ),
 )
 
 

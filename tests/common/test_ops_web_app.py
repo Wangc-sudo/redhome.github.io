@@ -78,6 +78,14 @@ class _Cursor:
         self._last = ""
         self.rowcount = 1
 
+    # 真实 pymysql cursor 支持 with；fake 必须同样支持，否则生产代码里
+    # 的 with connection.cursor() 在测试中会 TypeError。
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
         self._last = sql

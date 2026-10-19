@@ -568,7 +568,9 @@ class MartExtractRepository:
             """\
             SELECT `user_id`, `name`, `region`, `dept_id`, `dept_name`,
                    JSON_UNQUOTE(JSON_EXTRACT(`payload_json`, '$.unionid'))
-                       AS `union_id`
+                       AS `union_id`,
+                   JSON_UNQUOTE(JSON_EXTRACT(`payload_json`, '$.job_number'))
+                       AS `job_number`
             FROM `dingtalk_org_member`
             WHERE `sync_run_id` = (
               SELECT `sync_run_id` FROM `dingtalk_org_member`
@@ -591,14 +593,16 @@ class MartExtractRepository:
             if rows:
                 cursor.executemany(
                     "INSERT INTO `dim_robot_member` "
-                    "(`user_id`, `name`, `union_id`, `region`, `dept_id`, "
-                    "`dept_name`, `is_active`, `synced_at`, `sync_run_id`) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "(`user_id`, `name`, `union_id`, `job_number`, `region`, "
+                    "`dept_id`, `dept_name`, `is_active`, `synced_at`, "
+                    "`sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     [
                         (
                             row["user_id"],
                             row["name"],
                             row.get("union_id"),
+                            row.get("job_number"),
                             row["region"],
                             row.get("dept_id"),
                             row.get("dept_name"),
@@ -667,12 +671,14 @@ class MartExtractRepository:
                 textwrap.dedent(
                     """\
                     INSERT INTO `dim_robot_member`
-                    (`user_id`, `name`, `union_id`, `region`, `dept_id`,
-                     `dept_name`, `is_active`, `synced_at`, `sync_run_id`)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (`user_id`, `name`, `union_id`, `job_number`, `region`,
+                     `dept_id`, `dept_name`, `is_active`, `synced_at`,
+                     `sync_run_id`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                       `name` = VALUES(`name`),
                       `union_id` = VALUES(`union_id`),
+                      `job_number` = VALUES(`job_number`),
                       `region` = VALUES(`region`),
                       `dept_id` = VALUES(`dept_id`),
                       `dept_name` = VALUES(`dept_name`),
@@ -685,6 +691,7 @@ class MartExtractRepository:
                         row["user_id"],
                         row["name"],
                         row.get("union_id"),
+                        row.get("job_number"),
                         row["region"],
                         row.get("dept_id"),
                         row.get("dept_name"),
@@ -1164,10 +1171,10 @@ class MartExtractService:
             return None
 
         digest = self._content_digest(
-            "{}|{}|{}|{}|{}|{}".format(
+            "{}|{}|{}|{}|{}|{}|{}".format(
                 row["user_id"], row["name"], row["region"],
                 row.get("dept_id") or "", row.get("dept_name") or "",
-                row.get("union_id") or "",
+                row.get("union_id") or "", row.get("job_number") or "",
             )
             for row in rows
         )
