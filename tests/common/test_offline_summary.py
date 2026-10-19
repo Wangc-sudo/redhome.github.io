@@ -821,22 +821,35 @@ class DeptSectionTests(unittest.TestCase):
                 "诸暨项目部", "诸暨项目部", facts={day: 5000.0},
                 business_date=day, month_target=None),
         ]
-        dept_total = compute_daily_metrics(
-            TOTAL_SCOPE_KEY, "线下整体",
-            facts=merge_facts([{day: 15000.0}, {day: 5000.0}]),
-            business_date=day, month_target=None)
         body = build_daily_markdown(
             business_date=day, rows=rows, total=total,
-            dept_rows=dept_rows, dept_total=dept_total)
+            dept_rows=dept_rows)
         self.assertIn("**一、区域**", body)
-        self.assertIn("**二、部门**", body)
+        self.assertIn("**二、部门（杭州 / 绍兴）**", body)
         self.assertIn(
             "| 部门 | 今日 | 昨日 | 日环比 | 本周 | 上周 | 周环比 | 月累计 "
             "| 月目标 | 上月累计 | 上月目标 | 本月达成率 | 上月达成率 |", body)
         self.assertIn("| 杭中项目部 | 1.5万 |", body)
         self.assertIn("| 诸暨项目部 | 5,000 |", body)
-        # 两部分各自合计都等于线下整体（不是相加）
+        # 区域表合计仍是线下整体
         self.assertIn("| **线下整体** | 2.0万 |", body)
+        # 部门表不带合计行（2026-10-19 用户裁决去掉「杭州+绍兴」合计）
+        dept_section = body.split("**二、部门", 1)[1]
+        self.assertNotIn("**线下整体**", dept_section)
+        self.assertNotIn("杭州+绍兴", dept_section)
+
+    def test_bi_link_appended(self):
+        rows, total = _daily_rows()
+        body = build_daily_markdown(
+            business_date=date(2026, 9, 23), rows=rows, total=total,
+            bi_url="http://203.205.91.241:8300/offline_all.html")
+        self.assertIn(
+            "📊 [点击查看线下整体 BI 看板]"
+            "(<http://203.205.91.241:8300/offline_all.html>)", body)
+        # 不传 bi_url 则不出链接行（向后兼容）
+        body_no = build_daily_markdown(
+            business_date=date(2026, 9, 23), rows=rows, total=total)
+        self.assertNotIn("BI 看板", body_no)
 
     def test_canvas_dept_wins_and_store_falls_back(self):
         day = date(2026, 10, 19)

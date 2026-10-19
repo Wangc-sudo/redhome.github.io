@@ -598,7 +598,8 @@ def _handle_offline_summary(args, *, period):
             _print_failure("region_seed_required")
             sys.exit(1)
         configs = load_region_configs(seed_path)
-        if configs.get(region) is None:
+        cfg = configs.get(region)
+        if cfg is None:
             _print_failure("unknown_region")
             sys.exit(1)
 
@@ -615,6 +616,9 @@ def _handle_offline_summary(args, *, period):
             status = run_offline_daily_task(
                 conn, outbox, business_date=reference, now=now,
                 dedupe_suffix=dedupe_suffix,
+                # 线下整体 BI 看板链接（offline_all 的 leaderboardUrl，
+                # 2026-10-19 用户裁决附在日报末尾）
+                bi_url=cfg.leaderboard_url or None,
             )
         elif period == "weekly":
             status = run_offline_weekly_task(
