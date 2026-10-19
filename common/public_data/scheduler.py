@@ -203,6 +203,14 @@ _COMMAND_TABLE = {
     # L3 数据新鲜度看门狗（A3）：跨区域，投递固定 region=ops；
     # 依赖 extract-channel 完成后触发，避免早于数据落地误报。
     "freshness-check": _mart_cli_entry("freshness-check"),
+    # 舰队月检（2026-10-17 治理 P2）：四节体检快照落 pd_ops_fleet_audit，
+    # 产出只进 ops-web 治理抽屉（用户裁决：治理产出不发群播报）。
+    "fleet-audit": {
+        "argv": [
+            "common.public_data.fleet_audit",
+            "--confirm-local-test-write",
+        ],
+    },
 }
 
 #: Registered in the seed with a cron but intentionally not schedulable

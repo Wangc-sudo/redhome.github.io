@@ -39,6 +39,7 @@ from common.public_data import (
     calendar_store,
     channel_target,
     data_fix,
+    fleet_audit,
     ops_control,
     org_assignment_override,
     org_catalog,
@@ -502,6 +503,7 @@ _SERVICE_LABELS = {
     "kb-sync-products": "知识库商品同步（AI 表「产品资料」→ kb_products，小时级）",
     "kb-gateway": "知识库问答机器人（客服群，独立 Stream 应用，常驻）",
     "sync-runner": "旧版合并同步（双源，遗留入口）",
+    "fleet-audit": "舰队月检（每月 2 日四节体检快照 → 治理抽屉，不发群播报）",
     "bi-web": "BI 看板（L1/L2，只读 mart_ops，常驻）",
     "scheduler": "调度器（按注册表定时触发各管道，自身无定时，常驻）",
     "ops-web": "运维台（权限管理 + 定时任务管理，常驻）",
@@ -669,6 +671,7 @@ _SERVICE_NAMES = {
     "kb-sync-products": "知识库商品同步",
     "kb-gateway": "知识库问答机器人",
     "sync-runner": "合并同步（旧）",
+    "fleet-audit": "舰队月检",
     "bi-web": "BI 看板",
     "scheduler": "调度器",
     "ops-web": "运维台",
@@ -2761,6 +2764,23 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                     "status": status,
                 }
         return JSONResponse({"status": "ok", "latest": latest})
+
+    @app.get("/api/pipelines/fleet-audit-latest")
+    def api_pipelines_fleet_audit_latest(request: Request):
+        """最近一次舰队月检快照（治理抽屉「上次月检快照」节数据源）。
+
+        真源 ``pd_ops_fleet_audit``（fleet-audit 管道每月 2 日落一行）；
+        从未跑过 → ``snapshot=None``（前端显示「未跑过」而非报错）。
+        """
+        require_capability(request, CAPABILITY_PIPELINES)
+        try:
+            with db_connector() as connection:
+                snapshot = fleet_audit.fetch_latest_snapshot(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web fleet-audit snapshot load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "snapshot": snapshot})
 
     # -- 数据修正（类型化修数通道，2026-10-16：画布拉线之外的写面收口）-----
 

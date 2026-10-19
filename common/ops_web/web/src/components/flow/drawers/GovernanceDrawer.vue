@@ -5,7 +5,7 @@
  * 只在画布看板。
  */
 import { computed, onMounted, ref } from 'vue';
-import { getPipelinesHealth } from '../../../api.js';
+import { getFleetAuditLatest, getPipelinesHealth } from '../../../api.js';
 import { governanceReport } from '../../../flow/governance.js';
 
 const props = defineProps({
@@ -15,13 +15,21 @@ const props = defineProps({
 const today = new Date().toISOString().slice(0, 10);
 // 僵尸检测真源=真实 cron 运行史（勿用 service.latest——手动请求表）
 const health = ref({});
+//: 上次月检快照（2026-10-17 治理 P2：fleet-audit 管道每月 2 日落库，
+//: 只进本抽屉不发群）；null=加载中，undefined=读取失败（静默降级）。
+const snapshot = ref(null);
 onMounted(async () => {
   try {
     const data = await getPipelinesHealth();
     health.value = (data && data.latest) || {};
   } catch { health.value = {}; }
+  try {
+    const data = await getFleetAuditLatest();
+    snapshot.value = (data && data.snapshot) || undefined;
+  } catch { snapshot.value = undefined; }
 });
 const report = computed(() => governanceReport(props.groups, today, health.value));
+const snapshotReport = computed(() => (snapshot.value && snapshot.value.report) || null);
 </script>
 
 <template>
@@ -44,8 +52,32 @@ const report = computed(() => governanceReport(props.groups, today, health.value
       <p v-if="!report.disabled.length" class="drawer-line muted">无停用任务</p>
     </div>
 
+    <div v-if="snapshot === undefined" class="drawer-sec">
+      <h3>上次月检快照</h3>
+      <p class="drawer-line muted">尚未跑过（fleet-audit 每月 2 日 07:00）</p>
+    </div>
+    <div v-if="snapshotReport" class="drawer-sec">
+      <h3>上次月检快照（{{ snapshot.audit_date }}）</h3>
+      <p class="drawer-line muted">
+        舰队 {{ snapshotReport.total }} 条 · 启用 {{ snapshotReport.enabled }}
+        · 停用 {{ snapshotReport.disabled.length }}
+        · 僵尸 {{ snapshotReport.zombies.length }}
+        · 装饰依赖 {{ snapshotReport.decorative_deps.length }}
+        · cron 堆积 {{ snapshotReport.pileups.length }}
+      </p>
+      <div v-for="row in snapshotReport.zombies" :key="row.service_id" class="gov-row">
+        <span class="gov-id">{{ row.service_id }}</span>
+        <span class="gov-detail">僵尸：{{ row.last ? `最近 ${row.last}` : '无运行记录' }}</span>
+      </div>
+      <div v-for="row in snapshotReport.disabled.filter((r) => r.overdue)" :key="row.service_id" class="gov-row">
+        <span class="gov-id">{{ row.service_id }}</span>
+        <span class="gov-overdue">复查逾期</span>
+        <span class="gov-detail">{{ row.reason || '（原因缺失）' }}</span>
+      </div>
+    </div>
+
     <div class="drawer-sec">
-      <h3>僵尸任务（启用但 7 天未跑，{{ report.zombies.length }}）</h3>
+      <h3>僵尸任务（启用但超周期宽限未跑，{{ report.zombies.length }}）</h3>
       <div v-for="row in report.zombies" :key="row.service_id" class="gov-row">
         <span class="gov-id">{{ row.service_id }}</span>
         <span class="gov-detail">最近 {{ row.last }}</span>
