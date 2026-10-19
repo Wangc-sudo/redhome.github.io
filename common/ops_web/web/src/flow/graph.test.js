@@ -189,6 +189,15 @@ describe('buildGraph', () => {
     expect(nodes[0].label).toBe('其他区');
   });
 
+  it('测试区不进区域层（2026-10-19 改制为「播报试投」功能模块）', () => {
+    const g = buildGraph(raw({
+      regions: [region('hangzhou', '杭州'), region('test', '测试区')],
+      groups: [{ region: 'test', services: [svc('robot-test')] }],
+    }));
+    expect(g.regionNodes.find((n) => n.key === 'test')).toBeUndefined();
+    expect(g.regionNodes.find((n) => n.key === 'hangzhou')).toBeTruthy();
+  });
+
   it('平台线：region=null 的服务散落加工泳道模块（流水线分层，2026-10-17）', () => {
     const g = buildGraph(raw({
       groups: [{ region: null, services: [svc('extract-mart')] }],

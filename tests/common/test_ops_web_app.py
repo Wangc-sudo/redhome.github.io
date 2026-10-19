@@ -15,6 +15,7 @@ import unittest
 import warnings
 from contextlib import contextmanager
 from datetime import date, datetime
+
 from types import SimpleNamespace
 from unittest import mock
 
@@ -3690,6 +3691,19 @@ class OrgAssignmentApiTests(unittest.TestCase):
         self.assertEqual(401, client.post(
             "/api/org/region/relay",
             json={"region_key": "hangzhou", "relay": True}).status_code)
+
+    def test_region_scope_pairs_skip_test_region(self):
+        """测试区改制为「播报试投」功能模块（2026-10-19）：不进名册/目标
+        页的区域列表（它不是业务区域）。"""
+        from common.ops_web.app import _region_scope_pairs
+        conn = self._members_conn({"dim_org_region": [
+            {"region_key": "hangzhou", "label": "杭州"},
+            {"region_key": "test", "label": "测试区"},
+            {"region_key": "shaoxing", "label": "绍兴"},
+        ]})
+        pairs = _region_scope_pairs(conn)
+        keys = [key for key, _ in pairs]
+        self.assertEqual(["hangzhou", "shaoxing"], keys)
 
     def test_dept_add_writes_catalog_and_audit(self):
         conn = self._members_conn()

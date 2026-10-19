@@ -265,6 +265,10 @@ def _region_scope_pairs(connection):
     pairs = []
     for row in regions:
         key = str(row.get("region_key") or "").strip()
+        # 测试区（2026-10-19 改制为通用功能模块「播报试投」）不是业务
+        # 区域：不进名册/目标页区域列表（它只做播报改投目标）。
+        if key == "test":
+            continue
         if key and all(key != existing for existing, _ in pairs):
             pairs.append((key, row.get("label") or _label(_SCOPE_LABEL, key)))
     if not pairs:
