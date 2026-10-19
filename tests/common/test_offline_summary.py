@@ -19,6 +19,8 @@ from common.daily_robot.offline_summary import (
     compute_daily_metrics,
     compute_monthly_metrics,
     compute_weekly_metrics,
+    fetch_dept_daily_facts,
+    fetch_dept_month_targets,
     merge_facts,
     merge_targets,
     previous_month,
@@ -180,9 +182,12 @@ class RenderTest(unittest.TestCase):
         )
         self.assertIn("【线下整体日报】9月23日（周三）", body)
         self.assertIn("今日合计：**2.0万 元**", body)
+        self.assertIn("**一、区域**", body)
         self.assertIn(
-            "| 板块 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |", body,
+            "| 区域 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |", body,
         )
+        # 未传 dept_rows 时不出部门段（向后兼容）
+        self.assertNotIn("**二、部门**", body)
         self.assertIn("| 杭州 | 2.0万 | +100.0% | -- | 3.0万 | 10.0万 | 30.0% |", body)
         self.assertIn("| 绍兴 | 0 | -- | -- | 0 | -- | -- |", body)
         self.assertIn("| **线下整体** |", body)
@@ -265,6 +270,21 @@ class _Cursor:
         if "dim_calendar" in sql:
             self._rows = []
             return
+        if "dim_org_assignment_override" in sql:
+            self._rows = self._conn.overrides
+            return
+        if "SELECT DISTINCT `region` FROM `dim_robot_member`" in sql:
+            self._rows = [{"region": r} for r in self._conn.regions]
+            return
+        # 部门维度：目标（p/fd/t）与日销（d/p/fd/s）分开模拟。
+        # 用 `department` AS `fd` 判别——它只在部门取数出现，
+        # fetch_scope_month_target 没有，避免误截获。
+        if "`department` AS `fd`" in sql:
+            if "MAX(`monthly_target`)" in sql:
+                self._rows = self._conn.dept_targets
+            else:
+                self._rows = self._conn.dept_rows
+            return
         if "dim_robot_member" in sql:
             self._rows = [
                 {"region": region, "name": name, "dept_name": dept}
@@ -311,6 +331,10 @@ class _Conn:
         self.targets = targets    # {(region, anchor): float|None}
         self.members = {}         # {(region, name): dept_name}（通讯录）
         self.other_rows = []      # 补集人员采集行（「其他」桶）
+        self.regions = ()         # dim_robot_member 出现的 region
+        self.overrides = []       # dim_org_assignment_override 行
+        self.dept_rows = []       # 部门日销行 {d,p,fd,s}
+        self.dept_targets = []    # 部门目标行 {p,fd,t}
         self.agg_rows = []
         self.sql_log = []
 
@@ -730,6 +754,105 @@ class DeptMapOverrideTests(unittest.TestCase):
         conn = _DeptMapConn(self._BASE, boom=True)
         result = fetch_member_dept_map(conn, ("hangzhou",))
         self.assertEqual("杭中项目部", result[("hangzhou", "余发兴")])
+
+
+class _FactCursor:
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        return None
+
+    def execute(self, sql, params=None):
+        if "MAX(`monthly_target`)" in sql:
+            self._rows = self._conn.target_rows
+        else:
+            self._rows = self._conn.fact_rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FactConn:
+    def __init__(self, fact_rows, target_rows):
+        self.fact_rows = fact_rows
+        self.target_rows = target_rows
+
+    def cursor(self):
+        return _FactCursor(self)
+
+
+class DeptSectionTests(unittest.TestCase):
+    """日报「部门」部分：画布口径聚合 + 门店回退事实表 department。"""
+
+    def test_markdown_two_sections(self):
+        rows, total = _daily_rows()
+        day = date(2026, 9, 23)
+        dept_rows = [
+            compute_daily_metrics(
+                "杭中项目部", "杭中项目部", facts={day: 15000.0},
+                business_date=day, month_target=None),
+            compute_daily_metrics(
+                "诸暨项目部", "诸暨项目部", facts={day: 5000.0},
+                business_date=day, month_target=None),
+        ]
+        dept_total = compute_daily_metrics(
+            TOTAL_SCOPE_KEY, "线下整体",
+            facts=merge_facts([{day: 15000.0}, {day: 5000.0}]),
+            business_date=day, month_target=None)
+        body = build_daily_markdown(
+            business_date=day, rows=rows, total=total,
+            dept_rows=dept_rows, dept_total=dept_total)
+        self.assertIn("**一、区域**", body)
+        self.assertIn("**二、部门**", body)
+        self.assertIn("| 部门 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
+                      body)
+        self.assertIn("| 杭中项目部 | 1.5万 |", body)
+        self.assertIn("| 诸暨项目部 | 5,000 |", body)
+        # 两部分各自合计都等于线下整体（不是相加）
+        self.assertIn("| **线下整体** | 2.0万 |", body)
+
+    def test_canvas_dept_wins_and_store_falls_back(self):
+        day = date(2026, 10, 19)
+        conn = _FactConn(
+            fact_rows=[
+                {"d": day, "p": "余发兴", "fd": "杭中项目部", "s": 100.0},
+                {"d": day, "p": "诸暨门店", "fd": "诸暨项目部", "s": 200.0},
+            ],
+            target_rows=[
+                {"p": "余发兴", "fd": "杭中项目部", "t": 1000.0},
+                {"p": "诸暨门店", "fd": "诸暨项目部", "t": 124000.0},
+            ])
+        dept_of = {"余发兴": "杭州销售部"}  # 画布归位覆盖通讯录
+        facts = fetch_dept_daily_facts(
+            conn, start=date(2026, 10, 1), end=day, dept_of=dept_of)
+        self.assertEqual(100.0, facts["杭州销售部"][day])
+        self.assertNotIn("杭中项目部", facts)   # 画布口径优先，不被表内部门覆盖
+        self.assertEqual(200.0, facts["诸暨项目部"][day])  # 门店回退可归位
+
+        targets = fetch_dept_month_targets(
+            conn, year=2026, month=10, dept_of=dept_of)
+        self.assertEqual(1000.0, targets["杭州销售部"])
+        self.assertEqual(124000.0, targets["诸暨项目部"])
+
+    def test_unmapped_falls_into_placeholder_bucket(self):
+        day = date(2026, 10, 19)
+        conn = _FactConn(
+            fact_rows=[{"d": day, "p": "无名氏", "fd": None, "s": 50.0}],
+            target_rows=[])
+        facts = fetch_dept_daily_facts(
+            conn, start=date(2026, 10, 1), end=day, dept_of={})
+        self.assertEqual(50.0, facts["(未归位)"][day])
 
 
 if __name__ == "__main__":
