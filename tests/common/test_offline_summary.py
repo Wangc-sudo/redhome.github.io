@@ -643,5 +643,94 @@ class OfflineAllHtmlTest(unittest.TestCase):
         self.assertIn("线下整体", panel)
 
 
+# ---------------------------------------------------------------------------
+# 部门归位覆盖并入（2026-10-19 用户裁决：BI 与画布同真源）
+# ---------------------------------------------------------------------------
+
+def _ovr_row(user_id, region, dept_name=None, name=None):
+    """dim_org_assignment_override 字典行（dict 形态，_as_override 按 key 取）。"""
+    return {
+        "id": 1, "user_id": user_id, "name": name, "region": region,
+        "dept_id": None, "dept_name": dept_name, "enabled": 1,
+        "note": None, "updated_by": "ops", "updated_at": None,
+    }
+
+
+class _DeptMapCursor:
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        if "dim_org_assignment_override" in sql:
+            if self._conn.boom:
+                raise RuntimeError("db down")
+            self._rows = self._conn.override_rows
+        elif "dim_robot_member" in sql and "`user_id` IN" in sql:
+            # 移入在职校验：全部在职
+            self._rows = [{"user_id": u} for u in self._conn.active_ids]
+        elif "dim_robot_member" in sql:
+            self._rows = self._conn.base_rows
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def close(self):
+        pass
+
+
+class _DeptMapConn:
+    def __init__(self, base_rows, override_rows=(), *, boom=False,
+                 active_ids=("u9",)):
+        self.base_rows = base_rows
+        self.override_rows = override_rows
+        self.boom = boom
+        self.active_ids = active_ids
+
+    def cursor(self):
+        return _DeptMapCursor(self)
+
+
+class DeptMapOverrideTests(unittest.TestCase):
+    """2026-10-19 裁决：画布归位覆盖对 BI 部门卡生效（杭州销售部案例）。"""
+
+    _BASE = [
+        {"user_id": "u1", "region": "hangzhou", "name": "余发兴",
+         "dept_id": "1049728636", "dept_name": "杭中项目部"},
+        {"user_id": "u2", "region": "hangzhou", "name": "黄晓怡",
+         "dept_id": "1049728636", "dept_name": "杭中项目部"},
+    ]
+
+    def test_override_dept_wins_within_region(self):
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        conn = _DeptMapConn(self._BASE, [
+            _ovr_row("u1", "hangzhou", dept_name="杭州销售部", name="余发兴"),
+        ])
+        result = fetch_member_dept_map(conn, ("hangzhou",))
+        # 余发兴归位到杭州销售部（画布拉线口径），黄晓怡维持通讯录
+        self.assertEqual("杭州销售部", result[("hangzhou", "余发兴")])
+        self.assertEqual("杭中项目部", result[("hangzhou", "黄晓怡")])
+
+    def test_cross_region_move_out_and_in(self):
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        conn = _DeptMapConn(self._BASE, [
+            # 李四不在 hangzhou 基名单，覆盖移入 hangzhou·杭州销售部
+            _ovr_row("u9", "hangzhou", dept_name="杭州销售部", name="李四"),
+            # 黄晓怡移出杭州（region=None 语义=移出）
+            _ovr_row("u2", None, name="黄晓怡"),
+        ])
+        result = fetch_member_dept_map(conn, ("hangzhou",))
+        self.assertEqual("杭州销售部", result[("hangzhou", "李四")])
+        self.assertNotIn(("hangzhou", "黄晓怡"), result)
+
+    def test_override_read_failure_fails_soft(self):
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        conn = _DeptMapConn(self._BASE, boom=True)
+        result = fetch_member_dept_map(conn, ("hangzhou",))
+        self.assertEqual("杭中项目部", result[("hangzhou", "余发兴")])
+
+
 if __name__ == "__main__":
     unittest.main()
