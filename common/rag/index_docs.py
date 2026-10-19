@@ -83,6 +83,10 @@ _ESCAPE_RE = re.compile(r"\\([+\-*_#[\](){}])")
 
 _BLANK_RE = re.compile(r"\n{3,}")
 
+#: markdown 表格分隔行（``|---|---|``）：纯骨架零语义，被固定窗口切成独立
+#: 残片时会霸占 top-k（BM25/向量皆然，实测「京东Q4打法」首条命中就是它）。
+_TABLE_RULE_RE = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+
 
 def clean_markdown(text):
     """钉钉导出正文 → 纯文本：剥富文本标签、还原实体、去 markdown 转义。
@@ -95,7 +99,8 @@ def clean_markdown(text):
     out = _TAG_RE.sub("", out)
     out = _ESCAPE_RE.sub(r"\1", out)
     out = re.sub(r"[ \t]+\n", "\n", out)
-    return _BLANK_RE.sub("\n\n", out).strip()
+    lines = [line for line in out.splitlines() if not _TABLE_RULE_RE.match(line)]
+    return _BLANK_RE.sub("\n\n", "\n".join(lines)).strip()
 
 
 def _strip_emphasis(title):
