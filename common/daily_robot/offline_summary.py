@@ -197,6 +197,90 @@ def fetch_member_dept_map(connection, regions):
     return result
 
 
+def fetch_all_member_regions(connection):
+    """通讯录里出现过的全部 region（供画布归位映射覆盖跨区移入）。"""
+    sql = "SELECT DISTINCT `region` FROM `dim_robot_member` " \
+          "WHERE `region` IS NOT NULL AND `region` <> ''"
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+    out = []
+    for row in rows:
+        get = row.get if isinstance(row, dict) else None
+        value = get("region") if get else row[0]
+        if value:
+            out.append(str(value))
+    return tuple(out)
+
+
+def fetch_dept_daily_facts(connection, *, start, end, dept_of):
+    """线下整体口径按部门取日销：``{dept: {date: amount}}``。
+
+    部门取**画布口径**（``dept_of``=``fetch_member_dept_map`` 的姓名→部门，
+    即基成员 ∘ 归位覆盖后的结果，与闭环画布同源）。未归位的人回退事实表
+    ``department``——门店行由此归位（「诸暨门店」→诸暨项目部、「绍兴门店」
+    →绍兴项目部），仍为空则落「(未归位)」桶。
+
+    区域口径与 ``AGG_SCOPES`` 三桶一致：杭+绍+补集（排除 vanke/qudao）。
+    """
+    sql = (
+        "SELECT `business_date` AS `d`, `responsible_person` AS `p`, "
+        "`department` AS `fd`, `sales_amount` AS `s` "
+        "FROM `fact_daily_report_offline` "
+        "WHERE COALESCE(`region`, '') NOT IN ('vanke', 'qudao') "
+        "AND `sales_amount` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
+        "AND `business_date` BETWEEN %s AND %s"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, [start, end])
+        rows = cursor.fetchall()
+    result = {}
+    for row in rows:
+        get = row.get if isinstance(row, dict) else None
+        person = get("p") if get else row[1]
+        fact_dept = get("fd") if get else row[2]
+        day = get("d") if get else row[0]
+        amount = get("s") if get else row[3]
+        dept = dept_of.get(person) or fact_dept or "(未归位)"
+        bucket = result.setdefault(dept, {})
+        bucket[day] = bucket.get(day, 0.0) + float(amount or 0)
+    return result
+
+
+def fetch_dept_month_targets(connection, *, year, month, dept_of):
+    """按部门汇总当月目标；口径同 ``fetch_scope_month_target``。
+
+    先按人取 MAX（melt 行重复携带，绝不可 SUM），再按部门求和；「合计」行
+    排除（其目标值是行的冗余汇总）。
+    """
+    first, last = month_days(year, month)[0], month_days(year, month)[-1]
+    sql = (
+        "SELECT `responsible_person` AS `p`, `department` AS `fd`, "
+        "MAX(`monthly_target`) AS `t` "
+        "FROM `fact_daily_report_offline` "
+        "WHERE COALESCE(`region`, '') NOT IN ('vanke', 'qudao') "
+        "AND `monthly_target` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
+        "AND `business_date` BETWEEN %s AND %s "
+        "GROUP BY `responsible_person`, `department`"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, [first, last])
+        rows = cursor.fetchall()
+    targets = {}
+    for row in rows:
+        get = row.get if isinstance(row, dict) else None
+        person = get("p") if get else row[0]
+        fact_dept = get("fd") if get else row[1]
+        target = get("t") if get else row[2]
+        if target is None:
+            continue
+        dept = dept_of.get(person) or fact_dept or "(未归位)"
+        targets[dept] = targets.get(dept, 0.0) + float(target)
+    return targets
+
+
 def upsert_agg_daily(connection, *, stat_date, rows, synced_at):
     """写/覆盖 ``agg_offline_daily``（(stat_date, scope) 幂等）。"""
     sql = (
@@ -342,17 +426,13 @@ def _signed_pct(rate):
     return f"{'+' if rate >= 0 else ''}{_fmt_pct(rate)}"
 
 
-def build_daily_markdown(*, business_date, rows, total):
-    d = business_date
+def _scope_table(*, header, items, total):
+    """板块/部门共用的表体（列一致，仅表头首列名不同）。"""
     lines = [
-        f"【线下整体日报】{d.month}月{d.day}日（周{_WEEKDAYS[d.weekday()]}）",
-        f"今日合计：**{_fmt_wan(total.sales)} 元** · "
-        f"日环比 {_signed_pct(total.dod_rate)} · 周环比 {_signed_pct(total.wow_rate)}",
-        "",
-        "| 板块 | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
+        f"| {header} | 今日 | 日环比 | 周环比 | 月累计 | 月目标 | 达成率 |",
         "|---|---|---|---|---|---|---|",
     ]
-    for m in (*rows, total):
+    for m in (*items, total):
         label = f"**{m.label}**" if m.scope == TOTAL_SCOPE_KEY else m.label
         target_txt = _fmt_wan(m.month_target) if m.month_target else "--"
         rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
@@ -361,7 +441,55 @@ def build_daily_markdown(*, business_date, rows, total):
             f"| {_signed_pct(m.wow_rate)} | {_fmt_wan(m.month_completed)} "
             f"| {target_txt} | {rate_txt} |"
         )
+    return lines
+
+
+def build_daily_markdown(*, business_date, rows, total, dept_rows=None,
+                         dept_total=None):
+    """日报正文：**区域**与**部门**两部分。
+
+    两部分是同一批数据的两种切法，各自合计都等于线下整体（**不是相加**）。
+    部门部分按闭环画布口径（``fetch_dept_daily_facts``），缺失时省略。
+    """
+    d = business_date
+    lines = [
+        f"【线下整体日报】{d.month}月{d.day}日（周{_WEEKDAYS[d.weekday()]}）",
+        f"今日合计：**{_fmt_wan(total.sales)} 元** · "
+        f"日环比 {_signed_pct(total.dod_rate)} · 周环比 {_signed_pct(total.wow_rate)}",
+        "",
+        "**一、区域**",
+        "",
+        *_scope_table(header="区域", items=rows, total=total),
+    ]
+    if dept_rows:
+        lines += [
+            "",
+            "**二、部门**",
+            "",
+            *_scope_table(
+                header="部门",
+                items=dept_rows,
+                total=dept_total or compute_dept_total_fallback(dept_rows),
+            ),
+        ]
     return "\n".join(lines)
+
+
+def compute_dept_total_fallback(dept_rows):
+    """部门合计兜底（无独立合计行时由行相加；仅用于渲染，不落库）。"""
+    sales = sum(m.sales for m in dept_rows)
+    completed = sum(m.month_completed for m in dept_rows)
+    target_values = [m.month_target for m in dept_rows if m.month_target]
+    month_target = sum(target_values) if target_values else None
+    rate = achievement_rate(completed, month_target) if month_target else None
+    return ScopeMetrics(
+        scope=TOTAL_SCOPE_KEY,
+        label="线下整体",
+        sales=sales,
+        month_completed=completed,
+        month_target=month_target,
+        month_rate=rate,
+    )
 
 
 def build_weekly_markdown(*, week_start, week_end, rows, total):
@@ -465,10 +593,45 @@ def run_daily_summary(connection, outbox, *, business_date, now,
         month_target=merge_targets(targets.values()),
     )
 
+    # 部门部分（闭环画布口径）：基成员 ∘ 归位覆盖 → 姓名→部门，再聚合。
+    dept_of = {
+        name: dept
+        for (_, name), dept in fetch_member_dept_map(
+            connection, fetch_all_member_regions(connection)).items()
+    }
+    dept_facts = fetch_dept_daily_facts(
+        connection, start=prev_first, end=business_date, dept_of=dept_of,
+    )
+    dept_targets = fetch_dept_month_targets(
+        connection, year=business_date.year, month=business_date.month,
+        dept_of=dept_of,
+    )
+    dept_rows = sorted(
+        (
+            compute_daily_metrics(
+                dept, dept,
+                facts=facts,
+                business_date=business_date,
+                month_target=dept_targets.get(dept),
+            )
+            for dept, facts in dept_facts.items()
+        ),
+        key=lambda m: -m.sales,
+    )
+    dept_total = compute_daily_metrics(
+        TOTAL_SCOPE_KEY, TOTAL_LABEL,
+        facts=merge_facts(dept_facts.values()),
+        business_date=business_date,
+        month_target=merge_targets(dept_targets.values()),
+    ) if dept_rows else None
+
     upsert_agg_daily(
         connection, stat_date=business_date, rows=[*rows, total], synced_at=now,
     )
-    body = build_daily_markdown(business_date=business_date, rows=rows, total=total)
+    body = build_daily_markdown(
+        business_date=business_date, rows=rows, total=total,
+        dept_rows=dept_rows, dept_total=dept_total,
+    )
     enqueued = outbox.enqueue(
         region="offline_all",
         kind=DAILY_KIND,
