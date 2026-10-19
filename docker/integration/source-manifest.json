@@ -1764,19 +1764,11 @@
               },
               "责任人": {
                 "column": "responsible_person",
-                "source_type": "text"
-              },
-              "部门": {
-                "column": "department",
-                "source_type": "text"
+                "source_type": "user"
               },
               "销售额": {
                 "column": "sales_amount",
                 "source_type": "currency"
-              },
-              "月目标": {
-                "column": "monthly_target",
-                "source_type": "number"
               },
               "补充说明": {
                 "column": "note",

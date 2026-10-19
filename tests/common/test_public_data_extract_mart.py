@@ -325,6 +325,70 @@ class RegionKeyNormalizeTests(unittest.TestCase):
         self.assertEqual(rows[0]["region"], "杭州")
 
 
+class OtherMemberResolveTests(unittest.TestCase):
+    """其他区日报成员字段归位（2026-10-19 表重构，用户裁决）：
+    成员字段 JSON → 姓名；部门按通讯录注入；月目标走 dim_report_target。"""
+
+    @staticmethod
+    def _dataset():
+        return next(d for d in EXTRACT_DATASETS
+                    if d.dataset == "daily_report_offline")
+
+    def test_parse_user_field_shapes(self):
+        from common.public_data.extract_mart import _parse_user_field
+        self.assertEqual(
+            ("22452911181385570818", "余云涛"),
+            _parse_user_field(
+                '[{"userId": "22452911181385570818", "name": "余云涛"}]'))
+        self.assertEqual(("u1", "张三"), _parse_user_field(
+            [{"userId": "u1", "name": "张三"}]))          # 已解析的 list
+        self.assertIsNone(_parse_user_field("李树军"))    # 历史文本行放行
+        self.assertIsNone(_parse_user_field(None))
+        self.assertIsNone(_parse_user_field("[]"))
+        self.assertIsNone(_parse_user_field('[{"x": 1}]'))
+
+    def test_other_row_resolved_dept_and_target_injected(self):
+        from common.public_data.extract_mart import _resolve_other_member_rows
+
+        class _Cur:
+            def execute(self, sql, params=None):
+                if "dim_robot_member" in sql:
+                    self._rows = [{"dept_name": "省外销售部", "name": "余云涛"}]
+                elif "dim_report_target" in sql:
+                    self._rows = [{"monthly_target": 500000}]
+                else:  # pragma: no cover - 防呆
+                    raise AssertionError(sql)
+
+            def fetchall(self):
+                return self._rows
+
+            def close(self):
+                return None
+
+        class _Conn:
+            def cursor(self):
+                return _Cur()
+
+        rows = [
+            {"region": "other",
+             "responsible_person":
+                 '[{"userId": "22452911181385570818", "name": "余云涛"}]',
+             "department": None, "business_date": "2026-10-19",
+             "sales_amount": "1200", "monthly_target": None},
+            {"region": "hangzhou", "responsible_person": "余发兴"},
+            {"region": "other", "responsible_person": "李树军",
+             "business_date": "2026-10-19", "monthly_target": None},
+        ]
+        _resolve_other_member_rows(self._dataset(), rows, _Conn())
+        self.assertEqual("余云涛", rows[0]["responsible_person"])
+        self.assertEqual("省外销售部", rows[0]["department"])
+        self.assertEqual(500000, rows[0]["monthly_target"])
+        # 非 other 行与历史文本行原样放行
+        self.assertEqual("余发兴", rows[1]["responsible_person"])
+        self.assertEqual("李树军", rows[2]["responsible_person"])
+        self.assertIsNone(rows[2]["monthly_target"])
+
+
 class MartExtractServiceTests(unittest.TestCase):
 
     def _service(self, *, datasets=None, calendar_months=(), org_rows=()):
