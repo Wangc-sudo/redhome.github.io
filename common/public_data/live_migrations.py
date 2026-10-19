@@ -561,13 +561,6 @@ _MIGRATIONS = (
         org_assignment_override_ddl_statements(),
     ),
     (
-        # 测试区与播报改投（2026-10-19 用户裁决）：dim_org_region.relay_to
-        # 列 + 注册 test 区域（功能验证群凭据走 Nacos region-test.yaml）。
-        "mart-ops-org-catalog-relay-v1",
-        "mart",
-        org_catalog_relay_v1_statements(),
-    ),
-    (
         # 组织目录登记（2026-10-13 P7「组织编排」新增区域/部门）：dim_org_region
         # + dim_org_dept（消费侧登记，即使无成员也渲染）+ 审计表。灰度=表驱动
         # （只登记目标区域/部门），回退=停用/删除行。
@@ -584,6 +577,15 @@ _MIGRATIONS = (
         "mart-ops-region-registry-v1",
         "mart",
         org_catalog_region_run_v1_statements(),
+    ),
+    (
+        # 测试区与播报改投（2026-10-19 用户裁决）：dim_org_region.relay_to
+        # 列 + 注册 test 区域（功能验证群凭据走 Nacos region-test.yaml）。
+        # 顺序纪律：ALTER 必须在 catalog 建表与注册表两版本之后（10-19 CI
+        # 集成环境全新库 1146 事故——曾误插在 catalog-v1 之前）。
+        "mart-ops-org-catalog-relay-v1",
+        "mart",
+        org_catalog_relay_v1_statements(),
     ),
     (
         # 权威归属基线（2026-10-14 D2）：dim_robot_member 快照灌入
