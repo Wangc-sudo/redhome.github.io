@@ -7,9 +7,11 @@ API 契约以 dops-ci 实测冒烟（scripts/vector_smoke.py）为准：
 - search 返回 [[{"id","distance","entity"},...]]；query 用 filter 字符串标量过滤。
 
 条目 id 约定（幂等 upsert 键）：
-    文本  product:{record_id}
-    图片  product-img:{record_id}:{字段名}:{序号}
-商品下架/图片更换时按 id 先 delete 再 insert（幂等重跑无脏数据）。
+    商品文本  product:{record_id}
+    商品图片  product-img:{record_id}:{字段名}:{序号}
+    文档切片  doc:{doc_id}:{切片序号:04d}
+商品下架/图片更换时按 id 先 delete 再 insert（幂等重跑无脏数据）；
+文档改版时按 ``doc:{doc_id}:`` 前缀先清空（切片数会变，逐个删会留残块）。
 """
 
 from pymilvus import DataType, MilvusClient
@@ -88,6 +90,19 @@ def upsert_items(client, items, *, batch=64):
         client.insert(COLLECTION, chunk)
         written += len(chunk)
     return written
+
+
+def delete_prefix(client, prefix):
+    """按 id 前缀清空条目，返回删除条数（文档重导入前用）。
+
+    Milvus 标量过滤支持 ``id like "前缀%"``。prefix 由调用方约束成安全
+    字符集（见 index_docs._DOC_ID_RE），不拼任何用户自由文本。
+    """
+    client.load_collection(COLLECTION)
+    result = client.delete(COLLECTION, filter=f'id like "{prefix}%"')
+    if isinstance(result, dict):
+        return int(result.get("delete_count") or 0)
+    return 0
 
 
 def search(client, vector, *, limit=8, kind=None):

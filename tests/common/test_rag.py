@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from common.kb_qa import media
-from common.rag import embed, index_products, llm, qa
+from common.rag import embed, index_docs, index_products, llm, qa
 
 
 def _fake_post_factory(vectors, *, strict_count=False):
@@ -247,6 +247,162 @@ class RunIndexTest(unittest.TestCase):
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_jina_key", printed)
+
+
+class CleanMarkdownTest(unittest.TestCase):
+
+    def test_strips_dingtalk_rich_text_noise(self):
+        raw = ('<span style="color: rgb(33, 33, 33);">**购喝**</span>'
+               '<span style="color: rgb(33, 33, 33);">：同比 \\+1%，21&nbsp;万</span>')
+        self.assertEqual(index_docs.clean_markdown(raw), "**购喝**：同比 +1%，21 万")
+
+    def test_collapses_blank_lines(self):
+        self.assertEqual(index_docs.clean_markdown("a\n\n\n\nb"), "a\n\nb")
+
+
+class SplitSectionsTest(unittest.TestCase):
+
+    def test_builds_hierarchy_path_and_drops_empty_parent(self):
+        md = ("# 京东\n"
+              "## Q3\n"
+              "正文一\n"
+              "### 1.1 指标\n"
+              "正文二\n")
+        self.assertEqual(index_docs.split_sections(md), [
+            ("京东 > Q3", "正文一"),
+            ("京东 > Q3 > 1.1 指标", "正文二"),
+        ])
+
+    def test_strips_bold_markers_in_heading(self):
+        # 钉钉导出通篇 **粗体标题**，标题要作为路径前缀进 embedding，符号必须清掉
+        self.assertEqual(
+            index_docs.split_sections("## **市场判断**\n正文")[0][0],
+            "市场判断")
+
+    def test_flat_document_without_heading(self):
+        self.assertEqual(index_docs.split_sections("只有一段话"),
+                         [("", "只有一段话")])
+
+
+class BuildChunksTest(unittest.TestCase):
+
+    def test_prefixes_heading_path_and_slides_long_section(self):
+        md = "## 摘要\n" + "甲" * 1500
+        chunks = index_docs.build_chunks(md, size=600, overlap=80)
+        self.assertTrue(chunks)
+        self.assertTrue(all(c.startswith("[摘要] ") for c in chunks))
+        self.assertTrue(all(len(c) <= 600 + len("[摘要] ") for c in chunks))
+        # 切片内容应连续覆盖原文（相邻两片有 80 字重叠）
+        self.assertIn("甲" * 80, chunks[1])
+
+    def test_truncates_to_text_limit(self):
+        chunks = index_docs.build_chunks("乙" * 5000, size=600,
+                                         text_limit=100)
+        self.assertTrue(chunks)
+        self.assertTrue(all(len(c) <= 100 for c in chunks))
+
+    def test_empty_content_yields_nothing(self):
+        self.assertEqual(index_docs.build_chunks("   "), [])
+
+
+class NormalizeDocTest(unittest.TestCase):
+
+    def test_accepts_clean_doc_id(self):
+        self.assertEqual(
+            index_docs.normalize_doc(
+                {"doc_id": "amweZ92PV6wQbnYGHq5KD5mqJxEKBD6p",
+                 "doc_title": "京东Q3总结", "content": "正文"}),
+            ("amweZ92PV6wQbnYGHq5KD5mqJxEKBD6p", "京东Q3总结", "正文"))
+
+    def test_rejects_doc_id_with_space_or_like_wildcard(self):
+        for bad in ("a b", "", 'a"b', "a%", None):
+            self.assertIsNone(
+                index_docs.normalize_doc({"doc_id": bad, "content": "x"}))
+
+    def test_rejects_missing_content(self):
+        self.assertIsNone(index_docs.normalize_doc({"doc_id": "ok"}))
+        self.assertIsNone(index_docs.normalize_doc("not a dict"))
+
+
+class _DocStore:
+    """index_docs 用的 store 替身：记录写入与前缀删除。"""
+
+    def __init__(self, dim):
+        self.dim = dim
+        self.items = []
+        self.deleted = []
+
+    def ensure_collection(self, milvus, dim):
+        assert dim == self.dim
+        return dim
+
+    def delete_prefix(self, milvus, prefix):
+        self.deleted.append(prefix)
+        return 1
+
+    def upsert_items(self, milvus, items):
+        self.items.extend(items)
+        return len(items)
+
+
+class IndexDocsRunTest(unittest.TestCase):
+
+    def _run(self, payload, *, dim=2):
+        store = _DocStore(dim)
+
+        def fake_embed(items, key, **kw):
+            return [[0.1, 0.2] for _ in items]
+
+        with mock.patch.object(embed, "embed_items",
+                               mock.Mock(side_effect=fake_embed)):
+            stats = index_docs.run_index(
+                payload, milvus=object(), store=store, jina_key="k", dim=dim)
+        return stats, store, fake_embed
+
+    def test_indexes_doc_with_chunk_ids_and_clears_prefix(self):
+        payload = [{"doc_id": "jd-q3", "doc_title": "京东Q3总结及Q4规划",
+                    "content": "## 摘要\n销售额 500 万。\n## Q4 打法\n三条主线。"}]
+        stats, store, _ = self._run(payload)
+        self.assertEqual(stats["docs"], 1)
+        self.assertEqual(stats["chunks"], 2)
+        self.assertEqual(stats["skipped"], 0)
+        self.assertEqual(stats["written"], 2)
+        self.assertEqual(store.deleted, ["doc:jd-q3:"])
+        ids = [item["id"] for item in store.items]
+        self.assertEqual(ids, ["doc:jd-q3:0000", "doc:jd-q3:0001"])
+        self.assertTrue(all(i["kind"] == "text" for i in store.items))
+        self.assertTrue(all(i["name"] == "京东Q3总结及Q4规划" for i in store.items))
+        self.assertTrue(all(i["image_ref"] == "" for i in store.items))
+        self.assertTrue(store.items[0]["text"].startswith("[摘要] "))
+
+    def test_skips_invalid_records(self):
+        payload = [{"doc_id": "bad id", "content": "x"},
+                   {"doc_id": "no-content"},
+                   "garbage"]
+        stats, store, _ = self._run(payload)
+        self.assertEqual(stats, {"docs": 0, "chunks": 0, "skipped": 3,
+                                 "written": 0})
+        self.assertEqual(store.items, [])
+
+
+class IndexDocsMainTest(unittest.TestCase):
+
+    def test_skips_without_jina_key(self):
+        env = {k: v for k, v in os.environ.items() if k != "JINA_API_KEY"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("builtins.print") as out:
+            index_docs.main([])
+        printed = " ".join(str(c.args[0]) for c in out.call_args_list)
+        self.assertIn("status=skipped", printed)
+        self.assertIn("reason=no_jina_key", printed)
+
+    def test_skips_without_input_file(self):
+        with mock.patch.dict(os.environ, {"JINA_API_KEY": "k"}), \
+             mock.patch("builtins.print") as out:
+            index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+        printed = " ".join(str(c.args[0]) for c in out.call_args_list)
+        self.assertIn("status=skipped", printed)
+        self.assertIn("reason=no_input", printed)
 
 
 class QaTest(unittest.TestCase):
