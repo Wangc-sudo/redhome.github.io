@@ -4244,7 +4244,9 @@ class PeopleRunTests(unittest.TestCase):
         run_table_people_leaderboard(connection, params)
 
         # 四张卡共用一轮采集：dim_calendar + 事实表各一条
-        self.assertEqual(2, len(connection.executed))
+        # + 归位两表各一条（2026-10-19 归位覆盖并入，dim_robot_member
+        # + dim_org_assignment_override 每轮采集各一查）
+        self.assertEqual(4, len(connection.executed))
 
     def test_missing_calendar_degrades_to_empty_result(self):
         connection = FakeConnection(rowsets={"fact_daily_report_offline": []})
@@ -4276,8 +4278,8 @@ class PeopleRunTests(unittest.TestCase):
         self.assertEqual("王五", table_payload["rows"][0]["name"])
         self.assertEqual("张三", table_payload["rows"][1]["name"])
         self.assertEqual("李四", table_payload["rows"][2]["name"])
-        # 两区各一轮采集（日历 + 事实各两条），第二张卡走缓存
-        self.assertEqual(4, len(connection.executed))
+        # 两区各一轮采集（日历 + 事实 + 归位两表各两条），第二张卡走缓存
+        self.assertEqual(8, len(connection.executed))
 
     def test_run_kpi_people_count_defaults_month_to_current(self):
         connection = _PeopleFakeConnection(
