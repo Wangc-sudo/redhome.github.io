@@ -38,6 +38,14 @@ _DDL_WHITELIST = frozenset(
         # 填报人名册 schema 定义模块（mart-ops-report-roster-v1 的 DDL 源：
         # dim_report_roster / dim_report_roster_audit；同上引用关系）
         "common/public_data/report_roster.py",
+        # 运维登录凭据 schema 定义模块（mart-ops-credential-v1 的 DDL 源：
+        # ops_web_credential；2026-10-19 用户裁决「工号+系统生成随机初始
+        # 密码」，被 live_migrations 引用，同上引用关系）
+        "common/public_data/ops_credential.py",
+        # 按人登录口令 schema 定义模块（mart-ops-token-v1 的 DDL 源：
+        # ops_web_token；2026-10-19 过渡期裁决，替代「一枚全局共享口令 +
+        # 任意 user_id」的冒用面，同上引用关系）
+        "common/public_data/ops_token.py",
         # 知识库问答机器人 schema 定义模块（mart-ops-kb-qa-v1 的 DDL 源：
         # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
         # 被 live_migrations 引用，同上引用关系）

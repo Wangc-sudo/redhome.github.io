@@ -35,8 +35,33 @@
 <div class="card">
   <h1 id="title">需要登录</h1>
   <p id="message">请从钉钉工作台打开本看板。</p>
-  <!-- 浏览器登录（2026-10-14）：默认隐藏，仅当本端提供该通道时由脚本揭示
-       （bi-web 无此路由，共享入口页对 bi-web 外观零变化）。 -->
+  <!-- 浏览器登录：默认隐藏，仅当本端提供该通道时由脚本揭示（bi-web 无此
+       路由，共享入口页对 bi-web 外观零变化）。
+
+       两套通道互斥显示，密码通道优先：
+       * 工号 + 密码（2026-10-19 用户裁决）——用户名=工号，密码=系统生成
+         的随机初始密码，可自改；
+       * 旧运维口令通道——仅作为密码通道不可用时的逃生口保留。 -->
+  <form id="passwordLogin" hidden>
+    <p class="hint">无钉钉环境时，可用工号登录。</p>
+    <input id="plJob" type="text" placeholder="工号"
+           autocomplete="username">
+    <input id="plPass" type="password" placeholder="密码"
+           autocomplete="current-password">
+    <p id="plErr" class="err" hidden></p>
+    <button type="submit">登录</button>
+  </form>
+
+  <form id="passwordChange" hidden>
+    <p class="hint">首次登录（或密码刚被重置），请先设置新密码。</p>
+    <input id="pcOld" type="password" placeholder="当前密码"
+           autocomplete="current-password">
+    <input id="pcNew" type="password" placeholder="新密码（至少 10 位）"
+           autocomplete="new-password">
+    <p id="pcErr" class="err" hidden></p>
+    <button type="submit">设置并进入</button>
+  </form>
+
   <form id="browserLogin" hidden>
     <p class="hint">无钉钉环境时，可用运维口令登录。</p>
     <input id="blUser" type="text" placeholder="钉钉账号（userid）"
@@ -125,14 +150,100 @@
 
   // 浏览器登录表单（2026-10-14）：先探 /auth/login-options，只有本端开放了
   // 该通道才揭示表单；提交成功后回到 next（与钉钉免登同一枚 session cookie）。
+  // 工号 + 密码（2026-10-19）：通道可用则优先显示；否则退回旧运维口令
+  // 通道。首登（must_change）就地切到改密表单，改完再进 next。
   (function () {
-    var form = document.getElementById("browserLogin");
-    var err = document.getElementById("blErr");
+    var pwForm = document.getElementById("passwordLogin");
+    var pwErr = document.getElementById("plErr");
+    var chForm = document.getElementById("passwordChange");
+    var chErr = document.getElementById("pcErr");
+    var browserForm = document.getElementById("browserLogin");
+
+    function nextPath() {
+      var n = params.get("next") || "/";
+      if (n.charAt(0) !== "/" || n.charAt(1) === "/") n = "/";
+      return n;
+    }
 
     fetch("/auth/login-options", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (cfg) { if (cfg && cfg.browser) form.hidden = false; })
+      .then(function (cfg) {
+        if (cfg && cfg.password) { pwForm.hidden = false; return; }
+        if (cfg && cfg.browser) browserForm.hidden = false;
+      })
       .catch(function () {});
+
+    pwForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var job = document.getElementById("plJob").value.trim();
+      var pass = document.getElementById("plPass").value;
+      if (!job || !pass) {
+        pwErr.textContent = "请填工号与密码。";
+        pwErr.hidden = false;
+        return;
+      }
+      fetch("/auth/password-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_number: job, password: pass }),
+        cache: "no-store"
+      }).then(function (r) {
+        if (!r.ok) {
+          pwErr.textContent = (r.status === 503)
+            ? "本端未开放密码登录。"
+            : "工号或密码不正确。";
+          pwErr.hidden = false;
+          return null;
+        }
+        return r.json();
+      }).then(function (data) {
+        if (!data) return;
+        if (data.must_change) {
+          pwForm.hidden = true;
+          chForm.hidden = false;
+          document.getElementById("title").textContent = "请先设置密码";
+          document.getElementById("message").textContent =
+            "为安全起见，请先把初始密码改成自己的密码。";
+          document.getElementById("pcOld").value = pass;
+          return;
+        }
+        location.href = nextPath();
+      }).catch(function () {
+        pwErr.textContent = "登录请求失败，请稍后重试。";
+        pwErr.hidden = false;
+      });
+    });
+
+    chForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var old = document.getElementById("pcOld").value;
+      var neu = document.getElementById("pcNew").value;
+      if (!old || !neu) {
+        chErr.textContent = "请填当前密码与新密码。";
+        chErr.hidden = false;
+        return;
+      }
+      fetch("/auth/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_password: old, new_password: neu }),
+        cache: "no-store"
+      }).then(function (r) {
+        if (r.ok) { location.href = nextPath(); return; }
+        chErr.textContent = (r.status === 400)
+          ? "新密码不合要求（至少 10 位）。"
+          : "当前密码不正确。";
+        chErr.hidden = false;
+      }).catch(function () {
+        chErr.textContent = "改密请求失败，请稍后重试。";
+        chErr.hidden = false;
+      });
+    });
+  })();
+
+  (function () {
+    var form = document.getElementById("browserLogin");
+    var err = document.getElementById("blErr");
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();

@@ -603,8 +603,10 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         self.assertEqual(sql, "DELETE FROM `dim_robot_member`")
         insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
         self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
+        # job_number（2026-10-19 登录用户名真源）落在 union_id 之后。
+        self.assertIn("`job_number`", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", None, "hangzhou", "1049728636", "杭中",
+            "u1", "张三", None, None, "hangzhou", "1049728636", "杭中",
             1, _NOW, _RUN_ID,
         )])
 
@@ -889,8 +891,9 @@ class IncrementalRepositoryTests(unittest.TestCase):
         insert_sql, sequence = self.mart.cursor_instance.executemany_calls[0]
         self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
         self.assertIn("ON DUPLICATE KEY UPDATE", insert_sql)
+        self.assertIn("`job_number` = VALUES(`job_number`)", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", None, "hangzhou", "1049728636", "杭中",
+            "u1", "张三", None, None, "hangzhou", "1049728636", "杭中",
             1, _NOW, _RUN_ID,
         )])
         delete_sql, delete_params = self.mart.cursor_instance.executed[0]
@@ -1161,8 +1164,10 @@ class IncrementalOrgMemberTests(unittest.TestCase):
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_unchanged_org_snapshot_skips_the_write(self, _lock, _txn):
+        # digest 形态含 job_number（2026-10-19 登录用户名真源）：末段为
+        # 空即该员工在通讯录里没有工号。
         digest = MartExtractService._content_digest(
-            ["u1|张三|hangzhou|1049728636|杭中|"]
+            ["u1|张三|hangzhou|1049728636|杭中||"]
         )
         service = self._service(previous_digest=digest)
 
