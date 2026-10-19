@@ -211,6 +211,8 @@ class FakeConnection:
         # 归位覆盖并入部门排行（2026-10-19）：人级聚合后映射所需两表
         "dim_robot_member",
         "dim_org_assignment_override",
+        # region 键→中文名（2026-10-19 英译中）：趋势图系列名映射
+        "dim_org_region",
     )
 
     def __init__(self, scalars=None, rowsets=None):
@@ -2043,6 +2045,30 @@ class RegionRunPayloadTests(unittest.TestCase):
         sql, parameters = connection.executed[0]
         self.assertNotIn("region = %s", sql)
         self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)), parameters)
+
+    def test_run_trend_region_daily_maps_region_key_to_chinese_label(self):
+        """region 键 → dim_org_region.label 中文名（2026-10-19 英译中裁决）。
+
+        生产事实表 region 是英文键（hangzhou/shaoxing），趋势图系列名须
+        翻成中文；夹具无目录时回退原键（fail-open）。
+        """
+        rows = [
+            {"business_date": date(2026, 8, 2), "region": "hangzhou",
+             "total": Decimal("5")},
+        ]
+        connection = FakeConnection(rowsets={
+            "fact_daily_report_offline": rows,
+            "dim_org_region": [{"k": "hangzhou", "v": "杭州"}],
+        })
+        # 清模块级映射缓存，避免其它用例的目录串扰
+        bi_web_queries._REGION_LABEL_CACHE["at"] = 0.0
+        bi_web_queries._REGION_LABEL_CACHE["map"] = {}
+
+        payload = run_trend_region_daily(connection, {"month": "2026-08"})
+
+        names = [entry["name"] for entry in payload["series"]]
+        self.assertIn("杭州", names)
+        self.assertNotIn("hangzhou", names)
 
     def test_run_trend_region_daily_without_params_keeps_static_l1_path(self):
         connection = _DodFakeConnection(

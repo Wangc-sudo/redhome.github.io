@@ -1587,6 +1587,40 @@ def run_kpi_annual_progress(connection, params) -> dict:
     }
 
 
+#: region 键 → 中文名缓存（``dim_org_region.label``；趋势/排行图系列名
+#: 英译中，2026-10-19 用户裁决「BI 中的英文转中文」）。fail-open：目录表
+#: 未就绪/抖动/键缺失时回退原键，绝不影响出数。
+_REGION_LABEL_CACHE = {"at": 0.0, "map": {}}
+_REGION_LABEL_TTL_SECONDS = 300.0
+
+
+def _region_label_map(connection) -> dict:
+    import time
+
+    now = time.monotonic()
+    cache = _REGION_LABEL_CACHE
+    if cache["map"] and now - cache["at"] < _REGION_LABEL_TTL_SECONDS:
+        return cache["map"]
+    mapping = {}
+    try:
+        rows = _fetch_rows(
+            connection,
+            "SELECT `region_key` AS `k`, `label` AS `v` "
+            "FROM `dim_org_region` WHERE `label` IS NOT NULL AND `label` <> ''",
+        )
+        mapping = {row["k"]: row["v"] for row in rows}
+    except Exception:  # 目录表未就绪/抖动 → 回退原键
+        mapping = {}
+    cache["at"] = now
+    cache["map"] = mapping
+    return mapping
+
+
+def _region_label(connection, region_key):
+    """region 键 → 中文名（无映射回退原键）。"""
+    return _region_label_map(connection).get(region_key) or region_key
+
+
 def run_trend_region_daily(connection, params) -> dict:
     """区域销售趋势: gran=day 月内日序列（缺省）/ week 12 周 / month 12 月。
 
@@ -1622,7 +1656,7 @@ def run_trend_region_daily(connection, params) -> dict:
         "chart": "line",
         "dates": series["dates"],
         "series": [
-            {"name": entry["name"],
+            {"name": _region_label(connection, entry["name"]),
              "data": [None if value is None else float(value)
                       for value in entry["data"]]}
             for entry in series["series"]
