@@ -968,25 +968,46 @@ def region_month_target(connection, *, region=None, first_day, last_day,
 
 def department_mtd_ranking(connection, *, region=None, first_day, last_day,
                            scope=None) -> dict:
-    """选中区域（缺省全区域）某自然月按部门 Σsales 降序；空部门→未分组。"""
+    """选中区域（缺省全区域）某自然月按部门 Σsales 降序；空部门→未分组。
+
+    2026-10-19 归位升级（用户裁决，画布与 BI 同真源）：人级聚合后经
+    归位口径（``fetch_member_dept_map``，含 dim_org_assignment_override
+    覆盖层）映射部门再聚合——画布拉线归口对部门排行同步生效
+    （杭州销售部案例：父部门直属者被叶子部门先认领，纯 SQL GROUP BY
+    department 永远看不到父级）；映射无命中回退表内 department 值
+    （既有纪律不变），归位读取失败 fail-soft 同纯表内口径。
+    """
     region_sql, region_params = _scope_region_filter(scope, region)
     sql = textwrap.dedent(
         f"""
-        SELECT department, SUM(sales_amount) AS total
+        SELECT responsible_person, region, department,
+               SUM(sales_amount) AS total
         FROM fact_daily_report_offline
         WHERE business_date BETWEEN %s AND %s
         {region_sql}
         AND business_date <= CURDATE()
         AND responsible_person NOT LIKE '%%合计%%'
         {_OFFLINE_LINE_SQL}
-        GROUP BY department
-        ORDER BY total DESC
+        GROUP BY responsible_person, region, department
         """
     ).strip()
     rows = _fetch_rows(connection, sql, (first_day, last_day) + region_params)
+    dept_map = {}
+    row_regions = tuple({row["region"] for row in rows if row.get("region")})
+    if row_regions:
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        dept_map = fetch_member_dept_map(connection, row_regions)
+    bucket = {}
+    for row in rows:
+        dept = (
+            dept_map.get((row.get("region"), row["responsible_person"]))
+            or row["department"] or "未分组"
+        )
+        bucket[dept] = bucket.get(dept, Decimal(0)) + Decimal(row["total"] or 0)
+    ordered = sorted(bucket.items(), key=lambda kv: kv[1], reverse=True)
     return {
-        "categories": [row["department"] or "未分组" for row in rows],
-        "values": [Decimal(row["total"] or 0) for row in rows],
+        "categories": [dept for dept, _ in ordered],
+        "values": [total for _, total in ordered],
     }
 
 

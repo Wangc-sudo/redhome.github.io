@@ -208,6 +208,9 @@ class FakeConnection:
         "fact_refund_line",  # 退款原因
         "fact_order_cancel_line",  # 订单风险
         "fact_channel_store_target",  # 渠道店铺月目标真源
+        # 归位覆盖并入部门排行（2026-10-19）：人级聚合后映射所需两表
+        "dim_robot_member",
+        "dim_org_assignment_override",
     )
 
     def __init__(self, scalars=None, rowsets=None):
@@ -1739,8 +1742,10 @@ class RegionParamTests(ParameterizedSqlShapeTests):
     def test_department_mtd_ranking_sql_shape_and_null_department(self):
         connection = FakeConnection(
             rowsets={"fact_daily_report_offline": [
-                {"department": "零售一组", "total": Decimal("30")},
-                {"department": None, "total": Decimal("10")},
+                {"responsible_person": "甲", "region": "杭州",
+                 "department": "零售一组", "total": Decimal("30")},
+                {"responsible_person": "乙", "region": "杭州",
+                 "department": None, "total": Decimal("10")},
             ]}
         )
 
@@ -1752,15 +1757,54 @@ class RegionParamTests(ParameterizedSqlShapeTests):
         )
 
         sql = self.sole_parameterized_sql(
-            connection, (date(2026, 9, 1), date(2026, 9, 30), "杭州")
+            connection, (date(2026, 9, 1), date(2026, 9, 30), "杭州"),
+            table="fact_daily_report_offline",  # 归位升级后另有 dim 查询
         )
-        self.assertIn("GROUP BY department", sql)
-        self.assertIn("ORDER BY total DESC", sql)
+        # 2026-10-19 归位升级：人级聚合（归位映射在 Python 侧再聚合）
+        self.assertIn(
+            "GROUP BY responsible_person, region, department", sql)
         self.assertIn(_TRUNCATION, sql)
         self.assertIn(_PARAM_SUMMARY_EXCLUSION, sql)
         self.assertIn(_LINE_EXCLUSION, sql)
+        # 归位映射无命中（fake 无通讯录行）→ 回退表内 department 值
         self.assertEqual(["零售一组", "未分组"], ranking["categories"])
         self.assertEqual([Decimal("30"), Decimal("10")], ranking["values"])
+
+    def test_department_mtd_ranking_applies_assignment_override(self):
+        """归位覆盖并入（2026-10-19 裁决，杭州销售部案例）：覆盖层命中时
+        部门按归位口径聚合（同人跨行合并到覆盖部门）。"""
+        connection = FakeConnection(
+            rowsets={
+                "fact_daily_report_offline": [
+                    {"responsible_person": "余发兴", "region": "hangzhou",
+                     "department": "杭中项目部", "total": Decimal("100")},
+                    {"responsible_person": "黄晓怡", "region": "hangzhou",
+                     "department": "杭中项目部", "total": Decimal("50")},
+                ],
+                "dim_robot_member": [
+                    {"user_id": "u1", "region": "hangzhou", "name": "余发兴",
+                     "dept_id": "d1", "dept_name": "杭中项目部"},
+                    {"user_id": "u2", "region": "hangzhou", "name": "黄晓怡",
+                     "dept_id": "d1", "dept_name": "杭中项目部"},
+                ],
+                "dim_org_assignment_override": [
+                    {"id": 1, "user_id": "u1", "name": "余发兴",
+                     "region": "hangzhou", "dept_id": None,
+                     "dept_name": "杭州销售部", "enabled": 1, "note": None,
+                     "updated_by": "ops", "updated_at": None},
+                ],
+            }
+        )
+
+        ranking = department_mtd_ranking(
+            connection,
+            region="hangzhou",
+            first_day=date(2026, 10, 1),
+            last_day=date(2026, 10, 31),
+        )
+
+        self.assertEqual(["杭州销售部", "杭中项目部"], ranking["categories"])
+        self.assertEqual([Decimal("100"), Decimal("50")], ranking["values"])
 
     def test_region_month_daily_series_sql_shape(self):
         connection = _DodFakeConnection(
@@ -2025,7 +2069,8 @@ class RegionRunPayloadTests(unittest.TestCase):
         self.assertIn(_MONTH_START, sql)
 
     def test_run_bar_department_mtd_payload(self):
-        rows = [{"department": "零售一组", "total": Decimal("30")}]
+        rows = [{"responsible_person": "甲", "region": "杭州",
+                 "department": "零售一组", "total": Decimal("30")}]
         connection = FakeConnection(rowsets={"fact_daily_report_offline": rows})
 
         payload = run_bar_department_mtd(
@@ -2042,7 +2087,9 @@ class RegionRunPayloadTests(unittest.TestCase):
             payload,
         )
         sql, parameters = connection.executed[0]
-        self.assertIn("GROUP BY department", sql)
+        # 2026-10-19 归位升级：人级聚合（归位映射 Python 侧再聚合）
+        self.assertIn(
+            "GROUP BY responsible_person, region, department", sql)
         self.assertEqual((date(2026, 8, 1), date(2026, 8, 31), "杭州"), parameters)
 
 
