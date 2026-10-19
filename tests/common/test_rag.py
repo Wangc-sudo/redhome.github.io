@@ -256,6 +256,12 @@ class CleanMarkdownTest(unittest.TestCase):
                '<span style="color: rgb(33, 33, 33);">：同比 \\+1%，21&nbsp;万</span>')
         self.assertEqual(index_docs.clean_markdown(raw), "**购喝**：同比 +1%，21 万")
 
+    def test_drops_table_rule_lines(self):
+        # 分隔行零语义，被固定窗口切成独立残片时会霸占 top-k
+        raw = "| **月份** | **目标** |\n|---|---|\n| 7月 | 160 |"
+        self.assertEqual(index_docs.clean_markdown(raw),
+                         "| **月份** | **目标** |\n| 7月 | 160 |")
+
     def test_collapses_blank_lines(self):
         self.assertEqual(index_docs.clean_markdown("a\n\n\n\nb"), "a\n\nb")
 
