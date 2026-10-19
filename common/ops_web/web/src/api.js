@@ -360,6 +360,11 @@ export function getPipelinesHealth() {
   return request('/api/pipelines/health', { method: 'GET' });
 }
 
+/** 最近一次舰队月检快照（治理抽屉「上次月检快照」节；未跑过 snapshot=null）。 */
+export function getFleetAuditLatest() {
+  return request('/api/pipelines/fleet-audit-latest', { method: 'GET' });
+}
+
 /** 数据修正：人员归属归位预览/执行。payload: {person_name, from_region,
  *  to_region, apply?}（apply 缺省=预览）。 */
 export function dataFixRealign(payload) {

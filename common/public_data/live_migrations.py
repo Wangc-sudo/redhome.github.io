@@ -38,6 +38,7 @@ from common.public_data.mart_extract_schema import (
     stock_flow_ddl_statements,
 )
 from common.public_data.db import transaction
+from common.public_data.fleet_audit import fleet_audit_ddl_statements
 from common.public_data.ops_control import (
     pipeline_ops_ddl_statements,
     run_history_ddl_statements,
@@ -518,6 +519,14 @@ _MIGRATIONS = (
         "mart-ops-run-history-v1",
         "mart",
         _build_mart_run_history_ddl(),
+    ),
+    (
+        # 舰队月检快照（2026-10-17 治理 P2）：pd_ops_fleet_audit——
+        # fleet-audit 管道（每月 2 日 07:00）唯一写方，ops-web 治理抽屉
+        # 「上次月检快照」节只读。独立版本（校验和红线）。
+        "mart-ops-fleet-audit-v1",
+        "mart",
+        fleet_audit_ddl_statements(),
     ),
     (
         # 知识库问答机器人（2026-10-10）：kb_products/kb_media_cache/

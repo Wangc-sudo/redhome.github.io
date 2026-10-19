@@ -291,6 +291,17 @@ target-rollover:
   schedule: "0 6 1 * *"
   reads: [mart_ops]
   description: "monthly target carry-over (prev month -> current month, idempotent, manual entries win)"
+# 舰队月检（2026-10-17 治理 P2）：四节体检（停用盘点/僵尸/装饰依赖/
+# cron 堆积）快照落 pd_ops_fleet_audit，产出只进 ops-web 治理抽屉——
+# 用户裁决：治理产出不发群播报。每月 2 日跑（1 日 target-rollover 之后，
+# 避开月末/月初播报高峰）。
+fleet-audit:
+  kind: business
+  category: 平台
+  enabled: true
+  schedule: "0 7 2 * *"
+  reads: [mart_ops]
+  description: "monthly fleet governance audit snapshot (disabled/zombie/decorative-deps/pileup -> pd_ops_fleet_audit, ops-web drawer only)"
 robot-shaoxing:
   kind: business
   category: 催办

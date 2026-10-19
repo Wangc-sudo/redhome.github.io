@@ -54,6 +54,7 @@ SERVICE_CATEGORIES = {
     "bi-web": "平台",
     "scheduler": "平台",
     "ops-web": "平台",
+    "fleet-audit": "平台",
 }
 
 #: 家族前缀归类（新区域服务注册即自动归类，无需改代码）。
