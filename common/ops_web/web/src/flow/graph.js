@@ -228,6 +228,8 @@ export function buildGraph(raw) {
       members,
       taskCount: services.length,
       isPlatform,
+      // 播报改投目标（2026-10-19 测试区；null=不改投），抽屉开关数据源
+      relayTo: (spec.region && spec.region.relay_to) || null,
       x: REGION_X,
       y: TOP_Y,
     });

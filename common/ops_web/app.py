@@ -647,6 +647,8 @@ def _build_org_overview(members, overrides, catalog=None):
             "key": key,
             "label": catalog_region_labels.get(key) or _org_region_label(key),
             "depts": groups,
+            # 播报改投目标（2026-10-19 测试区；None=不改投），画布抽屉开关
+            "relay_to": (catalog_regions.get(key) or {}).get("relay_to"),
         })
     return {"status": "ok", "regions": regions, "pool": pool}
 
@@ -1717,6 +1719,41 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "roster": {"from_removed": from_removed, "to_added": to_added},
             "audit": True,
         })
+
+    @app.post("/api/org/region/relay")
+    async def org_region_relay(request: Request):
+        """播报改投测试区开关（2026-10-19 用户裁决「所有播报都可接入
+        测试区，区域接入后该区工作都接入」）。
+
+        请求体 ``{region_key, relay: bool}``：relay=true → 该区域群消息
+        与 DING 全部改投测试区群（消息带 [测试→原区域] 前缀标记）；
+        false → 清除改投。写 ``dim_org_region.relay_to``（DB 驱动，网关
+        30s TTL 内生效，无需重启）；审计 action=set_relay。区域须已登记
+        且启用，测试区自身不可改投。
+        """
+        viewer = _resolve_request_viewer(request)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        relay = payload.get("relay")
+        if not isinstance(region_key, str) or not isinstance(relay, bool):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not capability_allows(viewer, CAPABILITY_ORG, region_key):
+            _forbidden(request)
+        try:
+            with db_connector() as connection:
+                affected = org_catalog.set_region_relay(
+                    connection, region_key, "test" if relay else None,
+                    actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web region relay save failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not affected:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok", "region_key": region_key,
+                             "relay_to": "test" if relay else None})
 
     @app.post("/api/org/region/add")
     async def org_region_add(request: Request):

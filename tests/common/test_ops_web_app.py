@@ -3648,6 +3648,49 @@ class OrgAssignmentApiTests(unittest.TestCase):
                              ).status_code)
         self.assertEqual(0, conn.commits)
 
+    # -- /api/org/region/relay（播报改投测试区，2026-10-19 裁决）----------
+
+    def test_region_relay_sets_and_clears_with_audit(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        response = client.post("/api/org/region/relay",
+                               json={"region_key": "hangzhou", "relay": True})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "ok", "region_key": "hangzhou",
+                          "relay_to": "test"}, response.json())
+        update = next(p for s, p in conn.executed
+                      if s.lstrip().startswith("UPDATE"))
+        self.assertEqual("test", update[0])          # relay_to='test'
+        audit = next(p for s, p in conn.executed
+                     if "dim_org_catalog_audit" in s)
+        self.assertEqual("set_relay", audit[1])
+        # 清除
+        response = client.post("/api/org/region/relay",
+                               json={"region_key": "hangzhou", "relay": False})
+        self.assertEqual(200, response.status_code)
+        update = next(p for s, p in reversed(conn.executed)
+                      if s.lstrip().startswith("UPDATE"))
+        self.assertIsNone(update[0])
+
+    def test_region_relay_guards(self):
+        conn = self._members_conn()
+        client = self._admin_client(conn)
+        # 测试区自身不可改投（防回环）
+        self.assertEqual(400, client.post(
+            "/api/org/region/relay",
+            json={"region_key": "test", "relay": True}).status_code)
+        # 非法载荷 / 未登记区域（UPDATE 零命中）
+        self.assertEqual(400, client.post(
+            "/api/org/region/relay",
+            json={"region_key": "hangzhou"}).status_code)
+        self.assertEqual(0, conn.commits)
+
+    def test_region_relay_requires_org_capability(self):
+        client = TestClient(_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.post(
+            "/api/org/region/relay",
+            json={"region_key": "hangzhou", "relay": True}).status_code)
+
     def test_dept_add_writes_catalog_and_audit(self):
         conn = self._members_conn()
         client = self._admin_client(conn)

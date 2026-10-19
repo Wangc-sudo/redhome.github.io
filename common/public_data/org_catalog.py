@@ -175,6 +175,35 @@ def org_catalog_region_run_v1_statements() -> tuple:
     return _REGION_RUN_ALTERS + _region_registry_inserts()
 
 
+# ---------------------------------------------------------------------------
+# v3（2026-10-19，测试区）：relay_to 列 + 测试区注册
+# ---------------------------------------------------------------------------
+
+#: 测试区区域键（播报改投目标唯一合法值；测试区自身不可再改投）。
+TEST_REGION_KEY = "test"
+
+#: 播报改投列：非 NULL 时该区域的群消息/DING 全部改投目标区域群
+#: （dim_org_region 承载——DB 驱动，画布开关即写即生效，无需重启网关；
+#: 真实群凭据仍走 Nacos region-<region>.yaml，不入库不入 git）。
+_REGION_RELAY_ALTER = (
+    "ALTER TABLE `dim_org_region`\n"
+    "  ADD COLUMN `relay_to` VARCHAR(32) DEFAULT NULL"
+)
+
+#: 测试区注册行（sort_order 999 垫底；INSERT IGNORE 不覆盖人工行）。
+_REGION_RELAY_REGISTER = (
+    "INSERT IGNORE INTO `dim_org_region` "
+    "(`region_key`, `label`, `sort_order`, `enabled`, `updated_by`, "
+    "`updated_at`) VALUES "
+    "('test', '测试区', 999, 1, 'migration:test-region', NOW(6))"
+)
+
+
+def org_catalog_relay_v1_statements() -> tuple:
+    """迁移 ``mart-ops-org-catalog-relay-v1``：relay_to 列 + 测试区注册。"""
+    return (_REGION_RELAY_ALTER, _REGION_RELAY_REGISTER)
+
+
 class OrgCatalogError(ValueError):
     """目录写面数据无效（消息只含字段名，不含值）。"""
 
@@ -197,7 +226,8 @@ def _fetch_all(connection, sql, params=()):
 def _get(row, key, position):
     if isinstance(row, dict):
         return row.get(key)
-    return row[position]
+    # 加列演进宽容：旧形态元组短于新列序时缺列回 None（relay_to 案例）
+    return row[position] if position < len(row) else None
 
 
 def _text(value, limit):
@@ -223,6 +253,9 @@ def _as_region(row):
         "enabled": int(_get(row, "enabled", 4) or 0),
         "updated_by": _get(row, "updated_by", 5),
         "updated_at": _get(row, "updated_at", 6),
+        # 播报改投目标（2026-10-19 测试区）；迁移未应用时 fetch 层
+        # fail-soft 回空目录，本键始终存在（None=不改投）。
+        "relay_to": _get(row, "relay_to", 7),
     }
 
 
@@ -241,7 +274,7 @@ def _as_dept(row):
 
 _REGION_COLUMNS = (
     "`id`, `region_key`, `label`, `sort_order`, `enabled`, "
-    "`updated_by`, `updated_at`"
+    "`updated_by`, `updated_at`, `relay_to`"
 )
 _DEPT_COLUMNS = (
     "`id`, `region_key`, `dept_id`, `dept_name`, `sort_order`, `enabled`, "
@@ -460,6 +493,55 @@ def set_catalog_enabled(connection, target_type, *, region_key, dept_name=None,
                 _insert_audit(
                     connection, actor, action, target_type=target_type,
                     region_key=region_key, dept_name=dept_name_audit,
+                )
+    return affected
+
+
+def fetch_relay_map(connection):
+    """播报改投映射读面：``{region_key: relay_to}``（仅启用且设置了
+    relay_to 的区域）。网关投递每条消息前查（带 TTL 缓存，见
+    gateway.cli.build_relay_resolver）；读失败由调用方 fail-open 按
+    原区域投递（宁可发真群，不丢消息）。
+    """
+    rows = _fetch_all(
+        connection,
+        "SELECT `region_key`, `relay_to` FROM `dim_org_region` "
+        "WHERE `enabled` = 1 AND `relay_to` IS NOT NULL",
+    )
+    result = {}
+    for row in rows:
+        key = _get(row, "region_key", 0)
+        relay = _get(row, "relay_to", 1)
+        if key and relay:
+            result[str(key)] = str(relay)
+    return result
+
+
+def set_region_relay(connection, region_key, relay_to, *, actor):
+    """设置/清除区域的播报改投（2026-10-19 测试区）。审计 action='set_relay'。
+
+    门禁：区域须已登记且启用；relay_to 只允许 ``test``（测试区）或
+    ``None``（清除）；测试区自身不可改投（防回环）。返回受影响行数。
+    """
+    region_key = _check_region_key(region_key)
+    if relay_to is not None and relay_to != TEST_REGION_KEY:
+        raise OrgCatalogError("relay_to must be 'test' or null")
+    if region_key == TEST_REGION_KEY and relay_to is not None:
+        raise OrgCatalogError("test region cannot relay")
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            cursor.execute(
+                "UPDATE `dim_org_region` SET `relay_to` = %s, "
+                "`updated_by` = %s, `updated_at` = %s "
+                "WHERE `region_key` = %s AND `enabled` = 1",
+                (relay_to, actor, _utc_now_text(), region_key),
+            )
+            affected = cursor.rowcount
+            if affected:
+                _insert_audit(
+                    connection, actor, "set_relay", target_type="region",
+                    region_key=region_key,
+                    detail=f"relay_to={relay_to or '（清除）'}",
                 )
     return affected
 
