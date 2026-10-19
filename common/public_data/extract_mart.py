@@ -60,11 +60,12 @@ def _normalize_region_keys(dataset, rows):
 
 
 def _parse_user_field(value):
-    """成员字段值 → ``(user_id, name)``；非成员字段形态 → ``None``。
+    """成员字段值 → ``{user_id, union_id, name}``；非成员字段形态 → ``None``。
 
-    钉钉 user 字段在 records API 里是对象数组（``[{"userId":...,
-    "name":...}]``），raw 层经 canonical JSON 落为字符串；缺省/历史
-    文本行/空值一律放行（返回 None 由调用方原样保留）。
+    2026-10-19 云上实测形态：``"[{'unionId': '...', 'name': '...'}]"``——
+    单引号 repr 风格字符串（非严格 JSON），键是 unionId/name（无 userId）。
+    解析顺序：json.loads → ast.literal_eval 兜底；缺省/历史文本行/空值
+    一律放行（返回 None 由调用方原样保留）。
     """
     if value is None:
         return None
@@ -76,32 +77,46 @@ def _parse_user_field(value):
         try:
             payload = json.loads(text)
         except ValueError:
-            return None
+            import ast
+            try:
+                payload = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return None
     if not isinstance(payload, list) or not payload:
         return None
     first = payload[0]
     if not isinstance(first, dict):
         return None
     user_id = first.get("userId") or first.get("user_id") or first.get("id")
+    union_id = first.get("unionId") or first.get("union_id")
     name = first.get("name") or first.get("title")
-    if not user_id and not name:
+    if not user_id and not union_id and not name:
         return None
-    return (str(user_id) if user_id else None,
-            str(name) if name else None)
+    return {
+        "user_id": str(user_id) if user_id else None,
+        "union_id": str(union_id) if union_id else None,
+        "name": str(name) if name else None,
+    }
 
 
-def _lookup_member(connection, user_id, name):
-    """dim_robot_member 反查（user_id 优先、name 兜底）→ (dept_name, name)。
+def _lookup_member(connection, user_id, name, union_id=None):
+    """dim_robot_member 反查（user_id/union_id 优先、name 兜底）
+    → ``(dept_name, name)``。
 
     部门归属权威源=通讯录（2026-09-23 运维口径），未命中返回 (None, None)。
     """
     sql = (
         "SELECT `dept_name`, `name` FROM `dim_robot_member` "
-        "WHERE `is_active` = 1 AND (`user_id` = %s OR `name` = %s) "
-        "ORDER BY (`user_id` = %s) DESC LIMIT 1"
+        "WHERE `is_active` = 1 "
+        "AND (`user_id` = %s OR `union_id` = %s OR `name` = %s) "
+        "ORDER BY (`user_id` = %s OR `union_id` = %s) DESC LIMIT 1"
     )
     with contextlib.closing(connection.cursor()) as cursor:
-        cursor.execute(sql, (user_id or "", name or "", user_id or ""))
+        cursor.execute(
+            sql,
+            (user_id or "", union_id or "", name or "",
+             user_id or "", union_id or ""),
+        )
         rows = cursor.fetchall()
     if not rows:
         return None, None
@@ -133,8 +148,11 @@ def _resolve_other_member_rows(dataset, rows, connection):
     if not targets:
         return rows
     from common.public_data import report_roster
-    for row, (user_id, name) in targets:
-        dept, resolved = _lookup_member(connection, user_id, name)
+    for row, parsed in targets:
+        user_id, union_id, name = (
+            parsed["user_id"], parsed["union_id"], parsed["name"])
+        dept, resolved = _lookup_member(
+            connection, user_id, name, union_id=union_id)
         if resolved:
             name = resolved
             row["responsible_person"] = name

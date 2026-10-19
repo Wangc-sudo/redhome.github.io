@@ -336,12 +336,18 @@ class OtherMemberResolveTests(unittest.TestCase):
 
     def test_parse_user_field_shapes(self):
         from common.public_data.extract_mart import _parse_user_field
+        # 云上实测形态（2026-10-19）：单引号 repr + unionId/name 键
         self.assertEqual(
-            ("22452911181385570818", "余云涛"),
+            {"user_id": None, "union_id": "xAteG0Vyyii", "name": "余云涛"},
+            _parse_user_field("[{'unionId': 'xAteG0Vyyii', 'name': '余云涛'}]"))
+        # 严格 JSON + userId 键也认
+        self.assertEqual(
+            {"user_id": "224529", "union_id": None, "name": "余云涛"},
             _parse_user_field(
-                '[{"userId": "22452911181385570818", "name": "余云涛"}]'))
-        self.assertEqual(("u1", "张三"), _parse_user_field(
-            [{"userId": "u1", "name": "张三"}]))          # 已解析的 list
+                '[{"userId": "224529", "name": "余云涛"}]'))
+        self.assertEqual(
+            {"user_id": "u1", "union_id": None, "name": "张三"},
+            _parse_user_field([{"userId": "u1", "name": "张三"}]))
         self.assertIsNone(_parse_user_field("李树军"))    # 历史文本行放行
         self.assertIsNone(_parse_user_field(None))
         self.assertIsNone(_parse_user_field("[]"))
