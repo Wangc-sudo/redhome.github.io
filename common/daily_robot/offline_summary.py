@@ -50,8 +50,6 @@ TOTAL_LABEL = "线下整体"
 
 #: 部门表只保留这些区域的部门（2026-10-19 用户裁决：部门只看杭州、绍兴）。
 DEPT_TABLE_REGIONS = ("hangzhou", "shaoxing")
-#: 部门表合计行标签——部门表不含「其他」区域，合计=杭州+绍兴（≠线下整体）。
-DEPT_TABLE_TOTAL_LABEL = "杭州+绍兴"
 
 DAILY_KIND = "offline_daily"
 WEEKLY_KIND = "offline_weekly"
@@ -483,18 +481,19 @@ def _signed_pct(rate):
     return f"{'+' if rate >= 0 else ''}{_fmt_pct(rate)}"
 
 
-def _scope_table(*, header, items, total):
+def _scope_table(*, header, items, total=None):
     """板块/部门共用的 13 列表体（纯 markdown 表格，同「完成率榜」样式）。
 
     列：名称 | 今日 昨日 日环比 | 本周 上周 周环比 | 月累计 月目标 |
     上月累计 上月目标 | 本月达成率 上月达成率（口径见 ``compute_daily_metrics``）。
+    *total* 为 None 时不渲染合计行（部门表按裁决去掉合计）。
     """
     lines = [
         f"| {header} | 今日 | 昨日 | 日环比 | 本周 | 上周 | 周环比 | 月累计 "
         "| 月目标 | 上月累计 | 上月目标 | 本月达成率 | 上月达成率 |",
         "|:--|--:|--:|:--:|--:|--:|:--:|--:|--:|--:|--:|:--:|:--:|",
     ]
-    for m in (*items, total):
+    for m in ((*items, total) if total is not None else items):
         label = f"**{m.label}**" if m.scope == TOTAL_SCOPE_KEY else m.label
         month_target = _fmt_wan(m.month_target) if m.month_target else "--"
         prev_target = (
@@ -516,11 +515,12 @@ def _scope_table(*, header, items, total):
 
 
 def build_daily_markdown(*, business_date, rows, total, dept_rows=None,
-                         dept_total=None):
-    """日报正文：**区域**与**部门**两部分。
+                         bi_url=None):
+    """日报正文：**区域**与**部门**两部分（13 列 markdown 表，同榜单样式）。
 
-    两部分是同一批数据的两种切法，各自合计都等于线下整体（**不是相加**）。
-    部门部分按闭环画布口径（``fetch_dept_daily_facts``），缺失时省略。
+    区域表合计=线下整体；部门表只列杭州、绍兴各部门（2026-10-19 用户裁决：
+    去掉「杭州+绍兴」合计行），缺失时省略。末尾附线下整体 BI 看板链接
+    （*bi_url*，来自 offline_all 区域 ``leaderboardUrl``）。
     """
     d = business_date
     lines = [
@@ -535,32 +535,16 @@ def build_daily_markdown(*, business_date, rows, total, dept_rows=None,
     if dept_rows:
         lines += [
             "",
-            "**二、部门**",
+            "**二、部门（杭州 / 绍兴）**",
             "",
-            *_scope_table(
-                header="部门",
-                items=dept_rows,
-                total=dept_total or compute_dept_total_fallback(dept_rows),
-            ),
+            *_scope_table(header="部门", items=dept_rows),
+        ]
+    if bi_url:
+        lines += [
+            "",
+            f"📊 [点击查看线下整体 BI 看板](<{bi_url}>)",
         ]
     return "\n".join(lines)
-
-
-def compute_dept_total_fallback(dept_rows):
-    """部门合计兜底（无独立合计行时由行相加；仅用于渲染，不落库）。"""
-    sales = sum(m.sales for m in dept_rows)
-    completed = sum(m.month_completed for m in dept_rows)
-    target_values = [m.month_target for m in dept_rows if m.month_target]
-    month_target = sum(target_values) if target_values else None
-    rate = achievement_rate(completed, month_target) if month_target else None
-    return ScopeMetrics(
-        scope=TOTAL_SCOPE_KEY,
-        label="线下整体",
-        sales=sales,
-        month_completed=completed,
-        month_target=month_target,
-        month_rate=rate,
-    )
 
 
 def build_weekly_markdown(*, week_start, week_end, rows, total):
@@ -628,7 +612,7 @@ def _fetch_window(connection, *, region, anchor, start, end):
 
 
 def run_daily_summary(connection, outbox, *, business_date, now,
-                      dedupe_suffix=None):
+                      dedupe_suffix=None, bi_url=None):
     """每日 20:30：板块当日 + 环比 + 月累计 → agg 落表 + outbox。
 
     返回 ``"enqueued" | "already_sent"``。``dedupe_suffix``（run-once
@@ -716,21 +700,12 @@ def run_daily_summary(connection, outbox, *, business_date, now,
         if not (m.scope == UNMAPPED_DEPT and not m.sales
                 and not m.month_completed)
     ]
-    dept_total = compute_daily_metrics(
-        TOTAL_SCOPE_KEY, DEPT_TABLE_TOTAL_LABEL,
-        facts=merge_facts(dept_facts.values()),
-        business_date=business_date,
-        month_target=merge_targets(dept_targets.get(d) for d in dept_facts),
-        prev_month_target=merge_targets(
-            dept_prev_targets.get(d) for d in dept_facts),
-    ) if dept_rows else None
-
     upsert_agg_daily(
         connection, stat_date=business_date, rows=[*rows, total], synced_at=now,
     )
     body = build_daily_markdown(
         business_date=business_date, rows=rows, total=total,
-        dept_rows=dept_rows, dept_total=dept_total,
+        dept_rows=dept_rows, bi_url=bi_url,
     )
     enqueued = outbox.enqueue(
         region="offline_all",
