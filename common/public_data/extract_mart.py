@@ -17,6 +17,7 @@
 
 import contextlib
 import hashlib
+import json
 import logging
 import re
 import textwrap
@@ -55,6 +56,97 @@ def _normalize_region_keys(dataset, rows):
         display = str(row.get("region") or "").strip()
         if display in _REGION_KEY_BY_DISPLAY:
             row["region"] = _REGION_KEY_BY_DISPLAY[display]
+    return rows
+
+
+def _parse_user_field(value):
+    """成员字段值 → ``(user_id, name)``；非成员字段形态 → ``None``。
+
+    钉钉 user 字段在 records API 里是对象数组（``[{"userId":...,
+    "name":...}]``），raw 层经 canonical JSON 落为字符串；缺省/历史
+    文本行/空值一律放行（返回 None 由调用方原样保留）。
+    """
+    if value is None:
+        return None
+    payload = value
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text.startswith("["):
+            return None
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    first = payload[0]
+    if not isinstance(first, dict):
+        return None
+    user_id = first.get("userId") or first.get("user_id") or first.get("id")
+    name = first.get("name") or first.get("title")
+    if not user_id and not name:
+        return None
+    return (str(user_id) if user_id else None,
+            str(name) if name else None)
+
+
+def _lookup_member(connection, user_id, name):
+    """dim_robot_member 反查（user_id 优先、name 兜底）→ (dept_name, name)。
+
+    部门归属权威源=通讯录（2026-09-23 运维口径），未命中返回 (None, None)。
+    """
+    sql = (
+        "SELECT `dept_name`, `name` FROM `dim_robot_member` "
+        "WHERE `is_active` = 1 AND (`user_id` = %s OR `name` = %s) "
+        "ORDER BY (`user_id` = %s) DESC LIMIT 1"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, (user_id or "", name or "", user_id or ""))
+        rows = cursor.fetchall()
+    if not rows:
+        return None, None
+    row = rows[0]
+    get = row.get if isinstance(row, dict) else None
+    dept = get("dept_name") if get else row[0]
+    resolved = get("name") if get else row[1]
+    return dept or None, resolved or None
+
+
+def _resolve_other_member_rows(dataset, rows, connection):
+    """其他区日报成员字段归位（2026-10-19 表重构，用户裁决）——就地修改。
+
+    责任人列自 2026-10-19 起为成员字段（user JSON）：姓名解析落列；
+    部门不再填报、按通讯录 ``dim_robot_member`` 注入；月目标随行填报
+    退役，改 ``dim_report_target``（scope=other）按 business_date 月份
+    快照（与杭绍同一真源函数 fetch_intake_target，无记录留 None）。
+    非 other 区行与非成员字段形态（历史文本行）原样放行。
+    """
+    if dataset.dataset != "daily_report_offline":
+        return rows
+    targets = []
+    for row in rows:
+        if row.get("region") != "other":
+            continue
+        parsed = _parse_user_field(row.get("responsible_person"))
+        if parsed is not None:
+            targets.append((row, parsed))
+    if not targets:
+        return rows
+    from common.public_data import report_roster
+    for row, (user_id, name) in targets:
+        dept, resolved = _lookup_member(connection, user_id, name)
+        if resolved:
+            name = resolved
+            row["responsible_person"] = name
+        elif name:
+            row["responsible_person"] = name
+        if dept:
+            row["department"] = dept
+        biz = row.get("business_date")
+        ym = str(biz)[:7] if biz else None
+        if ym and name and row.get("monthly_target") is None:
+            row["monthly_target"] = report_roster.fetch_intake_target(
+                connection, "other", name, ym)
     return rows
 
 
@@ -883,6 +975,8 @@ class MartExtractService:
                 logger.warning("dataset=%s %s", dataset.dataset, degrade_reason)
             rows = self._repository.read_dataset(dataset, since=since)
             rows = _normalize_region_keys(dataset, rows)
+            rows = _resolve_other_member_rows(
+                dataset, rows, self._mart_connection)
             if dataset.dataset == "channel_daily_sales":
                 # 机器人填报归并（2026-10-09 裁决：AI 表为真源，robot 仅在
                 # AI 空/无行时兜底；复用 AI recordId 覆盖，fact 每业务键
