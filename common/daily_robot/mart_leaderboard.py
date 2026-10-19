@@ -19,6 +19,7 @@
 幻影工作日）已消除；无 ``daysInMonth`` 的旧 config 形态回退 30。
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -30,6 +31,8 @@ from common.metrics.daily_report import (
     fetch_workdays,
     summarize_people,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,22 @@ def mart_collect(connection, *, region, business_date, include_today=False):
             dept_by_person[name] = (
                 str(row.get("department") or "").strip() or "未分组"
             )
+
+    # 归位覆盖并入（2026-10-19 用户裁决「画布与 BI 同真源」）：画布拉线
+    # 归口（dim_org_assignment_override）对个人完成率榜/静态榜单页/播报
+    # 的部门列同步生效（杭州销售部案例：余发兴归位后个人榜仍显示杭中
+    # 项目部 = 只修了聚合卡没修人级卡的漏网）；读取失败 fail-soft 回退
+    # 表内值（懒加载避免 offline_summary 环依赖）。
+    try:
+        from common.daily_robot.offline_summary import fetch_member_dept_map
+        dept_map = fetch_member_dept_map(connection, (region,))
+        for name in list(dept_by_person):
+            mapped = dept_map.get((region, name))
+            if mapped:
+                dept_by_person[name] = mapped
+    except Exception:
+        logger.warning(
+            "归位部门映射读取失败，按表内值口径：%s", region, exc_info=True)
 
     people = []
     for name, summary in summaries.items():

@@ -23,6 +23,13 @@ class _RouterCursor:
         self._conn.queries.append((sql, params))
         if "dim_calendar" in sql:
             self._rows = self._conn.workday_rows
+        elif "dim_robot_member" in sql and "`user_id` IN" in sql:
+            # 归位覆盖的移入在职校验：默认可注入，缺省全在职
+            self._rows = self._conn.active_rows
+        elif "dim_robot_member" in sql:
+            self._rows = self._conn.member_rows
+        elif "dim_org_assignment_override" in sql:
+            self._rows = self._conn.override_rows
         else:
             self._rows = self._conn.fact_rows
 
@@ -34,9 +41,13 @@ class _RouterCursor:
 
 
 class _RouterConn:
-    def __init__(self, *, workdays=(), facts=()):
+    def __init__(self, *, workdays=(), facts=(), members=(), overrides=(),
+                 actives=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.fact_rows = list(facts)
+        self.member_rows = list(members)
+        self.override_rows = list(overrides)
+        self.active_rows = [{"user_id": u} for u in actives]
         self.queries = []
 
     def cursor(self):
@@ -115,6 +126,45 @@ class MartCollectTests(unittest.TestCase):
         self.assertEqual(people["王五"]["dept"], "未分组")
         self.assertEqual(people["王五"]["target"], 0)
         self.assertIsNone(people["王五"]["rate"])
+
+    def test_assignment_override_wins_people_dept(self):
+        """归位覆盖并入个人榜部门列（2026-10-19 裁决，余发兴案例）：
+        画布拉线归口 → 个人完成率榜/静态榜单页/播报部门列同步生效。"""
+        conn = _RouterConn(
+            workdays=_WORKDAYS, facts=_fixture_facts(),
+            members=[
+                {"user_id": "u1", "region": "hangzhou", "name": "张三",
+                 "dept_id": "d1", "dept_name": "杭中"},
+            ],
+            overrides=[{
+                "id": 1, "user_id": "u1", "name": "张三",
+                "region": "hangzhou", "dept_id": None,
+                "dept_name": "杭州销售部", "enabled": 1, "note": None,
+                "updated_by": "ops", "updated_at": None,
+            }],
+        )
+        data = mart_collect(conn, region="hangzhou", business_date=_DAY)
+        people = {p["name"]: p for p in data.people}
+        self.assertEqual("杭州销售部", people["张三"]["dept"])
+        # 无覆盖的人维持表内值
+        self.assertEqual("滨萧", people["李四"]["dept"])
+
+    def test_override_map_failure_fails_soft(self):
+        """归位映射读取失败 → 表内值兜底（fail-soft）。"""
+        class _BoomCursor(_RouterCursor):
+            def execute(self, sql, params=None):
+                if "dim_robot_member" in sql:
+                    raise RuntimeError("db down")
+                super().execute(sql, params)
+
+        class _BoomConn(_RouterConn):
+            def cursor(self):
+                return _BoomCursor(self)
+
+        conn = _BoomConn(workdays=_WORKDAYS, facts=_fixture_facts())
+        data = mart_collect(conn, region="hangzhou", business_date=_DAY)
+        people = {p["name"]: p for p in data.people}
+        self.assertEqual("杭中", people["张三"]["dept"])
 
         # 排序：rate desc（None 垫底）、completed desc、target desc。
         self.assertEqual(
