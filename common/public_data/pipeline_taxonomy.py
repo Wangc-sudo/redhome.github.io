@@ -33,7 +33,6 @@ SERVICE_CATEGORIES = {
     "roll-manifest": "同步",
     "sync-dingtalk": "同步",
     "sync-wdt": "同步",
-    "sync-runner": "同步",
     "sync-channel-sales": "同步",
     "kb-sync-products": "同步",
     "rag-index-products": "同步",

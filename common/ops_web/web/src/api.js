@@ -365,6 +365,12 @@ export function getFleetAuditLatest() {
   return request('/api/pipelines/fleet-audit-latest', { method: 'GET' });
 }
 
+/** 归档已停用服务（2026-10-19 治理 P2）：Nacos 摘除 + 审计留痕。
+ * 409=活线不可归档（先停用）。返回 {seed_registered} 提示 seed 侧是否需 PR 删条目。 */
+export function archivePipeline(payload) {
+  return post('/api/pipelines/archive', payload);
+}
+
 /** 数据修正：人员归属归位预览/执行。payload: {person_name, from_region,
  *  to_region, apply?}（apply 缺省=预览）。 */
 export function dataFixRealign(payload) {

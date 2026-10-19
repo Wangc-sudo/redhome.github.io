@@ -45,6 +45,15 @@ def _default_http_post(url, form, timeout):
         return error.code, error.read().decode("utf-8", errors="replace")
 
 
+def _default_http_delete(url, timeout):
+    request = urllib.request.Request(url, method="DELETE")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode("utf-8", errors="replace")
+
+
 class RestNacosClient:
     """Duck-typed drop-in for the SDK client (auth-enabled Nacos 2.x)."""
 
@@ -52,7 +61,8 @@ class RestNacosClient:
     _TOKEN_EXPIRY_MARGIN = 60
 
     def __init__(self, server, *, namespace="", username=None, password=None,
-                 timeout=5, http_get=None, http_post=None, monotonic=None):
+                 timeout=5, http_get=None, http_post=None, http_delete=None,
+                 monotonic=None):
         self._base = server if "://" in server else f"http://{server}"
         self._base = self._base.rstrip("/")
         self._namespace = namespace or ""
@@ -61,6 +71,7 @@ class RestNacosClient:
         self._timeout = timeout
         self._http_get = http_get or _default_http_get
         self._http_post = http_post or _default_http_post
+        self._http_delete = http_delete or _default_http_delete
         self._monotonic = monotonic or time.monotonic
         self._token = None
         self._token_expires_at = 0.0
@@ -126,6 +137,23 @@ class RestNacosClient:
         if status != 200 or body.strip().lower() != "true":
             raise NacosAuthError(
                 f"nacos publish_config failed: HTTP {status} {body.strip()!r}"
+            )
+        return True
+
+    def remove_config(self, data_id, group, timeout=None):
+        """删除配置条目（2026-10-19 归档动作）。返回 True；失败抛错。
+
+        归档语义（用户裁决）：Nacos 摘除 + seed 删条目 + git 历史即档案；
+        本方法只负责 Nacos 侧。SDK 客户端无对应能力——调用方须
+        ``getattr(client, "remove_config", None)`` 降级判定（同
+        ``list_data_ids`` 惯例）。
+        """
+        params = self._query({"dataId": data_id, "group": group})
+        url = f"{self._base}/nacos/v1/cs/configs?{urllib.parse.urlencode(params)}"
+        status, body = self._http_delete(url, timeout or self._timeout)
+        if status != 200 or body.strip().lower() != "true":
+            raise NacosAuthError(
+                f"nacos remove_config failed: HTTP {status} {body.strip()!r}"
             )
         return True
 

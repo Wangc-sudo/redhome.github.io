@@ -514,6 +514,38 @@ def build_config_publisher(environ=None):
     return publish
 
 
+def build_config_deleter(environ=None):
+    """Nacos 管道注册表删除器（ops-web 归档动作）；未配置 Nacos 返回 None。
+
+    返回的 callable 接收 service_id，删除 ``<service_id>.yaml`` 条目。
+    归档语义（2026-10-19 用户裁决）：Nacos 摘除 + seed 删条目（代码 PR）
+    + git 历史即档案——seed 注册的服务只删 Nacos 会在下次
+    ``publish-pipelines --if-missing`` 时复活，端点响应里须提示。
+    """
+    env = os.environ if environ is None else environ
+    server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+    if not server:
+        return None
+    namespace = (env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip()
+    group = (env.get("PUBLIC_DATA_NACOS_GROUP") or "").strip() or DEFAULT_GROUP
+    username = (env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None
+    password = (env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None
+
+    from common.public_data.nacos_client import build_nacos_client
+    client = build_nacos_client(
+        server, namespace=namespace, username=username, password=password
+    )
+    remover = getattr(client, "remove_config", None)
+
+    def delete(service_id):
+        if remover is None:
+            raise PipelineConfigError(
+                "nacos client lacks remove_config (SDK path)")
+        remover(f"{service_id}.yaml", group)
+
+    return delete
+
+
 def publish_seed_from_env(seed_path, if_missing=False, environ=None):
     """Build a Nacos client from the environment and publish *seed_path*."""
     env = os.environ if environ is None else environ
