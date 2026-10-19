@@ -301,7 +301,11 @@ class HandleReportTests(unittest.TestCase):
 
     def test_db_target_wins_over_nacos_config(self):
         """月目标快照（2026-10-07「所有数据入库」）：dim_report_target
-        优先于 Nacos monthlyTargets；DB 无记录才回退配置。"""
+        优先于 Nacos monthlyTargets；DB 无记录才回退配置。
+
+        2026-10-19 单位口径：dim 存万元（fixture 28.8 万），fact 列是元
+        （×10000 后 288000，与 Nacos 元值同列不混）。
+        """
         cfg = RegionConfig(
             region="vanke", display="万科&大莲花&团购",
             table_url="https://example.com/board",
@@ -311,7 +315,7 @@ class HandleReportTests(unittest.TestCase):
         )
         conn = _Conn(
             members=[_member(region="vanke", dept="体验中心")],
-            db_targets=[{"monthly_target": 288000}],
+            db_targets=[{"monthly_target": 28.8}],   # dim 万元口径
         )
         outcome = handle_report(
             conn, region_cfg=cfg, text="12800", sender_uid="u1", now=_NOW,

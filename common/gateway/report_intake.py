@@ -47,8 +47,13 @@ from common.public_data import report_roster
 
 def _monthly_target_for(connection, region_cfg, table_name, business_date):
     """月目标快照源（2026-10-07「所有数据入库」）：``dim_report_target``
-    优先，Nacos ``monthlyTargets`` 兜底（未迁库区域的过渡通道）。"""
-    db_value = report_roster.fetch_intake_target(
+    优先，Nacos ``monthlyTargets`` 兜底（未迁库区域的过渡通道）。
+
+    返回**元**口径（fact.monthly_target 列口径）：dim 存万元，经
+    ``fetch_intake_target_yuan`` ×10000（2026-10-19 单位混列修复）；
+    Nacos 兜底值本就是元，不动。
+    """
+    db_value = report_roster.fetch_intake_target_yuan(
         connection, region_cfg.region, table_name,
         business_date.strftime("%Y-%m"),
     )

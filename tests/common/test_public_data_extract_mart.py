@@ -361,7 +361,8 @@ class OtherMemberResolveTests(unittest.TestCase):
                 if "dim_robot_member" in sql:
                     self._rows = [{"dept_name": "省外销售部", "name": "余云涛"}]
                 elif "dim_report_target" in sql:
-                    self._rows = [{"monthly_target": 500000}]
+                    # dim 万元口径（v5 迁移后）：50 万 → fact 500000 元
+                    self._rows = [{"monthly_target": 50}]
                 else:  # pragma: no cover - 防呆
                     raise AssertionError(sql)
 

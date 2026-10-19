@@ -702,6 +702,11 @@ class TargetBackfillTests(unittest.TestCase):
         # 人工值不被回填覆盖
         self.assertEqual(99.0, report_roster.fetch_intake_target(
             self.db, "vanke", "老张", "2026-10"))
+        # 元口径包装（2026-10-19 单位混列修复）：dim 万元 ×10000 归元
+        self.assertEqual(990000.0, report_roster.fetch_intake_target_yuan(
+            self.db, "vanke", "老张", "2026-10"))
+        self.assertIsNone(report_roster.fetch_intake_target_yuan(
+            self.db, "vanke", "不存在", "2026-10"))
         # 复跑全跳过、零新增审计
         second = report_roster.backfill_targets_from_region_config(
             self.db, configs, "2026-10", actor="cli")

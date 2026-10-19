@@ -771,7 +771,12 @@ def fetch_person_targets(connection, scope, year_month):
 
 
 def fetch_intake_target(connection, scope, person_name, year_month):
-    """机器人报数快照源：该人该月目标（无记录 → ``None``，调用方兜底）。"""
+    """机器人报数快照源：该人该月目标（无记录 → ``None``，调用方兜底）。
+
+    返回 ``dim_report_target`` 原值——**万元**口径（2026-10-14 v5 迁移后）。
+    写 ``fact_daily_report_offline.monthly_target``（元口径，消费端
+    format wan 按元 ÷10000 显示）必须经 :func:`fetch_intake_target_yuan`。
+    """
     rows = _fetch_all(
         connection,
         "SELECT `monthly_target` FROM `dim_report_target` "
@@ -784,6 +789,18 @@ def fetch_intake_target(connection, scope, person_name, year_month):
     value = rows[0].get("monthly_target") if isinstance(rows[0], dict) \
         else rows[0][0]
     return float(value) if value is not None else None
+
+
+def fetch_intake_target_yuan(connection, scope, person_name, year_month):
+    """``fetch_intake_target`` 的**元**口径版（×10000）。
+
+    2026-10-19 单位混列事故修复：dim 自 10-14 存万元，而 fact
+    ``monthly_target`` 列历史存量与全部消费端（BI format wan、榜单
+    MAX 快照口径）都是元——v5 迁移只除了 dim 表没除快照写入链，导致
+    10-14 起新快照行是万元混进元列（本月被 MAX 掩盖，翻月必炸）。
+    """
+    value = fetch_intake_target(connection, scope, person_name, year_month)
+    return value * 10000 if value is not None else None
 
 
 def fetch_target_month_summary(connection, year_month):
