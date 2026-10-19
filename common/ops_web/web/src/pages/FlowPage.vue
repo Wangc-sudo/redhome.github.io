@@ -126,13 +126,15 @@ const { depDraft, depDraftPath, startDepWire, onDepEdgeClick } = useDepWire({
 // -- 抽屉（F2：状态机 + 组件化，实现见 components/flow/drawers/）-----------------
 const { drawer, openDrawer, closeDrawer } = useDrawer();
 
-// -- 全局节点（P3：播报日历 / 操作记录；P4 授权/修正；治理 P1 治理报告）--------
+// -- 全局节点（P3：播报日历 / 操作记录；P4 授权/修正；治理 P1 治理报告；
+// 2026-10-19 播报试投——测试区改制为通用功能模块，用户裁决）--------------
 const globalNodes = ref([
   { id: 'global:calendar', label: '播报日历', desc: '点日期改播报/休息', x: 40, y: 400 },
   { id: 'global:records', label: '操作记录', desc: '六源审计流水', x: 40, y: 480 },
   { id: 'global:governance', label: '治理报告', desc: '停用/僵尸/依赖线体检', x: 40, y: 560, cap: 'pipelines' },
-  { id: 'global:grants', label: '授权', desc: '能力×区域授权', x: 40, y: 560, admin: true },
-  { id: 'global:datafix', label: '数据修正', desc: '类型化修数（预览→落库）', x: 40, y: 640, cap: 'datafix' },
+  { id: 'global:relay', label: '播报试投', desc: '区域播报改投功能验证群', x: 40, y: 640, cap: 'org' },
+  { id: 'global:grants', label: '授权', desc: '能力×区域授权', x: 40, y: 720, admin: true },
+  { id: 'global:datafix', label: '数据修正', desc: '类型化修数（预览→落库）', x: 40, y: 800, cap: 'datafix' },
 ]);
 
 //: 数据修正/授权抽屉实现 → components/flow/drawers/{DataFixDrawer,GrantsDrawer}.vue

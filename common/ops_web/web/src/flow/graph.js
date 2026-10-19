@@ -16,6 +16,11 @@ export const AGGREGATE_REGIONS = {
 //: overview.regions 不含它——从名册/目标数据派生）。
 export const COMPLEMENT_REGION = 'other';
 
+//: 不进区域层的注册区域（2026-10-19 用户裁决：测试区改制为通用功能
+//: 模块「播报试投」，与播报日历同级——它只是播报试投出口，不是业务
+//: 区域；改投开关集中在功能模块抽屉，区域节点不再出现）。
+export const HIDDEN_REGION_KEYS = new Set(['test']);
+
 //: 平台线（region=null 的服务组）的虚拟区域键。
 export const PLATFORM_KEY = '__platform__';
 
@@ -168,7 +173,8 @@ export function buildGraph(raw) {
   // 聚合区域从普通循环里摘出（最后单独成圆形聚合节点）
   const regionSpecs = regions
     .map((region) => ({ key: region.key, region }))
-    .filter((spec) => !(spec.key in AGGREGATE_REGIONS));
+    .filter((spec) => !(spec.key in AGGREGATE_REGIONS))
+    .filter((spec) => !HIDDEN_REGION_KEYS.has(spec.key));
   // 平台线（region=null）不再是区域节点（2026-10-17 流水线分层）：其服务
   // 按 stageOf 散落 采集/加工 泳道成模块，源→采集→加工画数据流边。
   const platform = servicesByRegion[PLATFORM_KEY] || [];

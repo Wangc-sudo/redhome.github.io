@@ -12,6 +12,7 @@ import RecordsDrawer from './RecordsDrawer.vue';
 import GrantsDrawer from './GrantsDrawer.vue';
 import DataFixDrawer from './DataFixDrawer.vue';
 import GovernanceDrawer from './GovernanceDrawer.vue';
+import RelayDrawer from './RelayDrawer.vue';
 import './drawer.css';
 
 const props = defineProps({
@@ -34,6 +35,7 @@ const KIND_COMPONENT = {
   grants: GrantsDrawer,
   datafix: DataFixDrawer,
   governance: GovernanceDrawer,
+  relay: RelayDrawer,
 };
 
 const comp = computed(() =>

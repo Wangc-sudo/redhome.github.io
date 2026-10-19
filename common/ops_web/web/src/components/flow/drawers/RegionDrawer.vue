@@ -10,7 +10,6 @@ import {
   addRosterEntry,
   deleteRosterEntry,
   saveRegionTargets,
-  setRegionRelay,
   toggleRosterEntry,
 } from '../../../api.js';
 import { setFlash } from '../../../store/me.js';
@@ -93,27 +92,6 @@ async function onAddRosterRow() {
   }
 }
 
-async function onToggleRelay() {
-  // 播报改投测试区（2026-10-19）：开启后该区域群消息+DING 全部改投
-  // 测试区群（带 [测试→原区域] 前缀），网关 30s 内生效，无需重启。
-  const target = !props.node.relayTo;
-  if (target && !window.confirm(
-    `确认把「${props.node.label}」的全部播报改投测试区？`
-    + '（群消息+DING 都改投，真群不再收到；随时可关）')) return;
-  emit('update:busy', true);
-  try {
-    await setRegionRelay({ region_key: props.node.key, relay: target });
-    setFlash('ok', target
-      ? `「${props.node.label}」播报已改投测试区`
-      : `「${props.node.label}」已恢复投真群`);
-    await props.reload(['overview']);   // relay_to 挂在组织树域
-  } catch (err) {
-    setFlash('err', `改投开关失败：${err.message}`);
-  } finally {
-    emit('update:busy', false);
-  }
-}
-
 async function onSaveTargets() {
   const rows = Object.entries(drawerTargets.value)
     .map(([person_name, value]) => ({
@@ -139,24 +117,6 @@ async function onSaveTargets() {
     {{ node.key }} · 成员 {{ node.memberCount }} ·
     下游任务 {{ node.taskCount }} · 目标月份 {{ month }}
   </p>
-  <div class="drawer-sec">
-    <h3>播报改投测试区</h3>
-    <div class="roster-row">
-      <span class="roster-name">群消息 + DING 全部改投测试区群</span>
-      <button
-        class="switch"
-        :class="{ on: !!node.relayTo }"
-        :disabled="busy"
-        @click="onToggleRelay"
-      ><i /></button>
-    </div>
-    <p class="drawer-line muted">
-      {{ node.relayTo
-        ? '已改投：消息带 [测试→' + node.label + '] 前缀发到测试区群'
-        : '关闭中：播报投本区域群' }}
-      （网关 30 秒内生效，幂等键不变不影响当日去重）
-    </p>
-  </div>
   <div class="drawer-sec">
     <h3>名册（{{ drawerRoster.length }}）</h3>
     <div v-for="row in drawerRoster" :key="row.id" class="roster-row">
