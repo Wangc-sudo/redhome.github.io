@@ -150,6 +150,32 @@ def decorative_deps(configs, probed=PROBED_UPSTREAMS):
 _HM_RE = re.compile(r"^(\d{1,2})$")
 
 
+def sla_audit(configs, success_today, now_hm, has_command):
+    """SLA 迟到（2026-10-19 治理 P2 尾巴，用户裁决「不要播报」）。
+
+    声明了 ``sla``（北京 HH:MM 当日最晚完成时刻）、启用、可调度的服务，
+    ``now_hm``（北京当前 HH:MM）已过 deadline 且当日仍无成功运行 → 迟到。
+    未声明 / deadline 未到 / 当日已成功 → 不报。月/周检不声明 sla
+    （僵尸周期宽限已覆盖），daemon/修复工具（has_command=False）跳过。
+
+    ``success_today`` = 当日（北京）已有成功运行（status=finished）的
+    service_id 集合。只进治理抽屉/月检快照，不发群。
+    """
+    rows = []
+    for cfg in configs:
+        if not cfg.sla or not cfg.enabled:
+            continue
+        if not has_command(cfg.service_id):
+            continue
+        if now_hm <= cfg.sla:
+            continue  # deadline 未到
+        if cfg.service_id in success_today:
+            continue
+        rows.append({"service_id": cfg.service_id, "deadline": cfg.sla})
+    rows.sort(key=lambda r: (r["deadline"], r["service_id"]))
+    return rows
+
+
 def cron_pileup(configs, threshold=_CRON_PILEUP_THRESHOLD):
     """cron 堆积：同一时刻（HH:MM）启用任务数 ≥ threshold。"""
     by_time = {}
@@ -174,12 +200,20 @@ def cron_pileup(configs, threshold=_CRON_PILEUP_THRESHOLD):
 
 
 def build_report(configs, today, latest, has_command,
-                 probed=PROBED_UPSTREAMS):
-    """四节装配（与 governance.js governanceReport 同构）。"""
+                 probed=PROBED_UPSTREAMS, success_today=None, now_hm=None):
+    """五节装配（四节与 governance.js governanceReport 同构；SLA 节为
+    服务端独有——前端抽屉实时 SLA 走 /api/pipelines/sla，同一判定函数）。
+
+    ``success_today``/``now_hm`` 缺省时 SLA 节为空（月检快照在早上 07:00
+    跑，晨报链 deadline 全未到，恒为空属正常口径；快照价值在月度存档
+    四节，SLA 的主要战场是抽屉实时节）。
+    """
     disabled = disabled_audit(configs, today)
     zombies = zombie_audit(configs, today, latest, has_command)
     deps = decorative_deps(configs, probed)
     pileups = cron_pileup(configs)
+    sla = sla_audit(configs, success_today or set(), now_hm or "00:00",
+                    has_command)
     return {
         "date": today,
         "total": len(configs),
@@ -188,6 +222,7 @@ def build_report(configs, today, latest, has_command,
         "zombies": zombies,
         "decorative_deps": deps,
         "pileups": pileups,
+        "sla": sla,
     }
 
 
@@ -271,9 +306,44 @@ def fetch_latest_snapshot(connection):
 # 装配与 CLI
 # ---------------------------------------------------------------------------
 
+def collect_sla_status(connect_fn, database_settings, *, fleet_source,
+                       config_source, has_command, now=None):
+    """当日 SLA 实时状态（ops-web /api/pipelines/sla 与月检共用）。
+
+    返回 ``(violations, now_hm)``；``now`` 可注入（测试），缺省 UTC now。
+    成功口径 = pd_ops_run_history status='finished' 且 started_at ≥ 当日
+    00:00（北京，即 UTC 前一日 16:00）。
+    """
+    from common.public_data import ops_control
+
+    now_utc = now or datetime.now(timezone.utc)
+    beijing = now_utc + timedelta(hours=8)
+    now_hm = beijing.strftime("%H:%M")
+    day_start_utc = beijing.replace(
+        hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
+    day_start_utc = day_start_utc.replace(tzinfo=None)
+
+    configs = [config_source.get_pipeline(sid) for sid in fleet_source()]
+    with connect_fn(database_settings) as connection:
+        history = ops_control.fetch_run_history(connection, limit=1000)
+    success = set()
+    for row in history:
+        get = row.get if isinstance(row, dict) else None
+        sid = get("service_id") if get else row[1]
+        status = get("status") if get else row[3]
+        started = get("started_at") if get else row[6]
+        if status != "finished" or started is None:
+            continue
+        if getattr(started, "tzinfo", None) is not None:
+            started = started.replace(tzinfo=None)
+        if started >= day_start_utc:
+            success.add(sid)
+    return sla_audit(configs, success, now_hm, has_command), now_hm
+
+
 def collect_report(connect_fn, database_settings, *, today,
-                   fleet_source, config_source, has_command):
-    """拉舰队/注册表/运行史，装配四节报告（依赖注入，测试喂 fake）。"""
+                   fleet_source, config_source, has_command, now=None):
+    """拉舰队/注册表/运行史，装配五节报告（依赖注入，测试喂 fake）。"""
     from common.public_data import ops_control
 
     configs = [config_source.get_pipeline(sid) for sid in fleet_source()]
@@ -285,7 +355,13 @@ def collect_report(connect_fn, database_settings, *, today,
         sid = get("service_id") if get else row[1]
         if sid not in latest:
             latest[sid] = get("started_at") if get else row[6]
-    return build_report(configs, today, latest, has_command)
+    sla, now_hm = collect_sla_status(
+        connect_fn, database_settings, fleet_source=fleet_source,
+        config_source=config_source, has_command=has_command, now=now)
+    report = build_report(configs, today, latest, has_command)
+    report["sla"] = sla
+    report["sla_checked_at"] = now_hm
+    return report
 
 
 def main(argv=None):

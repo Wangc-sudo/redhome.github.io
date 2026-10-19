@@ -29,7 +29,7 @@ from common.ops_web.app import (
     ALL_CAPABILITIES, capability_allows, capability_has_scoped, create_app,
 )
 from common.public_data import (
-    bi_authz, calendar_store, channel_target, ops_control,
+    bi_authz, calendar_store, channel_target, fleet_audit, ops_control,
     recipient_override, report_roster,
 )
 from common.public_data.pipeline_config import StaticConfigSource
@@ -1110,6 +1110,36 @@ class PipelineArchiveTests(unittest.TestCase):
         self.assertEqual(401, client.post(
             "/api/pipelines/archive",
             json={"service_id": "sync-runner"}).status_code)
+
+
+class PipelineSlaTests(unittest.TestCase):
+    """SLA 迟到读面（2026-10-19 治理 P2 尾巴，用户裁决「不要播报」）。"""
+
+    def test_sla_endpoint_returns_violations(self):
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                fleet_audit, "collect_sla_status",
+                lambda *a, **k: (
+                    [{"service_id": "extract-mart", "deadline": "17:45"}],
+                    "18:00")):
+            data = client.get("/api/pipelines/sla").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual("18:00", data["checked_at"])
+        self.assertEqual(
+            [{"service_id": "extract-mart", "deadline": "17:45"}],
+            data["violations"],
+        )
+
+    def test_sla_endpoint_requires_admin_and_degrades(self):
+        client = TestClient(_pipeline_app(viewer=_admin_viewer()))
+        self.assertEqual(401, client.get("/api/pipelines/sla").status_code)
+        _login(client)
+        with mock.patch.object(
+                fleet_audit, "collect_sla_status",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError())):
+            self.assertEqual(
+                503, client.get("/api/pipelines/sla").status_code)
 
 
 class PipelineAddTests(unittest.TestCase):

@@ -371,6 +371,12 @@ export function archivePipeline(payload) {
   return post('/api/pipelines/archive', payload);
 }
 
+/** 当日 SLA 迟到读面（服务端判定，前端纯渲染；不发群）。
+ * 返回 {violations: [{service_id, deadline}], checked_at}。 */
+export function getPipelinesSla() {
+  return request('/api/pipelines/sla', { method: 'GET' });
+}
+
 /** 数据修正：人员归属归位预览/执行。payload: {person_name, from_region,
  *  to_region, apply?}（apply 缺省=预览）。 */
 export function dataFixRealign(payload) {

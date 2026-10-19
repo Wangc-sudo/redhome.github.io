@@ -24,6 +24,7 @@ sync-dingtalk:
   enabled: true
   sources: [dingtalk]
   schedule: "0 2,7,14,16 * * *"
+  sla: "16:45"
   reads: [raw_dingtalk, mart_ops]
   depends_on: [roll-manifest]
   description: "DingTalk AI sheets -> raw_dingtalk"
@@ -33,6 +34,7 @@ sync-wdt:
   enabled: true
   sources: [wdt]
   schedule: "0 2,7,14,16 * * *"
+  sla: "16:45"
   reads: [raw_wdt, mart_ops]
   depends_on: [roll-manifest]
   description: "WDT read APIs -> raw_wdt"
@@ -48,6 +50,7 @@ extract-mart:
   category: 加工
   enabled: true
   schedule: "0 4,8,15,17 * * *"
+  sla: "17:45"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
 # robot 一拆二（2026-10-07 裁决）：robot-<区域>=填报提醒(18:00)，
@@ -67,6 +70,7 @@ robot-check-hangzhou:
   category: 催办
   enabled: true
   schedule: "0 20 * * *"
+  sla: "20:45"
   reads: [mart_ops]
   description: "hangzhou unfilled check + DING (mart_ops -> robot_outbox)"
 pages-hangzhou:
@@ -145,6 +149,7 @@ sync-channel-sales:
   category: 同步
   enabled: true
   schedule: "31 10 * * *"
+  sla: "11:00"
   reads: [raw_dingtalk, mart_ops]
   description: "渠道日销 T+1 补采（dingtalk channel_daily_sales* + channel_monthly_target）"
 extract-channel:
@@ -152,6 +157,7 @@ extract-channel:
   category: 加工
   enabled: true
   schedule: "35 10 * * *"
+  sla: "11:00"
   reads: [raw_dingtalk, mart_ops]
   depends_on: [sync-channel-sales]
   description: "渠道日销 T+1 提取（fact_channel_daily_sales + fact_channel_store_target，点名册依赖）"
@@ -176,6 +182,7 @@ freshness-check:
   # T-1 非工作日只抑制告警、照常检查。
   enabled: true
   schedule: "0 11 * * *"
+  sla: "11:30"
   reads: [mart_ops]
   depends_on: [extract-channel]
   # 告警口径（ops-web「告警设置」可改；真源落 Nacos 本条目 params）：
@@ -208,6 +215,7 @@ leaderboard-hangzhou:
   category: 播报
   enabled: true
   schedule: "30 8 * * *"
+  sla: "09:15"
   reads: [mart_ops]
   description: "hangzhou leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-shaoxing:
@@ -215,6 +223,7 @@ leaderboard-shaoxing:
   category: 播报
   enabled: true
   schedule: "30 8 * * *"
+  sla: "09:15"
   reads: [mart_ops]
   description: "shaoxing leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-vanke:
@@ -222,6 +231,7 @@ leaderboard-vanke:
   category: 播报
   enabled: true
   schedule: "30 8 * * *"
+  sla: "09:15"
   reads: [mart_ops]
   description: "vanke leaderboard group broadcast (mart_ops -> robot_outbox)"
 leaderboard-qudao:
@@ -314,6 +324,7 @@ robot-check-shaoxing:
   category: 催办
   enabled: true
   schedule: "0 20 * * *"
+  sla: "20:45"
   reads: [mart_ops]
   description: "shaoxing unfilled check + DING (mart_ops -> robot_outbox)"
 robot-junpin:

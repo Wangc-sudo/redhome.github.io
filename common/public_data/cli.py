@@ -591,6 +591,56 @@ def _handle_backfill_pipeline_categories(args):
         sys.exit(1)
 
 
+def _handle_backfill_pipeline_sla(args):
+    """seed 的 sla 声明回填 Nacos（默认 dry-run，--apply 才写）。
+
+    逐条读 Nacos 原文，只补缺不覆盖（运行态字段原样保留，同
+    backfill-pipeline-categories 纪律）；Nacos 无条目不新建。
+    """
+    try:
+        import os
+        from pathlib import Path
+
+        from common.public_data.nacos_client import build_nacos_client
+        from common.public_data.pipeline_config import (
+            DEFAULT_GROUP,
+            backfill_sla,
+            load_seed,
+        )
+
+        env = os.environ
+        server = (env.get("PUBLIC_DATA_NACOS_SERVER") or "").strip()
+        if not server:
+            raise RuntimeError("PUBLIC_DATA_NACOS_SERVER is required")
+        seed = load_seed(Path(args.seed))
+        sla_map = {
+            sid: (raw.get("sla") or "").strip()
+            for sid, raw in seed.items()
+            if isinstance(raw, dict) and (raw.get("sla") or "").strip()
+        }
+        client = build_nacos_client(
+            server,
+            namespace=(env.get("PUBLIC_DATA_NACOS_NAMESPACE") or "").strip(),
+            username=(env.get("PUBLIC_DATA_NACOS_USERNAME") or "").strip() or None,
+            password=(env.get("PUBLIC_DATA_NACOS_PASSWORD") or "").strip() or None,
+        )
+        group = (env.get("PUBLIC_DATA_NACOS_GROUP") or "").strip() or DEFAULT_GROUP
+        result = backfill_sla(client, sla_map, group=group, apply=args.apply)
+        mode = "apply" if args.apply else "dry-run"
+        print(
+            f"backfill-sla({mode}): filled={len(result['filled'])}"
+            f" skipped={len(result['skipped'])}"
+        )
+        for key in ("filled", "skipped"):
+            for service_id in result[key]:
+                print(f"  {key}: {service_id}")
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="backfill_error")
+        sys.exit(1)
+
+
 #: roll-manifest 干校验（渠道 sheet 滚月）读取钉钉凭据的默认路径；
 #: 与调度器容器挂载点一致（compose `scheduler` 服务）。
 _DEFAULT_SOURCE_CREDENTIALS_PATH = "/run/live-input/source-credentials.json"
@@ -1061,6 +1111,19 @@ def main(argv=None):
         help="write to Nacos (default: dry-run classification report only)",
     )
 
+    # -- backfill-pipeline-sla ------------------------------------------------
+    backfill_sla_p = subparsers.add_parser(
+        "backfill-pipeline-sla",
+        help="Backfill the sla field from seed onto existing Nacos entries",
+    )
+    backfill_sla_p.add_argument(
+        "--seed", required=True, help="pipeline seed YAML path",
+    )
+    backfill_sla_p.add_argument(
+        "--apply", action="store_true", default=False,
+        help="write to Nacos (default: dry-run report only)",
+    )
+
     # -- split-robot-check ----------------------------------------------------
     split = subparsers.add_parser(
         "split-robot-check",
@@ -1180,6 +1243,7 @@ def main(argv=None):
         "extract-mart": _handle_extract_mart,
         "publish-pipelines": _handle_publish_pipelines,
         "backfill-pipeline-categories": _handle_backfill_pipeline_categories,
+        "backfill-pipeline-sla": _handle_backfill_pipeline_sla,
         "split-robot-check": _handle_split_robot_check,
         "roll-manifest": _handle_roll_manifest,
         "publish-bi": _handle_publish_bi,
