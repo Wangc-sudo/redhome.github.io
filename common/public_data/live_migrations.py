@@ -50,6 +50,7 @@ from common.public_data.org_assignment_override import (
 from common.public_data.org_catalog import (
     org_catalog_ddl_statements,
     org_catalog_region_run_v1_statements,
+    org_catalog_relay_v1_statements,
 )
 from common.public_data.recipient_override import (
     recipient_override_ddl_statements,
@@ -558,6 +559,13 @@ _MIGRATIONS = (
         "mart-ops-org-assignment-override-v1",
         "mart",
         org_assignment_override_ddl_statements(),
+    ),
+    (
+        # 测试区与播报改投（2026-10-19 用户裁决）：dim_org_region.relay_to
+        # 列 + 注册 test 区域（功能验证群凭据走 Nacos region-test.yaml）。
+        "mart-ops-org-catalog-relay-v1",
+        "mart",
+        org_catalog_relay_v1_statements(),
     ),
     (
         # 组织目录登记（2026-10-13 P7「组织编排」新增区域/部门）：dim_org_region

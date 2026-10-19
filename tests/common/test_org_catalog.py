@@ -311,5 +311,55 @@ class RegionRegistryMigrationTests(unittest.TestCase):
         self.assertEqual(oc.org_catalog_region_run_v1_statements(), statements)
 
 
+class RelayTests(unittest.TestCase):
+    """播报改投测试区（2026-10-19 用户裁决）：relay_to 列 + set/fetch。"""
+
+    def test_migration_shape(self):
+        statements = oc.org_catalog_relay_v1_statements()
+        self.assertEqual(2, len(statements))
+        self.assertIn("relay_to", statements[0])
+        self.assertIn("ALTER TABLE", statements[0])
+        # 测试区注册行（INSERT IGNORE 不覆盖人工行）
+        self.assertIn("'test'", statements[1])
+        self.assertIn("INSERT IGNORE", statements[1])
+
+    def test_set_and_fetch_relay(self):
+        conn = _Conn({"relay_to` IS NOT NULL": [
+            {"region_key": "hangzhou", "relay_to": "test"},
+            {"region_key": "vanke", "relay_to": "test"},
+        ]})
+        affected = oc.set_region_relay(
+            conn, "hangzhou", "test", actor="admin")
+        self.assertEqual(1, affected)
+        # 审计同行（action=set_relay）
+        params = _audit_params(conn)
+        self.assertIn("set_relay", params)
+        self.assertEqual(
+            {"hangzhou": "test", "vanke": "test"},
+            oc.fetch_relay_map(conn),
+        )
+
+    def test_clear_relay(self):
+        conn = _Conn()
+        affected = oc.set_region_relay(conn, "hangzhou", None, actor="admin")
+        self.assertEqual(1, affected)
+        update_sql, params = next(
+            (s, p) for s, p in conn.executed if s.lstrip().startswith("UPDATE"))
+        self.assertIsNone(params[0])
+
+    def test_relay_guards(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.set_region_relay(conn, "hangzhou", "shaoxing", actor="a")
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.set_region_relay(conn, "test", "test", actor="a")
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.set_region_relay(conn, "BAD KEY", "test", actor="a")
+        # 未启用/未登记区域：affected=0
+        conn = _Conn(affected=0)
+        self.assertEqual(
+            0, oc.set_region_relay(conn, "ghost", "test", actor="a"))
+
+
 if __name__ == "__main__":
     unittest.main()

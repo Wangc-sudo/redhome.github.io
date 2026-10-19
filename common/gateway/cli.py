@@ -26,10 +26,13 @@
 """
 
 import argparse
+import logging
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +90,44 @@ def connect_mart(settings):
     return connect(settings.mart_database)
 
 
-def build_deliverer(credentials, region_configs):
-    """构造真实投递器：钉钉 client（凭据注入）+ region 路由表。"""
+def build_relay_resolver(connection_factory, *, ttl_seconds=30.0):
+    """播报改投映射解析器（2026-10-19 测试区）：region -> relay_to | None。
+
+    真源 ``dim_org_region.relay_to``（画布开关即写）；TTL 缓存 30s 压平
+    轮询期 DB 压力。读失败**保留最近一次已知映射**（比 fail-open 回原
+    区域稳：开关已开时抖动期不至于漏回真群）；从未成功读到 → None
+    （按原区域投）。
+    """
+    from common.public_data.org_catalog import fetch_relay_map
+
+    cache = {"at": None, "map": {}}
+
+    def resolve(region):
+        now = time.monotonic()
+        if cache["at"] is None or now - cache["at"] >= ttl_seconds:
+            conn = None
+            try:
+                conn = connection_factory()
+                cache["map"] = fetch_relay_map(conn)
+                cache["at"] = now
+            except Exception:
+                logger.warning("relay map read failed, keeping last known",
+                               exc_info=True)
+                if cache["at"] is None:
+                    cache["at"] = now  # 首读失败也记时，避免每消息打 DB
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        return cache["map"].get(region)
+
+    return resolve
+
+
+def build_deliverer(credentials, region_configs, *, relay_resolver=None):
+    """构造真实投递器：钉钉 client（凭据注入）+ region 路由表（+改投）。"""
     from common.dingtalk import DingTalkClient
     from common.gateway import DingTalkDeliverer
 
@@ -103,7 +142,8 @@ def build_deliverer(credentials, region_configs):
         }
         for region, cfg in region_configs.items()
     }
-    return DingTalkDeliverer(client=client, region_config=region_config)
+    return DingTalkDeliverer(client=client, region_config=region_config,
+                             relay_resolver=relay_resolver)
 
 
 def build_worker(outbox, deliverer):
@@ -189,7 +229,11 @@ def _handle_run(args):
             args.source_credentials, source="dingtalk"
         )
 
-        deliverer = build_deliverer(credentials, region_configs)
+        deliverer = build_deliverer(
+            credentials, region_configs,
+            relay_resolver=build_relay_resolver(
+                lambda: connect_mart(settings)),
+        )
         conn = connect_mart(settings)
         worker = build_worker(build_outbox(conn), deliverer)
 

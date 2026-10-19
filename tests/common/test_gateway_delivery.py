@@ -312,6 +312,56 @@ class DingTalkDelivererTests(unittest.TestCase):
             deliverer.send_ding(region="nowhere", user_ids=["u1"], content="c")
 
 
+class DelivererRelayTests(unittest.TestCase):
+    """播报改投测试区（2026-10-19 用户裁决：带标记+DING 同改投）。"""
+
+    _CONFIG = {
+        "hangzhou": {"robot_code": "rc-hz", "open_conversation_id": "conv-hz"},
+        "test": {"robot_code": "rc-test", "open_conversation_id": "conv-test"},
+    }
+
+    def _deliverer(self, relay, ding_sender=None):
+        client = Mock()
+        deliverer = DingTalkDeliverer(
+            client=client, region_config=self._CONFIG,
+            ding_sender=ding_sender or Mock(),
+            relay_resolver=relay,
+        )
+        return deliverer, client
+
+    def test_relay_group_redirects_with_prefix(self):
+        deliverer, client = self._deliverer(lambda r: "test")
+        deliverer.send_group(
+            region="hangzhou", title="杭州日报", body_md="b",
+            at_user_ids=["u1"])
+        client.send_group_markdown.assert_called_once_with(
+            "rc-test", "conv-test", "[测试→hangzhou] 杭州日报", "b",
+            at_user_ids=["u1"])
+
+    def test_relay_ding_redirects_with_prefix(self):
+        sender = Mock()
+        deliverer, _ = self._deliverer(lambda r: "test", ding_sender=sender)
+        deliverer.send_ding(region="hangzhou", user_ids=["u1"], content="催办")
+        sender.assert_called_once_with(
+            robot_code="rc-test", user_ids=["u1"],
+            content="[测试→hangzhou] 催办")
+
+    def test_no_relay_passthrough(self):
+        deliverer, client = self._deliverer(lambda r: None)
+        deliverer.send_group(
+            region="hangzhou", title="t", body_md="b", at_user_ids=[])
+        # 未改投：目标群与原样标题
+        client.send_group_markdown.assert_called_once_with(
+            "rc-hz", "conv-hz", "t", "b", at_user_ids=None)
+
+    def test_relay_to_self_is_identity(self):
+        deliverer, client = self._deliverer(lambda r: r)
+        deliverer.send_group(
+            region="hangzhou", title="t", body_md="b", at_user_ids=[])
+        client.send_group_markdown.assert_called_once_with(
+            "rc-hz", "conv-hz", "t", "b", at_user_ids=None)
+
+
 class DwsCommandDingSenderTests(unittest.TestCase):
 
     def test_emits_the_legacy_contract_verbatim(self):

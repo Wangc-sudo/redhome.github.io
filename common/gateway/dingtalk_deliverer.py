@@ -47,17 +47,37 @@ class DingTalkDeliverer:
 
         {"hangzhou": {"robot_code": "...", "open_conversation_id": "...",
                       "group_name": "..."}}
+
+    *relay_resolver*（可选，2026-10-19 测试区）：``region -> str | None``
+    改投映射（真源 ``dim_org_region.relay_to``，DB 驱动即改即生效）。
+    命中时群消息与 DING 改投目标区域群，标题/内容加
+    ``[测试→<原区域>]`` 前缀（用户裁决：带标记一眼可辨）；映射读取
+    异常由 resolver 内部 fail-open 按原区域投（宁可发真群不丢消息）。
     """
 
-    def __init__(self, *, client, region_config, ding_sender=None):
+    def __init__(self, *, client, region_config, ding_sender=None,
+                 relay_resolver=None):
         self._client = client
         self._region_config = dict(region_config)
         self._ding_sender = ding_sender or DwsCommandDingSender()
+        self._relay_resolver = relay_resolver
+
+    def _route(self, region):
+        """改投解析 → ``(目标 region, 是否改投)``。"""
+        if self._relay_resolver is None:
+            return region, False
+        relay = self._relay_resolver(region)
+        if relay and relay != region:
+            return relay, True
+        return region, False
 
     def send_group(self, *, region, title, body_md, at_user_ids):
-        cfg = self._region_config.get(region)
+        target, relayed = self._route(region)
+        cfg = self._region_config.get(target)
         if not cfg:
-            raise DeliveryError(f"unknown region: {region!r}")
+            raise DeliveryError(f"unknown region: {target!r}")
+        if relayed:
+            title = f"[测试→{region}] {title}"
         self._client.send_group_markdown(
             cfg["robot_code"],
             cfg["open_conversation_id"],
@@ -70,9 +90,12 @@ class DingTalkDeliverer:
         if not user_ids:
             # 无人可 DING 视为投递成功（消息本身已无接收者）。
             return
-        cfg = self._region_config.get(region)
+        target, relayed = self._route(region)
+        cfg = self._region_config.get(target)
         if not cfg:
-            raise DeliveryError(f"unknown region: {region!r}")
+            raise DeliveryError(f"unknown region: {target!r}")
+        if relayed:
+            content = f"[测试→{region}] {content}"
         self._ding_sender(
             robot_code=cfg["robot_code"],
             user_ids=list(user_ids),

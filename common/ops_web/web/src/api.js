@@ -377,6 +377,12 @@ export function getPipelinesSla() {
   return request('/api/pipelines/sla', { method: 'GET' });
 }
 
+/** 播报改投测试区开关（2026-10-19）：{region_key, relay: bool}。
+ * true=该区域群消息+DING 全改投测试区群（带前缀标记）。 */
+export function setRegionRelay(payload) {
+  return post('/api/org/region/relay', payload);
+}
+
 /** 数据修正：人员归属归位预览/执行。payload: {person_name, from_region,
  *  to_region, apply?}（apply 缺省=预览）。 */
 export function dataFixRealign(payload) {
