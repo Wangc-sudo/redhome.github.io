@@ -30,8 +30,14 @@ docs.json → 落到容器可见路径 → 本管道读清单灌库。API 权限
   （灰度期 key 未到位的常规态，不刷失败告警）。
 
 环境变量（凭据进 /opt/dops/app.env，不入库）：
-    JINA_API_KEY / JINA_CLIP_MODEL / JINA_CLIP_DIM / RAG_MILVUS_PATH
-    RAG_DOCS_INPUT   文档清单路径（默认 /opt/dops/config-local/kb_docs.json）
+    RAG_EMBED_PROVIDER  ``jina``（默认，图文同空间）/ ``openai``（OpenAI 兼容
+                        端点，含天翼 ai.ctaigw.cn 一类网关，纯文本）
+    RAG_EMBED_API_KEY   凭据（缺省回读 JINA_API_KEY）
+    RAG_EMBED_BASE_URL  provider=openai 必填，形如 https://host/v1
+    RAG_EMBED_MODEL     模型名（换 provider 必须显式配）
+    RAG_EMBED_DIM       维度（缺省回读 JINA_CLIP_DIM，再缺省 1024）
+    RAG_MILVUS_PATH / RAG_DOCS_INPUT（清单路径，默认
+    /opt/dops/config-local/kb_docs.json）
 
 用法::
 
@@ -203,7 +209,8 @@ def _chunk_id(doc_id, index):
     return f"doc:{doc_id}:{index:04d}"
 
 
-def run_index(payload, *, milvus, store, jina_key, dim, model=embed.DEFAULT_MODEL,
+def run_index(payload, *, milvus, store, api_key, dim, model=embed.DEFAULT_MODEL,
+              provider=embed.DEFAULT_PROVIDER, base_url=None,
               size=CHUNK_SIZE, overlap=CHUNK_OVERLAP, text_batch=TEXT_BATCH,
               on_progress=None):
     """文档清单 → 向量库。返回统计 dict。
@@ -228,8 +235,9 @@ def run_index(payload, *, milvus, store, jina_key, dim, model=embed.DEFAULT_MODE
         for start in range(0, len(texts), text_batch):
             part = texts[start:start + text_batch]
             vectors.extend(
-                embed.embed_items([{"text": t} for t in part], jina_key,
-                                  model=model, dimensions=real_dim)
+                embed.embed_items([{"text": t} for t in part], api_key,
+                                  model=model, dimensions=real_dim,
+                                  provider=provider, base_url=base_url)
             )
         items = [
             {
@@ -256,11 +264,17 @@ def main(argv=None):
     parser.add_argument("--confirm-local-test-write", action="store_true")
     args = parser.parse_args(argv)
 
-    # fail-soft：key 未到位时每小时静默跳过，不刷失败告警；key 到位即生效。
-    jina_key = os.environ.get("JINA_API_KEY")
-    if not jina_key:
-        print("service=rag-index-docs status=skipped reason=no_jina_key")
+    # fail-soft：凭据未到位时静默跳过，不刷失败告警；配好即生效。
+    provider = os.environ.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
+    api_key = os.environ.get("RAG_EMBED_API_KEY") or os.environ.get("JINA_API_KEY")
+    if not api_key:
+        print("service=rag-index-docs status=skipped reason=no_embed_key")
         return
+    base_url = os.environ.get("RAG_EMBED_BASE_URL")
+    if provider == embed.PROVIDER_OPENAI and not base_url:
+        raise SystemExit("provider=openai 需要 RAG_EMBED_BASE_URL（如 https://host/v1）")
+    if provider not in (embed.PROVIDER_JINA, embed.PROVIDER_OPENAI):
+        raise SystemExit(f"未知 RAG_EMBED_PROVIDER: {provider}")
 
     path = Path(args.file or os.environ.get("RAG_DOCS_INPUT") or DEFAULT_INPUT)
     if not path.is_file():
@@ -281,13 +295,22 @@ def main(argv=None):
         settings, confirm_local_test_write=args.confirm_local_test_write
     )
     milvus = store.connect(os.environ.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
-    dim = int(os.environ.get("JINA_CLIP_DIM", str(embed.DEFAULT_DIM)))
-    model = os.environ.get("JINA_CLIP_MODEL", embed.DEFAULT_MODEL)
+    dim = int(os.environ.get("RAG_EMBED_DIM")
+              or os.environ.get("JINA_CLIP_DIM") or embed.DEFAULT_DIM)
+    # 模型名默认沿用 jina；换 provider 时必须显式配 RAG_EMBED_MODEL
+    # （jina-clip-v2 在别的网关上不存在，静默兜底只会换来一串 403）。
+    model = os.environ.get("RAG_EMBED_MODEL") or os.environ.get("JINA_CLIP_MODEL")
+    if not model:
+        model = embed.DEFAULT_MODEL if provider == embed.PROVIDER_JINA else None
+    if not model:
+        raise SystemExit("provider=openai 需要 RAG_EMBED_MODEL")
 
-    stats = run_index(payload, milvus=milvus, store=store, jina_key=jina_key,
-                      dim=dim, model=model)
+    stats = run_index(payload, milvus=milvus, store=store, api_key=api_key,
+                      dim=dim, model=model, provider=provider,
+                      base_url=base_url)
     print(
         f"service=rag-index-docs status=completed"
+        f" provider={provider} dim={dim}"
         f" docs={stats['docs']} chunks={stats['chunks']}"
         f" skipped={stats['skipped']} written={stats['written']}"
     )

@@ -2,6 +2,7 @@
 """common.rag 单元测试：embed / llm / 索引管道 / 检索编排，外部 API 全部打桩。"""
 
 import base64
+import json
 import os
 import unittest
 from unittest import mock
@@ -362,7 +363,7 @@ class IndexDocsRunTest(unittest.TestCase):
         with mock.patch.object(embed, "embed_items",
                                mock.Mock(side_effect=fake_embed)):
             stats = index_docs.run_index(
-                payload, milvus=object(), store=store, jina_key="k", dim=dim)
+                payload, milvus=object(), store=store, api_key="k", dim=dim)
         return stats, store, fake_embed
 
     def test_indexes_doc_with_chunk_ids_and_clears_prefix(self):
@@ -393,22 +394,89 @@ class IndexDocsRunTest(unittest.TestCase):
 
 class IndexDocsMainTest(unittest.TestCase):
 
-    def test_skips_without_jina_key(self):
-        env = {k: v for k, v in os.environ.items() if k != "JINA_API_KEY"}
+    def test_skips_without_embed_key(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("JINA_API_KEY", "RAG_EMBED_API_KEY")}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
             index_docs.main([])
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
-        self.assertIn("reason=no_jina_key", printed)
+        self.assertIn("reason=no_embed_key", printed)
 
     def test_skips_without_input_file(self):
-        with mock.patch.dict(os.environ, {"JINA_API_KEY": "k"}), \
+        with mock.patch.dict(os.environ, {"RAG_EMBED_API_KEY": "k"}), \
              mock.patch("builtins.print") as out:
             index_docs.main(["--file", "/nonexistent/kb_docs.json"])
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_input", printed)
+
+    def test_openai_provider_requires_base_url_and_model(self):
+        env = {"RAG_EMBED_API_KEY": "k", "RAG_EMBED_PROVIDER": "openai"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(SystemExit):
+                index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+
+
+class EmbedProviderTest(unittest.TestCase):
+    """provider=openai：请求形态与响应解析（不联网，stub HTTP）。"""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return json.dumps(self._payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _call(self, items, response, **kw):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            captured["auth"] = req.get_header("Authorization")
+            return self._Resp(response)
+
+        with mock.patch.object(embed.urllib.request, "urlopen",
+                               mock.Mock(side_effect=fake_urlopen)):
+            vectors = embed.embed_items(
+                items, "k", model="m", provider="openai",
+                base_url="https://gw.example/v1", **kw)
+        return vectors, captured
+
+    def test_posts_string_array_and_parses_data(self):
+        vectors, captured = self._call(
+            [{"text": "甲"}, {"text": "乙"}],
+            {"data": [{"index": 0, "embedding": [0.1, 0.2]},
+                      {"index": 1, "embedding": [0.3, 0.4]}]})
+        self.assertEqual(vectors, [[0.1, 0.2], [0.3, 0.4]])
+        self.assertEqual(captured["url"], "https://gw.example/v1/embeddings")
+        self.assertEqual(captured["body"]["input"], ["甲", "乙"])
+        self.assertEqual(captured["auth"], "Bearer k")
+
+    def test_accepts_output_embeddings_shape(self):
+        vectors, _ = self._call(
+            [{"text": "甲"}],
+            {"output": {"embeddings": [{"embedding": [0.5, 0.6]}]}})
+        self.assertEqual(vectors, [[0.5, 0.6]])
+
+    def test_rejects_image_items_and_bad_shape(self):
+        with self.assertRaises(embed.EmbedError):
+            self._call([{"image": "http://x/y.png"}], {"data": []})
+        with self.assertRaises(embed.EmbedError):
+            self._call([{"text": "甲"}], {"unexpected": True})
+
+    def test_requires_base_url(self):
+        with self.assertRaises(embed.EmbedError):
+            embed.embed_items([{"text": "甲"}], "k", model="m",
+                              provider="openai")
 
 
 class QaTest(unittest.TestCase):
