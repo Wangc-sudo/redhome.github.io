@@ -156,25 +156,45 @@ def fetch_scope_month_target(connection, *, region, anchor, year, month):
 
 
 def fetch_member_dept_map(connection, regions):
-    """通讯录实名 → 部门名（``dim_robot_member``，人员部门归属的权威源）。
+    """通讯录实名 → 部门名，并入归位覆盖（``dim_org_assignment_override``）。
 
     运维口径（2026-09-23）：对部门把握不准时以通讯录为准——AI 表内
-    部门列是手工维护的表内叫法，dim 才是组织真源。返回
-    ``{(region, 姓名): 部门名}``（dept_name 为空的行不收录）。
+    部门列是手工维护的表内叫法，dim 才是组织真源。2026-10-19 用户裁决
+    升级：画布拉线归口（归位覆盖层）对 BI 部门卡同步生效——画布与 BI
+    同真源（merge_region_members，含同区改部门/跨区移出/移入补入）。
+    覆盖读取失败 fail-soft 回退纯通讯录口径（merge 内部已处理）。
+    返回 ``{(region, 姓名): 部门名}``（dept_name 为空的行不收录）。
     """
+    from common.public_data import org_assignment_override
+
     placeholders = ",".join(["%s"] * len(regions))
     sql = (
-        "SELECT `region`, `name`, `dept_name` FROM `dim_robot_member` "
+        "SELECT `user_id`, `region`, `name`, `dept_id`, `dept_name` "
+        "FROM `dim_robot_member` "
         f"WHERE `region` IN ({placeholders}) AND `is_active` = 1"
     )
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, list(regions))
-        rows = cursor.fetchall()
-    return {
-        (row["region"], row["name"]): row["dept_name"]
-        for row in rows
-        if row.get("dept_name")
-    }
+        base = cursor.fetchall()
+    by_region = {}
+    for row in base:
+        get = row.get if isinstance(row, dict) else None
+        region = get("region") if get else row[1]
+        by_region.setdefault(region, []).append(
+            row if get else {
+                "user_id": row[0], "region": row[1], "name": row[2],
+                "dept_id": row[3], "dept_name": row[4],
+            })
+    result = {}
+    for region in regions:
+        merged = org_assignment_override.merge_region_members(
+            connection, region, by_region.get(region, ()))
+        for row in merged:
+            name = row.get("name")
+            dept = row.get("dept_name")
+            if name and dept:
+                result[(region, name)] = dept
+    return result
 
 
 def upsert_agg_daily(connection, *, stat_date, rows, synced_at):
