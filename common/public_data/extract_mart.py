@@ -163,7 +163,9 @@ def _resolve_other_member_rows(dataset, rows, connection):
         biz = row.get("business_date")
         ym = str(biz)[:7] if biz else None
         if ym and name and row.get("monthly_target") is None:
-            row["monthly_target"] = report_roster.fetch_intake_target(
+            # dim 存万元、fact 列是元口径：经 _yuan 换算（2026-10-19
+            # 单位混列修复，与机器人报数快照同函数）
+            row["monthly_target"] = report_roster.fetch_intake_target_yuan(
                 connection, "other", name, ym)
     return rows
 
