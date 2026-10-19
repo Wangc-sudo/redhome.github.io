@@ -17,6 +17,7 @@ directly -- so the backend stays swappable without touching consumers.
 
 import logging
 import os
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -27,6 +28,9 @@ from common.public_data.pipeline_taxonomy import SUPPORTED_CATEGORIES
 logger = logging.getLogger(__name__)
 
 DEFAULT_GROUP = "PIPELINES"
+
+#: SLA 声明形态：北京 HH:MM（24 小时制）。见 PipelineConfig.sla。
+_SLA_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 SUPPORTED_KINDS = ("apps", "business")
 SUPPORTED_SOURCES = ("dingtalk", "wdt")
 
@@ -75,6 +79,11 @@ class PipelineConfig:
     #: （YYYY-MM-DD）。启用时两字段清空。停用不带原因=没有上下文的死配置。
     disabled_reason: str = ""
     review_after: str = ""
+    #: SLA 声明（2026-10-19 治理 P2 尾巴，用户裁决「不要播报」）：
+    #: 当日最晚完成时刻（北京 HH:MM）。过了该时刻当日仍无成功运行=迟到，
+    #: 只进 ops-web 治理抽屉 / fleet-audit 月检快照，不发群。日检级服务
+    #: 适用；周/月检不声明（僵尸周期宽限已覆盖）。空 = 未声明。
+    sla: str = ""
 
     def to_mapping(self):
         mapping = {"enabled": self.enabled, "kind": self.kind}
@@ -96,6 +105,8 @@ class PipelineConfig:
             mapping["disabled_reason"] = self.disabled_reason
         if self.review_after:
             mapping["review_after"] = self.review_after
+        if self.sla:
+            mapping["sla"] = self.sla
         return mapping
 
 
@@ -172,6 +183,14 @@ def parse_pipeline_config(service_id, data):
                 f"YYYY-MM-DD"
             )
 
+    sla = data.get("sla", "")
+    if not isinstance(sla, str) or (
+            sla and not _SLA_RE.match(sla.strip())):
+        raise PipelineConfigError(
+            f"pipeline '{service_id}' field 'sla' must be HH:MM (Beijing)"
+        )
+    sla = sla.strip()
+
     return PipelineConfig(
         service_id=service_id,
         enabled=enabled,
@@ -185,6 +204,7 @@ def parse_pipeline_config(service_id, data):
         params=params,
         disabled_reason=disabled_reason,
         review_after=review_after,
+        sla=sla,
     )
 
 
@@ -427,6 +447,39 @@ def backfill_categories(client, service_ids, group=DEFAULT_GROUP, apply=True):
             continue
         if apply:
             data["category"] = category
+            client.publish_config(
+                data_id, group, _dump_yaml(data), config_type="yaml"
+            )
+        result["filled"].append(service_id)
+    return result
+
+
+def backfill_sla(client, sla_map, group=DEFAULT_GROUP, apply=True):
+    """SLA 声明回填（2026-10-19 治理 P2）：seed 声明 → Nacos 补缺。
+
+    逐条读 Nacos 原文 mapping：已配置 sla → ``skipped``；未配置且 seed
+    有声明 → 「原文 + sla」整体写回（运行态字段原样保留，与
+    backfill_categories 同纪律）；Nacos 无条目不新建。
+    ``sla_map`` = {service_id: "HH:MM"}（seed 中有 sla 的条目）。
+    ``apply=False`` 为 dry-run。返回 ``{"filled": [...], "skipped": [...]}``。
+    """
+    result = {"filled": [], "skipped": []}
+    for service_id, sla in sla_map.items():
+        if not _SLA_RE.match(sla):
+            raise PipelineConfigError(
+                f"pipeline '{service_id}' field 'sla' must be HH:MM (Beijing)")
+        data_id = f"{service_id}.yaml"
+        content = client.get_config(data_id, group)
+        if not content:
+            continue
+        data = _load_yaml(content, f"nacos config {data_id}")
+        if not isinstance(data, dict):
+            raise PipelineConfigError(f"pipeline '{service_id}' must be a mapping")
+        if (data.get("sla") or "").strip():
+            result["skipped"].append(service_id)
+            continue
+        if apply:
+            data["sla"] = sla
             client.publish_config(
                 data_id, group, _dump_yaml(data), config_type="yaml"
             )

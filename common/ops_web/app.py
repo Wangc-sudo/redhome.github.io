@@ -2838,6 +2838,33 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "snapshot": snapshot})
 
+    @app.get("/api/pipelines/sla")
+    def api_pipelines_sla(request: Request):
+        """当日 SLA 迟到读面（治理抽屉「SLA 迟到」节；2026-10-19 治理 P2
+        尾巴，用户裁决「不要播报」——只进本读面与月检快照，不发群）。
+
+        判定在服务端（fleet_audit.collect_sla_status，与月检同一函数），
+        前端纯渲染，避免 JS/Python 双口径漂移。返回
+        ``{violations: [{service_id, deadline}], checked_at}``。
+        """
+        require_capability(request, CAPABILITY_PIPELINES)
+        service_ids = _fleet()
+        try:
+            violations, now_hm = fleet_audit.collect_sla_status(
+                lambda _db: db_connector(), settings.mart_database,
+                fleet_source=lambda: service_ids,
+                config_source=config_source,
+                has_command=has_command,
+            )
+        except Exception as exc:
+            _LOGGER.warning("ops-web sla check failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok",
+            "checked_at": now_hm,
+            "violations": violations,
+        })
+
     # -- 数据修正（类型化修数通道，2026-10-16：画布拉线之外的写面收口）-----
 
     @app.post("/api/data-fix/realign")

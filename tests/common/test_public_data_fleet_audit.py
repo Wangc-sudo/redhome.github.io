@@ -7,10 +7,11 @@
 
 import json
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from common.public_data.fleet_audit import (
     build_report,
+    collect_sla_status,
     cron_pileup,
     decorative_deps,
     disabled_audit,
@@ -18,6 +19,7 @@ from common.public_data.fleet_audit import (
     fleet_audit_ddl_statements,
     grace_days,
     save_snapshot,
+    sla_audit,
     zombie_audit,
 )
 from common.public_data.pipeline_config import PipelineConfig
@@ -113,6 +115,74 @@ class DecorativeDepsTests(unittest.TestCase):
         ])
         self.assertEqual(["b", "c"], [r["service_id"] for r in rows])
         self.assertEqual(["robot-x"], rows[1]["deps"])
+
+
+class SlaAuditTests(unittest.TestCase):
+    """SLA 迟到（2026-10-19 治理 P2 尾巴，用户裁决「不要播报」）。"""
+
+    def test_late_only_when_past_deadline_and_no_success_today(self):
+        configs = [
+            _cfg("late", sla="09:15"),                 # 过点+无成功 → 迟到
+            _cfg("ok", sla="09:15"),                   # 过点但当日已成功
+            _cfg("early", sla="23:59"),                # deadline 未到
+            _cfg("undeclared"),                        # 未声明
+            _cfg("off", enabled=False, sla="09:15"),   # 停用跳过
+            _cfg("daemon", sla="09:15"),               # 不可调度跳过
+        ]
+        rows = sla_audit(configs, {"ok"}, "10:00",
+                         lambda sid: sid != "daemon")
+        self.assertEqual(["late"], [r["service_id"] for r in rows])
+        self.assertEqual("09:15", rows[0]["deadline"])
+
+    def test_collect_sla_status_beijing_day_boundary(self):
+        """当日口径=北京日界（UTC 前一日 16:00 起）；finished 才算成功。"""
+        class _Cur:
+            def execute(self, *a, **k):
+                pass
+
+            def fetchall(self):
+                return (
+                    # 昨日（北京）的成功：不计入当日
+                    {"service_id": "old", "status": "finished",
+                     "started_at": datetime(2026, 10, 18, 15, 59)},
+                    # 当日（北京 10-19 00:00 = UTC 10-18 16:00）后的成功
+                    {"service_id": "fresh", "status": "finished",
+                     "started_at": datetime(2026, 10, 18, 16, 5)},
+                    # 当日但失败：不算成功
+                    {"service_id": "broken", "status": "failed",
+                     "started_at": datetime(2026, 10, 19, 0, 30)},
+                )
+
+            def close(self):
+                return None
+
+        class _C:
+            def cursor(self):
+                return _Cur()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        configs = [
+            _cfg("old", sla="09:15"),      # 昨日成功今日无 → 迟到
+            _cfg("fresh", sla="09:15"),    # 当日已成功
+            _cfg("broken", sla="09:15"),   # 当日只有失败 → 迟到
+        ]
+        source = type("S", (), {"get_pipeline": lambda self, sid:
+                                next(c for c in configs
+                                     if c.service_id == sid)})()
+        violations, now_hm = collect_sla_status(
+            lambda _db: _C(), None,
+            fleet_source=lambda: ("old", "fresh", "broken"),
+            config_source=source, has_command=lambda sid: True,
+            now=datetime(2026, 10, 19, 2, 0, tzinfo=timezone.utc),  # 北京 10:00
+        )
+        self.assertEqual("10:00", now_hm)
+        self.assertEqual(["broken", "old"],
+                         sorted(r["service_id"] for r in violations))
 
 
 class CronPileupTests(unittest.TestCase):

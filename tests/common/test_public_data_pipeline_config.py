@@ -11,6 +11,7 @@ from common.public_data.pipeline_config import (
     PipelineConfigError,
     StaticConfigSource,
     backfill_categories,
+    backfill_sla,
     build_config_source,
     parse_pipeline_config,
     publish_pipelines,
@@ -273,6 +274,58 @@ class ParamsFieldTests(unittest.TestCase):
         )
         self.assertEqual({"a": 1, "b": 1.5, "c": True, "d": "s", "e": None},
                          config.params)
+
+
+class SlaFieldTests(unittest.TestCase):
+    """sla 字段（2026-10-19 治理 P2：北京 HH:MM 当日最晚完成时刻）。"""
+
+    def test_parse_and_roundtrip(self):
+        cfg = parse_pipeline_config("x", {"sla": "09:15"})
+        self.assertEqual("09:15", cfg.sla)
+        self.assertEqual("09:15", cfg.to_mapping()["sla"])
+        # 未声明 → 空字符串且不序列化
+        cfg = parse_pipeline_config("x", {})
+        self.assertEqual("", cfg.sla)
+        self.assertNotIn("sla", cfg.to_mapping())
+
+    def test_invalid_sla_rejected(self):
+        for bad in ("9:15", "25:00", "09:60", "ab:cd", 915):
+            with self.assertRaises(PipelineConfigError, msg=repr(bad)):
+                parse_pipeline_config("x", {"sla": bad})
+
+
+class BackfillSlaTests(unittest.TestCase):
+    def test_apply_fills_missing_preserves_fields(self):
+        client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP):
+                "enabled: true\nkind: apps\nschedule: '0 2 * * *'\n",
+            ("extract-mart.yaml", DEFAULT_GROUP):
+                "enabled: true\nsla: '17:45'\n",
+        })
+        result = backfill_sla(
+            client,
+            {"sync-wdt": "16:45", "extract-mart": "17:45", "ghost": "09:15"},
+            apply=True,
+        )
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual(["extract-mart"], result["skipped"])
+
+        import yaml
+        data = yaml.safe_load(client.configs[("sync-wdt.yaml", DEFAULT_GROUP)])
+        self.assertEqual("16:45", data["sla"])
+        self.assertEqual("apps", data["kind"])        # 原文字段原样保留
+        self.assertEqual("0 2 * * *", data["schedule"])
+        self.assertEqual(1, len(client.published))     # 已配置/无条目不写
+
+    def test_dry_run_and_bad_sla(self):
+        client = _FakeNacosClient({
+            ("sync-wdt.yaml", DEFAULT_GROUP): "enabled: true\n",
+        })
+        result = backfill_sla(client, {"sync-wdt": "16:45"}, apply=False)
+        self.assertEqual(["sync-wdt"], result["filled"])
+        self.assertEqual([], client.published)
+        with self.assertRaises(PipelineConfigError):
+            backfill_sla(client, {"sync-wdt": "9:45"}, apply=False)
 
 
 class BackfillCategoriesTests(unittest.TestCase):

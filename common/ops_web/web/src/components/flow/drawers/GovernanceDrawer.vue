@@ -5,7 +5,7 @@
  * 只在画布看板。
  */
 import { computed, onMounted, ref } from 'vue';
-import { getFleetAuditLatest, getPipelinesHealth } from '../../../api.js';
+import { getFleetAuditLatest, getPipelinesHealth, getPipelinesSla } from '../../../api.js';
 import { governanceReport } from '../../../flow/governance.js';
 
 const props = defineProps({
@@ -18,6 +18,9 @@ const health = ref({});
 //: 上次月检快照（2026-10-17 治理 P2：fleet-audit 管道每月 2 日落库，
 //: 只进本抽屉不发群）；null=加载中，undefined=读取失败（静默降级）。
 const snapshot = ref(null);
+//: 当日 SLA 迟到（2026-10-19 治理 P2 尾巴，服务端判定前端纯渲染，
+//: 用户裁决「不要播报」）；null=加载中/失败（静默降级）。
+const sla = ref(null);
 onMounted(async () => {
   try {
     const data = await getPipelinesHealth();
@@ -27,6 +30,9 @@ onMounted(async () => {
     const data = await getFleetAuditLatest();
     snapshot.value = (data && data.snapshot) || undefined;
   } catch { snapshot.value = undefined; }
+  try {
+    sla.value = await getPipelinesSla();
+  } catch { sla.value = null; }
 });
 const report = computed(() => governanceReport(props.groups, today, health.value));
 const snapshotReport = computed(() => (snapshot.value && snapshot.value.report) || null);
@@ -74,6 +80,16 @@ const snapshotReport = computed(() => (snapshot.value && snapshot.value.report) 
         <span class="gov-overdue">复查逾期</span>
         <span class="gov-detail">{{ row.reason || '（原因缺失）' }}</span>
       </div>
+    </div>
+
+    <div v-if="sla" class="drawer-sec">
+      <h3>SLA 迟到（当日 {{ sla.checked_at }} 口径，{{ sla.violations.length }}）</h3>
+      <div v-for="row in sla.violations" :key="row.service_id" class="gov-row">
+        <span class="gov-id">{{ row.service_id }}</span>
+        <span class="gov-overdue">迟到</span>
+        <span class="gov-detail">应于 {{ row.deadline }} 前完成当日运行</span>
+      </div>
+      <p v-if="!sla.violations.length" class="drawer-line muted">无</p>
     </div>
 
     <div class="drawer-sec">
