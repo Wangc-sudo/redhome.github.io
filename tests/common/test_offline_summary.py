@@ -373,12 +373,12 @@ def _task_conn():
         ("hangzhou", None): {date(2026, 9, 23): 20000.0, date(2026, 9, 22): 10000.0},
         ("shaoxing", None): {date(2026, 9, 23): 5000.0,
                              date(2026, 9, 17): 142910.0},
-        ("__offline_other__", None): {date(2026, 9, 17): 4841587.0},
+        ("other", None): {date(2026, 9, 17): 4841587.0},
     }
     targets = {
         ("hangzhou", None): 100000.0,
         ("shaoxing", None): None,
-        ("__offline_other__", None): 3195000.0,   # 省外 100万+总经办 219.5万
+        ("other", None): 3195000.0,   # 省外 100万+总经办 219.5万
     }
     conn = _Conn(facts, targets)
     # 补集人员行（余云涛：offline_extra 遗留行形，rp=板块/dept=责任人）
@@ -479,17 +479,17 @@ class TaskTest(unittest.TestCase):
             self.assertIn("NOT LIKE '%%合计%%'", sql)
 
     def test_scope_table_is_config_driven(self):
-        """三桶口径（2026-10-16 裁决）：杭州/绍兴/其他（补集）。"""
+        """三桶口径：杭州/绍兴/其他（2026-10-20：其他=显式 region='other'）。"""
         keys = [scope for scope, _, _, _ in AGG_SCOPES]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(["hangzhou", "shaoxing", "other"], keys)
         anchors = {scope: anchor for scope, _, _, anchor in AGG_SCOPES}
         self.assertEqual(anchors["shaoxing"], None)   # 李树军拆分退役，并入绍兴
-        from common.daily_robot.offline_summary import (
-            OFFLINE_OTHER_REGION, _OFFLINE_OTHER_EXCLUDES)
         regions = {scope: region for scope, _, region, _ in AGG_SCOPES}
-        self.assertEqual(regions["other"], OFFLINE_OTHER_REGION)
-        # 补集排除集含 qudao（2026-10-17：渠道日报行漏入「其他」桶实锤修复）
+        # 2026-10-20 用户裁决：其他=显式 region='other'（画布权威源），不再补集
+        self.assertEqual(regions["other"], "other")
+        # 人员榜补集排除集仍含 qudao（_collect_other_people 用，2026-10-17 修复）
+        from common.daily_robot.offline_summary import _OFFLINE_OTHER_EXCLUDES
         self.assertEqual(
             set(_OFFLINE_OTHER_EXCLUDES),
             {"hangzhou", "shaoxing", "vanke", "qudao"})
