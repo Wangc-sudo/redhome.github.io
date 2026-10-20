@@ -441,6 +441,15 @@ class IndexDocsMainTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 index_docs.main(["--file", "/nonexistent/kb_docs.json"])
 
+    def test_ctaigw_provider_passes_whitelist(self):
+        # ctaigw 应通过白名单走到 no_input（而非 SystemExit 未知 provider）
+        env = {"RAG_EMBED_API_KEY": "k", "RAG_EMBED_PROVIDER": "ctaigw"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("builtins.print") as out:
+            index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+        printed = " ".join(str(c.args[0]) for c in out.call_args_list)
+        self.assertIn("reason=no_input", printed)
+
 
 class EmbedProviderTest(unittest.TestCase):
     """provider=openai：请求形态与响应解析（不联网，stub HTTP）。"""
