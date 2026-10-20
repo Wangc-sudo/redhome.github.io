@@ -579,6 +579,30 @@ class EmbedCtaigwTest(unittest.TestCase):
         self.assertEqual(embed.default_model("jina"), "jina-clip-v2")
         self.assertIsNone(embed.default_model("openai"))
 
+    def test_max_batch_per_provider(self):
+        # ctaigw 实测 22 条即 HTTP 400（2026-10-20 商品灌库两次全灭于此）
+        self.assertEqual(embed.max_batch("ctaigw"), 16)
+        self.assertEqual(embed.max_batch("jina"), 64)
+
+    def test_run_index_defaults_text_batch_by_provider(self):
+        """ctaigw 下文本分批 ≤16（64 的 jina 默认值会把整批打挂）。"""
+        records = [_record(f"r{i}", f"商品{i}", {}) for i in range(20)]
+        store = _FakeStore(2)
+        batches = []
+
+        def fake_embed(items, key, **kw):
+            batches.append(len(items))
+            return [[0.1, 0.2] for _ in items]
+
+        with mock.patch.object(embed, "embed_items",
+                               mock.Mock(side_effect=fake_embed)):
+            index_products.run_index(
+                client=_FakeClient(records), milvus=object(), store=store,
+                api_key="k", base_id="b", sheet_id="s", dim=2,
+                provider=embed.PROVIDER_CTAIGW)
+        self.assertTrue(batches)
+        self.assertTrue(all(n <= 16 for n in batches))
+
 
 class QaTest(unittest.TestCase):
 
