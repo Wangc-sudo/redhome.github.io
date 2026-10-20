@@ -37,6 +37,7 @@ from common.metrics.daily_report import (
     fetch_filled_names,
     fetch_member,
     fetch_month_facts,
+    fetch_person_month_facts,
     fetch_region_members,
     fetch_workdays,
     summarize_people,
@@ -965,16 +966,18 @@ def _write_report(connection, *, region, member, table_name,
 
 
 def _progress(connection, *, region, table_name, business_date, workdays):
-    """本月累计 / 目标 / 完成率（含当天；共享口径）。无有效目标 → None。"""
+    """本月累计 / 目标 / 完成率（含当天；共享口径）。无有效目标 → None。
+
+    2026-10-20 用户裁决「先只修完成度」：改为按姓名**跨区域**查事实——
+    其他区域人的数据记在与报数群不同的 region（如余云涛/谢坚钰 在
+    ``other``，报数群是 ``offline_all``），按报数群区域查不到导致回执
+    无完成度。``region`` 形参保留（不再用于过滤，兼容调用方签名）。
+    """
     elapsed = elapsed_workdays(workdays, today=business_date, include_today=True)
-    facts = fetch_month_facts(
-        connection, region=region,
+    rows = fetch_person_month_facts(
+        connection, person=table_name,
         year=business_date.year, month=business_date.month,
     )
-    rows = [
-        row for row in facts
-        if str(row.get("responsible_person") or "").strip() == table_name
-    ]
     summary = summarize_people(rows, elapsed_days=elapsed).get(table_name)
     if summary is None or summary.rate is None:
         return None

@@ -180,6 +180,27 @@ def fetch_month_facts(connection, *, region, year, month):
     )
 
 
+def fetch_person_month_facts(connection, *, person, year, month):
+    """按姓名取本月事实行（**不限 region**）。
+
+    用于报数回执的完成度：其他区域人的数据记在与报数群不同的 region
+    （如余云涛/谢坚钰 在 ``other``，报数群却是 ``offline_all``），按报数群
+    区域查不到 → 回执无完成度。2026-10-20 用户裁决「先只修完成度」：
+    跨区域按姓名查，报数门禁与填报入口（表格）均不变。一人常态只在一个
+    region 有数，跨区域查与按本区查结果一致，向后兼容。
+    """
+    first, last = _month_range(year, month)
+    return _fetch_all(
+        connection,
+        "SELECT `responsible_person`, `department`, `business_date`, "
+        "`sales_amount`, `monthly_target` "
+        f"FROM `{FACT_TABLE}` "
+        "WHERE `responsible_person` = %s "
+        "AND `business_date` BETWEEN %s AND %s",
+        (person, first, last),
+    )
+
+
 def fetch_region_members(connection, *, region):
     """返回该区域**有效**成员（``dim_robot_member`` ∘ 组织归属覆盖，按姓名排序）。
 
