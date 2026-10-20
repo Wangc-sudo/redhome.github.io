@@ -31,8 +31,18 @@ _TIMEOUT = 30
 #: 文本 embedding；文档线（纯文本）不必被图片跨模态绑死在单一厂商上。
 PROVIDER_JINA = "jina"
 PROVIDER_OPENAI = "openai"
+#: 天翼 AI 网关 multimodal-embedding（2026-10-20 实测契约，AppKey 授权后）：
+#: 请求 ``input.contents`` 混合 text/image/video，``enable_fusion=false``
+#: 时每条独立向量（true 会把整批融合成一条）；响应
+#: ``output.embeddings[]``（{embedding, index, type:"vl"}），dim=2560，
+#: 图片与文本同空间同维——商品图文线不必再等 jina。
+PROVIDER_CTAIGW = "ctaigw"
 DEFAULT_PROVIDER = PROVIDER_JINA
 OPENAI_EMBEDDINGS_PATH = "/embeddings"
+CTAIGW_DEFAULT_URL = ("https://ai.ctaigw.cn/v1/services/embeddings/"
+                      "multimodal-embedding/multimodal-embedding")
+CTAIGW_DEFAULT_MODEL = "qwen3-vl-embedding"
+CTAIGW_DEFAULT_DIM = 2560
 
 
 class EmbedError(RuntimeError):
@@ -62,6 +72,16 @@ def _post(payload, api_key, *, url=API_URL):
     return sorted(data, key=lambda x: x.get("index", 0))
 
 
+def default_model(provider):
+    """各 provider 的默认模型名；openai 无默认（jina-clip-v2 在别的网关上
+    不存在，静默兜底只会换来一串 403），返回 None 由调用方强制显式配置。"""
+    if provider == PROVIDER_CTAIGW:
+        return CTAIGW_DEFAULT_MODEL
+    if provider == PROVIDER_JINA:
+        return DEFAULT_MODEL
+    return None
+
+
 def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
                 provider=DEFAULT_PROVIDER, base_url=None):
     """混合批量嵌入。items=[{"text":..}|{"image":..}]，返回 [vector,...]。
@@ -71,13 +91,16 @@ def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
     provider：
     - ``jina``：图文同空间，input 元素即 {"text"/"image"}；
     - ``openai``：OpenAI 兼容端点（``base_url`` + ``/embeddings``），只吃
-      文本——传图片项直接报错（文本模型出不了图向量，静默退化更糟）。
+      文本——传图片项直接报错（文本模型出不了图向量，静默退化更糟）；
+    - ``ctaigw``：天翼网关 multimodal-embedding，图文同空间 2560 维。
     """
     if not items:
         return []
     if provider == PROVIDER_OPENAI:
         return _embed_openai(items, api_key, model=model, base_url=base_url,
                              dimensions=dimensions)
+    if provider == PROVIDER_CTAIGW:
+        return _embed_ctaigw(items, api_key, model=model, base_url=base_url)
     if provider != PROVIDER_JINA:
         raise EmbedError(f"未知 embedding provider: {provider}")
     payload = {"model": model, "input": list(items)}
@@ -134,6 +157,47 @@ def _embed_openai(items, api_key, *, model, base_url, dimensions=None):
     return vectors
 
 
+def _embed_ctaigw(items, api_key, *, model, base_url=None):
+    """天翼网关 multimodal-embedding：图文同空间，dim=2560（实测契约）。
+
+    请求 ``input.contents`` 混合 {"text"}/{"image"}，``enable_fusion=false``
+    （true 会把整批融合成一条向量，灌库必须 false）；响应
+    ``output.embeddings[]``（{embedding, index, type:"vl"}），按 index 对齐
+    输入顺序。图片项给 http(s) URL；字节流先经 ``to_data_uri``（网关支持
+    data URI 与否未经实测，调用方若走字节流需先小流量验证）。
+    """
+    contents = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise EmbedError("ctaigw 输入项必须是 dict")
+        if isinstance(item.get("text"), str):
+            contents.append({"text": item["text"]})
+        elif isinstance(item.get("image"), str):
+            contents.append({"image": item["image"]})
+        else:
+            raise EmbedError("ctaigw 只支持 text/image 项")
+    payload = {
+        "model": model,
+        "input": {"contents": contents},
+        "parameters": {"enable_fusion": False},
+    }
+    result = _post_payload(payload, api_key, base_url or CTAIGW_DEFAULT_URL)
+    output = result.get("output")
+    entries = (output or {}).get("embeddings") if isinstance(output, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise EmbedError(f"ctaigw embed 返回异常: {sorted(result.keys())}")
+    vectors = []
+    for entry in sorted(entries, key=lambda e: e.get("index", 0)):
+        vec = entry.get("embedding") if isinstance(entry, dict) else None
+        if not isinstance(vec, list) or not vec:
+            raise EmbedError("ctaigw embed 返回空向量")
+        vectors.append([float(v) for v in vec])
+    if len(vectors) != len(items):
+        raise EmbedError(
+            f"ctaigw embed 数量不符: 入{len(items)} 出{len(vectors)}")
+    return vectors
+
+
 def _post_payload(payload, api_key, url):
     """发请求并做最小形状校验（只取 JSON，向量提取交给调用方）。"""
     req = urllib.request.Request(
@@ -161,9 +225,12 @@ def embed_text(text, api_key, *, model=DEFAULT_MODEL, dimensions=None,
                        base_url=base_url)[0]
 
 
-def embed_image_url(url, api_key, *, model=DEFAULT_MODEL, dimensions=None):
+def embed_image_url(url, api_key, *, model=DEFAULT_MODEL, dimensions=None,
+                    provider=DEFAULT_PROVIDER, base_url=None):
     """单张图片（http(s) URL）→ 向量。"""
-    return embed_items([{"image": url}], api_key, model=model, dimensions=dimensions)[0]
+    return embed_items([{"image": url}], api_key, model=model,
+                       dimensions=dimensions, provider=provider,
+                       base_url=base_url)[0]
 
 
 def to_data_uri(content, mime=None):
@@ -172,13 +239,14 @@ def to_data_uri(content, mime=None):
 
 
 def embed_image_bytes(content, api_key, *, mime="image/png", model=DEFAULT_MODEL,
-                      dimensions=None):
+                      dimensions=None, provider=DEFAULT_PROVIDER, base_url=None):
     """单张图片（字节流）→ base64 data URI → 向量。
 
     kb_qa 附件下载后是字节流（media.download_bytes），转 data URI 免外部 URL。
     """
     return embed_items([{"image": to_data_uri(content, mime)}], api_key,
-                       model=model, dimensions=dimensions)[0]
+                       model=model, dimensions=dimensions, provider=provider,
+                       base_url=base_url)[0]
 
 
 def cosine(a, b):

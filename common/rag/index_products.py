@@ -11,7 +11,12 @@
   文本/图片同批进 jina-clip-v2（同一向量空间，支撑文字搜图）。
 
 环境变量（凭据进 /opt/dops/app.env 不入库）：
-    JINA_API_KEY / JINA_CLIP_MODEL / JINA_CLIP_DIM / RAG_MILVUS_PATH
+    RAG_EMBED_PROVIDER  ``jina``（默认，图文同空间）/ ``ctaigw``（天翼网关
+                        qwen3-vl-embedding，图文同空间 2560 维）/ ``openai``
+    RAG_EMBED_API_KEY   凭据（缺省回读 JINA_API_KEY）
+    RAG_EMBED_BASE_URL / RAG_EMBED_MODEL / RAG_EMBED_DIM（维度回读
+    JINA_CLIP_DIM；ctaigw 固定 2560，dimensions 参数不下发）
+    RAG_MILVUS_PATH
     KB_DINGTALK_APP_KEY / KB_DINGTALK_APP_SECRET / KB_DINGTALK_OPERATOR_ID
     KB_PRODUCTS_BASE_ID / KB_PRODUCTS_SHEET_ID
 """
@@ -71,8 +76,9 @@ def iter_image_attachments(record):
     return found
 
 
-def run_index(*, client, milvus, store, jina_key, base_id, sheet_id, dim,
-              model=embed.DEFAULT_MODEL, text_batch=64, on_progress=None):
+def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
+              model=embed.DEFAULT_MODEL, provider=embed.DEFAULT_PROVIDER,
+              base_url=None, text_batch=64, on_progress=None):
     """全量重建索引。返回统计 dict。单张图片失败 fail-soft 跳过记数。"""
     records = client.list_records(base_id, sheet_id)
     pairs = []
@@ -90,8 +96,9 @@ def run_index(*, client, milvus, store, jina_key, base_id, sheet_id, dim,
     for start in range(0, len(pairs), text_batch):
         chunk = pairs[start:start + text_batch]
         texts = [build_text(row) for row, _ in chunk]
-        vectors = embed.embed_items([{"text": t} for t in texts], jina_key,
-                                    model=model, dimensions=real_dim)
+        vectors = embed.embed_items([{"text": t} for t in texts], api_key,
+                                    model=model, dimensions=real_dim,
+                                    provider=provider, base_url=base_url)
         for (row, _), vector, text in zip(chunk, vectors, texts):
             items.append({
                 "id": f"product:{row['record_id']}",
@@ -111,11 +118,22 @@ def run_index(*, client, milvus, store, jina_key, base_id, sheet_id, dim,
         if not images:
             continue
         try:
-            contents = [media.download_bytes(meta["url"]) for _, _, meta in images]
-            vectors = embed.embed_items(
-                [{"image": embed.to_data_uri(content, meta["mime"])}
-                 for content, (_, _, meta) in zip(contents, images)],
-                jina_key, model=model, dimensions=real_dim)
+            if provider == embed.PROVIDER_CTAIGW:
+                # 天翼网关支持 http(s) 图片 URL（实测）；钉钉附件签名 URL 带
+                # 时效，刚好即用即弃，免下载字节流。data URI 形态未经其实测，
+                # 不赌。
+                vectors = embed.embed_items(
+                    [{"image": meta["url"]} for _, _, meta in images],
+                    api_key, model=model, dimensions=real_dim,
+                    provider=provider, base_url=base_url)
+            else:
+                contents = [media.download_bytes(meta["url"])
+                            for _, _, meta in images]
+                vectors = embed.embed_items(
+                    [{"image": embed.to_data_uri(content, meta["mime"])}
+                     for content, (_, _, meta) in zip(contents, images)],
+                    api_key, model=model, dimensions=real_dim,
+                    provider=provider, base_url=base_url)
         except embed.EmbedError:
             stats["image_failed"] += len(images)
             continue
@@ -142,12 +160,14 @@ def main(argv=None):
     parser.add_argument("--confirm-local-test-write", action="store_true")
     args = parser.parse_args(argv)
 
-    # fail-soft：key 未配置不算故障（灰度期 seed enabled 但 env 未发 key 时
-    # 每小时静默跳过，不刷失败告警）；key 到位即自动生效。
-    jina_key = os.environ.get("JINA_API_KEY")
-    if not jina_key:
-        print("service=rag-index-products status=skipped reason=no_jina_key")
+    # fail-soft：凭据未配置不算故障（灰度期 seed enabled 但 env 未发 key 时
+    # 每小时静默跳过，不刷失败告警）；配好即自动生效。
+    provider = os.environ.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
+    api_key = os.environ.get("RAG_EMBED_API_KEY") or os.environ.get("JINA_API_KEY")
+    if not api_key:
+        print("service=rag-index-products status=skipped reason=no_embed_key")
         return
+    base_url = os.environ.get("RAG_EMBED_BASE_URL")
 
     from common.dingtalk.client import DingTalkClient
     from common.public_data.live_safety import require_live_run
@@ -166,15 +186,20 @@ def main(argv=None):
         os.environ["KB_DINGTALK_OPERATOR_ID"],
     )
     milvus = store.connect(os.environ.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
-    dim = int(os.environ.get("JINA_CLIP_DIM", str(embed.DEFAULT_DIM)))
-    model = os.environ.get("JINA_CLIP_MODEL", embed.DEFAULT_MODEL)
+    dim = int(os.environ.get("RAG_EMBED_DIM")
+              or os.environ.get("JINA_CLIP_DIM") or embed.DEFAULT_DIM)
+    model = (os.environ.get("RAG_EMBED_MODEL")
+             or os.environ.get("JINA_CLIP_MODEL")
+             or embed.default_model(provider))
+    if not model:
+        raise SystemExit(f"provider={provider} 需要 RAG_EMBED_MODEL")
 
     stats = run_index(
         client=client, milvus=milvus, store=store,
-        jina_key=jina_key,
+        api_key=api_key,
         base_id=os.environ["KB_PRODUCTS_BASE_ID"],
         sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
-        dim=dim, model=model,
+        dim=dim, model=model, provider=provider, base_url=base_url,
     )
     print(
         f"service=rag-index-products status=completed"

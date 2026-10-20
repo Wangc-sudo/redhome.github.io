@@ -197,7 +197,7 @@ class RunIndexTest(unittest.TestCase):
                                mock.Mock(return_value=image_bytes)):
             stats = index_products.run_index(
                 client=_FakeClient(records), milvus=object(), store=store,
-                jina_key="k", base_id="b", sheet_id="s", dim=text_dim)
+                api_key="k", base_id="b", sheet_id="s", dim=text_dim)
         return stats, store
 
     def test_indexes_text_and_image(self):
@@ -234,20 +234,43 @@ class RunIndexTest(unittest.TestCase):
                                mock.Mock(return_value=b"x")):
             stats = index_products.run_index(
                 client=_FakeClient(records), milvus=object(), store=store,
-                jina_key="k", base_id="b", sheet_id="s", dim=2)
+                api_key="k", base_id="b", sheet_id="s", dim=2)
         self.assertEqual(stats["text"], 1)
         self.assertEqual(stats["image"], 0)
         self.assertEqual(stats["image_failed"], 2)
 
-    def test_main_skips_without_jina_key(self):
-        """缺 JINA_API_KEY 时静默跳过（不触发 live 门禁/外部调用）。"""
-        env = {k: v for k, v in os.environ.items() if k != "JINA_API_KEY"}
+    def test_main_skips_without_embed_key(self):
+        """缺 embedding 凭据时静默跳过（不触发 live 门禁/外部调用）。"""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("JINA_API_KEY", "RAG_EMBED_API_KEY")}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
             index_products.main([])
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
-        self.assertIn("reason=no_jina_key", printed)
+        self.assertIn("reason=no_embed_key", printed)
+
+    def test_ctaigw_provider_passes_signed_url_without_download(self):
+        """ctaigw 图片分支直接传签名 URL（网关实测支持 http URL），不下载字节。"""
+        records = [
+            _record("r1", "习酒", {"细节图": [_img("a.jpg", "http://oss/a")]})]
+        store = _FakeStore(2)
+        captured = []
+
+        def fake_embed(items, key, **kw):
+            captured.append(list(items))
+            return [[0.1, 0.2] for _ in items]
+
+        with mock.patch.object(embed, "embed_items",
+                               mock.Mock(side_effect=fake_embed)), \
+             mock.patch.object(media, "download_bytes") as dl:
+            index_products.run_index(
+                client=_FakeClient(records), milvus=object(), store=store,
+                api_key="k", base_id="b", sheet_id="s", dim=2,
+                provider=embed.PROVIDER_CTAIGW)
+        dl.assert_not_called()
+        image_batch = [b for b in captured if any("image" in i for i in b)]
+        self.assertEqual(image_batch, [[{"image": "http://oss/a"}]])
 
 
 class CleanMarkdownTest(unittest.TestCase):
@@ -477,6 +500,75 @@ class EmbedProviderTest(unittest.TestCase):
         with self.assertRaises(embed.EmbedError):
             embed.embed_items([{"text": "甲"}], "k", model="m",
                               provider="openai")
+
+
+class EmbedCtaigwTest(unittest.TestCase):
+    """provider=ctaigw：天翼网关实测契约（2026-10-20）。"""
+
+    def _call(self, items, response, **kw):
+        captured = {}
+
+        class _Resp:
+            def read(self):
+                return json.dumps(response).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        with mock.patch.object(embed.urllib.request, "urlopen",
+                               mock.Mock(side_effect=fake_urlopen)):
+            vectors = embed.embed_items(
+                items, "k", model="qwen3-vl-embedding",
+                provider="ctaigw", **kw)
+        return vectors, captured
+
+    def test_posts_contents_with_fusion_disabled(self):
+        vectors, captured = self._call(
+            [{"text": "甲"}, {"image": "http://oss/a.jpg"}, {"text": "乙"}],
+            {"output": {"embeddings": [
+                {"index": 0, "embedding": [0.1], "type": "vl"},
+                {"index": 1, "embedding": [0.2], "type": "vl"},
+                {"index": 2, "embedding": [0.3], "type": "vl"}]}})
+        self.assertEqual(vectors, [[0.1], [0.2], [0.3]])
+        self.assertEqual(captured["url"], embed.CTAIGW_DEFAULT_URL)
+        self.assertEqual(captured["body"]["input"]["contents"],
+                         [{"text": "甲"}, {"image": "http://oss/a.jpg"},
+                          {"text": "乙"}])
+        self.assertEqual(captured["body"]["parameters"],
+                         {"enable_fusion": False})
+
+    def test_sorts_entries_by_index(self):
+        vectors, _ = self._call(
+            [{"text": "甲"}, {"text": "乙"}],
+            {"output": {"embeddings": [
+                {"index": 1, "embedding": [0.2]},
+                {"index": 0, "embedding": [0.1]}]}})
+        self.assertEqual(vectors, [[0.1], [0.2]])
+
+    def test_rejects_unknown_item_and_bad_shape(self):
+        with self.assertRaises(embed.EmbedError):
+            self._call([{"video": "http://x/v.mp4"}],
+                       {"output": {"embeddings": []}})
+        with self.assertRaises(embed.EmbedError):
+            self._call([{"text": "甲"}], {"unexpected": True})
+        with self.assertRaises(embed.EmbedError):
+            # 数量不符（融合成一条却没声明）必须 fail-fast
+            self._call([{"text": "甲"}, {"text": "乙"}],
+                       {"output": {"embeddings": [{"index": 0,
+                                                   "embedding": [0.1]}]}})
+
+    def test_default_model_per_provider(self):
+        self.assertEqual(embed.default_model("ctaigw"), "qwen3-vl-embedding")
+        self.assertEqual(embed.default_model("jina"), "jina-clip-v2")
+        self.assertIsNone(embed.default_model("openai"))
 
 
 class QaTest(unittest.TestCase):

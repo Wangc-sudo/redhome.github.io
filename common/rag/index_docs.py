@@ -297,13 +297,12 @@ def main(argv=None):
     milvus = store.connect(os.environ.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
     dim = int(os.environ.get("RAG_EMBED_DIM")
               or os.environ.get("JINA_CLIP_DIM") or embed.DEFAULT_DIM)
-    # 模型名默认沿用 jina；换 provider 时必须显式配 RAG_EMBED_MODEL
-    # （jina-clip-v2 在别的网关上不存在，静默兜底只会换来一串 403）。
-    model = os.environ.get("RAG_EMBED_MODEL") or os.environ.get("JINA_CLIP_MODEL")
+    # 模型名：env 显式 > provider 默认（jina-clip-v2 / qwen3-vl-embedding）；
+    # openai 无默认（jina-clip-v2 在别的网关上不存在，静默兜底只会换 403）。
+    model = (os.environ.get("RAG_EMBED_MODEL") or os.environ.get("JINA_CLIP_MODEL")
+             or embed.default_model(provider))
     if not model:
-        model = embed.DEFAULT_MODEL if provider == embed.PROVIDER_JINA else None
-    if not model:
-        raise SystemExit("provider=openai 需要 RAG_EMBED_MODEL")
+        raise SystemExit(f"provider={provider} 需要 RAG_EMBED_MODEL")
 
     stats = run_index(payload, milvus=milvus, store=store, api_key=api_key,
                       dim=dim, model=model, provider=provider,
