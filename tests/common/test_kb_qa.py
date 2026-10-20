@@ -8,8 +8,10 @@ from dingtalk_stream import AckMessage
 from common.kb_qa import bm25, docs, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
+from common.kb_qa import rag_docs
 from common.kb_qa.app import (
     KbStreamHandler,
+    _merge_doc_hits,
     callback_message_id,
     parse_conversation_allowlist,
 )
@@ -784,6 +786,79 @@ class HandlerP2Tests(unittest.TestCase):
             handler._connection_factory(), "三同两不同是啥"
         )
         self.assertIn("接入中", reply)
+
+
+class VectorRecallTests(unittest.TestCase):
+    """向量召回接线（2026-10-20）：合并去重 + fail-open 降级。"""
+
+    def _handler(self, *, doc_search, vector_search):
+        conn = _FakeConn([])
+        return KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            doc_search=doc_search, vector_search=vector_search,
+        )
+
+    def _bm25(self):
+        return [{"doc_title": "手册A", "chunk_index": 0,
+                 "content": "三同两不同指的是原料相同。"}]
+
+    def test_merge_bm25_first_then_vector_dedup(self):
+        bm25 = [{"doc_title": "A", "content": "同一段内容" * 10},
+                {"doc_title": "B", "content": "另一段" * 20}]
+        vector = [{"doc_title": "A", "content": "同一段内容" * 10},  # 重复
+                  {"doc_title": "C", "content": "向量独有的语义命中" * 8}]
+        merged = _merge_doc_hits(bm25, vector)
+        self.assertEqual([m["doc_title"] for m in merged], ["A", "B", "C"])
+
+    def test_merge_respects_limit(self):
+        bm25 = [{"doc_title": f"D{i}", "content": f"内容{i}"} for i in range(3)]
+        vector = [{"doc_title": f"V{i}", "content": f"向量{i}"} for i in range(6)]
+        self.assertEqual(len(_merge_doc_hits(bm25, vector)), 5)
+
+    def test_handler_merges_vector_hits(self):
+        handler = self._handler(
+            doc_search=lambda conn, q, k=3: self._bm25(),
+            vector_search=lambda q: [{"doc_title": "手册B", "chunk_index": 2,
+                                      "content": "向量召回的语义切片内容"}],
+        )
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥")
+        self.assertEqual(intent, DOC_QA)
+        self.assertIn("三同两不同指的是", reply)      # BM25 摘录在
+        self.assertIn("向量召回的语义切片内容", reply)  # 向量补充也在
+
+    def test_handler_degrades_when_vector_search_raises(self):
+        handler = self._handler(
+            doc_search=lambda conn, q, k=3: self._bm25(),
+            vector_search=lambda q: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        reply, _, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥")
+        self.assertIn("三同两不同指的是", reply)  # 纯 BM25 摘录，无异常外泄
+
+    def test_handler_vector_only_when_bm25_empty(self):
+        handler = self._handler(
+            doc_search=lambda conn, q, k=3: [],
+            vector_search=lambda q: [{"doc_title": "手册B", "chunk_index": 0,
+                                      "content": "只有向量命中的内容"}],
+        )
+        reply, _, _ = handler._answer(
+            handler._connection_factory(), "三同两不同是啥")
+        self.assertIn("只有向量命中的内容", reply)
+
+    def test_from_environment_missing_key_returns_none(self):
+        self.assertIsNone(rag_docs.from_environment({}))
+        self.assertIsNone(rag_docs.from_environment(
+            {"RAG_EMBED_PROVIDER": "openai", "RAG_EMBED_API_KEY": "k"}))
+
+    def test_from_environment_ctaigw_returns_callable(self):
+        search = rag_docs.from_environment(
+            {"RAG_EMBED_PROVIDER": "ctaigw", "RAG_EMBED_API_KEY": "k"})
+        self.assertTrue(callable(search))
+
+    def test_index_of_parses_chunk_suffix(self):
+        self.assertEqual(rag_docs._index_of("doc:abc:0007"), 7)
+        self.assertEqual(rag_docs._index_of("garbage"), -1)
 
 
 if __name__ == "__main__":
