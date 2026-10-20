@@ -77,6 +77,34 @@ def _render_doc_excerpt(chunks):
     return "\n".join(lines)
 
 
+#: 合并后送给渲染层（LLM/摘录）的切片上限。
+_DOC_MERGED_LIMIT = 5
+
+
+def _merge_doc_hits(bm25_hits, vector_hits, *, limit=_DOC_MERGED_LIMIT):
+    """BM25 与向量召回合并去重：BM25 在前（保持现有行为），向量补充。
+
+    两条通路的切片来源不同（kb_doc_chunks 滑窗 vs kb_rag_v1 结构切片），
+    id 体系不可比，按 (标题, 内容前 60 字) 去重——同一段话不重复喂 LLM。
+    """
+    merged = list(bm25_hits or [])
+    seen = {_hit_key(chunk) for chunk in merged}
+    for chunk in vector_hits or []:
+        key = _hit_key(chunk)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(chunk)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def _hit_key(chunk):
+    return (chunk.get("doc_title") or "",
+            (chunk.get("content") or "")[:60])
+
+
 def parse_conversation_allowlist(raw):
     """env KB_QA_CONVERSATION_IDS：逗号分隔；空=不限制（应用只进客服群）。"""
     return tuple(item.strip() for item in (raw or "").split(",") if item.strip())
@@ -111,7 +139,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
 
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
-                 doc_search=None):
+                 doc_search=None, vector_search=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -121,6 +149,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._robot_code = robot_code
         self._llm = llm
         self._doc_search = doc_search or search_docs
+        self._vector_search = vector_search
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -265,8 +294,18 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         return find_products(conn, keyword)
 
     def _answer_docs(self, conn, question):
-        """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。"""
+        """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。
+
+        召回两路并行：BM25（kb_doc_chunks）打底 + 向量（kb_rag_v1，语义
+        召回，问法不同也能命中）合并去重。向量通路 fail-open——缺配/异常
+        静默降级纯 BM25，绝不把异常甩给客服。
+        """
         chunks = self._doc_search(conn, question, k=3)
+        if self._vector_search is not None:
+            try:
+                chunks = _merge_doc_hits(chunks, self._vector_search(question))
+            except Exception:
+                self._log("kb qa: vector recall failed")
         if not chunks:
             return _DOC_FALLBACK, DOC_QA, None
         if self._llm is not None:
@@ -338,12 +377,20 @@ def main(argv=None):
     llm = from_environment()
     if llm is None:
         print("kb qa: LLM not configured, running in P1 template mode")
+    # 向量召回（2026-10-20，rag 第三期接线）：RAG_EMBED_* 未配或 provider
+    # 不支持时 from_environment 返回 None，纯 BM25 运行；配好即生效。
+    from common.kb_qa import rag_docs
+
+    vector_search = rag_docs.from_environment()
+    if vector_search is None:
+        print("kb qa: vector recall not configured, running BM25 only")
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
         reply_client=reply_client,
         robot_code=app_key,
         llm=llm,
+        vector_search=vector_search,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()
