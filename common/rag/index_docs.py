@@ -273,7 +273,8 @@ def main(argv=None):
     base_url = os.environ.get("RAG_EMBED_BASE_URL")
     if provider == embed.PROVIDER_OPENAI and not base_url:
         raise SystemExit("provider=openai 需要 RAG_EMBED_BASE_URL（如 https://host/v1）")
-    if provider not in (embed.PROVIDER_JINA, embed.PROVIDER_OPENAI):
+    if provider not in (embed.PROVIDER_JINA, embed.PROVIDER_OPENAI,
+                        embed.PROVIDER_CTAIGW):
         raise SystemExit(f"未知 RAG_EMBED_PROVIDER: {provider}")
 
     path = Path(args.file or os.environ.get("RAG_DOCS_INPUT") or DEFAULT_INPUT)
