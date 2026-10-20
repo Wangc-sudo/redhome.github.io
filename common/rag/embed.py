@@ -82,6 +82,15 @@ def default_model(provider):
     return None
 
 
+def max_batch(provider):
+    """单请求 contents 数量上限（2026-10-20 梯度实测：ctaigw 20 OK、22 →
+    HTTP 400；取 16 留长文本 token 余量，与 index_docs.TEXT_BATCH 同值）。
+    jina/openai 沿用 64。"""
+    if provider == PROVIDER_CTAIGW:
+        return 16
+    return 64
+
+
 def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
                 provider=DEFAULT_PROVIDER, base_url=None):
     """混合批量嵌入。items=[{"text":..}|{"image":..}]，返回 [vector,...]。

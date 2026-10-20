@@ -78,8 +78,13 @@ def iter_image_attachments(record):
 
 def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
               model=embed.DEFAULT_MODEL, provider=embed.DEFAULT_PROVIDER,
-              base_url=None, text_batch=64, on_progress=None):
-    """全量重建索引。返回统计 dict。单张图片失败 fail-soft 跳过记数。"""
+              base_url=None, text_batch=None, on_progress=None):
+    """全量重建索引。返回统计 dict。单张图片失败 fail-soft 跳过记数。
+
+    text_batch 缺省按 provider 取上限（ctaigw 实测 22 条即 HTTP 400，
+    64 的 jina 默认值会把整批打挂——2026-10-20 商品灌库两次全灭于此）。
+    """
+    text_batch = text_batch or embed.max_batch(provider)
     records = client.list_records(base_id, sheet_id)
     pairs = []
     for record in records:
