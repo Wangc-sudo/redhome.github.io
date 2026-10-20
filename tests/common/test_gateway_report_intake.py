@@ -49,11 +49,18 @@ class _Cursor:
             self._rows = []
             self._one = self._conn.existing_row
         elif sql.lstrip().startswith("SELECT"):
-            # 月事实查询（带 region 键的行按查询参数过滤，模拟生产 WHERE）
             rows = self._conn.fact_rows
             if params:
-                rows = [r for r in rows
-                        if "region" not in r or r["region"] == params[0]]
+                if ("`responsible_person` = %s" in sql
+                        and "`region` = %s" not in sql):
+                    # 按姓名跨区域查询（fetch_person_month_facts）：params[0]=姓名
+                    rows = [r for r in rows
+                            if "responsible_person" not in r
+                            or r["responsible_person"] == params[0]]
+                else:
+                    # 月事实查询（带 region 键的行按 region 过滤，模拟生产 WHERE）
+                    rows = [r for r in rows
+                            if "region" not in r or r["region"] == params[0]]
             self._rows = rows
         else:
             self._rows = []
@@ -421,6 +428,30 @@ class HandleReportTests(unittest.TestCase):
             conn, region_cfg=_cfg(), text="200", sender_uid="u1", now=_NOW,
         )
         self.assertNotIn("📊", outcome.reply)
+
+    def test_progress_found_cross_region_by_person(self):
+        """完成度按姓名跨区域查（2026-10-20 用户裁决「先只修完成度」）。
+
+        其他区域人的数据记在 ``other``、报数群是 ``offline_all``——按姓名
+        跨区域也能算出完成度（修复前按报数群区域查不到、回执无完成度）。
+        """
+        from common.gateway.report_intake import _progress
+        from common.metrics.daily_report import fetch_workdays
+        conn = _Conn(
+            facts=[{
+                "responsible_person": "余云涛", "department": "省外销售部",
+                "region": "other",
+                "business_date": date(2026, 9, 11), "sales_amount": 100,
+                "monthly_target": 1000,
+            }],
+        )
+        workdays = fetch_workdays(conn, year=2026, month=9)
+        progress = _progress(
+            conn, region="offline_all", table_name="余云涛",
+            business_date=date(2026, 9, 11), workdays=workdays,
+        )
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress[2], "10.0%")
 
 
 def _vanke_cfg(monthly_targets=None):
