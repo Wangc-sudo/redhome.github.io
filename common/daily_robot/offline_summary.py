@@ -2,8 +2,8 @@
 """线下整体销售汇总（offline_all 汇总群）——日 / 周 / 月报。
 
 数据源：``mart_ops.fact_daily_report_offline``——杭州/绍兴为机器人报数落库；
-「其他」=补集桶（region ∉ 杭/绍/vanke：省外/线下总经办等自动落桶，
-2026-10-16 运维裁决 线下总体=杭州+绍兴+其他，vanke 不算）。
+「其他」=``region='other'`` 显式桶（2026-10-20 用户裁决：以闭环画布为权威源，
+不再用补集；线下总体=杭州+绍兴+其他，vanke 不算）。
 
 口径铁律（方案 §5）：
 - 月目标 MAX 不 SUM（melt 行重复携带，同人同板块多行只取 MAX）；
@@ -27,11 +27,11 @@ from common.metrics.daily_report import achievement_rate
 
 #: 汇总板块：(scope 键, 展示名, fact region 键, 锚点)。
 #: 板块锚点：None=整区域（或整补集）。
-#: 2026-10-16 运维裁决：线下总体=杭州+绍兴+其他 三桶——「其他」=fact 里
-#: region ∉ {hangzhou, shaoxing, vanke} 的补集（省外/线下总经办/未来新板块
-#: 自动落桶，零维护）；原 offline_extra 板块锚点（省外/总经办）与李树军
-#: 拆分（dept_not 线下运营中心）随之退役——李树军并入绍兴行。
-#: vanke 不算线下总体（同日裁决，vanke 独立观察）。
+#: 2026-10-16 运维裁决：线下总体=杭州+绍兴+其他 三桶。
+#: 2026-10-20 用户裁决：「其他」从补集改为**显式** ``region='other'``——
+#: 其他区域以闭环画布为权威源（余云涛/省外销售部、李树军/线下运营中心、
+#: 谢坚钰/总经办 三人），不再靠「排除杭绍后剩下的」；画布归谁，播报就是谁。
+#: vanke 不算线下总体（2026-10-16 裁决，vanke 独立观察）。
 OFFLINE_OTHER_REGION = "__offline_other__"
 
 #: 补集排除的 region（核心桶 + vanke + qudao——2026-10-17 实锤：渠道线
@@ -42,7 +42,8 @@ _OFFLINE_OTHER_EXCLUDES = ("hangzhou", "shaoxing", "vanke", "qudao")
 AGG_SCOPES = (
     ("hangzhou", "杭州", "hangzhou", None),
     ("shaoxing", "绍兴", "shaoxing", None),
-    ("other", "其他", OFFLINE_OTHER_REGION, None),
+    # 2026-10-20：其他=显式 region='other'（画布权威源），不再用补集
+    ("other", "其他", "other", None),
 )
 
 TOTAL_SCOPE_KEY = "offline_total"
