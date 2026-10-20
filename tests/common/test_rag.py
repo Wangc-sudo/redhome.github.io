@@ -603,6 +603,36 @@ class EmbedCtaigwTest(unittest.TestCase):
         self.assertTrue(batches)
         self.assertTrue(all(n <= 16 for n in batches))
 
+    def test_images_are_batched_across_products(self):
+        """图片跨商品合批：20 个商品各 1 图 → 2 批（16+4），而非 20 次调用。
+
+        原逐行设计下某张图网关侧挂起会拖死整轮（2026-10-20 实测卡死
+        28 分钟）；合批后单批失败只损失该批。
+        """
+        records = [
+            _record(f"r{i}", f"商品{i}",
+                    {"细节图": [_img(f"{i}.jpg", f"http://oss/{i}")]})
+            for i in range(20)
+        ]
+        store = _FakeStore(2)
+        image_calls = []
+
+        def fake_embed(items, key, **kw):
+            if any("image" in i for i in items):
+                image_calls.append(len(items))
+            return [[0.1, 0.2] for _ in items]
+
+        with mock.patch.object(embed, "embed_items",
+                               mock.Mock(side_effect=fake_embed)):
+            stats = index_products.run_index(
+                client=_FakeClient(records), milvus=object(), store=store,
+                api_key="k", base_id="b", sheet_id="s", dim=2,
+                provider=embed.PROVIDER_CTAIGW)
+        self.assertEqual(image_calls, [16, 4])
+        self.assertEqual(stats["image"], 20)
+        image_ids = [i["id"] for i in store.items if i["kind"] == "image"]
+        self.assertEqual(len(image_ids), 20)
+
 
 class QaTest(unittest.TestCase):
 

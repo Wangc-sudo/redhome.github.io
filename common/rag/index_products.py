@@ -117,32 +117,41 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
         if on_progress:
             on_progress("text", stats["text"])
 
-    # 图片：按商品分组下载+批量 embed（该商品的全部图一次 API 调用）。
-    for row, record in pairs:
-        images = iter_image_attachments(record)
-        if not images:
-            continue
+    # 图片：跨商品合批（每批 ≤ max_batch 张）。原设计是逐行商品一次
+    # API 调用——825 行就是 825 次串行调用，慢且脆弱：某张图网关侧处理
+    # 挂起会把整轮拖死（2026-10-20 实测卡死 28 分钟无超时退出）。合批后
+    # 调用次数降一个量级，单批失败只损失该批（fail-soft），不会整体卡死。
+    image_entries = [
+        (row, field_name, index, meta)
+        for row, record in pairs
+        for field_name, index, meta in iter_image_attachments(record)
+    ]
+    image_batch = embed.max_batch(provider)
+    for start in range(0, len(image_entries), image_batch):
+        part = image_entries[start:start + image_batch]
         try:
             if provider == embed.PROVIDER_CTAIGW:
                 # 天翼网关支持 http(s) 图片 URL（实测）；钉钉附件签名 URL 带
                 # 时效，刚好即用即弃，免下载字节流。data URI 形态未经其实测，
                 # 不赌。
                 vectors = embed.embed_items(
-                    [{"image": meta["url"]} for _, _, meta in images],
+                    [{"image": meta["url"]} for _, _, _, meta in part],
                     api_key, model=model, dimensions=real_dim,
                     provider=provider, base_url=base_url)
             else:
                 contents = [media.download_bytes(meta["url"])
-                            for _, _, meta in images]
+                            for _, _, _, meta in part]
                 vectors = embed.embed_items(
                     [{"image": embed.to_data_uri(content, meta["mime"])}
-                     for content, (_, _, meta) in zip(contents, images)],
+                     for content, (_, _, _, meta) in zip(contents, part)],
                     api_key, model=model, dimensions=real_dim,
                     provider=provider, base_url=base_url)
         except embed.EmbedError:
-            stats["image_failed"] += len(images)
+            stats["image_failed"] += len(part)
+            if on_progress:
+                on_progress("image_failed", stats["image_failed"])
             continue
-        for (field_name, index, meta), vector in zip(images, vectors):
+        for (row, field_name, index, meta), vector in zip(part, vectors):
             items.append({
                 "id": f"product-img:{row['record_id']}:{field_name}:{index}",
                 "vector": vector,
@@ -205,6 +214,9 @@ def main(argv=None):
         base_id=os.environ["KB_PRODUCTS_BASE_ID"],
         sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
         dim=dim, model=model, provider=provider, base_url=base_url,
+        # 全量灌库可能跑几十分钟，无进度输出时无法区分「慢」与「卡死」
+        # （2026-10-20 两次排查教训）：每批落一行进度。
+        on_progress=lambda kind, n: print(f"progress {kind}={n}", flush=True),
     )
     print(
         f"service=rag-index-products status=completed"
