@@ -1269,6 +1269,18 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertIn("`channel`=%s", sql)
         self.assertEqual(["2026-10-20", "京东"], list(params))
 
+    def test_channel_sales_excludes_preset_future_rows(self):
+        # 上游 AI 表预置到月底的空行（金额 NULL/0）——未来日期必须过滤，
+        # 否则「最近一天」锚点落在空行上（裸 MAX=10-31 实测事故）
+        executor = self._executor([
+            [{"channel": "京东"}],
+            [{"channel": "京东", "business_date": "2026-10-20",
+              "sales_amount": 8.0}],
+        ])
+        executor.execute("channel_sales", {})
+        sql, _ = executor._conn.cursor_instance.executed[-1]
+        self.assertIn("`business_date`<=CURDATE()", sql)
+
     def test_search_docs_merges_bm25_and_vector(self):
         executor = self._executor(
             [],
