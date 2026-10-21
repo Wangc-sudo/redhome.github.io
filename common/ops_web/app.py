@@ -45,6 +45,7 @@ from common.public_data import (
     ops_token,
     org_assignment_override,
     org_catalog,
+    org_proxy_grant,
     recipient_override,
     report_roster,
 )
@@ -2166,6 +2167,100 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "ops-web org dept delete failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok"})
+
+    # ------------------------------------------------------------------
+    # 代填授权（dim_org_proxy_grant，2026-10-21 代填人设计）：代填人=授权
+    # 替他人填数（非归属）。admin 全权，非 admin 按本表授权范围。
+    # ------------------------------------------------------------------
+    @app.get("/api/org/proxy")
+    def org_proxy_list(request: Request):
+        """代填授权全表（闭环面板「代填授权」区块）。"""
+        require_capability(request, CAPABILITY_ORG)
+        try:
+            with db_connector() as connection:
+                grants = org_proxy_grant.fetch_all_proxy_grants(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org proxy list failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"grants": grants})
+
+    @app.post("/api/org/proxy/grant")
+    async def org_proxy_grant_upsert(request: Request):
+        """新增/更新一条代填授权（代填人 + 被代填区域[，被代填人]）。"""
+        viewer = require_capability(request, CAPABILITY_ORG)
+        payload = await _json_body(request)
+        proxy_user_id = payload.get("proxy_user_id")
+        proxy_name = payload.get("proxy_name")
+        target_region = payload.get("target_region")
+        target_person = payload.get("target_person") or ""
+        note = payload.get("note") or ""
+        if not isinstance(proxy_user_id, str) or not proxy_user_id.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(target_region, str) or not target_region.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        for value in (proxy_name, target_person, note):
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(
+                    status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                org_proxy_grant.upsert_proxy_grant(
+                    connection, proxy_user_id.strip(), target_region.strip(),
+                    target_person=target_person.strip(), proxy_name=proxy_name,
+                    note=note, actor=viewer.userid)
+        except org_proxy_grant.OrgProxyGrantError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org proxy grant failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/org/proxy/toggle")
+    async def org_proxy_toggle(request: Request):
+        """停用/启用一条代填授权。"""
+        viewer = require_capability(request, CAPABILITY_ORG)
+        payload = await _json_body(request)
+        proxy_user_id = payload.get("proxy_user_id")
+        target_region = payload.get("target_region")
+        target_person = payload.get("target_person") or ""
+        enabled = bool(payload.get("enabled"))
+        if not proxy_user_id or not target_region:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                ok = org_proxy_grant.set_proxy_grant_enabled(
+                    connection, proxy_user_id, target_region,
+                    target_person, enabled, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org proxy toggle failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok" if ok else "not_found"})
+
+    @app.post("/api/org/proxy/delete")
+    async def org_proxy_delete(request: Request):
+        """删除一条代填授权。"""
+        viewer = require_capability(request, CAPABILITY_ORG)
+        payload = await _json_body(request)
+        proxy_user_id = payload.get("proxy_user_id")
+        target_region = payload.get("target_region")
+        target_person = payload.get("target_person") or ""
+        if not proxy_user_id or not target_region:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                ok = org_proxy_grant.delete_proxy_grant(
+                    connection, proxy_user_id, target_region,
+                    target_person, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web org proxy delete failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok" if ok else "not_found"})
 
     def _org_override_region(user_id):
         """被操作覆盖行所属区域（无该行 → None）；读故障 503（收敛语义）。

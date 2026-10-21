@@ -200,6 +200,44 @@ export function deleteDept(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// 代填授权（dim_org_proxy_grant，2026-10-21 代填人设计）
+
+/** 代填授权全表。 */
+export function getProxyGrants() {
+  return request('/api/org/proxy', { method: 'GET' });
+}
+
+/**
+ * 新增/更新一条代填授权。
+ * @param {{proxy_user_id:string, target_region:string,
+ *          target_person?:string, proxy_name?:(string|null),
+ *          note?:(string|null)}} payload
+ * target_person 空串 = 整个区域。
+ */
+export function grantProxy(payload) {
+  return request('/api/org/proxy/grant', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 停用/启用一条代填授权。 */
+export function toggleProxy(payload) {
+  return request('/api/org/proxy/toggle', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 删除一条代填授权。 */
+export function deleteProxy(payload) {
+  return request('/api/org/proxy/delete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 全 SPA 迁移（C 阶段）：全域读写端点。函数名即后续页面调用契约，勿改名。
 // POST 字段名以 app.py 各 handler 的 payload.get(...) 为准。
 // ---------------------------------------------------------------------------
