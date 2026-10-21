@@ -6,6 +6,7 @@ import json
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dingtalk_stream import AckMessage
 
@@ -865,6 +866,67 @@ class VectorRecallTests(unittest.TestCase):
     def test_index_of_parses_chunk_suffix(self):
         self.assertEqual(rag_docs._index_of("doc:abc:0007"), 7)
         self.assertEqual(rag_docs._index_of("garbage"), -1)
+
+    def _fake_store(self, milvus, hits=None, error=None):
+        """store 替身塞进 sys.modules（真 store import 依赖 pymilvus，
+        本地测试环境没有——函数内延迟 import 会优先命中 sys.modules）。"""
+        import sys
+        import types
+
+        def search(client, vector, *, limit=8, kind=None):
+            if error:
+                raise error
+            return hits or []
+
+        fake = types.SimpleNamespace(
+            connect=mock.Mock(return_value=milvus),
+            search=mock.Mock(side_effect=search),
+            DEFAULT_PATH="/x/rag.db",
+        )
+        return mock.patch.dict(sys.modules,
+                               {"common.rag.store": fake})
+
+    def test_search_vector_closes_milvus_connection(self):
+        # Milvus Lite LOCK 是排他 flock：kb-gateway 与 scheduler 灌库共享
+        # rag.db，连接必须即用即放（2026-10-21 LOCK 冲突复盘）
+        milvus = mock.Mock()
+        hits = [{"id": "doc:a:0000", "score": 0.9, "kind": "text",
+                 "name": "手册", "text": "内容", "image_ref": ""}]
+        env = {"RAG_EMBED_PROVIDER": "ctaigw", "RAG_EMBED_API_KEY": "k",
+               "RAG_EMBED_MODEL": "qwen3-vl-embedding"}
+        with self._fake_store(milvus, hits=hits), \
+             mock.patch.object(rag_docs.embed, "embed_text",
+                               return_value=[0.1, 0.2]):
+            result = rag_docs.search_vector("q", api_key="k", environ=env)
+        self.assertEqual(1, len(result))
+        milvus.close.assert_called_once()
+
+    def test_search_vector_closes_even_when_search_raises(self):
+        milvus = mock.Mock()
+        with self._fake_store(milvus, error=RuntimeError("boom")), \
+             mock.patch.object(rag_docs.embed, "embed_text",
+                               return_value=[0.1]):
+            with self.assertRaises(RuntimeError):
+                rag_docs.search_vector(
+                    "q", api_key="k",
+                    environ={"RAG_EMBED_PROVIDER": "ctaigw",
+                             "RAG_EMBED_API_KEY": "k"})
+        milvus.close.assert_called_once()
+
+    def test_answer_failure_logs_exception_type(self):
+        # 2026-10-21 时段性故障无类型信息无法回溯：except 必须记类型
+        logs = []
+        conn = _FakeConn([1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=logs.append,
+            doc_search=lambda conn, q, k=3: (_ for _ in ()).throw(
+                ZeroDivisionError("boom")))
+        callback = _FakeCallback("m-fail", "三同两不同是啥")
+        status, _ = asyncio.run(handler.process(callback))
+        self.assertEqual(AckMessage.STATUS_OK, status)
+        self.assertTrue(
+            any("answer failed: ZeroDivisionError" in m for m in logs))
+        self.assertTrue(conn.rolled_back)
 
 
 def _block(block_type, index, **body):

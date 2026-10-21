@@ -65,8 +65,11 @@ services:
       - /opt/dops/repo:/opt/dops/repo:ro
       - /opt/dops/live:/opt/dops/live:ro
       # 向量库（Milvus Lite rag.db）：DOC_QA 意图时向量召回与 BM25 合并。
-      # 只读挂载够用——写入侧永远只有 scheduler（索引管道单写者）。
-      - /opt/vector:/opt/vector:ro
+      # 必须可写——milvus-lite 打开库就要创建 LOCK 文件（2026-10-21 实测
+      # :ro 挂载下向量召回每次都被拒、静默降级纯 BM25，从未生效）。数据
+      # 写入侧仍只有 scheduler；kb-gateway 侧 search_vector 即用即 close
+      # （排他 flock 毫秒级持有），与凌晨灌库几乎零冲突窗口。
+      - /opt/vector:/opt/vector:rw
 
   scheduler:
     image: dops-app:latest
