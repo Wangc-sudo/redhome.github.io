@@ -753,6 +753,26 @@ def _service_region(service_id):
     return None
 
 
+def _broadcast_task_type(service_id):
+    """service_id → 播报任务类型（播报编排板的行轴，2026-10-21）。
+
+    按 service_id 家族归一（去掉区域后缀），让同一任务类型跨区域聚成一行。
+    """
+    if service_id.startswith("robot-check-"):
+        return "催办未填人"
+    if service_id.startswith("robot-"):
+        return "填报提醒"
+    if service_id.startswith("leaderboard-"):
+        return "完成率榜单"
+    if service_id == "offline-daily-summary":
+        return "每日汇总日报"
+    if service_id.startswith("channel-missing"):
+        return "渠道门店校验"
+    if service_id.startswith("channel-daily"):
+        return "渠道日报"
+    return "其他"
+
+
 
 def _scope_backlinks(configs):
     """名册 scope → 被该范围名册影响的催办任务标识（P3，2026-10-12）。
@@ -2291,6 +2311,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 "service_id": sid,
                 "region": region,
                 "category": category,
+                "task_type": _broadcast_task_type(sid),
                 "label": _service_label(sid, cfg.description),
                 "enabled": bool(cfg.enabled),
                 "schedule": cfg.schedule or "",

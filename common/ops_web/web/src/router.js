@@ -17,6 +17,7 @@ import PipelinesHistoryPage from './pages/PipelinesHistoryPage.vue';
 import RecordsPage from './pages/RecordsPage.vue';
 import GrantsPage from './pages/GrantsPage.vue';
 import FlowPage from './pages/FlowPage.vue';
+import BroadcastBoardPage from './pages/BroadcastBoardPage.vue';
 
 const routes = [
   // P4（2026-10-16 画布即应用）：首页直达画布；OverviewPage 退役
@@ -36,6 +37,8 @@ const routes = [
   { path: '/recipients', name: 'recipients', component: RecipientsPage, meta: { capability: 'admin' } },
   { path: '/calendar', name: 'calendar', component: CalendarPage, meta: { capability: 'calendar' } },
   { path: '/pipelines', name: 'pipelines', component: PipelinesPage, meta: { capability: 'pipelines' } },
+  // 播报编排（2026-10-21 播报编排大模块）：任务×区域拉线板
+  { path: '/broadcast', name: 'broadcast', component: BroadcastBoardPage, meta: { capability: 'pipelines' } },
   {
     path: '/pipelines/audit',
     name: 'pipelines-audit',
