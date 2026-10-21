@@ -268,7 +268,8 @@ class HandleReportTests(unittest.TestCase):
         self.assertEqual(params[1:6],
                          ("hangzhou", "张三", "杭中", _DAY, 12800))
         self.assertIsNone(params[6])  # monthly_target（有表区域由 AI 表行携带）
-        self.assertEqual(params[8], STREAM_RUN_ID)
+        self.assertIsNone(params[7])  # filled_by（自报=NULL）
+        self.assertEqual(params[9], STREAM_RUN_ID)
 
         self.assertIn("✅ 已记录 9月11日（周五）销量：12800", outcome.reply)
         self.assertNotIn("🔁", outcome.reply)
@@ -375,7 +376,7 @@ class HandleReportTests(unittest.TestCase):
         )
         self.assertIn("SET `sales_amount` = %s", update_sql)
         self.assertEqual(params[0], 200)
-        self.assertEqual(params[2], "melt-r1#11")
+        self.assertEqual(params[3], "melt-r1#11")  # filled_by 列入后业务键在 params[3]
         # 业务键更新：不产生新的 stream 行。
         self.assertFalse(any(
             s.lstrip().startswith("INSERT") for s, _ in conn.executed
@@ -565,7 +566,7 @@ class MultiMetricIntakeTests(unittest.TestCase):
         self.assertEqual(inserts[0][6], 100000)
         self.assertEqual(inserts[1][2], "万科体验馆·团购")
         self.assertEqual(inserts[1][6], 20000)
-        self.assertEqual(inserts[0][8], STREAM_RUN_ID)
+        self.assertEqual(inserts[0][9], STREAM_RUN_ID)
         self.assertIn("万科体验馆·零售：7560", outcome.reply)
         self.assertIn("万科体验馆·团购：0", outcome.reply)
 

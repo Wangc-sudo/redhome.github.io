@@ -69,6 +69,10 @@ _DDL_WHITELIST = frozenset(
         # dim_org_region / dim_org_dept / dim_org_catalog_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/public_data/org_catalog.py",
+        # 代填授权 schema 定义模块（mart-ops-org-proxy-grant-v1 的 DDL 源：
+        # dim_org_proxy_grant / dim_org_proxy_grant_audit；被 live_migrations
+        # 引用，同上引用关系）
+        "common/public_data/org_proxy_grant.py",
         # 舰队月检 schema 定义模块（mart-ops-fleet-audit-v1 的 DDL 源：
         # pd_ops_fleet_audit；被 live_migrations 引用，同上引用关系）
         "common/public_data/fleet_audit.py",
