@@ -111,6 +111,14 @@ class DingTalkClient:
             next_token = data["nextToken"]
         return records
 
+    def get_record(self, base_id, sheet_id, record_id):
+        """读取单条记录（2026-10-21 实测端点有效）。附件直发场景：签名
+        URL 带时效不入库，用时按 record_id 现取。"""
+        url = (f"https://api.dingtalk.com/v1.0/notable/bases/{base_id}"
+               f"/sheets/{sheet_id}/records/{record_id}"
+               f"?operatorId={self.operator_id}")
+        return _http_json(url, headers=self._headers())
+
     def update_records(self, base_id, sheet_id, updates):
         """updates: [{id: recordId, fields: {字段名: 值}}]"""
         url = (f"https://api.dingtalk.com/v1.0/notable/bases/{base_id}"
