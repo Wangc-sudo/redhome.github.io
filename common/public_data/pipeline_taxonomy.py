@@ -45,8 +45,6 @@ SERVICE_CATEGORIES = {
     "freshness-check": "催办",
     "channel-daily-qudao": "播报",
     "offline-daily-summary": "播报",
-    "offline-weekly-summary": "播报",
-    "offline-monthly-summary": "播报",
     "target-rollover": "加工",
     "target-remind": "播报",
     "calendar-watch": "播报",

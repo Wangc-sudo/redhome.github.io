@@ -8,27 +8,18 @@ from unittest import mock
 from common.daily_robot.offline_summary import (
     AGG_SCOPES,
     DAILY_KIND,
-    MONTHLY_KIND,
     TOTAL_SCOPE_KEY,
-    WEEKLY_KIND,
+    UNMAPPED_DEPT,
     build_daily_markdown,
-    build_monthly_markdown,
     build_offline_all_html,
-    build_weekly_markdown,
     collect_offline_all_people,
     compute_daily_metrics,
-    compute_monthly_metrics,
-    compute_weekly_metrics,
     fetch_dept_daily_facts,
     fetch_dept_month_targets,
-    UNMAPPED_DEPT,
     merge_facts,
     merge_targets,
     previous_month,
-    previous_week,
     run_daily_summary,
-    run_monthly_summary,
-    run_weekly_summary,
 )
 
 
@@ -96,17 +87,6 @@ class ComputeDailyTest(unittest.TestCase):
 
 
 class PeriodBoundaryTest(unittest.TestCase):
-    def test_previous_week(self):
-        self.assertEqual(
-            previous_week(date(2026, 9, 28)),
-            (date(2026, 9, 21), date(2026, 9, 27)),
-        )
-        # 周日引用仍取上一整周
-        self.assertEqual(
-            previous_week(date(2026, 9, 27)),
-            (date(2026, 9, 14), date(2026, 9, 20)),
-        )
-
     def test_previous_month(self):
         self.assertEqual(
             previous_month(date(2026, 10, 1)),
@@ -116,36 +96,6 @@ class PeriodBoundaryTest(unittest.TestCase):
             previous_month(date(2026, 3, 15)),
             (date(2026, 2, 1), date(2026, 2, 28)),
         )
-
-    def test_weekly_metrics(self):
-        facts = {
-            date(2026, 9, 22): 100.0,
-            date(2026, 9, 25): 300.0,
-            date(2026, 9, 16): 50.0,
-        }
-        m = compute_weekly_metrics(
-            "hangzhou", "杭州", facts=facts,
-            week_start=date(2026, 9, 21), week_end=date(2026, 9, 27),
-        )
-        self.assertEqual(m.sales, 400.0)
-        self.assertEqual(m.wow_amount, 350.0)
-        self.assertAlmostEqual(m.wow_rate, 7.0)
-
-    def test_monthly_metrics(self):
-        facts = {
-            date(2026, 9, 3): 100.0,
-            date(2026, 9, 20): 300.0,
-            date(2026, 8, 10): 200.0,
-        }
-        m = compute_monthly_metrics(
-            "hangzhou", "杭州", facts=facts,
-            month_first=date(2026, 9, 1), month_last=date(2026, 9, 30),
-            month_target=1000.0,
-        )
-        self.assertEqual(m.sales, 400.0)
-        self.assertEqual(m.mom_amount, 200.0)
-        self.assertAlmostEqual(m.mom_rate, 1.0)
-        self.assertAlmostEqual(m.month_rate, 0.4)
 
     def test_merge(self):
         merged = merge_facts([
@@ -207,57 +157,6 @@ class RenderTest(unittest.TestCase):
             body)
         self.assertIn("| **线下整体** |", body)
 
-    def test_weekly_markdown_ranking(self):
-        rows = [
-            compute_weekly_metrics(
-                "hangzhou", "杭州", facts={date(2026, 9, 22): 100.0},
-                week_start=date(2026, 9, 21), week_end=date(2026, 9, 27),
-            ),
-            compute_weekly_metrics(
-                "shaoxing", "绍兴", facts={date(2026, 9, 22): 500.0},
-                week_start=date(2026, 9, 21), week_end=date(2026, 9, 27),
-            ),
-        ]
-        total = compute_weekly_metrics(
-            TOTAL_SCOPE_KEY, "线下整体",
-            facts={date(2026, 9, 22): 600.0},
-            week_start=date(2026, 9, 21), week_end=date(2026, 9, 27),
-        )
-        body = build_weekly_markdown(
-            week_start=date(2026, 9, 21), week_end=date(2026, 9, 27),
-            rows=rows, total=total,
-        )
-        self.assertIn("【线下整体周报】9月21日（周一） ~ 9月27日（周日）", body)
-        # 绍兴 500 > 杭州 100 → 绍兴排第一
-        self.assertLess(body.index("| 1 | 绍兴 |"), body.index("| 2 | 杭州 |"))
-
-    def test_monthly_markdown_rate_ranking(self):
-        rows = [
-            compute_monthly_metrics(
-                "hangzhou", "杭州", facts={date(2026, 9, 2): 100.0},
-                month_first=date(2026, 9, 1), month_last=date(2026, 9, 30),
-                month_target=1000.0,
-            ),
-            compute_monthly_metrics(
-                "shaoxing", "绍兴", facts={date(2026, 9, 2): 500.0},
-                month_first=date(2026, 9, 1), month_last=date(2026, 9, 30),
-                month_target=None,
-            ),
-        ]
-        total = compute_monthly_metrics(
-            TOTAL_SCOPE_KEY, "线下整体",
-            facts={date(2026, 9, 2): 600.0},
-            month_first=date(2026, 9, 1), month_last=date(2026, 9, 30),
-            month_target=1000.0,
-        )
-        body = build_monthly_markdown(
-            month_first=date(2026, 9, 1), rows=rows, total=total,
-        )
-        self.assertIn("【线下整体月报】2026年9月", body)
-        # 有达成率的杭州（10%）排在无目标的绍兴之前（None 垫底）
-        self.assertLess(body.index("| 1 | 杭州 |"), body.index("| 2 | 绍兴 |"))
-
-
 # ---------------------------------------------------------------------------
 # 任务（fake conn + fake outbox）
 # ---------------------------------------------------------------------------
@@ -310,8 +209,11 @@ class _Cursor:
         if "`region` AS `region`" in sql:
             self._rows = self._conn.other_rows
             return
+        # 人名口径其他桶（2026-10-20）：responsible_person IN（人名）/ offline_extra 换列
+        if "`responsible_person` IN (" in sql:
+            region = "other"
         # 补集（region NOT IN 杭/绍/vanke）：region 不进 params
-        if "`region` NOT IN" in sql:
+        elif "`region` NOT IN" in sql:
             region = "__offline_other__"
         else:
             region = params[0]
@@ -381,6 +283,12 @@ def _task_conn():
         ("other", None): 3195000.0,   # 省外 100万+总经办 219.5万
     }
     conn = _Conn(facts, targets)
+    # 其他区域画布成员（2026-10-20 人名口径权威源）：驱动「其他」桶人名取数
+    conn.members = {
+        ("other", "余云涛"): "省外销售部",
+        ("other", "李树军"): "线下运营中心",
+        ("other", "谢坚钰"): "总经办",
+    }
     # 补集人员行（余云涛：offline_extra 遗留行形，rp=板块/dept=责任人）
     conn.other_rows = [
         {"region": "offline_extra", "rp": "省外", "dept": "余云涛",
@@ -436,34 +344,6 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(status, "already_sent")
         self.assertEqual(len(conn.agg_rows), 4)
 
-    def test_weekly_uses_previous_full_week(self):
-        conn = _task_conn()
-        outbox = _Outbox()
-        status = run_weekly_summary(
-            conn, outbox,
-            reference=date(2026, 9, 28), now=datetime(2026, 9, 28, 9, 30),
-        )
-        self.assertEqual(status, "enqueued")
-        call = outbox.calls[0]
-        self.assertEqual(call["kind"], WEEKLY_KIND)
-        self.assertEqual(call["business_date"], date(2026, 9, 21))
-        self.assertEqual(call["title"], "线下整体周报")
-        self.assertIn("【线下整体周报】9月21日（周一） ~ 9月27日（周日）", call["body_md"])
-
-    def test_monthly_uses_previous_month(self):
-        conn = _task_conn()
-        outbox = _Outbox()
-        status = run_monthly_summary(
-            conn, outbox,
-            reference=date(2026, 10, 1), now=datetime(2026, 10, 1, 10, 0),
-        )
-        self.assertEqual(status, "enqueued")
-        call = outbox.calls[0]
-        self.assertEqual(call["kind"], MONTHLY_KIND)
-        self.assertEqual(call["business_date"], date(2026, 9, 1))
-        self.assertEqual(call["title"], "线下整体月报")
-        self.assertIn("【线下整体月报】2026年9月", call["body_md"])
-
     def test_queries_exclude_heji_rows(self):
         """AI 表自带合计行（杭州合计/余杭合计…），查询必须排除，否则双倍计数。"""
         conn = _task_conn()
@@ -486,13 +366,31 @@ class TaskTest(unittest.TestCase):
         anchors = {scope: anchor for scope, _, _, anchor in AGG_SCOPES}
         self.assertEqual(anchors["shaoxing"], None)   # 李树军拆分退役，并入绍兴
         regions = {scope: region for scope, _, region, _ in AGG_SCOPES}
-        # 2026-10-20 用户裁决：其他=显式 region='other'（画布权威源），不再补集
-        self.assertEqual(regions["other"], "other")
+        # 2026-10-20 用户裁决：其他=OFFLINE_OTHER_REGION 标记（人名口径，
+        # 画布 other 成员，含 offline_extra 换列），不再补集
+        from common.daily_robot.offline_summary import (
+            OFFLINE_OTHER_REGION, _OFFLINE_OTHER_EXCLUDES)
+        self.assertEqual(regions["other"], OFFLINE_OTHER_REGION)
         # 人员榜补集排除集仍含 qudao（_collect_other_people 用，2026-10-17 修复）
-        from common.daily_robot.offline_summary import _OFFLINE_OTHER_EXCLUDES
         self.assertEqual(
             set(_OFFLINE_OTHER_EXCLUDES),
             {"hangzhou", "shaoxing", "vanke", "qudao"})
+
+    def test_other_person_clause_includes_offline_extra_swap(self):
+        """其他桶人名口径含 offline_extra 换列（板块名当人名、真人在部门列）。
+
+        2026-10-20 用户裁决：其他=画布 other 成员人名。无名册时永假
+        （fail-closed，不冒名顶替）。
+        """
+        from common.daily_robot.offline_summary import _other_where
+        where, params = _other_where(["余云涛", "谢坚钰"])
+        self.assertIn("`responsible_person` IN", where)
+        self.assertIn("`region` = 'offline_extra'", where)
+        self.assertIn("`department` IN", where)
+        self.assertEqual(params, ["余云涛", "谢坚钰", "余云涛", "谢坚钰"])
+        where_empty, params_empty = _other_where([])
+        self.assertEqual(where_empty, "1=0")
+        self.assertEqual(params_empty, [])
 
     def test_daily_markdown_contains_other_row(self):
         """「其他」桶成行（省外+总经办并入）；李树军不再单独成行。"""

@@ -97,16 +97,6 @@ def run_calendar_watch_task(conn, outbox, **kwargs):
     return run_watch(conn, outbox, **kwargs)
 
 
-def run_offline_weekly_task(conn, outbox, **kwargs):
-    from common.daily_robot.offline_summary import run_weekly_summary
-    return run_weekly_summary(conn, outbox, **kwargs)
-
-
-def run_offline_monthly_task(conn, outbox, **kwargs):
-    from common.daily_robot.offline_summary import run_monthly_summary
-    return run_monthly_summary(conn, outbox, **kwargs)
-
-
 def mart_collect_data(conn, *, region, business_date):
     from common.daily_robot.mart_leaderboard import mart_collect
     return mart_collect(conn, region=region, business_date=business_date)
@@ -612,24 +602,14 @@ def _handle_offline_summary(args, *, period):
         conn = connect_mart(settings)
         outbox = build_outbox(conn)
         dedupe_suffix = _force_suffix(args, now)
-        if period == "daily":
-            status = run_offline_daily_task(
-                conn, outbox, business_date=reference, now=now,
-                dedupe_suffix=dedupe_suffix,
-                # 线下整体 BI 看板链接（offline_all 的 leaderboardUrl，
-                # 2026-10-19 用户裁决附在日报末尾）
-                bi_url=cfg.leaderboard_url or None,
-            )
-        elif period == "weekly":
-            status = run_offline_weekly_task(
-                conn, outbox, reference=reference, now=now,
-                dedupe_suffix=dedupe_suffix,
-            )
-        else:
-            status = run_offline_monthly_task(
-                conn, outbox, reference=reference, now=now,
-                dedupe_suffix=dedupe_suffix,
-            )
+        # 周报/月报已取消（2026-10-20 用户裁决：只保留日报），period 恒为 daily
+        status = run_offline_daily_task(
+            conn, outbox, business_date=reference, now=now,
+            dedupe_suffix=dedupe_suffix,
+            # 线下整体 BI 看板链接（offline_all 的 leaderboardUrl，
+            # 2026-10-19 用户裁决附在日报末尾）
+            bi_url=cfg.leaderboard_url or None,
+        )
         conn.commit()
         print(
             f"service={service_id} region={region} kind=offline_{period} "
@@ -1044,8 +1024,6 @@ def main(argv=None):
         ("leaderboard", "Enqueue the daily leaderboard broadcast"),
         ("channel-daily", "Enqueue the ecom channel daily report (qudao composite)"),
         ("offline-daily", "Enqueue the offline-all daily summary (20:30)"),
-        ("offline-weekly", "Enqueue the offline-all weekly summary (Mon 09:30)"),
-        ("offline-monthly", "Enqueue the offline-all monthly summary (1st 10:00)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument(
@@ -1067,7 +1045,7 @@ def main(argv=None):
         )
         if name in (
             "remind", "check", "once",
-            "offline-daily", "offline-weekly", "offline-monthly",
+            "offline-daily",
         ):
             sub.add_argument(
                 "--force", action="store_true", default=False,
@@ -1240,8 +1218,8 @@ def main(argv=None):
     if args.command == "channel-daily":
         _handle_channel_daily(args)
         return
-    if args.command in ("offline-daily", "offline-weekly", "offline-monthly"):
-        _handle_offline_summary(args, period=args.command.split("-", 1)[1])
+    if args.command == "offline-daily":
+        _handle_offline_summary(args, period="daily")
         return
     if args.command == "channel-missing":
         _handle_channel_missing(args)

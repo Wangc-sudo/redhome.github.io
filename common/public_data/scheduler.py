@@ -200,8 +200,6 @@ _COMMAND_TABLE = {
         for r in _LEADERBOARD_REGIONS
     },
     "offline-daily-summary": _mart_cli_entry("offline-daily", region="offline_all"),
-    "offline-weekly-summary": _mart_cli_entry("offline-weekly", region="offline_all"),
-    "offline-monthly-summary": _mart_cli_entry("offline-monthly", region="offline_all"),
     # 月目标双管道（2026-10-09 裁决「结转+月度提醒」）：跨区域任务，
     # 不注入 ROBOT_REGION；remind 的投递 region 由各 scope 自身决定。
     "target-rollover": _mart_cli_entry("target-rollover"),
@@ -325,7 +323,7 @@ def build_argv(service_id, settings):
 #: 写页面文件无去重语义，同步/加工线幂等由数据层承载，均不在列。
 _FORCEABLE_MART_SUBCOMMANDS = frozenset({
     "remind", "check", "once",
-    "offline-daily", "offline-weekly", "offline-monthly",
+    "offline-daily",
     "channel-missing", "target-remind", "calendar-watch", "freshness-check",
 })
 
