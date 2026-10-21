@@ -105,6 +105,21 @@ def _hit_key(chunk):
             (chunk.get("content") or "")[:60])
 
 
+def _error_location(exc):
+    """异常 → ``文件名:行号``（只取代码位置，不含异常原文/参数/数据）。"""
+    try:
+        import traceback as tb_module
+
+        frames = tb_module.extract_tb(exc.__traceback__)
+        if not frames:
+            return "unknown"
+        frame = frames[-1]
+        filename = frame.filename.replace("\\", "/").rsplit("/", 1)[-1]
+        return f"{filename}:{frame.lineno}"
+    except Exception:
+        return "unknown"
+
+
 def parse_conversation_allowlist(raw):
     """env KB_QA_CONVERSATION_IDS：逗号分隔；空=不限制（应用只进客服群）。"""
     return tuple(item.strip() for item in (raw or "").split(",") if item.strip())
@@ -193,9 +208,11 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             conn.commit()
         except Exception as exc:
             conn.rollback()
-            # 非泄露约定允许记异常类型（不记原文/堆栈）——2026-10-21 一次
-            # 时段性故障因无类型信息无法回溯定位，补上。
-            self._log(f"kb qa: answer failed: {type(exc).__name__}")
+            # 非泄露约定：记异常类型与位置（文件:行号），不记异常原文/
+            # 数据/堆栈详情——2026-10-21 AttributeError 复现不出，需要位置。
+            location = _error_location(exc)
+            self._log(f"kb qa: answer failed: {type(exc).__name__}"
+                      f" at {location}")
             self._safe_reply(incoming, "查询出了点问题，请稍后再试。")
             return AckMessage.STATUS_OK, "OK"
 
