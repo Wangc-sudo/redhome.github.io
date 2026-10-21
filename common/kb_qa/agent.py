@@ -567,9 +567,16 @@ def run_agent(llm, question, *, executor, history=None,
                 "content": result,
             })
     # 轮数用尽：让 LLM 基于已有工具结果直接作答（不再给工具）。
-    # max_tokens 给足推理预算（reasoning_tokens 与答案共享预算）。
+    # 必须加明确禁令——该推理版模型对复杂问题会在 reasoning 里继续设计
+    # SQL 直到吃光 max_tokens（实测 reasoning_tokens=1024 全耗、content
+    # 零产出、finish_reason=length）；指令「禁止再生成 SQL」让推理短路。
+    messages.append({
+        "role": "user",
+        "content": "以上工具结果已足够。请直接基于这些结果用中文给出最终"
+                   "答案，不要再生成 SQL 或调用任何工具。",
+    })
     try:
-        final = llm.chat(messages, max_tokens=1024, temperature=0.3)
+        final = llm.chat(messages, max_tokens=2048, temperature=0.3)
     except LlmError:
         return None
     if has_dsml_residue(final):
