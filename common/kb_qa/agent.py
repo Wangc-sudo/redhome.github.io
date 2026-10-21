@@ -186,7 +186,8 @@ _SQL_TABLES = {
         "人员花名册：scope 区域, person_name 姓名, aliases 别名(json数组),"
         " channel 渠道, role 角色, enabled 是否启用",
     "dim_report_target":
-        "月度目标：scope 区域, person_name 姓名, year_month 月份(YYYY-MM),"
+        "月度目标：scope 区域, person_name 姓名, `year_month` 月份(YYYY-MM"
+        " 字符串，**是 MySQL 保留字，SQL 里必须带反引号**),"
         " monthly_target 目标(元)",
     "kb_products":
         "商品资料：code 商品编码, name 名称, brand 品牌, category 系列,"
@@ -464,6 +465,10 @@ class ToolExecutor:
             cursor.execute(f"SET SESSION MAX_EXECUTION_TIME={_SQL_TIMEOUT_MS}")
             cursor.execute(sql)
             rows = cursor.fetchall()
+        except Exception as exc:
+            # 执行/语法错误回喂给 LLM 自修正（如保留字 year_month 需反引号
+            # ——2026-10-21 实测 1064；吞掉时 LLM 只会看到「一直报错」）。
+            return {"error": f"SQL 执行失败: {str(exc)[:220]}——请修正后重试"}
         finally:
             cursor.close()
         truncated = [
