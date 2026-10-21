@@ -139,7 +139,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
 
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
-                 doc_search=None, vector_search=None):
+                 doc_search=None, vector_search=None, context_store=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -150,6 +150,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._llm = llm
         self._doc_search = doc_search or search_docs
         self._vector_search = vector_search
+        self._context_store = context_store
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -165,14 +166,28 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
 
         msg_id = callback_message_id(callback)
 
+        # 对话层（2026-10-21）：同人同群的最近几轮历史，供指代/追问理解；
+        # context_store 为 None 时行为与单轮完全一致。
+        ctx_key = None
+        history = None
+        if self._context_store is not None:
+            sender_id = (getattr(incoming, "sender_staff_id", None)
+                         or getattr(incoming, "sender_nick", "") or "")
+            ctx_key = self._context_store.key(conversation_id, sender_id)
+            history = self._context_store.history(ctx_key)
+
         conn = self._connection_factory()
         try:
             if not self._claim(conn, msg_id, incoming, text, conversation_id):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
-            reply, intent, matched = self._answer(conn, text)
+            reply, intent, matched = self._answer(conn, text, history=history)
             self._finish_audit(conn, msg_id, intent, matched,
                                "text" if reply else "none")
+            if ctx_key is not None:
+                self._context_store.record(
+                    ctx_key, question=text, answer=reply,
+                    category=intent, record_id=matched)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -224,8 +239,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     # 问答主流程（纯函数式，便于测试）
     # ------------------------------------------------------------------
 
-    def _answer(self, conn, text):
-        """返回 (reply, intent, matched_record_id)。reply=None 表示静默。"""
+    def _answer(self, conn, text, history=None):
+        """返回 (reply, intent, matched_record_id)。reply=None 表示静默。
+
+        history（对话层）：同人同群最近几轮问答，透传给 LLM 二次解析与
+        渲染；None 与单轮行为一致。
+        """
         if not text:
             return None, CHITCHAT, None
         intent = classify(text)
@@ -233,13 +252,13 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             rows = find_products(conn, intent.keyword)
             if not rows:
                 # 规则层关键词整词/分词全 miss：有 LLM 时二次解析换关键词重查一次。
-                rows = self._reparse_products(conn, text)
+                rows = self._reparse_products(conn, text, history)
             if not rows:
                 return render_not_found(intent.keyword), intent.category, None
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
                 # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
                 return render_clarify(intent.keyword, rows), intent.category, None
-            reply = self._render_products(text, rows, intent)
+            reply = self._render_products(text, rows, intent, history)
             return reply, intent.category, rows[0]["record_id"]
         if intent.category == PRODUCT_ASSET:
             rows = find_products(conn, intent.keyword)
@@ -257,14 +276,14 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 lines.append(f"- {field}：{len(items)} 个文件")
             return "\n".join(lines), intent.category, row["record_id"]
         if intent.category == DOC_QA:
-            return self._answer_docs(conn, text)
+            return self._answer_docs(conn, text, history)
         return HELP_TEXT, CHITCHAT, None
 
     # ------------------------------------------------------------------
     # P2：LLM 渲染与手册召回（全部 fail-open，异常只降级不外泄）
     # ------------------------------------------------------------------
 
-    def _render_products(self, question, rows, intent):
+    def _render_products(self, question, rows, intent, history=None):
         """命中行后的渲染：有 LLM 先试口语化答案，失败/无 LLM 降 P1 模板。
 
         ``_answer`` 已拦下「多款 PARAM 反问」，这里只可能是单款 PARAM 或
@@ -272,19 +291,25 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         """
         if self._llm is not None:
             try:
-                return render_product_answer(self._llm, question, rows)
+                return render_product_answer(self._llm, question, rows,
+                                             history=history)
             except LlmError:
                 self._log("kb qa: llm product render failed")
         if len(rows) > 1:
             return render_filter_answer(rows, intent.keyword)
         return render_param_answer(rows[0])
 
-    def _reparse_products(self, conn, question):
-        """检索全 miss 时的 LLM 二次解析：换关键词重查一次商品。"""
+    def _reparse_products(self, conn, question, history=None):
+        """检索全 miss 时的 LLM 二次解析：换关键词重查一次商品。
+
+        history 在场时 LLM 能把「价格呢/那款呢」按上文补全成完整商品名
+        （对话层主战场：指代追问的规则 miss → 历史改写 → 命中）。
+        """
         if self._llm is None:
             return []
         try:
-            _category, keyword = extract_query(self._llm, question)
+            _category, keyword = extract_query(self._llm, question,
+                                               history=history)
         except LlmError:
             self._log("kb qa: llm query extract failed")
             return []
@@ -293,7 +318,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return []
         return find_products(conn, keyword)
 
-    def _answer_docs(self, conn, question):
+    def _answer_docs(self, conn, question, history=None):
         """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。
 
         召回两路并行：BM25（kb_doc_chunks）打底 + 向量（kb_rag_v1，语义
@@ -310,7 +335,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return _DOC_FALLBACK, DOC_QA, None
         if self._llm is not None:
             try:
-                return render_doc_answer(self._llm, question, chunks), DOC_QA, None
+                return render_doc_answer(self._llm, question, chunks,
+                                         history=history), DOC_QA, None
             except LlmError:
                 self._log("kb qa: llm doc render failed")
         return _render_doc_excerpt(chunks), DOC_QA, None
@@ -384,6 +410,10 @@ def main(argv=None):
     vector_search = rag_docs.from_environment()
     if vector_search is None:
         print("kb qa: vector recall not configured, running BM25 only")
+    # 对话层（2026-10-21）：进程内会话上下文（同人同群最近 4 轮 / TTL
+    # 10 分钟），重启丢上下文可接受；不建表。
+    from common.kb_qa.context import ConversationStore
+
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
@@ -391,6 +421,7 @@ def main(argv=None):
         robot_code=app_key,
         llm=llm,
         vector_search=vector_search,
+        context_store=ConversationStore(),
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()
