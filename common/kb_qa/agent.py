@@ -564,8 +564,9 @@ def run_agent(llm, question, *, executor, history=None,
                 "content": result,
             })
     # 轮数用尽：让 LLM 基于已有工具结果直接作答（不再给工具）。
+    # max_tokens 给足推理预算（reasoning_tokens 与答案共享预算）。
     try:
-        final = llm.chat(messages, max_tokens=500, temperature=0.3)
+        final = llm.chat(messages, max_tokens=1024, temperature=0.3)
     except LlmError:
         return None
     if has_dsml_residue(final):

@@ -62,12 +62,16 @@ class LlmClient:
         except Exception as exc:
             raise LlmError(str(exc)[:120]) from None
 
-    def chat_with_tools(self, messages, *, tools, max_tokens=600,
+    def chat_with_tools(self, messages, *, tools, max_tokens=2048,
                         temperature=0.3):
         """function calling（2026-10-21 实测 deepseek-v4.1-flash-1017 支持）。
 
         返回 {"content": str|None, "tool_calls": [...]}；失败抛 LlmError。
         tool_calls 原样透传（id/type/function{name,arguments}）。
+
+        max_tokens 默认 2048：该模型是推理版，reasoning_tokens 与答案共享
+        max_tokens 预算——600 曾被 reasoning 吃光导致 content 空、agent
+        静默无答（2026-10-21「各区域目标完成排名」实测）。
         """
         payload = {
             "model": self._model,
@@ -146,7 +150,7 @@ def extract_query(client, question, history=None):
           "content": (_QUERY_PROMPT
                       .replace("{{history}}", history_text)
                       .replace("{{question}}", question))}],
-        max_tokens=128, temperature=0.1,
+        max_tokens=512, temperature=0.1,
     )
     start = raw.find("{")
     end = raw.rfind("}")
