@@ -80,3 +80,21 @@ def kb_ddl_statements():
         _KB_DOC_CHUNKS_DDL,
         _KB_QA_AUDIT_DDL,
     )
+
+
+# 反馈闭环（2026-10-21）：kb_qa_audit 扩观测列——此前只记 intent/matched/
+# reply_kind，badcase 无法回溯（答了什么、走了哪条召回、调了什么工具、
+# 多快、成没成全是黑盒）。独立版本而非改写 v1：v1 校验和已入跟踪表，
+# 改动其文本会被 live_migrations 判漂移拒绝启动；存量库只跑本 ALTER。
+_KB_QA_AUDIT_V2_DDL = """ALTER TABLE `kb_qa_audit`
+  ADD COLUMN `recall_source` varchar(32) NULL COMMENT '召回通路：products/bm25/vector/mixed/agent/none' AFTER `reply_kind`,
+  ADD COLUMN `tool_used` varchar(255) NULL COMMENT 'agent 工具调用序列（逗号分隔）',
+  ADD COLUMN `agent_rounds` tinyint NULL COMMENT 'agent LLM 调用轮数',
+  ADD COLUMN `latency_ms` int NULL COMMENT '问答主流程耗时（毫秒，不含网络发送）',
+  ADD COLUMN `failed` tinyint NOT NULL DEFAULT 0 COMMENT '1=处理异常（走了兜底话术）',
+  ADD COLUMN `answer_excerpt` varchar(500) NULL COMMENT '答复前 500 字（badcase 复盘用）'"""
+
+
+def kb_audit_v2_ddl_statements():
+    """mart-ops-kb-qa-audit-v2：kb_qa_audit 观测列扩列（反馈闭环）。"""
+    return (_KB_QA_AUDIT_V2_DDL,)

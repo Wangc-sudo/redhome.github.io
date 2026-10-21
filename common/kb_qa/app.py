@@ -20,6 +20,7 @@ P2 fail-open 铁律：LLM 未配置/不可达/超时/返回畸形时全部降级
 
 import argparse
 import os
+import time
 from datetime import datetime
 
 import dingtalk_stream
@@ -196,14 +197,19 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             history = self._context_store.history(ctx_key)
 
         conn = self._connection_factory()
+        started = time.monotonic()
         try:
             if not self._claim(conn, msg_id, incoming, text, conversation_id):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
+            meta = {}
             reply, intent, matched = self._answer(
-                conn, text, history=history, conversation_id=conversation_id)
+                conn, text, history=history, conversation_id=conversation_id,
+                meta=meta)
+            latency_ms = int((time.monotonic() - started) * 1000)
             self._finish_audit(conn, msg_id, intent, matched,
-                               "text" if reply else "none")
+                               "text" if reply else "none",
+                               meta=meta, reply=reply, latency_ms=latency_ms)
             if ctx_key is not None:
                 self._context_store.record(
                     ctx_key, question=text, answer=reply,
@@ -216,6 +222,9 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             location = _error_location(exc)
             self._log(f"kb qa: answer failed: {type(exc).__name__}"
                       f" at {location}")
+            # 反馈闭环：占位审计行已随 rollback 回滚，用新连接补一行
+            # failed=1 的失败流水（best-effort，再失败不影响兜底回复）。
+            self._mark_failed(msg_id, incoming, text, conversation_id)
             self._safe_reply(incoming, "查询出了点问题，请稍后再试。")
             return AckMessage.STATUS_OK, "OK"
 
@@ -246,29 +255,79 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         finally:
             cursor.close()
 
-    def _finish_audit(self, conn, msg_id, intent, matched, reply_kind):
+    def _finish_audit(self, conn, msg_id, intent, matched, reply_kind,
+                      meta=None, reply=None, latency_ms=None):
         if not msg_id:
             return
+        meta = meta or {}
+        tools = meta.get("tools") or []
         cursor = conn.cursor()
         try:
             cursor.execute(
                 "UPDATE `kb_qa_audit` SET `intent`=%s, `matched_record_id`=%s,"
-                " `reply_kind`=%s WHERE `msg_id`=%s",
-                (intent, matched, reply_kind, msg_id),
+                " `reply_kind`=%s, `recall_source`=%s, `tool_used`=%s,"
+                " `agent_rounds`=%s, `latency_ms`=%s, `answer_excerpt`=%s"
+                " WHERE `msg_id`=%s",
+                (
+                    intent, matched, reply_kind,
+                    meta.get("recall_source"),
+                    ",".join(tools) or None,
+                    meta.get("rounds"),
+                    latency_ms,
+                    (reply or "")[:500] or None,
+                    msg_id,
+                ),
             )
         finally:
             cursor.close()
+
+    def _mark_failed(self, msg_id, incoming, text, conversation_id):
+        """处理异常后的失败流水补记（新连接，best-effort 不抛）。
+
+        占位审计行已随主事务 rollback 消失；这里独立补一行 failed=1，
+        让「answer failed」在 audit 表可统计、可聚类（反馈闭环）。
+        """
+        if not msg_id:
+            return
+        try:
+            conn = self._connection_factory()
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "INSERT INTO `kb_qa_audit`"
+                        " (`msg_id`, `conversation_id`, `sender_uid`,"
+                        "  `sender_name`, `question`, `failed`, `created_at`)"
+                        " VALUES (%s,%s,%s,%s,%s,1,%s)"
+                        " ON DUPLICATE KEY UPDATE `failed`=1",
+                        (
+                            msg_id, conversation_id,
+                            getattr(incoming, "sender_staff_id", None),
+                            getattr(incoming, "sender_nick", None),
+                            text, self._now().strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    )
+                finally:
+                    cursor.close()
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            self._log("kb qa: failure audit skipped")
 
     # ------------------------------------------------------------------
     # 问答主流程（纯函数式，便于测试）
     # ------------------------------------------------------------------
 
-    def _answer(self, conn, text, history=None, conversation_id=None):
+    def _answer(self, conn, text, history=None, conversation_id=None,
+                meta=None):
         """返回 (reply, intent, matched_record_id)。reply=None 表示静默。
 
         history（对话层）：同人同群最近几轮问答，透传给 LLM 二次解析与
         渲染；None 与单轮行为一致。
         conversation_id：附件直发需要目标群；None 时 ASSET 分支只列清单。
+        meta（反馈闭环埋点）：传入 dict 时回填 recall_source/tools/rounds，
+        供审计落列；不传零副作用。
         """
         if not text:
             return None, CHITCHAT, None
@@ -278,23 +337,29 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if not rows:
                 # 规则层关键词整词/分词全 miss：有 LLM 时二次解析换关键词重查一次。
                 rows = self._reparse_products(conn, text, history)
+                if rows and meta is not None:
+                    meta["recall_source"] = "products_reparse"
             if not rows:
                 # 商品全 miss：可能是业务数据问句（「今天杭州出了多少货」
                 # 会被兜底成疑似商品名直查）——给 agent 一次机会，它查
                 # 不到再由 LLM 如实说，比干巴巴的「未找到」更有用。
-                agent_answer = self._try_agent(conn, text, history)
+                agent_answer = self._try_agent(conn, text, history, meta=meta)
                 if agent_answer:
                     return agent_answer, "agent", None
                 return render_not_found(intent.keyword), intent.category, None
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
                 # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
                 return render_clarify(intent.keyword, rows), intent.category, None
+            if meta is not None and "recall_source" not in meta:
+                meta["recall_source"] = "products"
             reply = self._render_products(text, rows, intent, history)
             return reply, intent.category, rows[0]["record_id"]
         if intent.category == PRODUCT_ASSET:
             rows = find_products(conn, intent.keyword)
             if not rows:
                 return render_not_found(intent.keyword), intent.category, None
+            if meta is not None:
+                meta["recall_source"] = "products"
             # 精度（2026-10-21）：商品相关度与附件字段名联合选择——
             # 「习酒窖藏1988 质检报告」曾命中红习酱的「礼袋」。
             row, field_name, items = pick_asset(rows, text)
@@ -324,25 +389,30 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             lines.append(f"- {field_name}：{len(items)} 个文件")
             return "\n".join(lines), intent.category, row["record_id"]
         if intent.category == DOC_QA:
-            return self._answer_docs(conn, text, history)
+            return self._answer_docs(conn, text, history, meta=meta)
         # 规则未命中（含业务数据问句「今天杭州出了多少货」这类规则接不住
         # 的）→ 工具调用 agent：LLM 自主决定查商品/查文档/查业务数据。
         # 闲聊精确词（你好/在吗）直接 HELP，不花 agent 的 LLM 调用。
         if intent.category == CHITCHAT and intent.reason == "未命中任何规则":
-            agent_answer = self._try_agent(conn, text, history)
+            agent_answer = self._try_agent(conn, text, history, meta=meta)
             if agent_answer:
                 return agent_answer, "agent", None
         return HELP_TEXT, CHITCHAT, None
 
-    def _try_agent(self, conn, text, history):
+    def _try_agent(self, conn, text, history, meta=None):
         """agent loop 入口（fail-open：异常/无答案返回 None 由调用方降级）。"""
         if self._agent_runner is None:
             return None
         try:
-            return self._agent_runner(conn, text, history)
+            answer = self._agent_runner(conn, text, history, meta=meta)
         except Exception:
             self._log("kb qa: agent failed")
             return None
+        # 只有 agent 真正给出答案才记 recall_source=agent（降级走兜底
+        # 话术的行不应虚标召回通路，否则 badcase 聚类口径失真）。
+        if answer and meta is not None:
+            meta.setdefault("recall_source", "agent")
+        return answer
 
     # ------------------------------------------------------------------
     # P2：LLM 渲染与手册召回（全部 fail-open，异常只降级不外泄）
@@ -383,19 +453,34 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return []
         return find_products(conn, keyword)
 
-    def _answer_docs(self, conn, question, history=None):
+    def _answer_docs(self, conn, question, history=None, meta=None):
         """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。
 
         召回两路并行：BM25（kb_doc_chunks）打底 + 向量（kb_rag_v1，语义
         召回，问法不同也能命中）合并去重。向量通路 fail-open——缺配/异常
         静默降级纯 BM25，绝不把异常甩给客服。
+        meta 埋点：recall_source = mixed/bm25/vector/none（按实际贡献
+        命中的通路；向量未配置或异常不计入）。
         """
         chunks = self._doc_search(conn, question, k=3)
+        bm25_hit = bool(chunks)
+        vector_hit = False
         if self._vector_search is not None:
             try:
-                chunks = _merge_doc_hits(chunks, self._vector_search(question))
+                vector_hits = self._vector_search(question)
+                vector_hit = bool(vector_hits)
+                chunks = _merge_doc_hits(chunks, vector_hits)
             except Exception:
                 self._log("kb qa: vector recall failed")
+        if meta is not None:
+            if bm25_hit and vector_hit:
+                meta["recall_source"] = "mixed"
+            elif vector_hit:
+                meta["recall_source"] = "vector"
+            elif bm25_hit:
+                meta["recall_source"] = "bm25"
+            else:
+                meta["recall_source"] = "none"
         if not chunks:
             return _DOC_FALLBACK, DOC_QA, None
         if self._llm is not None:
@@ -486,10 +571,11 @@ def main(argv=None):
     if llm is not None:
         from common.kb_qa.agent import ToolExecutor, run_agent
 
-        def agent_runner(conn, text, history):
+        def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
                 conn, doc_search=search_docs, vector_search=vector_search)
-            return run_agent(llm, text, executor=executor, history=history)
+            return run_agent(llm, text, executor=executor, history=history,
+                             meta=meta)
     else:
         print("kb qa: agent disabled (no LLM)")
 
