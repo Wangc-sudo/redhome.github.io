@@ -257,24 +257,8 @@ offline-daily-summary:
   schedule: "30 20 * * *"
   reads: [mart_ops]
   description: "offline_all daily aggregation summary (scopes + dod/wow + mtd)"
-offline-weekly-summary:
-  kind: business
-  category: 播报
-  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
-  # git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "30 9 * * 1"
-  reads: [mart_ops]
-  description: "offline_all weekly summary (last week totals + wow + ranking)"
-offline-monthly-summary:
-  kind: business
-  category: 播报
-  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
-  # git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "0 10 1 * *"
-  reads: [mart_ops]
-  description: "offline_all monthly summary (prev month totals + mom + rate ranking)"
+# 周报/月报已取消（2026-10-20 用户裁决：线下整体只保留日报），
+# offline-weekly-summary / offline-monthly-summary 条目删除。
 # 月目标双管道（2026-10-09 运维裁决「结转+月度提醒」）：dim_report_target
 # 按月键控、翻月无行会静默走 Nacos 旧值兜底——1 日结转 + 28 日提醒核对。
 target-remind:

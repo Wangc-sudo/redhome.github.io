@@ -42,8 +42,9 @@ _OFFLINE_OTHER_EXCLUDES = ("hangzhou", "shaoxing", "vanke", "qudao")
 AGG_SCOPES = (
     ("hangzhou", "杭州", "hangzhou", None),
     ("shaoxing", "绍兴", "shaoxing", None),
-    # 2026-10-20：其他=显式 region='other'（画布权威源），不再用补集
-    ("other", "其他", "other", None),
+    # 2026-10-20：其他=画布 other 成员人名口径（OFFLINE_OTHER_REGION 标记，
+    # 取数走 _fetch_other_*，含 offline_extra 换列），不再用补集
+    ("other", "其他", OFFLINE_OTHER_REGION, None),
 )
 
 TOTAL_SCOPE_KEY = "offline_total"
@@ -53,12 +54,8 @@ TOTAL_LABEL = "线下整体"
 DEPT_TABLE_REGIONS = ("hangzhou", "shaoxing")
 
 DAILY_KIND = "offline_daily"
-WEEKLY_KIND = "offline_weekly"
-MONTHLY_KIND = "offline_monthly"
 
 DAILY_TITLE = "线下整体日报"
-WEEKLY_TITLE = "线下整体周报"
-MONTHLY_TITLE = "线下整体月报"
 
 _WEEKDAYS = "一二三四五六日"
 
@@ -161,6 +158,63 @@ def fetch_scope_month_target(connection, *, region, anchor, year, month):
     params = [*region_params, first, last, *clause_params]
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    values = [float(row["t"]) for row in rows if row["t"] is not None]
+    return sum(values) if values else None
+
+
+def _other_person_names(connection):
+    """画布 other 区域有效成员姓名（其他区域权威源，基成员 ∘ 归位覆盖）。
+
+    2026-10-20 用户裁决：其他区域=画布 other 区域的人（余云涛/李树军/谢坚钰），
+    不再用「排除杭绍后剩下的」补集。
+    """
+    dept_map = fetch_member_dept_map(connection, ["other"])
+    return [name for (region, name), _dept in dept_map.items()]
+
+
+def _other_where(names):
+    """人名口径 WHERE 片段（含 offline_extra 换列：其 responsible_person 是
+    板块名、真人在 department）。无名册 → 永假（fail-closed，不冒名）。"""
+    if not names:
+        return "1=0", []
+    ph = ", ".join(["%s"] * len(names))
+    return (f"(`responsible_person` IN ({ph}) "
+            f"OR (`region` = 'offline_extra' AND `department` IN ({ph})))",
+            [*names, *names])
+
+
+def _fetch_other_daily_facts(connection, *, start, end):
+    """其他桶日销 ``{date: amount}``：画布 other 成员人名口径。"""
+    where, persons = _other_where(_other_person_names(connection))
+    sql = (
+        "SELECT `business_date` AS `d`, SUM(`sales_amount`) AS `s` "
+        "FROM `fact_daily_report_offline` "
+        f"WHERE {where} AND `sales_amount` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
+        "AND `business_date` BETWEEN %s AND %s GROUP BY `business_date`"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, [*persons, start, end])
+        rows = cursor.fetchall()
+    return {row["d"]: float(row["s"] or 0) for row in rows}
+
+
+def _fetch_other_month_target(connection, *, year, month):
+    """其他桶当月目标：画布 other 成员人名口径（按人 MAX 再求和；offline_extra
+    换列——真人取 department）。无 → None。"""
+    first, last = month_days(year, month)[0], month_days(year, month)[-1]
+    where, persons = _other_where(_other_person_names(connection))
+    sql = (
+        "SELECT (CASE WHEN `region` = 'offline_extra' THEN `department` "
+        "ELSE `responsible_person` END) AS `p`, MAX(`monthly_target`) AS `t` "
+        "FROM `fact_daily_report_offline` "
+        f"WHERE {where} AND `monthly_target` IS NOT NULL "
+        "AND `responsible_person` NOT LIKE '%%合计%%' "
+        "AND `business_date` BETWEEN %s AND %s GROUP BY `p`"
+    )
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(sql, [*persons, first, last])
         rows = cursor.fetchall()
     values = [float(row["t"]) for row in rows if row["t"] is not None]
     return sum(values) if values else None
@@ -353,12 +407,6 @@ def _diff_rate(current, base):
     return diff, diff / abs(base)
 
 
-def previous_week(reference):
-    """*reference* 所在周的上一周（周一, 周日）。"""
-    monday = reference - timedelta(days=reference.weekday() + 7)
-    return monday, monday + timedelta(days=6)
-
-
 def previous_month(reference):
     """*reference* 所在月的上一月（1 日, 末日）。"""
     last = reference.replace(day=1) - timedelta(days=1)
@@ -423,37 +471,6 @@ def compute_daily_metrics(scope, label, *, facts, business_date, month_target,
         prev_month_completed=prev_completed,
         prev_month_target=prev_month_target,
         prev_month_rate=achievement_rate(prev_completed, prev_month_target),
-    )
-
-
-def compute_weekly_metrics(scope, label, *, facts, week_start, week_end):
-    """周报指标：周合计 + 周环比（对前一周同区间）。"""
-    week_total = _sum_window(facts, week_start, week_end)
-    prev_start = week_start - timedelta(days=7)
-    prev_end = week_end - timedelta(days=7)
-    prev_total = _sum_window(facts, prev_start, prev_end)
-    wow_amount, wow_rate = _diff_rate(week_total, prev_total)
-    return ScopeMetrics(
-        scope=scope, label=label, sales=week_total,
-        wow_amount=wow_amount, wow_rate=wow_rate,
-    )
-
-
-def compute_monthly_metrics(scope, label, *, facts, month_first, month_last, month_target):
-    """月报指标：月合计 + 月环比（对上月）+ 达成率。"""
-    month_total = _sum_window(facts, month_first, month_last)
-    prev_first, prev_last = previous_month(month_first)
-    prev_total = _sum_window(facts, prev_first, prev_last)
-    mom_amount, mom_rate = _diff_rate(month_total, prev_total)
-    return ScopeMetrics(
-        scope=scope,
-        label=label,
-        sales=month_total,
-        mom_amount=mom_amount,
-        mom_rate=mom_rate,
-        month_completed=month_total,
-        month_target=month_target,
-        month_rate=achievement_rate(month_total, month_target),
     )
 
 
@@ -548,68 +565,24 @@ def build_daily_markdown(*, business_date, rows, total, dept_rows=None,
     return "\n".join(lines)
 
 
-def build_weekly_markdown(*, week_start, week_end, rows, total):
-    def _label(d):
-        return f"{d.month}月{d.day}日（周{_WEEKDAYS[d.weekday()]}）"
-
-    ranked = sorted(rows, key=lambda m: -m.sales)
-    lines = [
-        f"【线下整体周报】{_label(week_start)} ~ {_label(week_end)}",
-        f"全周合计：**{_fmt_wan(total.sales)} 元** · 周环比 {_signed_pct(total.wow_rate)}",
-        "",
-        "| 排名 | 板块 | 周合计 | 周环比 |",
-        "|---|---|---|---|",
-    ]
-    for rank, m in enumerate(ranked, 1):
-        lines.append(
-            f"| {rank} | {m.label} | {_fmt_wan(m.sales)} | {_signed_pct(m.wow_rate)} |"
-        )
-    lines.append(
-        f"|  | **{total.label}** | **{_fmt_wan(total.sales)}** "
-        f"| {_signed_pct(total.wow_rate)} |"
-    )
-    return "\n".join(lines)
-
-
-def build_monthly_markdown(*, month_first, rows, total):
-    ranked = sorted(
-        rows,
-        key=lambda m: (
-            -(m.month_rate if m.month_rate is not None else -1),
-            -m.sales,
-        ),
-    )
-    lines = [
-        f"【线下整体月报】{month_first.year}年{month_first.month}月",
-        f"全月合计：**{_fmt_wan(total.sales)} 元** · 月环比 {_signed_pct(total.mom_rate)}",
-        "",
-        "| 排名 | 板块 | 月合计 | 月目标 | 达成率 | 月环比 |",
-        "|---|---|---|---|---|---|",
-    ]
-    for rank, m in enumerate(ranked, 1):
-        target_txt = _fmt_wan(m.month_target) if m.month_target else "--"
-        rate_txt = _fmt_pct(m.month_rate) if m.month_rate is not None else "--"
-        lines.append(
-            f"| {rank} | {m.label} | {_fmt_wan(m.sales)} | {target_txt} "
-            f"| {rate_txt} | {_signed_pct(m.mom_rate)} |"
-        )
-    lines.append(
-        f"|  | **{total.label}** | **{_fmt_wan(total.sales)}** "
-        f"| {_fmt_wan(total.month_target) if total.month_target else '--'} "
-        f"| {_fmt_pct(total.month_rate) if total.month_rate is not None else '--'} "
-        f"| {_signed_pct(total.mom_rate)} |"
-    )
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # 任务（connection + outbox 注入，幂等）
 # ---------------------------------------------------------------------------
 
 def _fetch_window(connection, *, region, anchor, start, end):
+    if region == OFFLINE_OTHER_REGION:
+        return _fetch_other_daily_facts(connection, start=start, end=end)
     return fetch_scope_daily_facts(
         connection, region=region, anchor=anchor, start=start, end=end
     )
+
+
+def _scope_month_target(connection, *, region, anchor, year, month):
+    """板块月目标：其他桶走人名口径，其余走 region 过滤。"""
+    if region == OFFLINE_OTHER_REGION:
+        return _fetch_other_month_target(connection, year=year, month=month)
+    return fetch_scope_month_target(
+        connection, region=region, anchor=anchor, year=year, month=month)
 
 
 def run_daily_summary(connection, outbox, *, business_date, now,
@@ -630,11 +603,11 @@ def run_daily_summary(connection, outbox, *, business_date, now,
             start=prev_first, end=business_date,
         )
         facts_by_scope[scope] = facts
-        targets[scope] = fetch_scope_month_target(
+        targets[scope] = _scope_month_target(
             connection, region=region, anchor=anchor,
             year=business_date.year, month=business_date.month,
         )
-        prev_targets[scope] = fetch_scope_month_target(
+        prev_targets[scope] = _scope_month_target(
             connection, region=region, anchor=anchor,
             year=prev_year, month=prev_month,
         )
@@ -713,96 +686,6 @@ def run_daily_summary(connection, outbox, *, business_date, now,
         kind=DAILY_KIND,
         business_date=business_date,
         title=DAILY_TITLE,
-        body_md=body,
-        created_at=now,
-        dedupe_suffix=dedupe_suffix,
-    )
-    return "enqueued" if enqueued else "already_sent"
-
-
-def run_weekly_summary(connection, outbox, *, reference, now,
-                       dedupe_suffix=None):
-    """每周一 09:30：上周周报（周合计/周环比/板块排名）→ outbox。
-
-    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）强制重发。
-    """
-    week_start, week_end = previous_week(reference)
-    fetch_start = week_start - timedelta(days=7)
-    facts_by_scope = {}
-    for scope, label, region, anchor in AGG_SCOPES:
-        facts_by_scope[scope] = _fetch_window(
-            connection, region=region, anchor=anchor,
-            start=fetch_start, end=week_end,
-        )
-
-    rows = [
-        compute_weekly_metrics(
-            scope, label, facts=facts_by_scope[scope],
-            week_start=week_start, week_end=week_end,
-        )
-        for scope, label, _, _ in AGG_SCOPES
-    ]
-    total = compute_weekly_metrics(
-        TOTAL_SCOPE_KEY, TOTAL_LABEL,
-        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
-        week_start=week_start, week_end=week_end,
-    )
-    body = build_weekly_markdown(
-        week_start=week_start, week_end=week_end, rows=rows, total=total,
-    )
-    enqueued = outbox.enqueue(
-        region="offline_all",
-        kind=WEEKLY_KIND,
-        business_date=week_start,
-        title=WEEKLY_TITLE,
-        body_md=body,
-        created_at=now,
-        dedupe_suffix=dedupe_suffix,
-    )
-    return "enqueued" if enqueued else "already_sent"
-
-
-def run_monthly_summary(connection, outbox, *, reference, now,
-                        dedupe_suffix=None):
-    """每月 1 日 10:00：上月月报（月合计/月环比/达成率榜）→ outbox。
-
-    ``dedupe_suffix``（run-once 手动触发 `--force` 传入）强制重发。
-    """
-    month_first, month_last = previous_month(reference)
-    prev_first, _ = previous_month(month_first)
-    facts_by_scope = {}
-    targets = {}
-    for scope, label, region, anchor in AGG_SCOPES:
-        facts_by_scope[scope] = _fetch_window(
-            connection, region=region, anchor=anchor,
-            start=prev_first, end=month_last,
-        )
-        targets[scope] = fetch_scope_month_target(
-            connection, region=region, anchor=anchor,
-            year=month_first.year, month=month_first.month,
-        )
-
-    rows = [
-        compute_monthly_metrics(
-            scope, label,
-            facts=facts_by_scope[scope],
-            month_first=month_first, month_last=month_last,
-            month_target=targets[scope],
-        )
-        for scope, label, _, _ in AGG_SCOPES
-    ]
-    total = compute_monthly_metrics(
-        TOTAL_SCOPE_KEY, TOTAL_LABEL,
-        facts=merge_facts([facts_by_scope[s] for s, _, _, _ in AGG_SCOPES]),
-        month_first=month_first, month_last=month_last,
-        month_target=merge_targets(targets.values()),
-    )
-    body = build_monthly_markdown(month_first=month_first, rows=rows, total=total)
-    enqueued = outbox.enqueue(
-        region="offline_all",
-        kind=MONTHLY_KIND,
-        business_date=month_first,
-        title=MONTHLY_TITLE,
         body_md=body,
         created_at=now,
         dedupe_suffix=dedupe_suffix,
@@ -985,12 +868,12 @@ def build_offline_panels(connection, *, business_date):
     facts_by_scope = {}
     targets = {}
     for scope, label, region, anchor in AGG_SCOPES:
-        facts = fetch_scope_daily_facts(
+        facts = _fetch_window(
             connection, region=region, anchor=anchor,
             start=prev_first, end=data_date,
         )
         facts_by_scope[scope] = facts
-        targets[scope] = fetch_scope_month_target(
+        targets[scope] = _scope_month_target(
             connection, region=region, anchor=anchor,
             year=data_date.year, month=data_date.month,
         )

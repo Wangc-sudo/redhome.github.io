@@ -501,8 +501,6 @@ _SERVICE_LABELS = {
     "channel-daily-qudao": "渠道日报播报（已并入渠道榜单页，2026-09-23 停单独播报）",
     "pages-qudao-t1": "渠道榜单页 T+1 重算",
     "offline-daily-summary": "线下整体每日汇总（板块 + 日环比 + 月累计）",
-    "offline-weekly-summary": "线下整体每周汇总（上周总量 + 周环比 + 排名）",
-    "offline-monthly-summary": "线下整体每月汇总（上月总量 + 月环比 + 达成率排名）",
     "target-remind": "月目标核对提醒（每月 28 日 → 有目标的区域群，附名册页入口）",
     "target-rollover": "月目标自动结转（每月 1 日把上月目标幂等结转到当月，人工已录入不覆盖）",
     "calendar-watch": "播报日历覆盖看门（每月 25 日查当月/下月日历，零行缺口 → 线下整体群告警）",
@@ -671,8 +669,6 @@ _SERVICE_NAMES = {
     "channel-daily-qudao": "渠道日报播报",
     "pages-qudao-t1": "渠道榜单 T+1 重算",
     "offline-daily-summary": "线下每日汇总",
-    "offline-weekly-summary": "线下每周汇总",
-    "offline-monthly-summary": "线下每月汇总",
     "target-remind": "月目标核对提醒",
     "target-rollover": "月目标自动结转",
     "dingtalk-gateway": "钉钉网关",
@@ -738,8 +734,6 @@ _SERVICE_REGIONS = {
     "channel-missing-check": "qudao",
     "pages-qudao-t1": "qudao",
     "offline-daily-summary": "offline_all",
-    "offline-weekly-summary": "offline_all",
-    "offline-monthly-summary": "offline_all",
 }
 
 def _category_label(config):
