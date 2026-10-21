@@ -44,6 +44,7 @@ from common.metrics.daily_report import (
     unfilled_members,
 )
 from common.public_data import report_roster
+from common.public_data.org_proxy_grant import fetch_proxy_targets, is_proxy_for
 
 
 def _monthly_target_for(connection, region_cfg, table_name, business_date):
@@ -558,8 +559,12 @@ def _aux_stores(connection, *, region_cfg, business_date, workdays,
 
 
 def _record_value(connection, *, region_cfg, member, table_name,
-                  business_date, value, now, workdays, key_suffix=None):
-    """单格写入 + 进度（/补签 复用）。返回 ``(数据格, 金额, 旧值文案|None, progress)``。"""
+                  business_date, value, now, workdays, key_suffix=None,
+                  filled_by=None):
+    """单格写入 + 进度（/补签 复用）。返回 ``(数据格, 金额, 旧值文案|None, progress)``。
+
+    *filled_by*：代填留痕——自报=None，代填/补签=代填人 user_id。
+    """
     old_value = _write_report(
         connection,
         region=region_cfg.region,
@@ -571,6 +576,7 @@ def _record_value(connection, *, region_cfg, member, table_name,
         value=value,
         now=now,
         key_suffix=key_suffix,
+        filled_by=filled_by,
     )
     progress = _progress(
         connection, region=region_cfg.region, table_name=table_name,
@@ -590,10 +596,13 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
 
     署名为目标成员（业务键与本人自报一致，重报走覆盖）；回执注明代录人。
     """
-    if not _is_admin(connection, sender_uid):
+    is_admin = _is_admin(connection, sender_uid)
+    proxy_regions = _proxy_regions(connection, sender_uid)
+    if not is_admin and not proxy_regions:
         return IntakeOutcome(
             "not_member",
-            "⛔ /补签 仅限管理人使用（需在 bi_authz_grant 持 admin 授权）。",
+            "⛔ /补签 仅限管理人或代填授权人"
+            "（bi_authz admin / 闭环面板代填授权）。",
             region=region_cfg.region, name=name,
         )
     if match is None:
@@ -613,7 +622,11 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             region=region_cfg.region, name=name,
         )
     target_name = match.group("name")
-    members = fetch_region_members(connection, region=region_cfg.region)
+    # 找人：报数群区域 + 代填授权区域（跨区域，如 offline_all 群代填 other 的人）
+    search_regions = list(dict.fromkeys([region_cfg.region, *proxy_regions]))
+    members = []
+    for _r in search_regions:
+        members.extend(fetch_region_members(connection, region=_r))
     targets = [m for m in members if m["name"] == target_name]
     if len(targets) != 1:
         return IntakeOutcome(
@@ -622,6 +635,15 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             region=region_cfg.region, name=name,
         )
     target = targets[0]
+    # 非 admin 代填授权人：只能代填其授权区域内的人
+    if not is_admin and not is_proxy_for(
+            connection, sender_uid,
+            region=target.get("region"), person=target_name):
+        return IntakeOutcome(
+            "not_member",
+            f"⛔ 你未被授权代填「{target_name}」。",
+            region=region_cfg.region, name=name,
+        )
     workdays = fetch_workdays(
         connection, year=business_date.year, month=business_date.month
     )
@@ -642,6 +664,7 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
                 connection, region_cfg=region_cfg, member=target,
                 table_name=f"{store}·{metric}", business_date=business_date,
                 value=value, now=now, workdays=workdays, key_suffix=metric,
+                filled_by=sender_uid,
             ))
     else:
         value = parse_report_amount(body)
@@ -655,6 +678,7 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             connection, region_cfg=region_cfg, member=target,
             table_name=table_name, business_date=business_date,
             value=value, now=now, workdays=workdays,
+            filled_by=sender_uid,
         ))
     lines = [
         f"✅ 已代录（管理人 {name} 为 {target_name} 补签 "
@@ -917,12 +941,28 @@ def _is_admin(connection, user_id):
     return row is not None
 
 
+def _proxy_regions(connection, user_id):
+    """该用户的代填授权区域集合（``dim_org_proxy_grant``，启用）。
+
+    2026-10-21 代填授权：代填人（非 admin）被授权替这些区域的人填数，
+    找人范围据此跨区扩展。表未就绪/抖动 fail-open（返回 []，不加范围）。
+    """
+    try:
+        return [t["target_region"]
+                for t in fetch_proxy_targets(connection, user_id)]
+    except Exception:
+        return []
+
+
 def _write_report(connection, *, region, member, table_name,
-                  monthly_target, business_date, value, now, key_suffix=None):
+                  monthly_target, business_date, value, now, key_suffix=None,
+                  filled_by=None):
     """业务键优先写入。返回旧值（无旧行或旧值为空 → None）。
 
     *key_suffix*：多板块报数时追加到 ``source_record_id`` 末尾（同一成员
     同日多数据格各一行）；单金额旧路径不传，保持原键格式不变。
+    *filled_by*：代填留痕（2026-10-21 用户裁决）——自报=None，代填/补签
+    = 代填人 user_id（谁代填的可审计）。
     """
     existing = _fetch_one(
         connection,
@@ -937,9 +977,9 @@ def _write_report(connection, *, region, member, table_name,
         if existing is not None:
             cursor.execute(
                 "UPDATE `fact_daily_report_offline` "
-                "SET `sales_amount` = %s, `synced_at` = %s "
+                "SET `sales_amount` = %s, `filled_by` = %s, `synced_at` = %s "
                 "WHERE `source_record_id` = %s",
-                (value, now, existing["source_record_id"]),
+                (value, filled_by, now, existing["source_record_id"]),
             )
             return existing.get("sales_amount")
 
@@ -947,8 +987,8 @@ def _write_report(connection, *, region, member, table_name,
             "INSERT INTO `fact_daily_report_offline` "
             "(`source_record_id`, `region`, `responsible_person`, "
             "`department`, `business_date`, `sales_amount`, `monthly_target`, "
-            "`synced_at`, `sync_run_id`) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "`filled_by`, `synced_at`, `sync_run_id`) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 f"stream:{region}:{member['user_id']}:{business_date.isoformat()}"
                 + (f":{key_suffix}" if key_suffix else ""),
@@ -958,6 +998,7 @@ def _write_report(connection, *, region, member, table_name,
                 business_date,
                 value,
                 monthly_target,
+                filled_by,
                 now,
                 STREAM_RUN_ID,
             ),

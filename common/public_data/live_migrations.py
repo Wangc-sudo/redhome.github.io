@@ -56,6 +56,7 @@ from common.public_data.org_catalog import (
     org_catalog_region_run_v1_statements,
     org_catalog_relay_v1_statements,
 )
+from common.public_data.org_proxy_grant import org_proxy_grant_ddl_statements
 from common.public_data.recipient_override import (
     recipient_override_ddl_statements,
 )
@@ -452,6 +453,18 @@ def _build_mart_queue_ddl() -> tuple[str, ...]:
     return (_ROBOT_OUTBOX_DDL,)
 
 
+# 代填留痕（2026-10-21 用户裁决「加 filled_by 列」）：事实行记录代填人
+# user_id——自报=NULL，代填/补签=代填人 user_id，谁代填的可审计。
+_FACT_FILLED_BY_DDL = (
+    "ALTER TABLE `fact_daily_report_offline`\n"
+    "  ADD COLUMN `filled_by` VARCHAR(64) DEFAULT NULL"
+)
+
+
+def _build_mart_fact_filled_by_ddl() -> tuple[str, ...]:
+    return (_FACT_FILLED_BY_DDL,)
+
+
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
@@ -613,6 +626,23 @@ _MIGRATIONS = (
         "mart-ops-org-assignment-baseline-v1",
         "mart",
         org_assignment_baseline_statements(),
+    ),
+    (
+        # 代填授权（2026-10-21 用户裁决「代填人设计」）：dim_org_proxy_grant
+        # + 审计表。代填人=授权替他人填数（非归属），与 assignment_override
+        # 分开；admin 全权（bi_authz），非 admin 按本表授权范围（闭环面板下拉
+        # 选定）。报数/补签门禁 is_proxy_for 与 admin 做 OR 合并。
+        "mart-ops-org-proxy-grant-v1",
+        "mart",
+        org_proxy_grant_ddl_statements(),
+    ),
+    (
+        # 代填留痕（2026-10-21 用户裁决）：fact_daily_report_offline 补
+        # filled_by 列（自报=NULL，代填=代填人 user_id），谁代填的可审计。
+        # 独立版本而非改写既有 facts 迁移，避免校验和漂移。
+        "mart-ops-fact-filled-by-v1",
+        "mart",
+        _build_mart_fact_filled_by_ddl(),
     ),
     (
         # 目标单位统一（2026-10-14 D3）：dim_report_target 存量月目标
