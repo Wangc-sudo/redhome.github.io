@@ -5,6 +5,8 @@
 走反问确认（render_clarify），不猜。
 """
 
+import json
+
 #: 展示列（中文名, 列名），按客服关心度排序。
 PARAM_COLUMNS = (
     ("商品编码", "code"),
@@ -43,15 +45,34 @@ def find_products(conn, keyword, *, limit=_MAX_ROWS):
         return []
     rows = _search(conn, kw, limit)
     if rows:
-        return rows
+        return _decode_json_fields(rows)
     tokens = sorted(
         (t for t in kw.split() if len(t) >= 2), key=len, reverse=True
     )
     for token in tokens[:3]:
         rows = _search(conn, token, limit)
         if rows:
-            return rows
+            return _decode_json_fields(rows)
     return []
+
+
+def _decode_json_fields(rows):
+    """JSON 文本列（attachments/extra）原位解码为 dict（单一真源）。
+
+    sync_products 入库时 json.dumps 存字符串，而 SELECT * 原样返回——
+    消费方按 dict 用（``attachments.items()``）会在有附件的商品上炸
+    AttributeError（2026-10-21「质检报告」问答必炸事故）。解码失败置
+    None（与缺列一致），不阻断查询。
+    """
+    for row in rows:
+        for column in ("attachments", "extra"):
+            value = row.get(column)
+            if isinstance(value, str):
+                try:
+                    row[column] = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    row[column] = None
+    return rows
 
 
 def _search(conn, kw, limit):
