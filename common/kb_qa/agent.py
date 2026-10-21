@@ -25,8 +25,11 @@ import re
 from common.kb_qa.context import format_history
 from common.kb_qa.llm import LlmError
 
-#: 工具调用轮数上限（第一轮决策+调用，第二轮基于结果再决策或直接作答）。
-MAX_TOOL_ROUNDS = 2
+#: 工具调用轮数上限（LLM 调用次数，含作答）。2 曾不够：「各区域完成
+#: 排名」要先查基准日期再算完成率——两轮全被工具占满，作答只能走轮尽
+#: chat 而该场景轮尽输出空（2026-10-21 实测）。3 给「工具→工具→作答」
+#: 留出席位。
+MAX_TOOL_ROUNDS = 3
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
