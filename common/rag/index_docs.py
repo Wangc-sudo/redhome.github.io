@@ -37,7 +37,7 @@ docs.json → 落到容器可见路径 → 本管道读清单灌库。API 权限
     RAG_EMBED_MODEL     模型名（换 provider 必须显式配）
     RAG_EMBED_DIM       维度（缺省回读 JINA_CLIP_DIM，再缺省 1024）
     RAG_MILVUS_PATH / RAG_DOCS_INPUT（清单路径，默认
-    /opt/dops/config-local/kb_docs.json）
+    /opt/vector/data/kb_docs.json）
 
 用法::
 
@@ -58,8 +58,9 @@ from pathlib import Path
 
 from common.rag import embed
 
-#: 清单缺省路径：与其余本地输入同目录（config-local 只读挂载）。
-DEFAULT_INPUT = "/opt/dops/config-local/kb_docs.json"
+#: 清单缺省路径：/opt/vector/data 与 rag.db 同区（scheduler 可写、recreate
+#: 不丢；config-local 只读挂载，kb-sync-wiki 写不了——2026-10-21 冒烟实测）。
+DEFAULT_INPUT = "/opt/vector/data/kb_docs.json"
 
 #: 切片窗口与重叠（字）。600 字≈一段报告正文，80 字重叠防句义被腰斩。
 CHUNK_SIZE = 600
