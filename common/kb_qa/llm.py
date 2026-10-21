@@ -62,6 +62,35 @@ class LlmClient:
         except Exception as exc:
             raise LlmError(str(exc)[:120]) from None
 
+    def chat_with_tools(self, messages, *, tools, max_tokens=600,
+                        temperature=0.3):
+        """function calling（2026-10-21 实测 deepseek-v4.1-flash-1017 支持）。
+
+        返回 {"content": str|None, "tool_calls": [...]}；失败抛 LlmError。
+        tool_calls 原样透传（id/type/function{name,arguments}）。
+        """
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "tools": list(tools),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        try:
+            result = self._request(payload)
+            message = result["choices"][0]["message"]
+        except LlmError:
+            raise
+        except Exception as exc:
+            raise LlmError(str(exc)[:120]) from None
+        if not isinstance(message, dict):
+            raise LlmError("tools chat: bad message shape")
+        content = message.get("content")
+        return {
+            "content": content.strip() if isinstance(content, str) else None,
+            "tool_calls": message.get("tool_calls") or [],
+        }
+
 
 def from_environment(environ=None):
     """env 齐备返回 LlmClient，缺失返回 None（无 LLM 降级运行）。"""
