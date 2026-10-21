@@ -45,7 +45,9 @@ _DOC_EXTENSION = ".adoc"
 _PAGE_SIZE = 100
 
 #: 清单默认输出路径（与 rag.index_docs.DEFAULT_INPUT 对齐）。
-DEFAULT_OUTPUT = "/opt/dops/config-local/kb_docs.json"
+#: config-local 是只读挂载写不了（2026-10-21 冒烟 OSError 实测）；
+#: /opt/vector/data 与 rag.db 同区：scheduler 可写、容器 recreate 不丢。
+DEFAULT_OUTPUT = "/opt/vector/data/kb_docs.json"
 
 
 def blocks_to_markdown(blocks):
