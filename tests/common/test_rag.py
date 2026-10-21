@@ -584,6 +584,11 @@ class EmbedCtaigwTest(unittest.TestCase):
         self.assertEqual(embed.max_batch("ctaigw"), 16)
         self.assertEqual(embed.max_batch("jina"), 64)
 
+    def test_max_image_batch(self):
+        # 图片上限比文本更严：ctaigw 实测 8 张 OK、16 张 400
+        self.assertEqual(embed.max_image_batch("ctaigw"), 8)
+        self.assertEqual(embed.max_image_batch("jina"), 8)
+
     def test_run_index_defaults_text_batch_by_provider(self):
         """ctaigw 下文本分批 ≤16（64 的 jina 默认值会把整批打挂）。"""
         records = [_record(f"r{i}", f"商品{i}", {}) for i in range(20)]
@@ -628,7 +633,8 @@ class EmbedCtaigwTest(unittest.TestCase):
                 client=_FakeClient(records), milvus=object(), store=store,
                 api_key="k", base_id="b", sheet_id="s", dim=2,
                 provider=embed.PROVIDER_CTAIGW)
-        self.assertEqual(image_calls, [16, 4])
+        # 图片上限 8（实测 16 张/批 HTTP 400，1232 张图曾全灭于此）
+        self.assertEqual(image_calls, [8, 8, 4])
         self.assertEqual(stats["image"], 20)
         image_ids = [i["id"] for i in store.items if i["kind"] == "image"]
         self.assertEqual(len(image_ids), 20)
