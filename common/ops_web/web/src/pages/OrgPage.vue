@@ -13,6 +13,10 @@ import {
   disableRegion,
   getOverview,
   getPipelines,
+  getProxyGrants,
+  grantProxy,
+  toggleProxy,
+  deleteProxy,
   resetOverrides,
   toggleOverride,
 } from '../api.js';
@@ -29,6 +33,107 @@ const loading = ref(true);
 const loadError = ref('');
 const busy = ref(false);     // 有接口在途：暂停拖拽与操作按钮，防止并发写入
 const query = ref('');
+
+// -- 代填授权（dim_org_proxy_grant，2026-10-21 代填人设计）----------------
+// 代填人=授权替他人填数（非归属）；admin 全权，非 admin 按授权范围。
+const proxyGrants = ref([]);
+const proxyBusy = ref(false);
+const proxyForm = ref({ proxy_user_id: '', target_region: '', target_person: '' });
+
+//: 代填人下拉：所有在职成员（区域树各部门成员 + 未归类池，按 user_id 去重）。
+const allMemberOptions = computed(() => {
+  const seen = new Set();
+  const list = [];
+  const push = (m) => {
+    if (m && m.user_id && !seen.has(m.user_id)) { seen.add(m.user_id); list.push(m); }
+  };
+  for (const r of regions.value) {
+    for (const d of (r.depts || [])) {
+      for (const m of (d.members || [])) push(m);
+    }
+  }
+  for (const m of pool.value) push(m);
+  return list;
+});
+
+//: 被代填人下拉：选中区域的成员（不选 = 整个区域）。
+const proxyPersonOptions = computed(() => {
+  const r = regions.value.find((x) => x.key === proxyForm.value.target_region);
+  if (!r) return [];
+  const list = [];
+  for (const d of (r.depts || [])) for (const m of (d.members || [])) list.push(m);
+  return list;
+});
+
+function memberName(userId) {
+  const m = allMemberOptions.value.find((x) => x.user_id === userId);
+  return (m && m.name) || userId;
+}
+
+async function loadProxyGrants() {
+  if (!hasCapability('org')) { proxyGrants.value = []; return; }
+  try {
+    const data = await getProxyGrants();
+    proxyGrants.value = (data && data.grants) || [];
+  } catch (err) {
+    proxyGrants.value = [];
+  }
+}
+
+async function submitProxyGrant() {
+  const f = proxyForm.value;
+  if (!f.proxy_user_id || !f.target_region) return;
+  proxyBusy.value = true;
+  try {
+    await grantProxy({
+      proxy_user_id: f.proxy_user_id,
+      target_region: f.target_region,
+      target_person: f.target_person || '',
+      proxy_name: memberName(f.proxy_user_id),
+    });
+    proxyForm.value = { proxy_user_id: '', target_region: '', target_person: '' };
+    await loadProxyGrants();
+    setFlash('已保存代填授权', 'ok');
+  } catch (err) {
+    setFlash(err.message || '保存代填授权失败', 'error');
+  } finally {
+    proxyBusy.value = false;
+  }
+}
+
+async function toggleProxyGrant(g) {
+  proxyBusy.value = true;
+  try {
+    await toggleProxy({
+      proxy_user_id: g.proxy_user_id, target_region: g.target_region,
+      target_person: g.target_person || '', enabled: !g.enabled,
+    });
+    await loadProxyGrants();
+  } catch (err) {
+    setFlash(err.message || '操作失败', 'error');
+  } finally {
+    proxyBusy.value = false;
+  }
+}
+
+async function removeProxyGrant(g) {
+  const label = `${memberName(g.proxy_user_id)} → ${g.target_region}`
+    + (g.target_person ? `/${g.target_person}` : '');
+  if (!window.confirm(`删除代填授权「${label}」？`)) return;
+  proxyBusy.value = true;
+  try {
+    await deleteProxy({
+      proxy_user_id: g.proxy_user_id, target_region: g.target_region,
+      target_person: g.target_person || '',
+    });
+    await loadProxyGrants();
+    setFlash('已删除代填授权', 'ok');
+  } catch (err) {
+    setFlash(err.message || '删除失败', 'error');
+  } finally {
+    proxyBusy.value = false;
+  }
+}
 
 // -- 统一锚点（spec §5：region / user）+ 下游影响数 -----------------------
 const anchorRegion = computed(() =>
@@ -488,7 +593,7 @@ async function onDeleteDept(region, dept) {
 }
 
 onMounted(async () => {
-  await Promise.all([load(), loadPipelines()]);
+  await Promise.all([load(), loadPipelines(), loadProxyGrants()]);
 });
 watch(() => route.query, () => applyAnchor());
 </script>
@@ -743,6 +848,75 @@ watch(() => route.query, () => applyAnchor());
         </div>
       </section>
     </div>
+
+    <!-- 代填授权（dim_org_proxy_grant，2026-10-21 代填人设计） -->
+    <section v-if="hasCapability('org')" class="col proxy-section">
+      <div class="col-head">
+        <h2>代填授权</h2>
+        <span class="count">{{ proxyGrants.length }}</span>
+      </div>
+      <p class="note">
+        代填人被授权替他人填销售日报（如内勤代填某区域）。admin 可代填所有；
+        这里给非 admin 的指定代填人授权范围。代填数据记在被代填人名下、留痕代填人。
+      </p>
+
+      <div class="proxy-form">
+        <select v-model="proxyForm.proxy_user_id" class="input" :disabled="proxyBusy">
+          <option value="" disabled>代填人（选成员）</option>
+          <option v-for="m in allMemberOptions" :key="m.user_id" :value="m.user_id">
+            {{ m.name || m.user_id }}
+          </option>
+        </select>
+        <select v-model="proxyForm.target_region" class="input" :disabled="proxyBusy">
+          <option value="" disabled>被代填区域</option>
+          <option v-for="r in regions" :key="r.key" :value="r.key">{{ r.label }}</option>
+        </select>
+        <select
+          v-model="proxyForm.target_person"
+          class="input"
+          :disabled="proxyBusy || !proxyForm.target_region"
+        >
+          <option value="">（整个区域）</option>
+          <option v-for="m in proxyPersonOptions" :key="m.user_id" :value="m.name">
+            {{ m.name || m.user_id }}
+          </option>
+        </select>
+        <button
+          class="btn primary"
+          :disabled="proxyBusy || !proxyForm.proxy_user_id || !proxyForm.target_region"
+          @click="submitProxyGrant"
+        >
+          + 授权
+        </button>
+      </div>
+
+      <div v-if="!proxyGrants.length" class="empty">暂无代填授权</div>
+      <table v-else class="proxy-table">
+        <thead>
+          <tr><th>代填人</th><th>被代填区域</th><th>被代填人</th><th>状态</th><th /></tr>
+        </thead>
+        <tbody>
+          <tr v-for="g in proxyGrants" :key="g.id">
+            <td>{{ g.proxy_name || g.proxy_user_id }}</td>
+            <td>{{ regionLabel(g.target_region) }}</td>
+            <td>{{ g.target_person || '（整个区域）' }}</td>
+            <td>
+              <span class="badge" :class="{ off: !g.enabled }">
+                {{ g.enabled ? '启用' : '停用' }}
+              </span>
+            </td>
+            <td class="ops">
+              <button class="btn mini ghost" :disabled="proxyBusy" @click="toggleProxyGrant(g)">
+                {{ g.enabled ? '停用' : '启用' }}
+              </button>
+              <button class="btn mini danger" :disabled="proxyBusy" @click="removeProxyGrant(g)">
+                删除
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
 
     <!-- 成员详情 / 覆盖操作 -->
     <div v-if="detailMember" class="modal-mask" @click.self="detailUserId = null">
@@ -1323,5 +1497,41 @@ watch(() => route.query, () => applyAnchor());
 }
 .down-link.is-zero:hover {
   text-decoration: none;
+}
+
+/* 代填授权 */
+.proxy-section {
+  margin-top: 16px;
+}
+.proxy-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.proxy-form .input {
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  min-width: 160px;
+  background: #fff;
+}
+.proxy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.proxy-table th,
+.proxy-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #eef1f4;
+}
+.proxy-table .ops {
+  white-space: nowrap;
+}
+.proxy-table .ops .btn {
+  margin-right: 6px;
 }
 </style>
