@@ -927,6 +927,8 @@ class VectorRecallTests(unittest.TestCase):
         self.assertTrue(
             any("answer failed: ZeroDivisionError" in m for m in logs))
         self.assertTrue(conn.rolled_back)
+        # 位置信息（文件:行号）帮助定位复现不出的线上异常
+        self.assertTrue(any(" at " in m and ".py:" in m for m in logs))
 
 
 def _block(block_type, index, **body):
