@@ -2,8 +2,8 @@
 """天翼云 DeepSeek 客户端（OpenAI 兼容）+ 三个业务调用点。
 
 接入（2026-10-10 运维提供）：https://ai.ctaigw.cn/v1/chat/completions，
-模型 deepseek-v4.1-flash（非推理版，客服 5s 预算的硬约束——R1 类推理
-模型首 token 就超）。全部配置走 env：
+模型 deepseek-v4.1-flash-1017（2026-10-20 授权生效实测可用；旧名
+deepseek-v4.1-flash 未授权 403）。全部配置走 env：
     KB_LLM_BASE_URL / KB_LLM_API_KEY / KB_LLM_MODEL / KB_LLM_TIMEOUT(可选,默认20s)
 
 **fail-open 铁律**：LLM 不可达/未开通/超时/返回畸形时，调用方一律降级
@@ -17,6 +17,8 @@ None，handler 按「无 LLM」运行。
 import json
 import os
 import urllib.request
+
+from common.kb_qa.context import format_history
 
 
 class LlmError(RuntimeError):
@@ -95,16 +97,26 @@ _QUERY_PROMPT = """你是商品知识库机器人的查询理解器。
 # 规则
 - keyword 只留有助于检索商品的词：去掉问句、语气词、「验收/测试」等无关词
 - 问题里有具体商品名 → keyword 必须是商品名（可保留度数/规格等区分词）
+- 问题里有「它/那/这款/价格呢」这类指代追问 → 按对话历史补全成完整
+  商品名或检索词（如「价格呢」+ 上文习酒 → keyword=「习酒」）
+{{history}}
 
 # 提问
 {{question}}"""
 
 
-def extract_query(client, question):
-    """LLM 二次解析提问，返回 (category, keyword)；失败抛 LlmError。"""
+def extract_query(client, question, history=None):
+    """LLM 二次解析提问，返回 (category, keyword)；失败抛 LlmError。
+
+    history（对话层，2026-10-21）：最近几轮问答（见 context.format_history），
+    供指代追问补全；None 与旧行为一致。
+    """
+    history_text = format_history(history) if history else ""
     raw = client.chat(
         [{"role": "user",
-          "content": _QUERY_PROMPT.replace("{{question}}", question)}],
+          "content": (_QUERY_PROMPT
+                      .replace("{{history}}", history_text)
+                      .replace("{{question}}", question))}],
         max_tokens=128, temperature=0.1,
     )
     start = raw.find("{")
@@ -142,6 +154,8 @@ _PRODUCT_PROMPT = """你是酒类商品资料助手，服务对象是公司客�
 5. 涉及多个商品时用列表，一个商品一行
 6. 不要出现"根据以上数据""检索结果显示"等系统语
 7. 回答控制在 200 字以内，除非用户明确要求详细
+8. 问题里的「它/那/这款」等指代按对话历史理解，回答自然衔接不重复
+{{history}}
 
 # 客服的问题
 {{question}}"""
@@ -154,8 +168,11 @@ _ROW_FIELDS = (
 )
 
 
-def render_product_answer(client, question, rows):
-    """SQL 行 → 口语化答案；失败抛 LlmError（调用方降模板渲染）。"""
+def render_product_answer(client, question, rows, history=None):
+    """SQL 行 → 口语化答案；失败抛 LlmError（调用方降模板渲染）。
+
+    history（对话层）：最近几轮问答，指代与追问按历史理解；None 与旧行为一致。
+    """
     slim = [
         {key: row.get(key) for key in _ROW_FIELDS if row.get(key) is not None}
         for row in rows
@@ -163,6 +180,8 @@ def render_product_answer(client, question, rows):
     prompt = (_PRODUCT_PROMPT
               .replace("{{rows_json}}",
                        json.dumps(slim, ensure_ascii=False, default=str))
+              .replace("{{history}}",
+                       format_history(history) if history else "")
               .replace("{{question}}", question))
     return client.chat([{"role": "user", "content": prompt}],
                        max_tokens=500, temperature=0.3)
@@ -186,18 +205,25 @@ _DOC_PROMPT = """你是品牌与产品知识助手，服务对象是公司客服
 3. 口语化、可用于对客沟通；若为卖点类问题，整理成可直接使用的销售话术
 4. 末尾标注来源，格式：【引自《文档标题》】
 5. 不要出现"根据检索""上下文提到"等系统语
+6. 问题里的「它/那/这款」等指代按对话历史理解，回答自然衔接不重复
+{{history}}
 
 # 客服的问题
 {{question}}"""
 
 
-def render_doc_answer(client, question, chunks):
-    """手册切片 → 带出处答案；失败抛 LlmError。"""
+def render_doc_answer(client, question, chunks, history=None):
+    """手册切片 → 带出处答案；失败抛 LlmError。
+
+    history（对话层）：最近几轮问答；None 与旧行为一致。
+    """
     blocks = "\n\n".join(
         f"【{chunk['doc_title']}】{chunk['content']}" for chunk in chunks
     )
     prompt = (_DOC_PROMPT
               .replace("{{chunks}}", blocks)
+              .replace("{{history}}",
+                       format_history(history) if history else "")
               .replace("{{question}}", question))
     return client.chat([{"role": "user", "content": prompt}],
                        max_tokens=600, temperature=0.3)

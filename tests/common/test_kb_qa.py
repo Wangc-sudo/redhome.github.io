@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """kb_qa 模块单元测试：路由 / 商品查询渲染 / 同步归一化 / 媒体缓存 / 问答主流程。"""
 
+import asyncio
 import json
+import time
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from dingtalk_stream import AckMessage
 from common.kb_qa import bm25, docs, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
+from common.kb_qa import context as ctx_module
 from common.kb_qa import rag_docs, sync_wiki
 from common.kb_qa.app import (
     KbStreamHandler,
@@ -992,6 +995,136 @@ class SyncWikiRunTests(unittest.TestCase):
         self.assertNotIn("workspace", payload[0])
         self.assertEqual(conn.deleted, ["n1"])   # 先删后灌
         self.assertTrue(conn.upserted)           # 切片已写
+
+
+class ConversationStoreTests(unittest.TestCase):
+    """对话上下文：存取 / TTL / 容量 / 键隔离（2026-10-21 对话层）。"""
+
+    def _store(self, now):
+        return ctx_module.ConversationStore(ttl_seconds=600, now=now)
+
+    def test_record_and_history_roundtrip(self):
+        store = self._store(time.monotonic)
+        key = store.key("cid1", "u1")
+        store.record(key, question="习酒箱规", answer="6 瓶/箱",
+                     category="product_param", record_id="r1")
+        history = store.history(key)
+        self.assertEqual(1, len(history))
+        self.assertEqual("习酒箱规", history[0]["q"])
+        self.assertEqual("r1", history[0]["record_id"])
+
+    def test_history_expires_after_ttl(self):
+        clock = [1000.0]
+        store = self._store(lambda: clock[0])
+        key = store.key("cid1", "u1")
+        store.record(key, question="q", answer="a")
+        clock[0] += 601
+        self.assertEqual([], store.history(key))
+
+    def test_max_turns_evicts_oldest(self):
+        store = ctx_module.ConversationStore(max_turns=2)
+        key = store.key("cid1", "u1")
+        for i in range(4):
+            store.record(key, question=f"q{i}", answer=f"a{i}")
+        history = store.history(key)
+        self.assertEqual(2, len(history))
+        self.assertEqual("q2", history[0]["q"])
+
+    def test_keys_are_isolated_per_sender(self):
+        store = self._store(time.monotonic)
+        store.record(store.key("cid1", "u1"), question="q1", answer="a1")
+        self.assertEqual([], store.history(store.key("cid1", "u2")))
+        self.assertEqual([], store.history(store.key("cid2", "u1")))
+
+    def test_silent_turn_not_recorded(self):
+        store = self._store(time.monotonic)
+        key = store.key("cid1", "u1")
+        store.record(key, question="q", answer=None)
+        self.assertEqual([], store.history(key))
+
+    def test_format_history_recent_first(self):
+        history = [{"q": "q1", "a": "a1"}, {"q": "q2", "a": "a2"}]
+        text = ctx_module.format_history(history)
+        self.assertLess(text.index("q2"), text.index("q1"))
+        self.assertEqual("", ctx_module.format_history([]))
+
+
+class _RecordingLlm:
+    """捕获 messages 的 LLM 替身。"""
+
+    def __init__(self, reply="答案"):
+        self.reply = reply
+        self.calls = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append(messages)
+        return self.reply
+
+
+class LlmHistoryTests(unittest.TestCase):
+    """LLM 三个调用点：history 进 prompt。"""
+
+    def test_extract_query_includes_history(self):
+        llm = _RecordingLlm(reply='{"category": "PRODUCT_PARAM", '
+                                  '"keyword": "习酒窖藏1998"}')
+        llm_module.extract_query(
+            llm, "价格呢",
+            history=[{"q": "习酒窖藏1998 箱规", "a": "6 瓶/箱"}])
+        prompt = llm.calls[0][0]["content"]
+        self.assertIn("习酒窖藏1998 箱规", prompt)   # 历史段进 prompt
+        self.assertIn("价格呢", prompt)
+
+    def test_render_doc_answer_includes_history(self):
+        llm = _RecordingLlm()
+        chunks = [{"doc_title": "手册", "content": "内容", "chunk_index": 0}]
+        llm_module.render_doc_answer(
+            llm, "那周期呢", chunks,
+            history=[{"q": "茅台工艺", "a": "一年一个周期"}])
+        prompt = llm.calls[0][0]["content"]
+        self.assertIn("茅台工艺", prompt)
+
+
+class ConversationFlowTests(unittest.TestCase):
+    """process 级两轮对话：第一轮落历史，第二轮带历史（指代追问）。"""
+
+    def _handler(self, script, llm, store):
+        conn = _FakeConn(script)
+        return KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=llm, context_store=store,
+        )
+
+    def test_second_turn_sees_first_turn_history(self):
+        store = ctx_module.ConversationStore()
+        llm = _RecordingLlm(reply="箱规 6 瓶/箱。【商品资料】")
+        # script：claim INSERT=1 → find_products SELECT=商品行
+        handler = self._handler([1, [_product_row()]], llm, store)
+        asyncio.run(handler.process(
+            _FakeCallback("m1", "习酒窖藏1998 箱规")))
+        key = store.key("cid1", "u1")
+        self.assertEqual(1, len(store.history(key)))  # 第一轮已记录
+
+        llm2 = _RecordingLlm(reply='{"category": "PRODUCT_PARAM", '
+                                   '"keyword": "习酒窖藏1998"}')
+        # 第二轮：「价格呢」规则 miss → 二次解析带历史
+        handler._llm = llm2
+        # claim=1 → find miss([]) → reparse 后 find 命中
+        conn2 = _FakeConn([1, [], [_product_row()]])
+        handler._connection_factory = lambda: conn2
+        asyncio.run(handler.process(_FakeCallback("m2", "价格呢")))
+        extract_prompt = llm2.calls[0][0]["content"]
+        self.assertIn("习酒窖藏1998 箱规", extract_prompt)  # 历史进入二次解析
+
+    def test_render_receives_history(self):
+        store = ctx_module.ConversationStore()
+        llm = _RecordingLlm(reply="第一答")
+        handler = self._handler([1, [_product_row()]], llm, store)
+        asyncio.run(handler.process(_FakeCallback("m1", "习酒窖藏1998 箱规")))
+        conn2 = _FakeConn([1, [_product_row()]])
+        handler._connection_factory = lambda: conn2
+        asyncio.run(handler.process(_FakeCallback("m2", "习酒窖藏1998 价格")))
+        render_prompt = llm.calls[-1][0]["content"]
+        self.assertIn("习酒窖藏1998 箱规", render_prompt)  # 渲染也带历史
 
 
 if __name__ == "__main__":
