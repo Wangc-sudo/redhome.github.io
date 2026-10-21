@@ -1773,6 +1773,39 @@ class QuerySqlToolTests(unittest.TestCase):
                     " JOIN fact_stockout_line s ON o.trade_no=s.trade_no"}))
         self.assertIn("超阈值", result["error"])
 
+    def test_execution_error_returned_for_llm_self_correction(self):
+        # 2026-10-21 实测：year_month 是 MySQL 保留字，LLM 不加反引号会
+        # 1064——执行错误必须回喂（LLM 看到 near 位置会自己加反引号重试），
+        # 吞掉时它只能看到「一直报错」。
+
+        class _ErrCursor:
+            def execute(self, sql, params=None):
+                if sql.startswith("EXPLAIN"):
+                    self.rowcount = [{"rows": 5}]
+                else:
+                    raise RuntimeError(
+                        '(1064, "...near \'year_month=...\' at line 1")')
+
+            def fetchall(self):
+                value = self.rowcount
+                self.rowcount = []
+                return value
+
+            def close(self):
+                pass
+
+        class _ErrConn:
+            def cursor(self):
+                return _ErrCursor()
+
+        executor = agent_module.ToolExecutor(_ErrConn())
+        result = json.loads(executor.execute(
+            "query_sql",
+            {"sql": "SELECT scope FROM dim_report_target"
+                    " WHERE year_month='2026-10'"}))
+        self.assertIn("执行失败", result["error"])
+        self.assertIn("year_month", result["error"])   # 错误细节回喂
+
     def test_executes_with_session_timeout_and_truncates(self):
         rows = [{"code": f"c{i}", "name": "x" * 300} for i in range(60)]
         executor = self._executor([
