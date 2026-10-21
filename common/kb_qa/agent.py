@@ -163,7 +163,11 @@ _SQL_TABLES = {
         " wow_rate 周环比, month_target 月目标(元), month_rate 月完成率",
     "fact_channel_daily_sales":
         "渠道日销：channel 渠道, store_name 店铺, business_date 日期,"
-        " sales_amount 销售额(元), promotion_cost 推广费(元), roi",
+        " sales_amount 销售额(元), promotion_cost 推广费(元), roi。"
+        " **注意：上游 AI 表预置了到月底的空行（未来日期、金额全 NULL/0"
+        " 每天 21 行），查询必须加 business_date<=CURDATE() 过滤，否则"
+        " MAX(business_date) 锚点会落在未来的空行上（2026-10-21 实测"
+        " 裸 MAX=10-31 而真实最新=10-20）**",
     "fact_order_line":
         "订单行（约10万行，必须带 trade_time 日期过滤）：trade_time 下单时间,"
         " shop_name 店铺, channel_name 渠道, goods_name 商品, brand_name 品牌,"
@@ -424,7 +428,10 @@ class ToolExecutor:
             sql = ("SELECT `channel`, `business_date`,"
                    " SUM(`sales_amount`) AS `sales_amount`"
                    " FROM `fact_channel_daily_sales`")
-            conditions, params = [], []
+            # 上游 AI 表预置了到月底的空行（未来日期、金额 NULL/0）——
+            # 过滤未来日期，否则 DESC 排序与「最近一天」锚点全落在空行上
+            # （2026-10-21 实测裸 MAX=10-31 而真实最新=10-20）。
+            conditions, params = ["`business_date`<=CURDATE()"], []
             if date:
                 conditions.append("`business_date`=%s")
                 params.append(date)
