@@ -84,6 +84,9 @@ class _FakeConn:
     def rollback(self):
         self.rolled_back = True
 
+    def close(self):
+        pass
+
 
 def _product_row(**overrides):
     row = {
@@ -1492,7 +1495,7 @@ class AgentAnswerRoutingTests(unittest.TestCase):
     def test_rule_miss_goes_to_agent(self):
         seen = []
 
-        def runner(conn, text, history):
+        def runner(conn, text, history, meta=None):
             seen.append(text)
             return "杭州昨天 12.5 万。"
 
@@ -1510,7 +1513,7 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         conn = _FakeConn([])
         handler = KbStreamHandler(
             connection_factory=lambda: conn, log=lambda _: None,
-            agent_runner=lambda conn, text, history: seen.append(text))
+            agent_runner=lambda conn, text, history, meta=None: seen.append(text))
         reply, intent, _ = handler._answer(conn, "你好")
         self.assertEqual(CHITCHAT, intent)
         self.assertEqual([], seen)
@@ -1520,7 +1523,7 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         conn = _FakeConn([])
         handler = KbStreamHandler(
             connection_factory=lambda: conn, log=lambda _: None,
-            agent_runner=lambda conn, text, history: None)
+            agent_runner=lambda conn, text, history, meta=None: None)
         reply, intent, _ = handler._answer(conn, "今天杭州出了多少货")
         self.assertEqual(PRODUCT_PARAM, intent)
         self.assertIn("没有找到", reply)
@@ -1530,7 +1533,7 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         conn = _FakeConn([])
         handler = KbStreamHandler(
             connection_factory=lambda: conn, log=lambda _: None,
-            agent_runner=lambda conn, text, history: None)
+            agent_runner=lambda conn, text, history, meta=None: None)
         reply, intent, _ = handler._answer(conn, "嗯")
         self.assertEqual(CHITCHAT, intent)
 
@@ -1835,6 +1838,255 @@ class QuerySqlToolTests(unittest.TestCase):
         executed_sql = [sql for sql, _ in
                         executor._conn.cursor_instance.executed]
         self.assertTrue(any("MAX_EXECUTION_TIME" in s for s in executed_sql))
+
+
+class AuditObservabilityTests(unittest.TestCase):
+    """反馈闭环埋点（mart-ops-kb-qa-audit-v2）：观测列落审计。"""
+
+    def test_finish_audit_writes_meta_columns(self):
+        conn = _FakeConn([1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None)
+        handler._finish_audit(
+            conn, "m1", "agent", None, "text",
+            meta={"recall_source": "agent",
+                  "tools": ["daily_sales", "query_sql"], "rounds": 3},
+            reply="答案" * 300,  # 600 字 → 截 500
+            latency_ms=1234)
+        sql, params = conn.cursor_instance.executed[0]
+        self.assertIn("`recall_source`=%s", sql)
+        self.assertIn("`tool_used`=%s", sql)
+        self.assertIn("`agent_rounds`=%s", sql)
+        self.assertIn("`latency_ms`=%s", sql)
+        self.assertIn("`answer_excerpt`=%s", sql)
+        self.assertEqual(
+            ("agent", None, "text", "agent", "daily_sales,query_sql", 3,
+             1234, "答案" * 250, "m1"),
+            params)
+
+    def test_finish_audit_empty_meta(self):
+        conn = _FakeConn([1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None)
+        handler._finish_audit(conn, "m2", CHITCHAT, None, "text")
+        _sql, params = conn.cursor_instance.executed[0]
+        # recall_source/tool_used/rounds/latency/摘要全部 None，不受影响
+        self.assertEqual((CHITCHAT, None, "text", None, None, None, None,
+                          None, "m2"), params)
+
+    def test_answer_meta_recall_source_products(self):
+        handler, _ = HandlerAnswerTests()._handler([[_product_row()]])
+        meta = {}
+        handler._answer(handler._connection_factory(), "习酒窖藏1998 箱规",
+                        meta=meta)
+        self.assertEqual("products", meta["recall_source"])
+
+    def test_answer_meta_recall_source_doc_paths(self):
+        # 纯 BM25
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            doc_search=lambda conn, q, k=3: [{"doc_title": "t",
+                                              "content": "c"}])
+        meta = {}
+        handler._answer(_FakeConn(), "摘要酒怎么介绍", meta=meta)
+        self.assertEqual("bm25", meta["recall_source"])
+        # BM25 + 向量
+        handler2 = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            doc_search=lambda conn, q, k=3: [{"doc_title": "t",
+                                              "content": "c"}],
+            vector_search=lambda q: [{"doc_title": "v", "content": "x"}])
+        meta2 = {}
+        handler2._answer(_FakeConn(), "摘要酒怎么介绍", meta=meta2)
+        self.assertEqual("mixed", meta2["recall_source"])
+        # 全 miss → none + 兜底话术
+        handler3 = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            doc_search=lambda conn, q, k=3: [])
+        meta3 = {}
+        handler3._answer(_FakeConn(), "摘要酒怎么介绍", meta=meta3)
+        self.assertEqual("none", meta3["recall_source"])
+
+    def test_answer_meta_agent(self):
+        def runner(conn, text, history, meta=None):
+            if meta is not None:
+                meta["tools"] = ["daily_sales"]
+                meta["rounds"] = 2
+            return "杭州昨天 12.5 万。"
+
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=runner)
+        meta = {}
+        reply, intent, _ = handler._answer(conn, "今天杭州出了多少货",
+                                           meta=meta)
+        self.assertEqual("agent", intent)
+        self.assertEqual("agent", meta["recall_source"])
+        self.assertEqual(["daily_sales"], meta["tools"])
+        self.assertEqual(2, meta["rounds"])
+
+    def test_agent_no_answer_does_not_mark_recall_source(self):
+        # agent 降级走兜底话术的行不虚标 recall_source（聚类口径防失真）
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history, meta=None: None)
+        meta = {}
+        handler._answer(conn, "嗯", meta=meta)
+        self.assertNotIn("recall_source", meta)
+
+    def test_process_failure_marks_failed_audit(self):
+        import asyncio
+
+        class _BoomCursor(_FakeCursor):
+            def execute(self, sql, params=None):
+                if "SELECT" in sql:
+                    raise RuntimeError("boom")
+                super().execute(sql, params)
+
+        class _BoomConn(_FakeConn):
+            def cursor(self):
+                return self.cursor_instance
+
+        conn1 = _BoomConn([1])  # claim 成功，查询炸
+        conn1.cursor_instance = _BoomCursor([1])
+        conn2 = _FakeConn([1])  # _mark_failed 补记
+        conns = iter([conn1, conn2])
+        replies = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: next(conns), log=lambda _: None)
+        handler._safe_reply = lambda incoming, text: replies.append(text)
+        callback = _FakeCallback("msg-fail", "习酒窖藏1998 箱规")
+        status, _ = asyncio.run(handler.process(callback))
+        self.assertEqual(AckMessage.STATUS_OK, status)
+        self.assertTrue(conn1.rolled_back)
+        self.assertEqual(["查询出了点问题，请稍后再试。"], replies)
+        failed_sql = "\n".join(sql for sql, _
+                               in conn2.cursor_instance.executed)
+        self.assertIn("`failed`, `created_at`) VALUES", failed_sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE `failed`=1", failed_sql)
+        self.assertTrue(conn2.committed)
+
+
+class AgentMetaTests(unittest.TestCase):
+    """run_agent meta 回填：工具序列与轮数。"""
+
+    def test_meta_tools_and_rounds(self):
+        responses = [
+            {"content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "daily_sales",
+                              "arguments": '{"scope": "hangzhou"}'}}]},
+            {"content": "杭州 10-20 销售 12.5 万。", "tool_calls": []},
+        ]
+        meta = {}
+        answer = agent_module.run_agent(
+            AgentLoopTests()._llm(responses), "杭州昨天卖了多少",
+            executor=AgentLoopTests._Executor(), meta=meta)
+        self.assertIn("12.5", answer)
+        self.assertEqual(["daily_sales"], meta["tools"])
+        self.assertEqual(2, meta["rounds"])
+
+    def test_meta_none_zero_side_effect(self):
+        responses = [{"content": "你好", "tool_calls": []}]
+        answer = agent_module.run_agent(
+            AgentLoopTests()._llm(responses), "你好",
+            executor=AgentLoopTests._Executor())
+        self.assertEqual("你好", answer)
+
+    def test_meta_rounds_include_final_chat(self):
+        # 轮尽作答也是一次 LLM 调用（成本口径）
+        responses = [
+            {"content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "daily_sales", "arguments": "{}"}}]}
+        ] * agent_module.MAX_TOOL_ROUNDS
+
+        class _Llm:
+            def __init__(self):
+                self._responses = list(responses)
+
+            def chat_with_tools(self, messages, *, tools, **kw):
+                return self._responses.pop(0)
+
+            def chat(self, messages, **kw):
+                return "最终答案"
+
+        meta = {}
+        answer = agent_module.run_agent(_Llm(), "q",
+                                        executor=AgentLoopTests._Executor(),
+                                        meta=meta)
+        self.assertEqual("最终答案", answer)
+        self.assertEqual(agent_module.MAX_TOOL_ROUNDS + 1, meta["rounds"])
+
+
+class BadcaseReportTests(unittest.TestCase):
+    """badcase 聚类报表：分类、聚合、渲染。"""
+
+    def _row(self, **overrides):
+        row = {
+            "msg_id": "m1", "question": "q", "intent": CHITCHAT,
+            "sender_name": "张三", "created_at": "2026-10-21 10:00:00",
+            "failed": 0, "reply_kind": "text", "recall_source": None,
+            "tool_used": None, "latency_ms": 100, "answer_excerpt": "答案",
+        }
+        row.update(overrides)
+        return row
+
+    def test_classify_row(self):
+        from common.kb_qa import badcase
+
+        self.assertEqual("failed", badcase.classify_row(
+            self._row(failed=1)))
+        self.assertEqual("product_miss", badcase.classify_row(self._row(
+            answer_excerpt=render_not_found("习酒"))))
+        self.assertEqual("doc_fallback", badcase.classify_row(self._row(
+            answer_excerpt="产品手册问答还在接入中。……")))
+        self.assertEqual("unmatched_help", badcase.classify_row(self._row(
+            answer_excerpt=products.HELP_TEXT)))
+        # 正常作答 / 静默行不算 badcase
+        self.assertIsNone(badcase.classify_row(self._row()))
+        self.assertIsNone(badcase.classify_row(self._row(reply_kind="none",
+                                                         answer_excerpt=None)))
+
+    def test_collect_and_render(self):
+        from common.kb_qa import badcase
+
+        rows = [
+            self._row(msg_id="m1", question="茅台1935 价格",
+                      answer_excerpt=render_not_found("茅台1935 价格")),
+            self._row(msg_id="m2", question="茅台1935 价格",
+                      answer_excerpt=render_not_found("茅台1935 价格")),
+            self._row(msg_id="m3", question="习酒箱规", intent=PRODUCT_PARAM,
+                      recall_source="products", latency_ms=200),
+            self._row(msg_id="m4", question="今天杭州出了多少货",
+                      intent="agent", recall_source="agent",
+                      tool_used="daily_sales,query_sql", latency_ms=3500),
+            self._row(msg_id="m5", question="崩一下", failed=1,
+                      reply_kind="text", answer_excerpt=None),
+        ]
+        conn = _FakeConn([rows])
+        report = badcase.collect_badcases(conn, days=7)
+        self.assertEqual(5, report["total"])
+        self.assertEqual(5, report["answered"])
+        self.assertEqual(1, report["failed"])
+        self.assertEqual(800, report["latency_avg"])
+        self.assertEqual(200, report["latency_p95"])
+        self.assertEqual(3500, report["latency_max"])
+        self.assertEqual({"daily_sales": 1, "query_sql": 1},
+                         dict(report["tools"]))
+        # 同一问题两次未命中聚成一组
+        self.assertEqual(2, len(report["badcases"]))
+        top = report["badcases"][0]
+        self.assertEqual("product_miss", top["category"])
+        self.assertEqual(2, top["count"])
+        self.assertEqual("茅台1935 价格", top["question"])
+        markdown = badcase.render_markdown(report)
+        self.assertIn("近 7 天", markdown)
+        self.assertIn("商品未找到", markdown)
+        self.assertIn("处理失败", markdown)
+        self.assertIn("daily_sales×1", markdown)
 
 
 if __name__ == "__main__":

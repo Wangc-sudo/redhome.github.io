@@ -2,7 +2,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from common.kb_qa.schema import kb_ddl_statements
+from common.kb_qa.schema import kb_audit_v2_ddl_statements, kb_ddl_statements
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
 from common.public_data.data_fix import data_fix_ddl_statements
@@ -567,6 +567,13 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-v1",
         "mart",
         kb_ddl_statements(),
+    ),
+    (
+        # 问答反馈闭环（2026-10-21）：kb_qa_audit 扩观测列（召回通路/
+        # 工具序列/轮数/耗时/失败标记/答复摘要），badcase 可回溯。
+        "mart-ops-kb-qa-audit-v2",
+        "mart",
+        kb_audit_v2_ddl_statements(),
     ),
     (
         # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：

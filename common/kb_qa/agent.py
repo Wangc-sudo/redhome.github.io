@@ -520,13 +520,18 @@ class ToolExecutor:
 
 
 def run_agent(llm, question, *, executor, history=None,
-              max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None):
+              max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None, meta=None):
     """agent loop：问题 → 工具调用（≤max_rounds 轮）→ 答案。
 
     返回答案文本；LLM 异常/畸形/超限无答案 → None（调用方降级）。
     chat_with_tools 注入点（测试替身），缺省调 llm.chat_with_tools。
+    meta（反馈闭环埋点）：传入 dict 时回填 ``tools``（工具名序列）与
+    ``rounds``（LLM 调用轮数），供调用方落审计；不传零副作用。
     """
     call = chat_with_tools or llm.chat_with_tools
+    if meta is not None:
+        meta["tools"] = []
+        meta["rounds"] = 0
     history_text = format_history(history) if history else ""
     tables_text = "\n".join(f"- {name}：{desc}"
                             for name, desc in _SQL_TABLES.items())
@@ -537,13 +542,15 @@ def run_agent(llm, question, *, executor, history=None,
                      .replace("{{history}}", history_text))},
         {"role": "user", "content": question},
     ]
-    for _ in range(max_rounds):
+    for round_index in range(max_rounds):
         try:
             response = call(messages, tools=TOOLS)
         except LlmError:
             return None
         except Exception:
             return None
+        if meta is not None:
+            meta["rounds"] = round_index + 1
         tool_calls = response.get("tool_calls") or []
         content = response.get("content") or ""
         if not tool_calls and content:
@@ -567,6 +574,8 @@ def run_agent(llm, question, *, executor, history=None,
                 arguments = json.loads(function.get("arguments") or "{}")
             except (TypeError, json.JSONDecodeError):
                 arguments = {}
+            if meta is not None and name:
+                meta["tools"].append(name)
             try:
                 result = executor.execute(name, arguments)
             except Exception:
@@ -587,6 +596,8 @@ def run_agent(llm, question, *, executor, history=None,
         "content": "以上工具结果已足够。请直接基于这些结果用中文给出最终"
                    "答案，不要再生成 SQL 或调用任何工具。",
     })
+    if meta is not None:
+        meta["rounds"] += 1  # 轮尽作答也是一次 LLM 调用
     try:
         final = llm.chat(messages, max_tokens=2048, temperature=0.3)
     except LlmError:
