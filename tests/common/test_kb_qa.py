@@ -1341,6 +1341,68 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("绍兴销售", captured[0][0]["content"])
 
 
+class DsmlParsingTests(unittest.TestCase):
+    """DSML 文本工具调用（2026-10-21 用户收到乱码原文事件）。"""
+
+    # 用户实际收到的原文样本
+    SAMPLE = ('<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="search_docs"> '
+              '<｜｜DSML｜｜ parameter name="keyword" string="true">礼袋 尺寸'
+              '</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ invoke> '
+              '</｜｜DSML｜｜ calls>|||')
+
+    def test_parse_real_user_sample(self):
+        calls = agent_module.parse_dsml_calls(self.SAMPLE)
+        self.assertEqual(1, len(calls))
+        function = calls[0]["function"]
+        self.assertEqual("search_docs", function["name"])
+        self.assertEqual({"keyword": "礼袋 尺寸"},
+                         json.loads(function["arguments"]))
+        self.assertEqual("function", calls[0]["type"])
+        self.assertTrue(calls[0]["id"])
+
+    def test_parse_multiple_invokes(self):
+        content = ('<｜｜DSML｜｜ calls>'
+                   '<｜｜DSML｜｜ invoke name="daily_sales">'
+                   '<｜｜DSML｜｜ parameter name="scope" string="true">hz'
+                   '</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>'
+                   '<｜｜DSML｜｜ invoke name="search_products">'
+                   '<｜｜DSML｜｜ parameter name="keyword" string="true">习酒'
+                   '</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>'
+                   '</｜｜DSML｜｜ calls>')
+        calls = agent_module.parse_dsml_calls(content)
+        self.assertEqual(["daily_sales", "search_products"],
+                         [c["function"]["name"] for c in calls])
+
+    def test_no_dsml_returns_empty(self):
+        self.assertEqual([], agent_module.parse_dsml_calls("正常回答"))
+        self.assertEqual([], agent_module.parse_dsml_calls(""))
+        self.assertEqual([], agent_module.parse_dsml_calls(None))
+
+    def test_agent_executes_dsml_call_instead_of_leaking_it(self):
+        responses = [
+            {"content": self.SAMPLE, "tool_calls": []},      # DSML 偶发
+            {"content": "礼袋尺寸是 30×40cm。【引自手册】", "tool_calls": []},
+        ]
+        executor = AgentLoopTests._Executor()
+        answer = agent_module.run_agent(
+            AgentLoopTests()._llm(responses), "圆习酒礼袋尺寸",
+            executor=executor)
+        self.assertIn("礼袋尺寸", answer)
+        # DSML 被解析成真实工具调用（name=search_docs, keyword=礼袋 尺寸）
+        self.assertEqual([("search_docs", {"keyword": "礼袋 尺寸"})],
+                         executor.calls)
+
+    def test_dsml_residue_returns_none_instead_of_leaking(self):
+        # 残缺 DSML（解析不出调用）→ None 降级，乱码不到用户
+        responses = [
+            {"content": "<｜｜DSML｜｜ calls> 残缺的标记", "tool_calls": []},
+        ]
+        answer = agent_module.run_agent(
+            AgentLoopTests()._llm(responses), "q",
+            executor=AgentLoopTests._Executor())
+        self.assertIsNone(answer)
+
+
 class ChatWithToolsTests(unittest.TestCase):
     """LlmClient.chat_with_tools：payload 与响应解析。"""
 

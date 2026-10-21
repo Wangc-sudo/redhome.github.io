@@ -114,6 +114,58 @@ TOOLS = [
 #: 工具结果给 LLM 的截断长度（控 token，防单行数据撑爆上下文）。
 _RESULT_LIMIT = 2000
 
+# DSML 文本工具调用（2026-10-21 实测：deepseek-v4.1-flash-1017 偶发不走
+# 原生 tool_calls 协议，而把调用写成 ``<｜｜DSML｜｜ calls>…`` 标记文本塞在
+# content 里——用户曾收到这段原文）。分隔符全角 ``｜``，兼容半角 ``|``。
+_DSML_CALLS_RE = re.compile(
+    r"<[|｜]{2}DSML[|｜]{2}\s*calls>(.*?)</[|｜]{2}DSML[|｜]{2}\s*calls>",
+    re.S)
+_DSML_INVOKE_RE = re.compile(
+    r"<[|｜]{2}DSML[|｜]{2}\s*invoke\s+name=\"(?P<name>[^\"]+)\"\s*>"
+    r"(?P<body>.*?)</[|｜]{2}DSML[|｜]{2}\s*invoke>",
+    re.S)
+_DSML_PARAM_RE = re.compile(
+    r"<[|｜]{2}DSML[|｜]{2}\s*parameter\s+name=\"(?P<name>[^\"]+)\"[^>]*>"
+    r"(?P<value>.*?)</[|｜]{2}DSML[|｜]{2}\s*parameter>",
+    re.S)
+
+
+def parse_dsml_calls(content):
+    """content 里的 DSML 工具调用 → 与原生 tool_calls 同构的列表；无则 []。
+
+    输出项 ``{"id", "type", "function": {"name", "arguments"}}``，arguments
+    为 JSON 字符串（与原生协议对齐，直接进既有执行路径）。
+    """
+    if not content or "DSML" not in content:
+        return []
+    body_match = _DSML_CALLS_RE.search(content)
+    if not body_match:
+        return []
+    calls = []
+    for index, invoke in enumerate(
+            _DSML_INVOKE_RE.finditer(body_match.group(1))):
+        params = {
+            param.group("name"): param.group("value").strip()
+            for param in _DSML_PARAM_RE.finditer(invoke.group("body"))
+        }
+        calls.append({
+            "id": f"dsml-{index}",
+            "type": "function",
+            "function": {
+                "name": invoke.group("name"),
+                "arguments": json.dumps(params, ensure_ascii=False),
+            },
+        })
+    return calls
+
+
+def has_dsml_residue(content):
+    """content 含 DSML 标记残留（调用了但解析不出来/答案里带乱码）。
+
+    残留绝不能原样发给客服——调用方据此降级。
+    """
+    return bool(content) and "DSML" in content
+
 
 class ToolExecutor:
     """白名单工具执行器。所有 SQL 为预定义形态，参数走占位符。"""
@@ -296,8 +348,17 @@ def run_agent(llm, question, *, executor, history=None,
         except Exception:
             return None
         tool_calls = response.get("tool_calls") or []
+        content = response.get("content") or ""
+        if not tool_calls and content:
+            # DSML 偶发形态：调用写在文本里而非协议字段——解析出来按原生
+            # 调用照常执行，原文不当答案发出去（2026-10-21 用户收到乱码）。
+            tool_calls = parse_dsml_calls(content)
+            if tool_calls:
+                content = ""
         if not tool_calls:
-            content = (response.get("content") or "").strip()
+            content = content.strip()
+            if has_dsml_residue(content):
+                return None  # 残留乱码绝不发给客服，降级由调用方决定
             return content or None
         messages.append({"role": "assistant",
                          "content": response.get("content") or "",
@@ -324,5 +385,7 @@ def run_agent(llm, question, *, executor, history=None,
     try:
         final = llm.chat(messages, max_tokens=500, temperature=0.3)
     except LlmError:
+        return None
+    if has_dsml_residue(final):
         return None
     return final or None
