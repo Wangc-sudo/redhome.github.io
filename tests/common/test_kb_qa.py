@@ -14,6 +14,7 @@ from common.kb_qa import bm25, docs, products, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
 from common.kb_qa import agent as agent_module
+from common.kb_qa import assets as assets_module
 from common.kb_qa import context as ctx_module
 from common.kb_qa import rag_docs, sync_wiki
 from common.kb_qa.app import (
@@ -1500,6 +1501,172 @@ class AgentAnswerRoutingTests(unittest.TestCase):
             agent_runner=lambda conn, text, history: None)
         reply, intent, _ = handler._answer(conn, "嗯")
         self.assertEqual(CHITCHAT, intent)
+
+
+class PickAssetTests(unittest.TestCase):
+    """附件选择精度（2026-10-21：习酒1988质检报告曾命中红习酱礼袋）。"""
+
+    def _row(self, record_id, name, attachments):
+        return {"record_id": record_id, "name": name,
+                "attachments": attachments}
+
+    def test_field_name_matching_question_wins(self):
+        rows = [
+            self._row("r1", "红习酱", {"礼袋": [{"name": "a.jpg"}]}),
+            self._row("r2", "习酒窖藏1988", {"质检报告": [{"name": "r.pdf"}]}),
+        ]
+        row, field, items = assets_module.pick_asset(rows, "习酒窖藏1988 质检报告")
+        self.assertEqual("r2", row["record_id"])
+        self.assertEqual("质检报告", field)
+        self.assertEqual(1, len(items))
+
+    def test_fallback_first_row_with_attachments(self):
+        rows = [
+            self._row("r1", "无附件商品", None),
+            self._row("r2", "有附件商品", {"素材包": [{"name": "s.zip"}]}),
+        ]
+        row, field, _ = assets_module.pick_asset(rows, "发我资料")
+        self.assertEqual("r2", row["record_id"])
+        self.assertEqual("素材包", field)
+
+    def test_no_attachments_returns_none(self):
+        rows = [self._row("r1", "无附件商品", None)]
+        row, field, items = assets_module.pick_asset(rows, "质检报告")
+        self.assertIsNone(row)
+        self.assertEqual([], items)
+
+
+class AssetDeliveryTests(unittest.TestCase):
+    """ASSET 分支：直发 / 降级列清单。"""
+
+    def _handler(self, row, *, sender=None, send_error=None):
+        conn = _FakeConn([[row]])
+        calls = []
+
+        class _Sender:
+            def send(self, conn, *, row, field_name, conversation_id,
+                     robot_code):
+                calls.append((row["record_id"], field_name,
+                              conversation_id, robot_code))
+                if send_error:
+                    raise send_error
+                return 1
+
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            robot_code="robot-1",
+            asset_sender=_Sender() if sender else None)
+        return handler, calls
+
+    def test_delivers_and_replies_confirmation(self):
+        row = _product_row(
+            attachments={"质检报告": [{"name": "r.pdf"}]})
+        handler, calls = self._handler(row, sender=True)
+        reply, intent, matched = handler._answer(
+            handler._connection_factory(), "习酒质检报告",
+            conversation_id="cid-1")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("已发送到群里", reply)
+        self.assertEqual(calls, [(row["record_id"], "质检报告",
+                                  "cid-1", "robot-1")])
+
+    def test_send_failure_degrades_to_listing(self):
+        row = _product_row(
+            attachments={"质检报告": [{"name": "r.pdf"}]})
+        handler, calls = self._handler(row, sender=True,
+                                       send_error=RuntimeError("boom"))
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "习酒质检报告",
+            conversation_id="cid-1")
+        self.assertIn("质检报告：1 个文件", reply)   # 降级清单
+        self.assertIn("接入中", reply)
+
+    def test_without_sender_lists_attachments(self):
+        row = _product_row(
+            attachments={"质检报告": [{"name": "r.pdf"}]})
+        handler, calls = self._handler(row, sender=False)
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "习酒质检报告",
+            conversation_id="cid-1")
+        self.assertIn("质检报告：1 个文件", reply)
+        self.assertEqual([], calls)
+
+    def test_no_conversation_lists_attachments(self):
+        row = _product_row(
+            attachments={"质检报告": [{"name": "r.pdf"}]})
+        handler, calls = self._handler(row, sender=True)
+        reply, intent, _ = handler._answer(
+            handler._connection_factory(), "习酒质检报告")
+        self.assertIn("质检报告：1 个文件", reply)
+        self.assertEqual([], calls)
+
+
+class AssetSenderTests(unittest.TestCase):
+    """AssetSender：记录重拉 → ensure_media_id → 消息形态。"""
+
+    class _Client:
+        def __init__(self, record):
+            self._record = record
+            self.sent = []
+
+        def get_record(self, base_id, sheet_id, record_id):
+            return self._record
+
+        def send_group_message(self, robot_code, conv_id, msg_key, msg_param):
+            self.sent.append((msg_key, msg_param))
+
+    def _sender(self, record, **kw):
+        client = self._Client(record)
+        sender = assets_module.AssetSender(
+            dingtalk_client=client, base_id="b", sheet_id="s",
+            oapi_token_factory=lambda: "tok", **kw)
+        return sender, client
+
+    def test_image_goes_sample_image_msg(self):
+        record = {"fields": {"细节图": [
+            {"filename": "a.jpg", "url": "http://oss/a"}]}}
+        sender, client = self._sender(record)
+        with mock.patch.object(assets_module.media, "ensure_media_id",
+                               return_value=("@m1", "image")) as ensure:
+            sent = sender.send(
+                object(), row={"record_id": "r1"}, field_name="细节图",
+                conversation_id="cid", robot_code="robot")
+        self.assertEqual(1, sent)
+        self.assertEqual(client.sent,
+                         [("sampleImageMsg", {"photoURL": "@m1"})])
+        ensure.assert_called_once()
+
+    def test_file_goes_sample_file(self):
+        record = {"fields": {"质检报告": [
+            {"filename": "质检报告.pdf", "url": "http://oss/r"}]}}
+        sender, client = self._sender(record)
+        with mock.patch.object(assets_module.media, "ensure_media_id",
+                               return_value=("@m2", "file")):
+            sender.send(object(), row={"record_id": "r1"},
+                        field_name="质检报告", conversation_id="cid",
+                        robot_code="robot")
+        self.assertEqual(client.sent, [(
+            "sampleFile",
+            {"mediaId": "@m2", "fileName": "质检报告.pdf",
+             "fileType": "pdf"})])
+
+    def test_max_deliver_caps(self):
+        record = {"fields": {"素材包": [
+            {"filename": f"{i}.png", "url": f"http://oss/{i}"}
+            for i in range(4)]}}
+        sender, client = self._sender(record)
+        with mock.patch.object(assets_module.media, "ensure_media_id",
+                               return_value=("@m", "image")):
+            sent = sender.send(object(), row={"record_id": "r1"},
+                               field_name="素材包", conversation_id="cid",
+                               robot_code="robot")
+        self.assertEqual(assets_module.MAX_DELIVER, sent)
+        self.assertEqual(assets_module.MAX_DELIVER, len(client.sent))
+
+    def test_build_from_environment_requires_full_env(self):
+        self.assertIsNone(assets_module.build_from_environment({}))
+        self.assertIsNone(assets_module.build_from_environment(
+            {"KB_DINGTALK_APP_KEY": "k"}))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
+from common.kb_qa.assets import pick_asset
 from common.kb_qa.docs import search_docs
 from common.kb_qa.llm import (
     LlmError,
@@ -155,7 +156,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
                  doc_search=None, vector_search=None, context_store=None,
-                 agent_runner=None):
+                 agent_runner=None, asset_sender=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -168,6 +169,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._vector_search = vector_search
         self._context_store = context_store
         self._agent_runner = agent_runner
+        self._asset_sender = asset_sender
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -198,7 +200,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if not self._claim(conn, msg_id, incoming, text, conversation_id):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
-            reply, intent, matched = self._answer(conn, text, history=history)
+            reply, intent, matched = self._answer(
+                conn, text, history=history, conversation_id=conversation_id)
             self._finish_audit(conn, msg_id, intent, matched,
                                "text" if reply else "none")
             if ctx_key is not None:
@@ -260,11 +263,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     # 问答主流程（纯函数式，便于测试）
     # ------------------------------------------------------------------
 
-    def _answer(self, conn, text, history=None):
+    def _answer(self, conn, text, history=None, conversation_id=None):
         """返回 (reply, intent, matched_record_id)。reply=None 表示静默。
 
         history（对话层）：同人同群最近几轮问答，透传给 LLM 二次解析与
         渲染；None 与单轮行为一致。
+        conversation_id：附件直发需要目标群；None 时 ASSET 分支只列清单。
         """
         if not text:
             return None, CHITCHAT, None
@@ -291,16 +295,33 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             rows = find_products(conn, intent.keyword)
             if not rows:
                 return render_not_found(intent.keyword), intent.category, None
-            row = rows[0]
-            attachments = row.get("attachments") or {}
-            if not attachments:
+            # 精度（2026-10-21）：商品相关度与附件字段名联合选择——
+            # 「习酒窖藏1988 质检报告」曾命中红习酱的「礼袋」。
+            row, field_name, items = pick_asset(rows, text)
+            if row is None:
                 return (
-                    f"「{row['name']}」的资料里还没有附件。",
-                    intent.category, row["record_id"],
+                    f"「{rows[0]['name']}」的资料里还没有附件。",
+                    intent.category, rows[0]["record_id"],
                 )
+            # 直发（2026-10-21）：下载 → 钉钉媒体库 → 群文件/图片消息；
+            # 任一步失败降级为列清单，绝不甩异常给客服。
+            if (self._asset_sender is not None and conversation_id
+                    and self._robot_code):
+                try:
+                    sent = self._asset_sender.send(
+                        conn, row=row, field_name=field_name,
+                        conversation_id=conversation_id,
+                        robot_code=self._robot_code)
+                    if sent:
+                        return (
+                            f"「{row['name']}」的{field_name}"
+                            f"已发送到群里，请查收。",
+                            intent.category, row["record_id"],
+                        )
+                except Exception:
+                    self._log("kb qa: asset deliver failed")
             lines = [f"「{row['name']}」的附件：", _ASSET_PENDING]
-            for field, items in attachments.items():
-                lines.append(f"- {field}：{len(items)} 个文件")
+            lines.append(f"- {field_name}：{len(items)} 个文件")
             return "\n".join(lines), intent.category, row["record_id"]
         if intent.category == DOC_QA:
             return self._answer_docs(conn, text, history)
@@ -472,6 +493,14 @@ def main(argv=None):
     else:
         print("kb qa: agent disabled (no LLM)")
 
+    # 附件直发（2026-10-21）：AI 表签名 URL → 下载 → 钉钉媒体库 → 群
+    # 文件/图片消息；env 缺失则关闭（ASSET 分支降级列清单）。
+    from common.kb_qa import assets
+
+    asset_sender = assets.build_from_environment()
+    if asset_sender is None:
+        print("kb qa: asset delivery disabled (missing env)")
+
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
@@ -481,6 +510,7 @@ def main(argv=None):
         vector_search=vector_search,
         context_store=ConversationStore(),
         agent_runner=agent_runner,
+        asset_sender=asset_sender,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()
