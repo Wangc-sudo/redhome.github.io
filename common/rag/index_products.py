@@ -126,7 +126,7 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
         for row, record in pairs
         for field_name, index, meta in iter_image_attachments(record)
     ]
-    image_batch = embed.max_batch(provider)
+    image_batch = embed.max_image_batch(provider)
     for start in range(0, len(image_entries), image_batch):
         part = image_entries[start:start + image_batch]
         try:
