@@ -237,6 +237,11 @@ export function deleteProxy(payload) {
   });
 }
 
+/** 播报编排板读面（任务×区域拉线矩阵，2026-10-21 播报编排大模块）。 */
+export function getBroadcastBoard() {
+  return request('/api/org/broadcast-board', { method: 'GET' });
+}
+
 // ---------------------------------------------------------------------------
 // 全 SPA 迁移（C 阶段）：全域读写端点。函数名即后续页面调用契约，勿改名。
 // POST 字段名以 app.py 各 handler 的 payload.get(...) 为准。
