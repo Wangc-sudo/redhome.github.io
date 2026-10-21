@@ -12,6 +12,7 @@ from dingtalk_stream import AckMessage
 from common.kb_qa import bm25, docs, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
+from common.kb_qa import agent as agent_module
 from common.kb_qa import context as ctx_module
 from common.kb_qa import rag_docs, sync_wiki
 from common.kb_qa.app import (
@@ -1125,6 +1126,230 @@ class ConversationFlowTests(unittest.TestCase):
         asyncio.run(handler.process(_FakeCallback("m2", "习酒窖藏1998 价格")))
         render_prompt = llm.calls[-1][0]["content"]
         self.assertIn("习酒窖藏1998 箱规", render_prompt)  # 渲染也带历史
+
+
+class AgentToolExecutorTests(unittest.TestCase):
+    """白名单工具执行器（2026-10-21 工具调用 agent）。"""
+
+    def _executor(self, script, **kw):
+        return agent_module.ToolExecutor(_FakeConn(script), **kw)
+
+    def test_unknown_tool(self):
+        executor = self._executor([])
+        result = json.loads(executor.execute("drop_table", {}))
+        self.assertIn("unknown tool", result["error"])
+
+    def test_daily_sales_rejects_bad_scope_and_date(self):
+        # script: DISTINCT scope 返回两个合法区域
+        executor = self._executor([[{"scope": "hangzhou"},
+                                    {"scope": "shaoxing"}]])
+        result = json.loads(executor.execute(
+            "daily_sales", {"scope": "hangzhou; DROP TABLE kb_products"}))
+        self.assertIn("unknown scope", result["error"])
+        self.assertIn("hangzhou", result["valid_scopes"])
+        executor2 = self._executor([[{"scope": "hangzhou"}]])
+        result = json.loads(executor2.execute(
+            "daily_sales", {"scope": "hangzhou", "date": "10-21"}))
+        self.assertIn("YYYY-MM-DD", result["error"])
+
+    def test_daily_sales_uses_placeholders(self):
+        executor = self._executor([
+            [{"scope": "hangzhou"}],                       # DISTINCT scope
+            {"stat_date": "2026-10-20", "scope": "hangzhou",
+             "sales_amount": 12.5, "dod_rate": 0.1},       # 主查询 fetchone
+        ])
+        result = json.loads(executor.execute(
+            "daily_sales", {"scope": "hangzhou", "date": "2026-10-20"}))
+        self.assertTrue(result["found"])
+        self.assertEqual(12.5, result["sales_amount"])
+        sql, params = executor._conn.cursor_instance.executed[-1]
+        self.assertIn("`scope`=%s", sql)          # 占位符，无拼接
+        self.assertEqual(("hangzhou", "2026-10-20"), params)
+
+    def test_channel_sales_filters_and_groups(self):
+        executor = self._executor([
+            [{"channel": "京东"}],                          # DISTINCT channel
+            [{"channel": "京东", "business_date": "2026-10-20",
+              "sales_amount": 8.0}],                        # 主查询 fetchall
+        ])
+        result = json.loads(executor.execute(
+            "channel_sales", {"channel": "京东", "date": "2026-10-20"}))
+        self.assertEqual(1, result["count"])
+        sql, params = executor._conn.cursor_instance.executed[-1]
+        self.assertIn("`business_date`=%s", sql)
+        self.assertIn("`channel`=%s", sql)
+        self.assertEqual(["2026-10-20", "京东"], list(params))
+
+    def test_search_docs_merges_bm25_and_vector(self):
+        executor = self._executor(
+            [],
+            doc_search=lambda conn, q, k=2: [
+                {"doc_title": "手册", "content": "BM25 切片"}],
+            vector_search=lambda q: [
+                {"doc_title": "手册", "content": "向量切片"}],
+        )
+        result = json.loads(executor.execute(
+            "search_docs", {"query": "工艺周期"}))
+        self.assertEqual(2, result["count"])
+        self.assertEqual(2, len(result["chunks"]))
+
+
+class AgentLoopTests(unittest.TestCase):
+    """agent loop：决策→工具→作答；异常与降级。"""
+
+    class _Executor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, name, arguments):
+            self.calls.append((name, arguments))
+            return json.dumps({"found": True, "sales_amount": 12.5},
+                              ensure_ascii=False)
+
+    def _llm(self, responses):
+        state = {"i": 0}
+
+        class _Llm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                response = responses[min(state["i"], len(responses) - 1)]
+                state["i"] += 1
+                return response
+
+            def chat(self, messages, **kw):
+                return "最终答案"
+
+        return _Llm()
+
+    def test_tool_call_then_answer(self):
+        responses = [
+            {"content": None, "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "daily_sales",
+                             "arguments": '{"scope": "hangzhou"}'}}]},
+            {"content": "杭州 10-20 销售 12.5 万。", "tool_calls": []},
+        ]
+        executor = self._Executor()
+        answer = agent_module.run_agent(self._llm(responses),
+                                        "杭州昨天卖了多少", executor=executor)
+        self.assertEqual("杭州 10-20 销售 12.5 万。", answer)
+        self.assertEqual([("daily_sales", {"scope": "hangzhou"})],
+                         executor.calls)
+
+    def test_direct_answer_without_tools(self):
+        responses = [{"content": "你好，有什么可以帮你？", "tool_calls": []}]
+        executor = self._Executor()
+        answer = agent_module.run_agent(self._llm(responses), "你好",
+                                        executor=executor)
+        self.assertIn("你好", answer)
+        self.assertEqual([], executor.calls)
+
+    def test_llm_error_returns_none(self):
+        class _ErrLlm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                raise LlmError("boom")
+
+        answer = agent_module.run_agent(_ErrLlm(), "q",
+                                        executor=self._Executor())
+        self.assertIsNone(answer)
+
+    def test_rounds_exhausted_falls_back_to_final_chat(self):
+        responses = [
+            {"content": None, "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "daily_sales", "arguments": "{}"}}]},
+            {"content": None, "tool_calls": [{
+                "id": "c2", "type": "function",
+                "function": {"name": "channel_sales", "arguments": "{}"}}]},
+        ]
+        answer = agent_module.run_agent(self._llm(responses), "q",
+                                        executor=self._Executor())
+        self.assertEqual("最终答案", answer)
+
+    def test_history_enters_system_prompt(self):
+        captured = []
+
+        class _Llm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                captured.append(messages)
+                return {"content": "答", "tool_calls": []}
+
+        agent_module.run_agent(
+            _Llm(), "那杭州呢", executor=self._Executor(),
+            history=[{"q": "绍兴销售", "a": "8 万"}])
+        self.assertIn("绍兴销售", captured[0][0]["content"])
+
+
+class ChatWithToolsTests(unittest.TestCase):
+    """LlmClient.chat_with_tools：payload 与响应解析。"""
+
+    def test_payload_and_parse(self):
+        captured = {}
+
+        def fake_request(payload):
+            captured.update(payload)
+            return {"choices": [{"message": {
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "daily_sales",
+                                             "arguments": "{}"}}]}}]}
+
+        client = llm_module.LlmClient("http://x", "k", "m",
+                                      request=fake_request)
+        result = client.chat_with_tools(
+            [{"role": "user", "content": "q"}], tools=agent_module.TOOLS)
+        self.assertIn("tools", captured)
+        self.assertIsNone(result["content"])
+        self.assertEqual("daily_sales",
+                         result["tool_calls"][0]["function"]["name"])
+
+
+class AgentAnswerRoutingTests(unittest.TestCase):
+    """app._answer：规则 miss 进 agent；闲聊精确词不进。"""
+
+    def test_rule_miss_goes_to_agent(self):
+        seen = []
+
+        def runner(conn, text, history):
+            seen.append(text)
+            return "杭州昨天 12.5 万。"
+
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=runner)
+        reply, intent, _ = handler._answer(conn, "今天杭州出了多少货")
+        self.assertEqual("agent", intent)
+        self.assertIn("12.5", reply)
+        self.assertEqual(["今天杭州出了多少货"], seen)
+
+    def test_chitchat_exact_skips_agent(self):
+        seen = []
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history: seen.append(text))
+        reply, intent, _ = handler._answer(conn, "你好")
+        self.assertEqual(CHITCHAT, intent)
+        self.assertEqual([], seen)
+
+    def test_agent_none_falls_back_to_not_found(self):
+        # 商品全 miss + agent 无答案 → not_found（业务问句被兜底成商品直查）
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history: None)
+        reply, intent, _ = handler._answer(conn, "今天杭州出了多少货")
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertIn("没有找到", reply)
+
+    def test_chitchat_miss_agent_none_falls_back_to_help(self):
+        # 规则完全未命中 + agent 无答案 → HELP_TEXT
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history: None)
+        reply, intent, _ = handler._answer(conn, "嗯")
+        self.assertEqual(CHITCHAT, intent)
 
 
 if __name__ == "__main__":

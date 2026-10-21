@@ -139,7 +139,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
 
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
-                 doc_search=None, vector_search=None, context_store=None):
+                 doc_search=None, vector_search=None, context_store=None,
+                 agent_runner=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -151,6 +152,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._doc_search = doc_search or search_docs
         self._vector_search = vector_search
         self._context_store = context_store
+        self._agent_runner = agent_runner
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -254,6 +256,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 # 规则层关键词整词/分词全 miss：有 LLM 时二次解析换关键词重查一次。
                 rows = self._reparse_products(conn, text, history)
             if not rows:
+                # 商品全 miss：可能是业务数据问句（「今天杭州出了多少货」
+                # 会被兜底成疑似商品名直查）——给 agent 一次机会，它查
+                # 不到再由 LLM 如实说，比干巴巴的「未找到」更有用。
+                agent_answer = self._try_agent(conn, text, history)
+                if agent_answer:
+                    return agent_answer, "agent", None
                 return render_not_found(intent.keyword), intent.category, None
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
                 # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
@@ -277,7 +285,24 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return "\n".join(lines), intent.category, row["record_id"]
         if intent.category == DOC_QA:
             return self._answer_docs(conn, text, history)
+        # 规则未命中（含业务数据问句「今天杭州出了多少货」这类规则接不住
+        # 的）→ 工具调用 agent：LLM 自主决定查商品/查文档/查业务数据。
+        # 闲聊精确词（你好/在吗）直接 HELP，不花 agent 的 LLM 调用。
+        if intent.category == CHITCHAT and intent.reason == "未命中任何规则":
+            agent_answer = self._try_agent(conn, text, history)
+            if agent_answer:
+                return agent_answer, "agent", None
         return HELP_TEXT, CHITCHAT, None
+
+    def _try_agent(self, conn, text, history):
+        """agent loop 入口（fail-open：异常/无答案返回 None 由调用方降级）。"""
+        if self._agent_runner is None:
+            return None
+        try:
+            return self._agent_runner(conn, text, history)
+        except Exception:
+            self._log("kb qa: agent failed")
+            return None
 
     # ------------------------------------------------------------------
     # P2：LLM 渲染与手册召回（全部 fail-open，异常只降级不外泄）
@@ -414,6 +439,20 @@ def main(argv=None):
     # 10 分钟），重启丢上下文可接受；不建表。
     from common.kb_qa.context import ConversationStore
 
+    # 工具调用 agent（2026-10-21）：规则 miss 的消息由 LLM 自主决定查
+    # 商品/查文档/查业务数据（agg_offline_daily / fact_channel_daily_sales
+    # 预定义只读查询，白名单参数）。LLM 未配置则不启用（规则兜底照旧）。
+    agent_runner = None
+    if llm is not None:
+        from common.kb_qa.agent import ToolExecutor, run_agent
+
+        def agent_runner(conn, text, history):
+            executor = ToolExecutor(
+                conn, doc_search=search_docs, vector_search=vector_search)
+            return run_agent(llm, text, executor=executor, history=history)
+    else:
+        print("kb qa: agent disabled (no LLM)")
+
     handler = KbStreamHandler(
         connection_factory=lambda: db.connect(settings.mart_database),
         conversation_ids=allowlist,
@@ -422,6 +461,7 @@ def main(argv=None):
         llm=llm,
         vector_search=vector_search,
         context_store=ConversationStore(),
+        agent_runner=agent_runner,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()
