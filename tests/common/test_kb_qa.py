@@ -10,7 +10,7 @@ from unittest import mock
 
 from dingtalk_stream import AckMessage
 
-from common.kb_qa import bm25, docs, sync_docs
+from common.kb_qa import bm25, docs, products, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
 from common.kb_qa import agent as agent_module
@@ -326,6 +326,30 @@ class HandlerAnswerTests(unittest.TestCase):
         )
         self.assertEqual(PRODUCT_ASSET, intent)
         self.assertIn("细节图：1 个文件", reply)
+
+    def test_asset_attachments_stored_as_json_string(self):
+        # 2026-10-21 事故回归：DB 里 attachments 是 json.dumps 的字符串，
+        # ASSET 分支 str.items() 炸 AttributeError（「质检报告」必炸）。
+        row = _product_row(
+            attachments=json.dumps({"质检报告": [{"name": "r.pdf"}]},
+                                   ensure_ascii=False))
+        handler, _ = self._handler([[row]])
+        reply, intent, matched = handler._answer(
+            handler._connection_factory(), "习酒质检报告"
+        )
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("质检报告：1 个文件", reply)
+
+    def test_decode_json_fields(self):
+        rows = [{"attachments": '{"a": [1]}', "extra": None},
+                {"attachments": "not-json", "extra": {"b": 2}},
+                {"attachments": None}]
+        out = products._decode_json_fields(rows)
+        self.assertEqual({"a": [1]}, out[0]["attachments"])
+        self.assertIsNone(out[0]["extra"])
+        self.assertIsNone(out[1]["attachments"])   # 坏 JSON 置 None
+        self.assertEqual({"b": 2}, out[1]["extra"])  # dict 原样
+        self.assertIsNone(out[2]["attachments"])
 
     def test_conversation_allowlist_parsing(self):
         self.assertEqual((), parse_conversation_allowlist(None))
