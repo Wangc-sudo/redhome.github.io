@@ -55,7 +55,16 @@ def search_vector(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
         question, api_key, model=model,
         dimensions=int(dim_text) if dim_text else None,
         provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
-    hits = store.search(milvus, vector, limit=limit, kind="text")
+    try:
+        hits = store.search(milvus, vector, limit=limit, kind="text")
+    finally:
+        # Milvus Lite 的 LOCK 是排他 flock：kb-gateway 与 scheduler（灌库）
+        # 共享 rag.db，连接必须即用即放——不 close 时靠 GC 释放，时机不
+        # 可控，凌晨灌库会撞 Open local milvus failed（2026-10-21）。
+        try:
+            milvus.close()
+        except Exception:
+            pass
     return [
         {
             "doc_title": hit.get("name") or "",

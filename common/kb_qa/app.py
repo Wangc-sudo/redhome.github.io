@@ -191,9 +191,11 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     ctx_key, question=text, answer=reply,
                     category=intent, record_id=matched)
             conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            self._log("kb qa: answer failed")
+            # 非泄露约定允许记异常类型（不记原文/堆栈）——2026-10-21 一次
+            # 时段性故障因无类型信息无法回溯定位，补上。
+            self._log(f"kb qa: answer failed: {type(exc).__name__}")
             self._safe_reply(incoming, "查询出了点问题，请稍后再试。")
             return AckMessage.STATUS_OK, "OK"
 
