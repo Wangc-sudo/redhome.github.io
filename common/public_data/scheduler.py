@@ -145,6 +145,17 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
+    # 知识库文档同步（2026-10-21，wiki OpenAPI 已授权）：遍历知识库 →
+    # blocks→markdown → 双写清单 JSON（rag-index-docs 灌向量用）与
+    # kb_doc_chunks（BM25 通路，按 doc_id 先删后灌）。幂等，手动触发
+    # 无需 --force。
+    "kb-sync-wiki": {
+        "argv": [
+            "common.kb_qa.sync_wiki",
+            "--live-read",
+            "--confirm-local-test-write",
+        ],
+    },
     # RAG 向量索引（2026-10-12 第一期，商品+图片跨模态）：AI 表「产品资料」→
     # jina-clip-v2 embed → Milvus Lite；数据层幂等（id 先 delete 后 insert）。
     "rag-index-products": {

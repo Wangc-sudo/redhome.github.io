@@ -389,6 +389,17 @@ kb-sync-products:
   schedule: "7 * * * *"
   reads: [mart_ops]
   description: "product knowledge-base sync (DingTalk aitable -> mart_ops kb_products)"
+# 2026-10-21：wiki/doc OpenAPI 已授权（知识库读/节点读/企业存储文件读），
+# 知识库文档自动同步——遍历可见知识库 → blocks→markdown → 双写清单 JSON
+# （rag-index-docs 03:17 灌向量库）与 kb_doc_chunks（BM25 通路）。
+# 03:10 跑，先于 rag-index-docs 03:17 完成（两库文档量小，分钟级）。
+kb-sync-wiki:
+  kind: apps
+  category: 同步
+  enabled: true
+  schedule: "10 3 * * *"
+  reads: [mart_ops]
+  description: "wiki docs sync (DingTalk wiki/doc OpenAPI -> kb_docs.json + kb_doc_chunks)"
 kb-gateway:
   kind: apps
   category: 钉钉
