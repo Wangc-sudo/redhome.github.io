@@ -2262,6 +2262,55 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok" if ok else "not_found"})
 
+    @app.get("/api/org/broadcast-board")
+    def org_broadcast_board(request: Request):
+        """播报编排板数据（任务×区域拉线矩阵；注册表为真源，前端即后端）。
+
+        2026-10-21 用户裁决「播报编排大模块」：把播报/催办类任务按
+        「任务 × 区域」装配成拉线视图；链接=该区域该任务的启用/播报时间。
+        部门级拉线预留（暂不开放）。无区域的平台/应用线任务不进板。
+        """
+        require_capability(request, CAPABILITY_ORG)
+        service_ids = _fleet()
+        links = []
+        for sid in service_ids:
+            try:
+                cfg = config_source.get_pipeline(sid)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "ops-web broadcast-board config parse failed: %s",
+                    type(exc).__name__)
+                continue
+            region = _service_region(sid)
+            if not region:
+                continue
+            category = resolve_category(sid, cfg.category)
+            if category not in ("播报", "催办"):
+                continue
+            links.append({
+                "service_id": sid,
+                "region": region,
+                "category": category,
+                "label": _service_label(sid, cfg.description),
+                "enabled": bool(cfg.enabled),
+                "schedule": cfg.schedule or "",
+            })
+        # 区域轴：组织目录启用区域（中文名；含画布登记但暂无播报的区域）
+        try:
+            with db_connector() as connection:
+                catalog = org_catalog.fetch_catalog(connection)
+        except Exception as exc:
+            _LOGGER.warning(
+                "ops-web broadcast-board catalog failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        regions = [
+            {"key": r.get("region_key"), "label": r.get("label") or r.get("region_key")}
+            for r in (catalog.get("regions") or [])
+            if r.get("enabled", True)
+        ]
+        links.sort(key=lambda x: (x["category"], x["label"]))
+        return JSONResponse({"links": links, "regions": regions})
+
     def _org_override_region(user_id):
         """被操作覆盖行所属区域（无该行 → None）；读故障 503（收敛语义）。
 
