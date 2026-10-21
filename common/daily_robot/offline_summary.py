@@ -116,7 +116,12 @@ def fetch_scope_daily_facts(connection, *, region, anchor, start, end):
 
     名称含「合计」的行一律排除（与 ``mart_leaderboard`` 同口径）——AI 表
     自带 杭州合计/余杭合计 等合计行，不排则区域汇总双倍计数。
+
+    ``OFFLINE_OTHER_REGION``（其他桶）走画布 other 成员人名口径（含
+    offline_extra 换列），日报与 BI 板块总览同源（2026-10-20 用户裁决）。
     """
+    if region == OFFLINE_OTHER_REGION:
+        return _fetch_other_daily_facts(connection, start=start, end=end)
     region_sql, region_params = _region_clause(region)
     clause, clause_params = _anchor_clause(anchor)
     sql = (
@@ -143,6 +148,8 @@ def fetch_scope_month_target(connection, *, region, anchor, year, month):
     （板块目标 = 成员目标之和）；「合计」行排除（其目标值是行的冗余
     汇总，混入即虚增）。
     """
+    if region == OFFLINE_OTHER_REGION:
+        return _fetch_other_month_target(connection, year=year, month=month)
     first, last = month_days(year, month)[0], month_days(year, month)[-1]
     region_sql, region_params = _region_clause(region)
     clause, clause_params = _anchor_clause(anchor)
@@ -570,17 +577,13 @@ def build_daily_markdown(*, business_date, rows, total, dept_rows=None,
 # ---------------------------------------------------------------------------
 
 def _fetch_window(connection, *, region, anchor, start, end):
-    if region == OFFLINE_OTHER_REGION:
-        return _fetch_other_daily_facts(connection, start=start, end=end)
     return fetch_scope_daily_facts(
         connection, region=region, anchor=anchor, start=start, end=end
     )
 
 
 def _scope_month_target(connection, *, region, anchor, year, month):
-    """板块月目标：其他桶走人名口径，其余走 region 过滤。"""
-    if region == OFFLINE_OTHER_REGION:
-        return _fetch_other_month_target(connection, year=year, month=month)
+    """板块月目标统一入口（其他桶由 fetch_scope_month_target 内部走人名口径）。"""
     return fetch_scope_month_target(
         connection, region=region, anchor=anchor, year=year, month=month)
 
