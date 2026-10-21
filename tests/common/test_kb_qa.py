@@ -1349,10 +1349,30 @@ class AgentLoopTests(unittest.TestCase):
             {"content": None, "tool_calls": [{
                 "id": "c2", "type": "function",
                 "function": {"name": "channel_sales", "arguments": "{}"}}]},
+            {"content": None, "tool_calls": [{
+                "id": "c3", "type": "function",
+                "function": {"name": "query_sql", "arguments": "{}"}}]},
         ]
         answer = agent_module.run_agent(self._llm(responses), "q",
                                         executor=self._Executor())
         self.assertEqual("最终答案", answer)
+
+    def test_two_tool_calls_then_answer_within_three_rounds(self):
+        # 2026-10-21 实测场景：先查基准日期再算完成率，两轮工具后第三轮作答
+        responses = [
+            {"content": None, "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "query_sql",
+                             "arguments": '{"sql": "SELECT MAX(stat_date) FROM agg_offline_daily"}'}}]},
+            {"content": None, "tool_calls": [{
+                "id": "c2", "type": "function",
+                "function": {"name": "query_sql",
+                             "arguments": '{"sql": "SELECT scope, month_rate FROM agg_offline_daily"}'}}]},
+            {"content": "排名如下……", "tool_calls": []},
+        ]
+        answer = agent_module.run_agent(self._llm(responses), "q",
+                                        executor=self._Executor())
+        self.assertIn("排名", answer)
 
     def test_history_enters_system_prompt(self):
         captured = []
