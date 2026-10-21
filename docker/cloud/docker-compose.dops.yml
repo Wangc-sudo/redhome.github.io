@@ -247,6 +247,10 @@ services:
     volumes:
       - /opt/dops/nginx/pages.conf:/etc/nginx/conf.d/default.conf:ro
       - /opt/dops/pages-output:/usr/share/nginx/html:ro
+      # Let's Encrypt（2026-10-20，dt.yyhlzj.com）：acme = http-01 验证
+      # webroot；letsencrypt = 证书目录（certbot 容器写入，nginx 只读消费）。
+      - /opt/dops/nginx/acme:/usr/share/nginx/acme:ro
+      - /opt/dops/letsencrypt:/etc/letsencrypt:ro
 
   # NTP 授时（2026-09-23）：chronyd 校准宿主机内核时钟（容器共享宿主时钟，
   # gateway/scheduler/nginx 自动受益），host 网络下 123/udp 对私网授时。
