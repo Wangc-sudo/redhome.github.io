@@ -1669,5 +1669,108 @@ class AssetSenderTests(unittest.TestCase):
             {"KB_DINGTALK_APP_KEY": "k"}))
 
 
+class ValidateSqlTests(unittest.TestCase):
+    """受控 SQL 护栏（2026-10-21 方案 B）。"""
+
+    def test_select_appends_default_limit(self):
+        sql = agent_module.validate_sql(
+            "SELECT scope, sales_amount FROM agg_offline_daily")
+        self.assertTrue(sql.endswith(f"LIMIT {agent_module._SQL_DEFAULT_LIMIT}"))
+
+    def test_with_cte_allowed(self):
+        sql = agent_module.validate_sql(
+            "WITH t AS (SELECT scope FROM agg_offline_daily) "
+            "SELECT scope FROM t LIMIT 10")
+        self.assertIn("LIMIT 10", sql)
+
+    def test_write_and_admin_statements_rejected(self):
+        for bad in (
+            "INSERT INTO kb_products (code) VALUES ('x')",
+            "UPDATE kb_products SET code='x'",
+            "DELETE FROM kb_products",
+            "DROP TABLE kb_products",
+            "SET SESSION sql_safe_updates=0",
+            "SHOW TABLES",
+            "REPLACE INTO kb_products (code) VALUES ('x')",
+        ):
+            with self.assertRaises(agent_module.SqlRejected, msg=bad):
+                agent_module.validate_sql(bad)
+
+    def test_multi_statement_rejected(self):
+        with self.assertRaises(agent_module.SqlRejected):
+            agent_module.validate_sql(
+                "SELECT 1 FROM kb_products; SELECT 2 FROM kb_products")
+
+    def test_non_whitelist_table_rejected(self):
+        with self.assertRaises(agent_module.SqlRejected) as ctx:
+            agent_module.validate_sql("SELECT * FROM kb_qa_audit")
+        self.assertIn("kb_qa_audit", str(ctx.exception))
+
+    def test_system_schema_rejected(self):
+        with self.assertRaises(agent_module.SqlRejected):
+            agent_module.validate_sql(
+                "SELECT table_name FROM information_schema.tables")
+
+    def test_limit_clamped(self):
+        sql = agent_module.validate_sql(
+            "SELECT code FROM kb_products LIMIT 100000")
+        self.assertIn("LIMIT 500", sql)
+        self.assertNotIn("100000", sql)
+
+    def test_desc_order_and_set_like_words_not_misjudged(self):
+        # DESC 排序与 asset 类子串不应误伤
+        sql = agent_module.validate_sql(
+            "SELECT sales_amount FROM agg_offline_daily"
+            " ORDER BY sales_amount DESC")
+        self.assertIn("DESC", sql)
+
+    def test_join_tables_all_checked(self):
+        with self.assertRaises(agent_module.SqlRejected):
+            agent_module.validate_sql(
+                "SELECT * FROM fact_order_line o JOIN secret_table s"
+                " ON o.spec_no=s.id")
+
+
+class QuerySqlToolTests(unittest.TestCase):
+    """_tool_query_sql：预检/超时/截断。"""
+
+    def _executor(self, script):
+        return agent_module.ToolExecutor(_FakeConn(script))
+
+    def test_guard_rejection_returned_as_error(self):
+        executor = self._executor([])
+        result = json.loads(executor.execute(
+            "query_sql", {"sql": "DELETE FROM kb_products"}))
+        self.assertIn("未通过安全检查", result["error"])
+
+    def test_explain_over_threshold_rejected(self):
+        executor = self._executor([
+            [{"rows": 400000}, {"rows": 200000}],   # EXPLAIN 两行计划
+        ])
+        result = json.loads(executor.execute(
+            "query_sql",
+            {"sql": "SELECT * FROM fact_order_line o"
+                    " JOIN fact_stockout_line s ON o.trade_no=s.trade_no"}))
+        self.assertIn("超阈值", result["error"])
+
+    def test_executes_with_session_timeout_and_truncates(self):
+        rows = [{"code": f"c{i}", "name": "x" * 300} for i in range(60)]
+        executor = self._executor([
+            [{"rows": 10}],      # EXPLAIN
+            0,                   # SET SESSION
+            rows,                # 业务 SQL
+        ])
+        result = json.loads(executor.execute(
+            "query_sql", {"sql": "SELECT code, name FROM kb_products"}))
+        self.assertEqual(60, result["total_rows"])
+        # 行数被压缩进结果预算（JSON 结构保持完整，能 loads）
+        self.assertLess(result["returned"], 60)
+        self.assertGreater(result["returned"], 0)
+        self.assertEqual(200, len(result["rows"][0]["name"]))
+        executed_sql = [sql for sql, _ in
+                        executor._conn.cursor_instance.executed]
+        self.assertTrue(any("MAX_EXECUTION_TIME" in s for s in executed_sql))
+
+
 if __name__ == "__main__":
     unittest.main()

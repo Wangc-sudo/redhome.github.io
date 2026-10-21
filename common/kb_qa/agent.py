@@ -37,11 +37,18 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 2. 产品手册/品牌工艺/卖点话术/售后流程/销售总结规划 → search_docs
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
 4. 各渠道销售额汇总对比 → channel_sales
-5. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+5. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
+   query_sql 写一条 SELECT（只能用白名单表，大表必须带日期过滤，
+   结果超 100 行用 GROUP BY 聚合）
+6. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
 - 口语化、客服可直接转发；数据类回答带上日期与单位
+
+# query_sql 可用表（含口径，别编造表与列）
+{{sql_tables}}
+
 {{history}}"""
 
 TOOLS = [
@@ -109,10 +116,140 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_sql",
+            "description": "受控 SQL 查询业务库（只读 SELECT，白名单表，"
+                           "自动 LIMIT，大表必须带日期过滤）。用于其他工具"
+                           "答不了的订单/出库/退款/库存/人员目标类问题。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string",
+                            "description": "单条 SELECT 语句（MySQL 方言）"},
+                },
+                "required": ["sql"],
+            },
+        },
+    },
 ]
 
 #: 工具结果给 LLM 的截断长度（控 token，防单行数据撑爆上下文）。
 _RESULT_LIMIT = 2000
+
+# ---------------------------------------------------------------------------
+# 受控 SQL（query_sql，2026-10-21 裁决方案 B：Text-to-SQL + 多层护栏）
+#
+# 防线（缺一不可）：
+#   1. 语句形态：只允许单条 SELECT/WITH（多语句、写操作、管理语句全拒）；
+#   2. 表白名单：FROM/JOIN 的表必须在 _SQL_TABLES（带口径注释，防编造）；
+#   3. 强制 LIMIT：缺省追加 100，上限 clamp 500；
+#   4. EXPLAIN 预检：估算扫描行数超阈值直接拒（防全表/JOIN 放大打挂
+#      生产库——mart_ops 上还有 scheduler/播报/BI）；
+#   5. 语句超时：SET SESSION MAX_EXECUTION_TIME（毫秒，MySQL 5.7.8+，
+#      只对只读 SELECT 生效）；
+#   6. 结果截断：返回 LLM ≤50 行、单元格截 200 字。
+# ---------------------------------------------------------------------------
+
+#: 白名单表与口径注释（喂 LLM 的 schema 摘要；口径正确性比能跑更重要）。
+_SQL_TABLES = {
+    "agg_offline_daily":
+        "线下区域日聚合：stat_date 日期, scope 区域(hangzhou/shaoxing/vanke/"
+        "qudao/junpin/offline_all), sales_amount 销售额(元), dod_rate 日环比,"
+        " wow_rate 周环比, month_target 月目标(元), month_rate 月完成率",
+    "fact_channel_daily_sales":
+        "渠道日销：channel 渠道, store_name 店铺, business_date 日期,"
+        " sales_amount 销售额(元), promotion_cost 推广费(元), roi",
+    "fact_order_line":
+        "订单行（约10万行，必须带 trade_time 日期过滤）：trade_time 下单时间,"
+        " shop_name 店铺, channel_name 渠道, goods_name 商品, brand_name 品牌,"
+        " quantity 数量, paid_amount 实付(元), trade_status 状态",
+    "fact_stockout_line":
+        "出库行（约10万行，必须带 consign_time 日期过滤）：consign_time 发货"
+        "时间, warehouse_name 仓, shop_name 店铺, channel_name 渠道,"
+        " goods_name 商品, quantity 数量, sell_price 售价(元)",
+    "fact_refund_line":
+        "退款行：check_time 审核时间, process_status 状态, shop_name 店铺,"
+        " channel_name 渠道, reason 退款原因, goods_name 商品, quantity 数量,"
+        " refund_amount 退款额(元)",
+    "fact_purchase_inbound":
+        "采购入库：stockin_time 入库时间, warehouse_name 仓, goods_name 商品,"
+        " qty 数量, status 状态",
+    "fact_sales_daily":
+        "每日销量（按规格编码）：business_date 日期, spec_no 规格编码,"
+        " qty_sold 销量",
+    "dim_report_roster":
+        "人员花名册：scope 区域, person_name 姓名, aliases 别名(json数组),"
+        " channel 渠道, role 角色, enabled 是否启用",
+    "dim_report_target":
+        "月度目标：scope 区域, person_name 姓名, year_month 月份(YYYY-MM),"
+        " monthly_target 目标(元)",
+    "kb_products":
+        "商品资料：code 商品编码, name 名称, brand 品牌, category 系列,"
+        " box_qty 箱规, case_qty 盒规, size_mm 尺寸, weight_kg 重量,"
+        " gift_bag_spec 礼袋规格, barcode_single/barcode_case 69码",
+}
+
+_SQL_FORBIDDEN_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|SET|"
+    r"USE|SHOW|DESCRIBE|EXPLAIN|INTO|LOAD|CALL|EXEC|HANDLER|LOCK|"
+    r"UNLOCK|KILL|REPLACE)\b",
+    re.IGNORECASE)
+_SQL_SCHEMA_RE = re.compile(
+    r"\b(information_schema|performance_schema|mysql|sys)\s*\.", re.IGNORECASE)
+_SQL_TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+`?([A-Za-z_]\w*)`?",
+                           re.IGNORECASE)
+
+#: EXPLAIN 估算扫描行数阈值（行）；订单行/出库行全表 106k，JOIN 放大防到 50 万。
+_SQL_EXPLAIN_ROW_LIMIT = 500_000
+#: 语句超时（毫秒，SET SESSION MAX_EXECUTION_TIME）。
+_SQL_TIMEOUT_MS = 5000
+#: 强制 LIMIT：缺省值与上限。
+_SQL_DEFAULT_LIMIT = 100
+_SQL_MAX_LIMIT = 500
+#: 返回给 LLM 的最大行数与单元格长度。
+_SQL_RESULT_ROWS = 50
+_SQL_CELL_LIMIT = 200
+
+
+class SqlRejected(ValueError):
+    """SQL 未通过护栏校验（原因文本可直接回喂 LLM 修正）。"""
+
+
+def validate_sql(sql):
+    """受控 SQL 校验与规整，返回可执行 SQL；不通过抛 SqlRejected（原因）。"""
+    text = (sql or "").strip()
+    if not text:
+        raise SqlRejected("empty sql")
+    if ";" in text.rstrip(";"):
+        raise SqlRejected("只允许单条语句")
+    text = text.rstrip(";").strip()
+    first = text.split(None, 1)[0].upper() if text.split(None, 1) else ""
+    if first not in ("SELECT", "WITH"):
+        raise SqlRejected("只允许 SELECT 查询")
+    match = _SQL_FORBIDDEN_RE.search(text)
+    if match:
+        raise SqlRejected(f"含禁止语句: {match.group(1)}")
+    if _SQL_SCHEMA_RE.search(text):
+        raise SqlRejected("不允许访问系统库")
+    tables = {t.lower() for t in _SQL_TABLE_RE.findall(text)}
+    if not tables:
+        raise SqlRejected("未找到 FROM 表")
+    # CTE 别名（WITH t AS (...)）不是物理表，从校验集合剔除
+    cte_names = {name.lower() for name in re.findall(
+        r"\bWITH\s+`?(\w+)`?\s+AS\s*\(", text, re.IGNORECASE)}
+    unknown = tables - cte_names - set(_SQL_TABLES)
+    if unknown:
+        raise SqlRejected(
+            f"表不在白名单: {sorted(unknown)}（可用: {sorted(_SQL_TABLES)}）")
+    limit_match = re.search(r"\bLIMIT\s+(\d+)", text, re.IGNORECASE)
+    if not limit_match:
+        text = f"{text} LIMIT {_SQL_DEFAULT_LIMIT}"
+    elif int(limit_match.group(1)) > _SQL_MAX_LIMIT:
+        text = (text[:limit_match.start(1)] + str(_SQL_MAX_LIMIT)
+                + text[limit_match.end(1):])
+    return text
 
 # DSML 文本工具调用（2026-10-21 实测：deepseek-v4.1-flash-1017 偶发不走
 # 原生 tool_calls 协议，而把调用写成 ``<｜｜DSML｜｜ calls>…`` 标记文本塞在
@@ -301,6 +438,47 @@ class ToolExecutor:
             cursor.close()
         return {"count": len(rows), "rows": rows}
 
+    def _tool_query_sql(self, args):
+        try:
+            sql = validate_sql(args.get("sql"))
+        except SqlRejected as exc:
+            return {"error": f"SQL 未通过安全检查: {exc}"}
+        cursor = self._conn.cursor()
+        try:
+            # 成本预检：估算扫描行数超阈值直接拒（防全表/JOIN 放大）。
+            cursor.execute(f"EXPLAIN {sql}")
+            plan_rows = 0
+            for plan in cursor.fetchall():
+                estimate = plan.get("rows") or 0
+                try:
+                    plan_rows += int(estimate)
+                except (TypeError, ValueError):
+                    continue
+            if plan_rows > _SQL_EXPLAIN_ROW_LIMIT:
+                return {"error": f"查询估算扫描 {plan_rows} 行，超阈值 "
+                                 f"{_SQL_EXPLAIN_ROW_LIMIT}——请加日期过滤或"
+                                 " GROUP BY 聚合后重试"}
+            cursor.execute(f"SET SESSION MAX_EXECUTION_TIME={_SQL_TIMEOUT_MS}")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        truncated = [
+            {key: (str(value)[:_SQL_CELL_LIMIT] if value is not None else None)
+             for key, value in row.items()}
+            for row in rows[:_SQL_RESULT_ROWS]
+        ]
+        result = {"total_rows": len(rows), "rows": truncated}
+        # 自我压缩到结果预算内——外层 execute 的 _RESULT_LIMIT 硬截会破坏
+        # JSON 结构（2026-10-21 实测），行数由这里减，不给外层截的机会。
+        budget = _RESULT_LIMIT - 200
+        while (result["rows"]
+               and len(json.dumps(result, ensure_ascii=False,
+                                  default=str)) > budget):
+            result["rows"].pop()
+        result["returned"] = len(result["rows"])
+        return result
+
     # ------------------------------------------------------------------
     def _valid_scopes(self):
         if self._scopes is None:
@@ -335,9 +513,13 @@ def run_agent(llm, question, *, executor, history=None,
     """
     call = chat_with_tools or llm.chat_with_tools
     history_text = format_history(history) if history else ""
+    tables_text = "\n".join(f"- {name}：{desc}"
+                            for name, desc in _SQL_TABLES.items())
     messages = [
         {"role": "system",
-         "content": _SYSTEM_PROMPT.replace("{{history}}", history_text)},
+         "content": (_SYSTEM_PROMPT
+                     .replace("{{sql_tables}}", tables_text)
+                     .replace("{{history}}", history_text))},
         {"role": "user", "content": question},
     ]
     for _ in range(max_rounds):
