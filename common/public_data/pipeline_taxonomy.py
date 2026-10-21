@@ -35,6 +35,7 @@ SERVICE_CATEGORIES = {
     "sync-wdt": "同步",
     "sync-channel-sales": "同步",
     "kb-sync-products": "同步",
+    "kb-sync-wiki": "同步",
     "rag-index-products": "同步",
     "rag-index-docs": "同步",
     "kb-gateway": "钉钉",

@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """kb_qa 模块单元测试：路由 / 商品查询渲染 / 同步归一化 / 媒体缓存 / 问答主流程。"""
 
+import json
 import unittest
+from pathlib import Path
 
 from dingtalk_stream import AckMessage
 
 from common.kb_qa import bm25, docs, sync_docs
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
-from common.kb_qa import rag_docs
+from common.kb_qa import rag_docs, sync_wiki
 from common.kb_qa.app import (
     KbStreamHandler,
     _merge_doc_hits,
@@ -859,6 +861,137 @@ class VectorRecallTests(unittest.TestCase):
     def test_index_of_parses_chunk_suffix(self):
         self.assertEqual(rag_docs._index_of("doc:abc:0007"), 7)
         self.assertEqual(rag_docs._index_of("garbage"), -1)
+
+
+def _block(block_type, index, **body):
+    return {"blockType": block_type, "index": index, "id": f"b{index}",
+            block_type: body}
+
+
+class SyncWikiBlocksTests(unittest.TestCase):
+    """blocks_to_markdown：钉钉 doc blocks → markdown。"""
+
+    def test_heading_paragraph_lists(self):
+        blocks = [
+            _block("heading", 0, level="heading-1", text="手册"),
+            _block("heading", 1, level="heading-3", text="小节"),
+            _block("paragraph", 2, text="正文一段"),
+            _block("unorderedList", 3, text="要点A"),
+            _block("orderedList", 4, text="步骤一"),
+            _block("blockquote", 5, text="引用"),
+            _block("unknown", 6, rawType="hr"),
+        ]
+        md = sync_wiki.blocks_to_markdown(blocks)
+        self.assertEqual(md, "# 手册\n\n### 小节\n\n正文一段\n\n- 要点A"
+                             "\n\n1. 步骤一\n\n> 引用")
+
+    def test_table_becomes_markdown_with_escaped_pipes(self):
+        blocks = [
+            _block("table", 0,
+                   cells=[["月份", "目标|万元"], ["7月", "160"], ["8月", "223"]],
+                   colSize=2, rowSize=3),
+        ]
+        md = sync_wiki.blocks_to_markdown(blocks)
+        self.assertIn("| 月份 | 目标\\|万元 |", md)
+        self.assertIn("|---|---|", md)
+        self.assertIn("| 7月 | 160 |", md)
+
+    def test_table_uneven_rows_padded_and_empty_dropped(self):
+        blocks = [
+            _block("table", 0, cells=[["a", "b", "c"], ["x"]],
+                   colSize=3, rowSize=2),
+            _block("table", 1, cells=[], colSize=0, rowSize=0),
+        ]
+        md = sync_wiki.blocks_to_markdown(blocks)
+        self.assertIn("| a | b | c |", md)
+        self.assertIn("| x |  |  |", md)
+
+    def test_blocks_sorted_by_index_and_empty_text_dropped(self):
+        blocks = [
+            _block("paragraph", 2, text="后"),
+            _block("paragraph", 0, text="先"),
+            _block("paragraph", 1, text="  "),
+        ]
+        self.assertEqual(sync_wiki.blocks_to_markdown(blocks), "先\n\n后")
+
+
+class _FakeWiki:
+    """WikiClient 替身：给定文档表与 blocks。"""
+
+    def __init__(self, docs, fail_ids=()):
+        self._docs = docs          # {workspace_id: [(node_id, title)]}
+        self._fail = set(fail_ids)
+
+    def workspaces(self):
+        return [(wid, f"库{wid}") for wid in self._docs]
+
+    def iter_documents(self, workspace_id):
+        return iter(self._docs.get(workspace_id, []))
+
+    def document_blocks(self, node_id):
+        if node_id in self._fail:
+            raise RuntimeError("boom")
+        return [_block("paragraph", 0, text=f"{node_id} 的正文内容")]
+
+
+class SyncWikiRunTests(unittest.TestCase):
+
+    class _Conn:
+        def __init__(self):
+            self.deleted = []
+            self.upserted = []
+
+        def cursor(self):
+            conn = self
+
+            class _Cur:
+                def execute(self, sql, params=None):
+                    if sql.strip().startswith("DELETE"):
+                        conn.deleted.append(params[0])
+                        self.rowcount = 3
+                    else:
+                        conn.upserted.append(params[:3])
+                        self.rowcount = 1
+
+                def close(self):
+                    pass
+
+            return _Cur()
+
+    def test_collect_skips_failed_and_empty(self):
+        wiki = _FakeWiki(
+            {"w1": [("n1", "手册A"), ("n2", "手册B")]},
+            fail_ids={"n2"},
+        )
+        docs, stats = sync_wiki.collect_documents(wiki)
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["doc_id"], "n1")
+        self.assertEqual(docs[0]["doc_title"], "手册A")
+        self.assertEqual(docs[0]["workspace"], "库w1")
+        self.assertEqual(stats["failed"], 1)
+
+    def test_collect_respects_workspace_allowlist(self):
+        wiki = _FakeWiki({"w1": [("n1", "A")], "w2": [("n2", "B")]})
+        docs, stats = sync_wiki.collect_documents(wiki, workspace_ids=["w2"])
+        self.assertEqual([d["doc_id"] for d in docs], ["n2"])
+
+    def test_run_sync_writes_manifest_and_rebuilds_chunks(self):
+        import tempfile
+
+        wiki = _FakeWiki({"w1": [("n1", "手册A")]})
+        conn = self._Conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(Path(tmp) / "kb_docs.json")
+            stats = sync_wiki.run_sync(wiki=wiki, conn=conn, out_path=out)
+            payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        self.assertEqual(stats["docs"], 1)
+        self.assertEqual(payload[0]["doc_id"], "n1")
+        self.assertEqual(payload[0]["doc_title"], "手册A")
+        self.assertIn("n1 的正文内容", payload[0]["content"])
+        # workspace 字段不进清单（下游 sync_docs/rag 不认它）
+        self.assertNotIn("workspace", payload[0])
+        self.assertEqual(conn.deleted, ["n1"])   # 先删后灌
+        self.assertTrue(conn.upserted)           # 切片已写
 
 
 if __name__ == "__main__":
