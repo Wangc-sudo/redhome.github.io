@@ -1999,6 +1999,44 @@ class PickAssetTests(unittest.TestCase):
         self.assertIsNone(row)
         self.assertEqual([], items)
 
+    def test_strong_term_never_falls_back_to_other_field(self):
+        # 2026-10-22 事故回归：红习酱没有质检报告字段（只有礼袋/素材包），
+        # 问「质检报告」被回退发了礼袋。强类型词宁缺毋滥。
+        rows = [self._row("r1", "红习酱整箱",
+                          {"礼袋": [{"name": "5.jpg"}],
+                           "素材包": [{"name": "s.zip"}]})]
+        row, field, items = assets_module.pick_asset(
+            rows, "53°500ml*6 酱香型白酒 500mL 质检报告")
+        self.assertIsNone(row)
+        self.assertEqual([], items)
+        # 弱词仍回退（行为不变）
+        row2, field2, _ = assets_module.pick_asset(rows, "发我资料")
+        self.assertEqual("r1", row2["record_id"])
+        self.assertEqual("礼袋", field2)
+
+
+class StrongTermAnswerTests(unittest.TestCase):
+    """强类型附件词字段 miss：如实回答现有字段，不搜图（防跨商品错发）。"""
+
+    def test_strong_term_miss_lists_available_fields(self):
+        row = _product_row(
+            name="红习酱整箱",
+            attachments={"礼袋": [{"name": "5.jpg"}],
+                         "素材包": [{"name": "s.zip"}]})
+        conn = _FakeConn([[row]])
+        image_called = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            image_search=lambda q: image_called.append(q) or [],
+            asset_sender=None)
+        reply, intent, _ = handler._answer(conn, "红习酱整箱 质检报告",
+                                           conversation_id="cid")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("没有这个附件", reply)
+        self.assertIn("礼袋", reply)
+        self.assertIn("素材包", reply)
+        self.assertEqual([], image_called)  # 强类型词不触发图召回
+
 
 class AssetDeliveryTests(unittest.TestCase):
     """ASSET 分支：直发 / 降级列清单。"""

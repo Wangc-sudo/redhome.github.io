@@ -26,6 +26,19 @@ ASSET_TERMS = (
     "素材", "礼袋", "包装", "图片", "照片", "质检", "报告", "图",
 )
 
+#: 强类型附件词：明确点名证书/报告/发票类时，字段不匹配**不得**回退
+#: 到别的字段（2026-10-22 事故：问红习酱质检报告被发了礼袋——证书类
+#: 发错类型比如实答「没有」更糟）。弱词（图/包装/素材）保留回退。
+STRONG_TERMS = (
+    "质检报告", "检测报告", "规格书", "说明书", "质检", "报告",
+    "发票", "证书",
+)
+
+
+def is_strong_asset_question(question):
+    """问题是否明确点名强类型附件（证书/报告/发票类）。"""
+    return any(term in (question or "") for term in STRONG_TERMS)
+
 #: 单条消息最多直发几个附件（一个字段可能多个文件，防刷屏）。
 MAX_DELIVER = 2
 
@@ -58,7 +71,10 @@ def pick_asset(rows, question):
                 fallback = (row, field_name, items)
             if any(term in field_name for term in wanted):
                 return row, field_name, items
-    return fallback if fallback is not None else (None, None, [])
+    # 强类型词不回退：点名要证书而商品没有证书字段时，宁缺毋滥。
+    if fallback is not None and not is_strong_asset_question(question):
+        return fallback
+    return (None, None, [])
 
 
 class AssetSender:

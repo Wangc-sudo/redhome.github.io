@@ -26,7 +26,7 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
-from common.kb_qa.assets import pick_asset
+from common.kb_qa.assets import is_strong_asset_question, pick_asset
 from common.kb_qa.docs import search_docs
 from common.kb_qa.llm import (
     LlmError,
@@ -377,12 +377,26 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if row is None:
                 # 附件字段没匹配上（如问「包装什么样」而字段名不含包装）——
                 # 向量图召回兜底：文字搜图跨字段跨商品找图直发。
-                recalled = self._try_send_recalled_images(
-                    conn, text, conversation_id)
+                # 强类型词（质检报告/发票/证书）除外：图召回是跨商品的，
+                # 发别家产品的证书比答「没有」更糟（2026-10-22 裁决）。
+                recalled = None
+                if not is_strong_asset_question(text):
+                    recalled = self._try_send_recalled_images(
+                        conn, text, conversation_id)
                 if recalled:
                     return (
                         "给你找到这些商品的相关图片："
                         + "、".join(recalled),
+                        intent.category, rows[0]["record_id"],
+                    )
+                available = [
+                    field for field, its
+                    in (rows[0].get("attachments") or {}).items() if its
+                ]
+                if available:
+                    return (
+                        f"「{rows[0]['name']}」的资料里没有这个附件，"
+                        f"现有：{'、'.join(available)}。",
                         intent.category, rows[0]["record_id"],
                     )
                 return (
