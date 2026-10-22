@@ -111,18 +111,24 @@ class AssetSender:
     def _send_long_image(self, conn, *, row, field_name, attachments,
                          conversation_id, robot_code):
         """多图竖拼长图 → 上传 → 单条图片消息。media_id 走同款 3 天缓存。"""
-        cache_key = f"{row['record_id']}:{field_name}:long"
+        return self._deliver_images(
+            conn, cache_key=f"{row['record_id']}:{field_name}:long",
+            metas=attachments, file_name=f"{field_name}-长图.jpg",
+            conversation_id=conversation_id, robot_code=robot_code)
+
+    def _deliver_images(self, conn, *, cache_key, metas, file_name,
+                        conversation_id, robot_code):
+        """多图 → 长图单条发送（缓存命中直发）。返回 1。"""
         cached = media.cached_media(conn, cache_key)
         if cached:
             media_id = cached["media_id"]
         else:
             images = []
-            for meta in attachments[:MAX_STITCH_IMAGES]:
+            for meta in metas[:MAX_STITCH_IMAGES]:
                 url = media._extract_attachment_url(meta)
                 if url:
                     images.append(media.download_bytes(url))
             content, _used = self._stitcher(images)
-            file_name = f"{field_name}-长图.jpg"
             media_id = media.upload_media(
                 self._oapi_token_factory(), "image", file_name, content)
             media.save_media(conn, cache_key, media_id, "image", file_name)
@@ -130,6 +136,50 @@ class AssetSender:
             robot_code, conversation_id, _IMAGE_MSG_KEY,
             {"photoURL": media_id})
         return 1
+
+    def send_image_refs(self, conn, *, refs, conversation_id, robot_code):
+        """向量图召回结果直发：refs = [(record_id, field_name, index), ...]。
+
+        回指 AI 表附件位置，get_record 现取签名 URL。单图走
+        ensure_media_id 直发（命中既有单图缓存）；多图拼长图单条。
+        返回发送的消息条数，0=无可发图（调用方走文本兜底）。
+        """
+        valid = []
+        record_cache = {}
+        for record_id, field_name, index in refs:
+            if record_id not in record_cache:
+                record_cache[record_id] = self._client.get_record(
+                    self._base_id, self._sheet_id, record_id)
+            items = ((record_cache[record_id].get("fields") or {})
+                     .get(field_name) or [])
+            if 0 <= index < len(items):
+                meta = items[index]
+                if media.is_image_name(meta.get("filename")
+                                       or meta.get("name")):
+                    valid.append((record_id, field_name, index, meta))
+        if not valid:
+            return 0
+        if len(valid) == 1:
+            record_id, field_name, index, meta = valid[0]
+            media_id, _media_type = media.ensure_media_id(
+                conn, oapi_token=self._oapi_token_factory(),
+                record_id=record_id, field_name=field_name,
+                index=index, attachment_meta=meta)
+            self._deliver(media_id, "image",
+                          meta.get("filename") or meta.get("name")
+                          or "召回图",
+                          conversation_id, robot_code)
+            return 1
+        # 多图长图缓存键：回指组合的指纹（附件内容变则键变，自动失效）
+        import hashlib
+
+        fingerprint = hashlib.md5(
+            "|".join(f"{r}/{f}/{i}" for r, f, i, _m in valid)
+            .encode()).hexdigest()[:16]
+        return self._deliver_images(
+            conn, cache_key=f"recall:{fingerprint}",
+            metas=[m for _r, _f, _i, m in valid], file_name="召回图-长图.jpg",
+            conversation_id=conversation_id, robot_code=robot_code)
 
     def _deliver(self, media_id, media_type, file_name,
                  conversation_id, robot_code):
