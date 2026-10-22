@@ -98,3 +98,15 @@ _KB_QA_AUDIT_V2_DDL = """ALTER TABLE `kb_qa_audit`
 def kb_audit_v2_ddl_statements():
     """mart-ops-kb-qa-audit-v2：kb_qa_audit 观测列扩列（反馈闭环）。"""
     return (_KB_QA_AUDIT_V2_DDL,)
+
+
+# token 成本统计（2026-10-22）：LLM 用量随消息落审计（当条消息全部
+# LLM 调用的前后快照差值合计；遥测口径非计费真源）。
+_KB_QA_AUDIT_V3_DDL = """ALTER TABLE `kb_qa_audit`
+  ADD COLUMN `prompt_tokens` int NULL COMMENT 'LLM 输入 token 合计（本条消息全部调用）',
+  ADD COLUMN `completion_tokens` int NULL COMMENT 'LLM 输出 token 合计（本条消息全部调用）'"""
+
+
+def kb_audit_v3_ddl_statements():
+    """mart-ops-kb-qa-audit-v3：kb_qa_audit 加 token 用量列。"""
+    return (_KB_QA_AUDIT_V3_DDL,)
