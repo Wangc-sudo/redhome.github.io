@@ -151,7 +151,13 @@ def ensure_media_id(conn, *, oapi_token, record_id, field_name, index,
     url = _extract_attachment_url(attachment_meta)
     if not url:
         raise RuntimeError("附件无可用下载地址")
-    file_name = attachment_meta.get("name") or f"{field_name}-{index}"
+    # 2026-10-22 事故修复：AI 表原始附件名称键是 ``filename``（见
+    # sync_products._attachment_meta 实测注释），只认 ``name`` 会把所有
+    # 图片附件落成无扩展名的 ``字段名-序号`` → media_type 误判 file →
+    # 图片走 sampleFile 变成「下载卡片」而非内联图片消息。
+    file_name = (attachment_meta.get("filename")
+                 or attachment_meta.get("name")
+                 or f"{field_name}-{index}")
     content = download_bytes(url)
     media_type = media_type_for(file_name)
     media_id = upload_media(oapi_token, media_type, file_name, content)
