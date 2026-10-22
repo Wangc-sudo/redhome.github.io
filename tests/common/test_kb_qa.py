@@ -2715,3 +2715,26 @@ class LlmEmptyAnswerFallbackTests(unittest.TestCase):
         for fn in (llm_mod.render_product_answer, llm_mod.render_doc_answer):
             src = inspect.getsource(fn)
             self.assertIn("max_tokens=2048", src)
+
+
+class StrongTermAnswerTests(unittest.TestCase):
+    """强类型附件词字段 miss：如实回答现有字段，不搜图（防跨商品错发）。"""
+
+    def test_strong_term_miss_lists_available_fields(self):
+        row = _product_row(
+            name="红习酱整箱",
+            attachments={"礼袋": [{"name": "5.jpg"}],
+                         "素材包": [{"name": "s.zip"}]})
+        conn = _FakeConn([[row]])
+        image_called = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            image_search=lambda q: image_called.append(q) or [],
+            asset_sender=None)
+        reply, intent, _ = handler._answer(conn, "红习酱整箱 质检报告",
+                                           conversation_id="cid")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("没有这个附件", reply)
+        self.assertIn("礼袋", reply)
+        self.assertIn("素材包", reply)
+        self.assertEqual([], image_called)  # 强类型词不触发图召回
