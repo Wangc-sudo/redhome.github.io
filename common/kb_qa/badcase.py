@@ -63,7 +63,8 @@ def collect_badcases(conn, days=7):
         cursor.execute(
             "SELECT `msg_id`, `question`, `intent`, `sender_name`,"
             " `created_at`, `failed`, `reply_kind`, `recall_source`,"
-            " `tool_used`, `latency_ms`, `answer_excerpt`"
+            " `tool_used`, `latency_ms`, `answer_excerpt`,"
+            " `prompt_tokens`, `completion_tokens`"
             " FROM `kb_qa_audit`"
             " WHERE `created_at` >= DATE_SUB(NOW(), INTERVAL %s DAY)"
             " ORDER BY `created_at` DESC",
@@ -81,11 +82,19 @@ def collect_badcases(conn, days=7):
     bad_samples = {}
     failed_rows = []
     answered = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    token_rows = 0
 
     for row in rows:
         intents[row.get("intent") or "(未回填)"] += 1
         if row.get("reply_kind") == "text":
             answered += 1
+        # token 成本统计（2026-10-22 v3 列；NULL=无 LLM 调用或旧行）
+        if row.get("prompt_tokens") is not None:
+            prompt_tokens += row["prompt_tokens"]
+            completion_tokens += row.get("completion_tokens") or 0
+            token_rows += 1
         if row.get("recall_source"):
             recall_sources[row["recall_source"]] += 1
         if row.get("tool_used"):
@@ -116,6 +125,9 @@ def collect_badcases(conn, days=7):
         "latency_avg": (sum(latencies) // size) if size else None,
         "latency_p95": latencies[int(0.95 * (size - 1))] if size else None,
         "latency_max": latencies[-1] if size else None,
+        "token_rows": token_rows,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "badcases": [
             {
                 "category": category,
@@ -143,6 +155,13 @@ def render_markdown(report):
         lines.append(
             f"- 耗时：均值 {report['latency_avg']}ms / "
             f"P95 {report['latency_p95']}ms / 最大 {report['latency_max']}ms")
+    if report.get("token_rows"):
+        avg_p = report["prompt_tokens"] // report["token_rows"]
+        avg_c = report["completion_tokens"] // report["token_rows"]
+        lines.append(
+            f"- token 消耗（{report['token_rows']} 条有 LLM 调用）："
+            f"输入合计 {report['prompt_tokens']} / 输出合计 "
+            f"{report['completion_tokens']}（条均 {avg_p}/{avg_c}）")
     if report["intents"]:
         dist = "、".join(f"{name} {count}"
                          for name, count in report["intents"].most_common())

@@ -203,15 +203,28 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
             meta = {}
+            # token 成本统计（2026-10-22）：LLM 用量前后快照差值归账到
+            # 本条消息（遥测口径）。_RecordingLlm 类替身无 usage_snapshot，
+            # getattr 守卫。
+            usage_snap = getattr(self._llm, "usage_snapshot", None)
+            usage_before = usage_snap() if usage_snap else None
             reply, intent, matched = self._answer(
                 conn, text, history=history, conversation_id=conversation_id,
                 meta=meta)
+            if usage_before is not None:
+                usage_after = usage_snap()
+                meta["prompt_tokens"] = max(
+                    0, usage_after["prompt_tokens"]
+                    - usage_before["prompt_tokens"])
+                meta["completion_tokens"] = max(
+                    0, usage_after["completion_tokens"]
+                    - usage_before["completion_tokens"])
             latency_ms = int((time.monotonic() - started) * 1000)
             self._finish_audit(conn, msg_id, intent, matched,
                                "text" if reply else "none",
                                meta=meta, reply=reply, latency_ms=latency_ms)
             # 噪声轮过滤（2026-10-22）：CHITCHAT 轮（HELP 帮助文案等）
-            # 不进历史，避免稀释 4 轮窗口里的有效上文。subject=最近命中
+            # 不进历史，避免稀释 6 轮窗口里的有效上文。subject=最近命中
             # 商品名，供历史透出「上文涉及商品」（指代补全锚点）。
             if ctx_key is not None and intent != CHITCHAT:
                 self._context_store.record(
@@ -270,7 +283,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             cursor.execute(
                 "UPDATE `kb_qa_audit` SET `intent`=%s, `matched_record_id`=%s,"
                 " `reply_kind`=%s, `recall_source`=%s, `tool_used`=%s,"
-                " `agent_rounds`=%s, `latency_ms`=%s, `answer_excerpt`=%s"
+                " `agent_rounds`=%s, `latency_ms`=%s, `answer_excerpt`=%s,"
+                " `prompt_tokens`=%s, `completion_tokens`=%s"
                 " WHERE `msg_id`=%s",
                 (
                     intent, matched, reply_kind,
@@ -279,6 +293,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     meta.get("rounds"),
                     latency_ms,
                     (reply or "")[:500] or None,
+                    meta.get("prompt_tokens"),
+                    meta.get("completion_tokens"),
                     msg_id,
                 ),
             )

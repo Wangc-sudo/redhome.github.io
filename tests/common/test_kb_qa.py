@@ -1345,6 +1345,84 @@ class LlmHistoryTests(unittest.TestCase):
         self.assertIn("茅台工艺", prompt)
 
 
+class LlmUsageTests(unittest.TestCase):
+    """token 成本统计（2026-10-22）：usage 累计与快照差值归账。"""
+
+    def _client(self, usages):
+        responses = []
+        for usage in usages:
+            result = {"choices": [{"message": {"content": "答"}}]}
+            if usage is not None:
+                result["usage"] = usage
+            responses.append(result)
+        calls = iter(responses)
+        return llm_module.LlmClient("http://x", "k", "m",
+                                    request=lambda payload: next(calls))
+
+    def test_chat_accumulates_usage(self):
+        client = self._client([
+            {"prompt_tokens": 100, "completion_tokens": 20},
+            {"prompt_tokens": 50, "completion_tokens": 10},
+        ])
+        client.chat([{"role": "user", "content": "q"}])
+        client.chat([{"role": "user", "content": "q2"}])
+        snap = client.usage_snapshot()
+        self.assertEqual(150, snap["prompt_tokens"])
+        self.assertEqual(30, snap["completion_tokens"])
+
+    def test_chat_with_tools_accumulates_usage(self):
+        result = {"choices": [{"message": {"content": None,
+                                           "tool_calls": []}}],
+                  "usage": {"prompt_tokens": 300, "completion_tokens": 5}}
+        client = llm_module.LlmClient("http://x", "k", "m",
+                                      request=lambda payload: result)
+        client.chat_with_tools([{"role": "user", "content": "q"}], tools=[])
+        self.assertEqual(300, client.usage_snapshot()["prompt_tokens"])
+
+    def test_missing_usage_tolerated(self):
+        client = self._client([None])
+        client.chat([{"role": "user", "content": "q"}])
+        self.assertEqual({"prompt_tokens": 0, "completion_tokens": 0},
+                         client.usage_snapshot())
+
+    def test_snapshot_is_independent_copy(self):
+        client = self._client([{"prompt_tokens": 1, "completion_tokens": 1}])
+        client.chat([{"role": "user", "content": "q"}])
+        snap = client.usage_snapshot()
+        snap["prompt_tokens"] = 999
+        self.assertEqual(1, client.usage_snapshot()["prompt_tokens"])
+
+    def test_process_attributes_usage_delta_to_audit(self):
+        """process 级：两次快照差值落审计 prompt/completion_tokens。"""
+
+        class _UsageLlm(_RecordingLlm):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._n = 0
+
+            def usage_snapshot(self):
+                self._n += 1
+                # 第一次（答前）→ 基线；第二次（答后）→ 多了 700/90
+                total = 0 if self._n == 1 else 700
+                return {"prompt_tokens": total,
+                        "completion_tokens": 0 if self._n == 1 else 90}
+
+        store = ctx_module.ConversationStore()
+        llm = _UsageLlm(reply="箱规 6 瓶/箱。【商品资料】")
+        conn = _FakeConn([1, [_product_row()]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=llm, context_store=store)
+        asyncio.run(handler.process(
+            _FakeCallback("m1", "习酒窖藏1998 箱规")))
+        updates = [(s, p) for s, p in conn.cursor_instance.executed
+                   if "prompt_tokens" in s]
+        self.assertEqual(1, len(updates))
+        _sql, params = updates[0]
+        self.assertEqual(700, params[-3])   # prompt_tokens
+        self.assertEqual(90, params[-2])    # completion_tokens
+
+
 class ConversationFlowTests(unittest.TestCase):
     """process 级两轮对话：第一轮落历史，第二轮带历史（指代追问）。"""
 
@@ -2108,7 +2186,8 @@ class AuditObservabilityTests(unittest.TestCase):
         handler._finish_audit(
             conn, "m1", "agent", None, "text",
             meta={"recall_source": "agent",
-                  "tools": ["daily_sales", "query_sql"], "rounds": 3},
+                  "tools": ["daily_sales", "query_sql"], "rounds": 3,
+                  "prompt_tokens": 800, "completion_tokens": 120},
             reply="答案" * 300,  # 600 字 → 截 500
             latency_ms=1234)
         sql, params = conn.cursor_instance.executed[0]
@@ -2117,9 +2196,11 @@ class AuditObservabilityTests(unittest.TestCase):
         self.assertIn("`agent_rounds`=%s", sql)
         self.assertIn("`latency_ms`=%s", sql)
         self.assertIn("`answer_excerpt`=%s", sql)
+        self.assertIn("`prompt_tokens`=%s", sql)
+        self.assertIn("`completion_tokens`=%s", sql)
         self.assertEqual(
             ("agent", None, "text", "agent", "daily_sales,query_sql", 3,
-             1234, "答案" * 250, "m1"),
+             1234, "答案" * 250, 800, 120, "m1"),
             params)
 
     def test_finish_audit_empty_meta(self):
@@ -2128,9 +2209,9 @@ class AuditObservabilityTests(unittest.TestCase):
             connection_factory=lambda: conn, log=lambda _: None)
         handler._finish_audit(conn, "m2", CHITCHAT, None, "text")
         _sql, params = conn.cursor_instance.executed[0]
-        # recall_source/tool_used/rounds/latency/摘要全部 None，不受影响
+        # recall_source/tool_used/rounds/latency/摘要/token 全部 None，不受影响
         self.assertEqual((CHITCHAT, None, "text", None, None, None, None,
-                          None, "m2"), params)
+                          None, None, None, "m2"), params)
 
     def test_answer_meta_recall_source_products(self):
         handler, _ = HandlerAnswerTests()._handler([[_product_row()]])
@@ -2345,6 +2426,26 @@ class BadcaseReportTests(unittest.TestCase):
         self.assertIn("商品未找到", markdown)
         self.assertIn("处理失败", markdown)
         self.assertIn("daily_sales×1", markdown)
+
+    def test_collect_token_aggregation(self):
+        # token 成本统计（2026-10-22 v3 列）：合计 + 条均 + 报表行
+        from common.kb_qa import badcase
+
+        rows = [
+            self._row(msg_id="m1", prompt_tokens=1000,
+                      completion_tokens=100),
+            self._row(msg_id="m2", prompt_tokens=500, completion_tokens=50),
+            self._row(msg_id="m3"),  # 无 token 列值（旧行/无 LLM 调用）
+        ]
+        conn = _FakeConn([rows])
+        report = badcase.collect_badcases(conn, days=7)
+        self.assertEqual(2, report["token_rows"])
+        self.assertEqual(1500, report["prompt_tokens"])
+        self.assertEqual(150, report["completion_tokens"])
+        markdown = badcase.render_markdown(report)
+        self.assertIn("token 消耗", markdown)
+        self.assertIn("输入合计 1500", markdown)
+        self.assertIn("条均 750/75", markdown)
 
 
 class LongImageTests(unittest.TestCase):
