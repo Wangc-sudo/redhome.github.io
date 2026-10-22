@@ -219,6 +219,11 @@ function buildGraph(raw) {
   regionNodes.value = graph.regionNodes;
   taskNodes.value = graph.taskNodes;
   edges.value = graph.edges;
+  // 默认折叠全部区域任务栈（2026-10-22 用户裁决 B：首开清爽），只首次初始化
+  if (!tasksCollapseInit.value) {
+    collapsedTaskRegions.value = new Set(taskNodes.value.map((t) => t.regionKey));
+    tasksCollapseInit.value = true;
+  }
   layout();
 }
 
@@ -244,11 +249,41 @@ function toggleExpandAll() {
   layout();
 }
 
+//: 区域任务折叠（2026-10-22 用户裁决 B）：按区域折叠应用泳道的任务栈，
+//: 组内连线（区域→任务汇聚边）随之收起，画布默认清爽；点区域节点「任务」展开细看。
+const collapsedTaskRegions = ref(new Set());
+const tasksCollapseInit = ref(false);
+
+//: 参与布局/连线的任务 = 全部 − 已折叠区域的（折叠区任务不占位、不出线）。
+const visibleTaskNodes = computed(() =>
+  taskNodes.value.filter((t) => !collapsedTaskRegions.value.has(t.regionKey)));
+
+const allTasksCollapsed = computed(() => {
+  const keys = [...new Set(taskNodes.value.map((t) => t.regionKey))];
+  return keys.length > 0 && keys.every((k) => collapsedTaskRegions.value.has(k));
+});
+
+function toggleRegionTasks(regionKey) {
+  const next = new Set(collapsedTaskRegions.value);
+  if (next.has(regionKey)) next.delete(regionKey);
+  else next.add(regionKey);
+  collapsedTaskRegions.value = next;
+  layout();   // 折叠影响任务栈高度与连线端点
+}
+
+function toggleAllRegionTasks() {
+  const keys = [...new Set(taskNodes.value.map((t) => t.regionKey))];
+  const allCollapsed = keys.length > 0
+    && keys.every((k) => collapsedTaskRegions.value.has(k));
+  collapsedTaskRegions.value = allCollapsed ? new Set() : new Set(keys);
+  layout();
+}
+
 /** 自动布局（纯函数在 flow/layout.js）；池节点对象整体替换。 */
 function layout() {
   poolNode.value = layoutNodes({
     regionNodes: regionNodes.value,
-    taskNodes: taskNodes.value,
+    taskNodes: visibleTaskNodes.value,
     poolMembers: poolMembers.value,
     globalNodes: globalNodes.value,
     sourceNodes: sourceNodes.value,
@@ -260,7 +295,7 @@ function layout() {
 
 // -- 连线几何（纯函数在 flow/layout.js，此处注入当前图状态）---------------------
 const nodeById = computed(() => nodeRects(
-  regionNodes.value, taskNodes.value,
+  regionNodes.value, visibleTaskNodes.value,
   expandedRegions.value, expandedModules.value,
   { poolNode: poolNode.value, globalNodes: globalNodes.value,
     sourceNodes: sourceNodes.value },
@@ -276,12 +311,16 @@ const laneY = computed(() =>
 // （顶条扇出到每个提醒/催办模块），默认收起、头部开关按需展开。
 const showConsumeEdges = ref(false);
 
+//: 收线器（2026-10-22 用户裁决 A）：depends_on 依赖线（黄虚线，模块→模块）
+//: 是画布第二大噪音源（跨泳道交叉缠绕），默认收起、头部开关按需展开。
+const showDepEdges = ref(false);
+
 const edgePaths = computed(() =>
   buildEdgePaths(edges.value, nodeById.value)
     .filter((e) => !e.consumes || showConsumeEdges.value));
 
 /** 依赖线（模块→模块）：成员服务 depends_on 聚合到家族模块层。 */
-const depEdges = computed(() => buildDepEdges(taskNodes.value, nodeById.value));
+const depEdges = computed(() => buildDepEdges(visibleTaskNodes.value, nodeById.value));
 
 const canvasSize = computed(() => canvasSizeFor(nodeById.value, globalNodes.value));
 
@@ -372,6 +411,16 @@ watch(() => route.query.region, () => applyAnchor());
         >
           {{ showConsumeEdges ? '收起日历驱动线' : '日历驱动线' }}
         </button>
+        <button
+          class="btn"
+          :class="{ 'btn-active': showDepEdges }"
+          @click="showDepEdges = !showDepEdges"
+        >
+          {{ showDepEdges ? '收起依赖线' : '依赖线' }}
+        </button>
+        <button class="btn" @click="toggleAllRegionTasks">
+          {{ allTasksCollapsed ? '展开全部任务' : '收起全部任务' }}
+        </button>
         <button class="btn" @click="onResetAllPos">复位布局</button>
         <button class="btn" @click="resetView">复位视图</button>
         <button class="btn" :disabled="loading" @click="load()">刷新</button>
@@ -408,15 +457,17 @@ watch(() => route.query.region, () => applyAnchor());
             />
             <path v-if="wireDraft" :d="wireDraftPath" class="edge drafting" />
             <path v-if="depDraft" :d="depDraftPath" class="edge dep-drafting" />
-            <path
-              v-for="dep in depEdges"
-              :key="dep.id"
-              :d="dep.d"
-              class="edge dep"
-              :data-dep-id="dep.id"
-              @mousedown.stop
-              @click="onDepEdgeClick(dep)"
-            ><title>依赖：{{ dep.fromLabel }} → {{ dep.toLabel }}（点击解除）</title></path>
+            <template v-if="showDepEdges">
+              <path
+                v-for="dep in depEdges"
+                :key="dep.id"
+                :d="dep.d"
+                class="edge dep"
+                :data-dep-id="dep.id"
+                @mousedown.stop
+                @click="onDepEdgeClick(dep)"
+              ><title>依赖：{{ dep.fromLabel }} → {{ dep.toLabel }}（点击解除）</title></path>
+            </template>
           </svg>
 
           <!-- 泳道标题（五层流水线：源→采集→加工→区域→应用） -->
@@ -454,10 +505,12 @@ watch(() => route.query.region, () => applyAnchor());
             :node="node"
             :expanded="expandedRegions.has(node.id)"
             :anchor-hit="anchorRegion === node.key"
+            :tasks-collapsed="collapsedTaskRegions.has(node.key)"
             :busy="busy"
             @drag="startNodeDrag"
             @wire-start="startWire"
             @toggle-members="toggleRegionMembers"
+            @toggle-tasks="toggleRegionTasks"
             @open-drawer="(n) => openDrawer('region', n)"
           />
 
@@ -468,9 +521,9 @@ watch(() => route.query.region, () => applyAnchor());
             @open="onGlobalNodeClick"
           />
 
-          <!-- 家族模块节点（区域→模块 N:1；点头部展开成员） -->
+          <!-- 家族模块节点（区域→模块 N:1；点头部展开成员）；区域折叠后不收 -->
           <ModuleNode
-            v-for="node in taskNodes"
+            v-for="node in visibleTaskNodes"
             :key="node.id"
             :node="node"
             :expanded="expandedModules.has(node.id)"

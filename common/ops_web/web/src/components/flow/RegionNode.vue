@@ -11,9 +11,10 @@ defineProps({
   node: { type: Object, required: true },
   expanded: { type: Boolean, default: false },
   anchorHit: { type: Boolean, default: false },
+  tasksCollapsed: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
 });
-const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'open-drawer']);
+const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks', 'open-drawer']);
 </script>
 
 <template>
@@ -89,7 +90,16 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'open-drawer']
         </template>
       </div>
       <div class="node-foot">
-        <span class="task-count">下游任务 {{ node.taskCount }}</span>
+        <button
+          v-if="node.taskCount"
+          class="btn mini ghost task-toggle"
+          :title="tasksCollapsed ? '展开该区域的任务模块' : '折叠该区域的任务模块（组内连线收起）'"
+          @mousedown.stop
+          @click="emit('toggle-tasks', node.key)"
+        >
+          {{ tasksCollapsed ? `任务 ${node.taskCount} ▸` : `任务 ${node.taskCount} ▾` }}
+        </button>
+        <span v-else class="task-count">下游任务 0</span>
         <button class="btn mini ghost" @click="emit('open-drawer', node)">详情</button>
       </div>
     </template>
