@@ -1142,6 +1142,173 @@ class ConversationStoreTests(unittest.TestCase):
         self.assertLess(text.index("q2"), text.index("q1"))
         self.assertEqual("", ctx_module.format_history([]))
 
+    def test_subject_roundtrip(self):
+        # 2026-10-22：命中商品名随轮入史（指代锚点）
+        store = self._store(time.monotonic)
+        key = store.key("cid1", "u1")
+        store.record(key, question="习酒窖藏1998 箱规", answer="6 瓶/箱",
+                     category="product_param", record_id="r1",
+                     subject="习酒窖藏1998")
+        self.assertEqual("习酒窖藏1998", store.history(key)[0]["subject"])
+
+    def test_format_history_surfaces_subject(self):
+        # 透出最近一次命中商品；旧条目无 subject 字段自动跳过
+        history = [
+            {"q": "q1", "a": "a1"},  # 旧形态（无 subject 键）
+            {"q": "q2", "a": "a2", "subject": "习酒窖藏1988"},
+        ]
+        text = ctx_module.format_history(history)
+        self.assertIn("上文涉及商品：习酒窖藏1988", text)
+
+    def test_format_history_uses_latest_subject(self):
+        history = [
+            {"q": "q1", "a": "a1", "subject": "旧商品"},
+            {"q": "q2", "a": "a2", "subject": "新商品"},
+        ]
+        text = ctx_module.format_history(history)
+        self.assertIn("上文涉及商品：新商品", text)
+        self.assertNotIn("上文涉及商品：旧商品", text)
+
+    def test_format_history_no_subject_no_line(self):
+        history = [{"q": "q1", "a": "a1"}]
+        self.assertNotIn("上文涉及商品", ctx_module.format_history(history))
+
+
+class _FakeRedis:
+    """redis.Redis 最小替身：list 语义 + expire 记录（2026-10-22）。"""
+
+    def __init__(self):
+        self.lists = {}
+        self.expires = {}
+
+    def rpush(self, key, payload):
+        self.lists.setdefault(key, []).append(payload)
+
+    def ltrim(self, key, start, end):
+        items = self.lists.get(key, [])
+        if end == -1:
+            self.lists[key] = items[start:]
+        else:
+            self.lists[key] = items[start:end + 1]
+
+    def expire(self, key, ttl):
+        self.expires[key] = ttl
+
+    def lrange(self, key, start, end):
+        items = self.lists.get(key, [])
+        if end == -1:
+            return list(items[start:])
+        return list(items[start:end + 1])
+
+
+class RedisConversationStoreTests(unittest.TestCase):
+    """Redis 后端：存取 / 容量裁剪 / TTL 续期 / fail-open（2026-10-22）。
+
+    注：本测试类曾随 PR #205 合入，被并行会话 PR #206 的旧基线提交
+    意外吞掉，同日补回（含 subject 断言）。
+    """
+
+    def _store(self, client, max_turns=4, ttl=600):
+        return ctx_module.RedisConversationStore(
+            client=client, max_turns=max_turns, ttl_seconds=ttl)
+
+    def test_record_and_history_roundtrip(self):
+        client = _FakeRedis()
+        store = self._store(client)
+        key = store.key("cid1", "u1")
+        store.record(key, question="习酒箱规", answer="6 瓶/箱",
+                     category="product_param", record_id="r1",
+                     subject="习酒窖藏1998")
+        history = store.history(key)
+        self.assertEqual(1, len(history))
+        self.assertEqual("习酒箱规", history[0]["q"])
+        self.assertEqual("6 瓶/箱", history[0]["a"])
+        self.assertEqual("r1", history[0]["record_id"])
+        self.assertEqual("习酒窖藏1998", history[0]["subject"])
+
+    def test_key_has_prefix(self):
+        key = ctx_module.RedisConversationStore.key("cid1", "u1")
+        self.assertTrue(key.startswith("kbqa:ctx:cid1:u1"))
+
+    def test_max_turns_trims_oldest(self):
+        client = _FakeRedis()
+        store = self._store(client, max_turns=2)
+        key = store.key("cid1", "u1")
+        for i in range(4):
+            store.record(key, question=f"q{i}", answer=f"a{i}")
+        history = store.history(key)
+        self.assertEqual(2, len(history))
+        self.assertEqual("q2", history[0]["q"])
+        self.assertEqual("q3", history[1]["q"])
+
+    def test_expire_refreshed_on_record(self):
+        client = _FakeRedis()
+        store = self._store(client, ttl=600)
+        key = store.key("cid1", "u1")
+        store.record(key, question="q", answer="a")
+        self.assertEqual(600, client.expires[key])
+
+    def test_silent_turn_not_recorded(self):
+        client = _FakeRedis()
+        store = self._store(client)
+        store.record(store.key("cid1", "u1"), question="q", answer=None)
+        self.assertEqual({}, client.lists)
+
+    def test_redis_failure_fails_open(self):
+        class _Broken:
+            def lrange(self, *a):
+                raise ConnectionError("down")
+
+            def rpush(self, *a):
+                raise ConnectionError("down")
+
+        store = self._store(_Broken())
+        key = store.key("cid1", "u1")
+        store.record(key, question="q", answer="a")  # 静默丢弃
+        self.assertEqual([], store.history(key))     # 当无历史
+
+    def test_bad_json_entry_skipped(self):
+        client = _FakeRedis()
+        store = self._store(client)
+        key = store.key("cid1", "u1")
+        store.record(key, question="q", answer="a")
+        client.lists[key].insert(0, "{bad json")
+        history = store.history(key)
+        self.assertEqual(1, len(history))
+        self.assertEqual("q", history[0]["q"])
+
+    def test_keys_are_isolated_per_sender(self):
+        client = _FakeRedis()
+        store = self._store(client)
+        store.record(store.key("cid1", "u1"), question="q1", answer="a1")
+        self.assertEqual([], store.history(store.key("cid1", "u2")))
+        self.assertEqual([], store.history(store.key("cid2", "u1")))
+
+
+class BuildConversationStoreTests(unittest.TestCase):
+    """后端选择：URL 在场 → Redis，否则进程内（2026-10-22）。"""
+
+    def test_no_url_falls_back_in_process(self):
+        store = ctx_module.build_conversation_store({})
+        self.assertIsInstance(store, ctx_module.ConversationStore)
+
+    def test_kb_redis_url_preferred(self):
+        store = ctx_module.build_conversation_store(
+            {"KB_REDIS_URL": "redis://k:6379/0",
+             "PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
+        self.assertIsInstance(store, ctx_module.RedisConversationStore)
+        self.assertEqual("redis://k:6379/0", store._url)
+
+    def test_public_data_redis_url_reused(self):
+        store = ctx_module.build_conversation_store(
+            {"PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
+        self.assertIsInstance(store, ctx_module.RedisConversationStore)
+        self.assertEqual("redis://p:6379/0", store._url)
+
+    def test_blank_url_falls_back(self):
+        store = ctx_module.build_conversation_store({"KB_REDIS_URL": "  "})
+        self.assertIsInstance(store, ctx_module.ConversationStore)
+
 
 class _RecordingLlm:
     """捕获 messages 的 LLM 替身。"""
@@ -1208,6 +1375,34 @@ class ConversationFlowTests(unittest.TestCase):
         asyncio.run(handler.process(_FakeCallback("m2", "价格呢")))
         extract_prompt = llm2.calls[0][0]["content"]
         self.assertIn("习酒窖藏1998 箱规", extract_prompt)  # 历史进入二次解析
+
+    def test_subject_flows_into_second_turn_prompt(self):
+        # 2026-10-22：第一轮命中商品名入史，第二轮 prompt 透出
+        # 「上文涉及商品」锚点
+        store = ctx_module.ConversationStore()
+        llm = _RecordingLlm(reply="箱规 6 瓶/箱。【商品资料】")
+        handler = self._handler([1, [_product_row()]], llm, store)
+        asyncio.run(handler.process(
+            _FakeCallback("m1", "习酒窖藏1998 箱规")))
+        key = store.key("cid1", "u1")
+        self.assertEqual("习酒窖藏1998", store.history(key)[0]["subject"])
+
+        llm2 = _RecordingLlm(reply='{"category": "PRODUCT_PARAM", '
+                                   '"keyword": "习酒窖藏1998"}')
+        handler._llm = llm2
+        conn2 = _FakeConn([1, [], [_product_row()]])
+        handler._connection_factory = lambda: conn2
+        asyncio.run(handler.process(_FakeCallback("m2", "价格呢")))
+        extract_prompt = llm2.calls[0][0]["content"]
+        self.assertIn("上文涉及商品：习酒窖藏1998", extract_prompt)
+
+    def test_chitchat_turn_not_recorded(self):
+        # 2026-10-22 噪声轮过滤：HELP 帮助文案轮不进历史
+        store = ctx_module.ConversationStore()
+        handler = self._handler([1], None, store)
+        asyncio.run(handler.process(_FakeCallback("m1", "你好")))
+        key = store.key("cid1", "u1")
+        self.assertEqual([], store.history(key))
 
     def test_render_receives_history(self):
         store = ctx_module.ConversationStore()
