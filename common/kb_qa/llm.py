@@ -217,8 +217,11 @@ def render_product_answer(client, question, rows, history=None):
               .replace("{{history}}",
                        format_history(history) if history else "")
               .replace("{{question}}", question))
+    # max_tokens=2048：推理版模型 reasoning_tokens 与答案共享预算，
+    # 500 会被推理吃光 → content 空 → 用户看到静默不回（2026-10-22
+    # 实测「53°500ml*6习酒窖藏1988新包装2025款」audit reply_kind=none）。
     return client.chat([{"role": "user", "content": prompt}],
-                       max_tokens=500, temperature=0.3)
+                       max_tokens=2048, temperature=0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -259,5 +262,6 @@ def render_doc_answer(client, question, chunks, history=None):
               .replace("{{history}}",
                        format_history(history) if history else "")
               .replace("{{question}}", question))
+    # max_tokens=2048：同 render_product_answer 的推理版预算坑。
     return client.chat([{"role": "user", "content": prompt}],
-                       max_tokens=600, temperature=0.3)
+                       max_tokens=2048, temperature=0.3)
