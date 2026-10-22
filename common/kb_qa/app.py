@@ -420,8 +420,11 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                             f"已发送到群里，请查收。",
                             intent.category, row["record_id"],
                         )
-                except Exception:
-                    self._log("kb qa: asset deliver failed")
+                except Exception as exc:
+                    # 非泄露约定同款：只记异常类型与代码位置——
+                    # 2026-10-22 直发失败落兜底时无任何线索可查。
+                    self._log(f"kb qa: asset deliver failed:"
+                              f" {type(exc).__name__} at {_error_location(exc)}")
             lines = [f"「{row['name']}」的附件：", _ASSET_PENDING]
             lines.append(f"- {field_name}：{len(items)} 个文件")
             return "\n".join(lines), intent.category, row["record_id"]
@@ -488,8 +491,9 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             sent = self._asset_sender.send_image_refs(
                 conn, refs=refs, conversation_id=conversation_id,
                 robot_code=self._robot_code)
-        except Exception:
-            self._log("kb qa: recalled image deliver failed")
+        except Exception as exc:
+            self._log(f"kb qa: recalled image deliver failed:"
+                      f" {type(exc).__name__} at {_error_location(exc)}")
             return None
         return names if sent else None
 
