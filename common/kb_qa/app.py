@@ -560,9 +560,14 @@ def main(argv=None):
     vector_search = rag_docs.from_environment()
     if vector_search is None:
         print("kb qa: vector recall not configured, running BM25 only")
-    # 对话层（2026-10-21）：进程内会话上下文（同人同群最近 4 轮 / TTL
-    # 10 分钟），重启丢上下文可接受；不建表。
-    from common.kb_qa.context import ConversationStore
+    # 对话层（2026-10-21）：会话上下文（同人同群最近 4 轮 / TTL 10
+    # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
+    # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
+    # 重启不丢），否则进程内兜底；fail-open，Redis 不可达只当轮无历史。
+    from common.kb_qa.context import build_conversation_store
+
+    context_store = build_conversation_store()
+    print(f"kb qa: context backend = {type(context_store).__name__}")
 
     # 工具调用 agent（2026-10-21）：规则 miss 的消息由 LLM 自主决定查
     # 商品/查文档/查业务数据（agg_offline_daily / fact_channel_daily_sales
@@ -594,7 +599,7 @@ def main(argv=None):
         robot_code=app_key,
         llm=llm,
         vector_search=vector_search,
-        context_store=ConversationStore(),
+        context_store=context_store,
         agent_runner=agent_runner,
         asset_sender=asset_sender,
     )
