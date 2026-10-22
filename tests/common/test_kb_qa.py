@@ -486,6 +486,37 @@ class ReplyChannelTests(unittest.TestCase):
         self.assertEqual(["答案"], sent)
 
 
+class EnsureMediaIdTests(unittest.TestCase):
+    """2026-10-22 事故回归：附件名称键是 filename（不是 name）——
+    漏认会把 PNG 判成 file，图片走成「下载卡片」。"""
+
+    def test_filename_key_yields_image_type(self):
+        conn = _FakeConn([None])  # 缓存未命中
+        with mock.patch.object(media, "download_bytes",
+                               return_value=b"png-bytes"), \
+             mock.patch.object(media, "upload_media",
+                               return_value="@img") as upload:
+            media_id, media_type = media.ensure_media_id(
+                conn, oapi_token="tok", record_id="r1",
+                field_name="质检报告", index=0,
+                attachment_meta={"filename": "报告_00.png",
+                                 "url": "http://oss/x"})
+        self.assertEqual("image", media_type)
+        self.assertEqual("@img", media_id)
+        # 上传类型也必须是 image（oapi type 参数）
+        self.assertEqual("image", upload.call_args[0][1])
+
+    def test_name_key_still_supported(self):
+        conn = _FakeConn([None])
+        with mock.patch.object(media, "download_bytes", return_value=b"x"), \
+             mock.patch.object(media, "upload_media", return_value="@f"):
+            _id, media_type = media.ensure_media_id(
+                conn, oapi_token="tok", record_id="r1",
+                field_name="素材包", index=1,
+                attachment_meta={"name": "包.zip", "url": "http://oss/z"})
+        self.assertEqual("file", media_type)
+
+
 class Bm25Tests(unittest.TestCase):
     """纯 Python BM25：中文 bigram + 英文数字连续串分词。"""
 
