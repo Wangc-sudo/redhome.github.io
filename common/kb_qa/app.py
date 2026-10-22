@@ -157,7 +157,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
                  doc_search=None, vector_search=None, context_store=None,
-                 agent_runner=None, asset_sender=None):
+                 agent_runner=None, asset_sender=None, image_search=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -171,6 +171,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._context_store = context_store
         self._agent_runner = agent_runner
         self._asset_sender = asset_sender
+        self._image_search = image_search
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -390,6 +391,16 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 # 对话层（2026-10-22）：透出命中商品名，作指代追问锚点。
                 meta["subject"] = (row or rows[0]).get("name")
             if row is None:
+                # 附件字段没匹配上（如问「包装什么样」而字段名不含包装）——
+                # 向量图召回兜底：文字搜图跨字段跨商品找图直发。
+                recalled = self._try_send_recalled_images(
+                    conn, text, conversation_id)
+                if recalled:
+                    return (
+                        "给你找到这些商品的相关图片："
+                        + "、".join(recalled),
+                        intent.category, rows[0]["record_id"],
+                    )
                 return (
                     f"「{rows[0]['name']}」的资料里还没有附件。",
                     intent.category, rows[0]["record_id"],
@@ -439,6 +450,48 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         if answer and meta is not None:
             meta.setdefault("recall_source", "agent")
         return answer
+
+    def _try_send_recalled_images(self, conn, question, conversation_id):
+        """向量图召回兜底直发（文字搜图）。返回发出的图片对应的商品名
+        列表；不可用/无命中/发送失败返回 None（调用方走文本兜底）。
+
+        全部 fail-open：缺配置、向量库异常、下载/上传/发送异常都只记
+        日志不外抛——图召回是增强，绝不能拖垮文本兜底。
+        """
+        if (self._image_search is None or self._asset_sender is None
+                or not conversation_id or not self._robot_code):
+            return None
+        from common.kb_qa.rag_docs import MIN_IMAGE_SCORE
+
+        try:
+            hits = self._image_search(question)
+        except Exception:
+            self._log("kb qa: image recall failed")
+            return None
+        refs = []
+        names = []
+        for hit in hits or []:
+            if (hit.get("score") or 0) < MIN_IMAGE_SCORE:
+                continue
+            parts = (hit.get("image_ref") or "").split("/")
+            if len(parts) != 3:
+                continue
+            try:
+                index = int(parts[2])
+            except ValueError:
+                continue
+            refs.append((parts[0], parts[1], index))
+            names.append(hit.get("name") or "")
+        if not refs:
+            return None
+        try:
+            sent = self._asset_sender.send_image_refs(
+                conn, refs=refs, conversation_id=conversation_id,
+                robot_code=self._robot_code)
+        except Exception:
+            self._log("kb qa: recalled image deliver failed")
+            return None
+        return names if sent else None
 
     # ------------------------------------------------------------------
     # P2：LLM 渲染与手册召回（全部 fail-open，异常只降级不外泄）
@@ -586,6 +639,11 @@ def main(argv=None):
     vector_search = rag_docs.from_environment()
     if vector_search is None:
         print("kb qa: vector recall not configured, running BM25 only")
+    # 文字搜图（2026-10-22）：kind=image 图召回，附件字段 miss 时兜底直发；
+    # 同一组 RAG_EMBED_* env，缺配返回 None 关闭。
+    image_search = rag_docs.image_search_from_environment()
+    if image_search is None:
+        print("kb qa: image recall not configured")
     # 对话层（2026-10-21）：会话上下文（同人同群最近 6 轮 / TTL 10
     # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
     # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
@@ -628,6 +686,7 @@ def main(argv=None):
         context_store=context_store,
         agent_runner=agent_runner,
         asset_sender=asset_sender,
+        image_search=image_search,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()

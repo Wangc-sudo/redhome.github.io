@@ -4,7 +4,9 @@
 import asyncio
 import io
 import json
+import sys
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1172,6 +1174,8 @@ class ConversationStoreTests(unittest.TestCase):
     def test_format_history_no_subject_no_line(self):
         history = [{"q": "q1", "a": "a1"}]
         self.assertNotIn("上文涉及商品", ctx_module.format_history(history))
+
+
 
 
 class _FakeRedis:
@@ -2487,6 +2491,156 @@ class LongImageTests(unittest.TestCase):
         self.assertEqual(1, used)
         with self.assertRaises(long_image.StitchError):
             long_image.stitch_vertical([b"bad", b"also-bad"])
+
+
+class ImageRecallTests(unittest.TestCase):
+    """文字搜图接线（2026-10-22）：附件字段 miss → 向量图召回兜底直发。"""
+
+    class _ImageSender:
+        def __init__(self, sent=1):
+            self.refs = None
+            self._sent = sent
+
+        def send_image_refs(self, conn, *, refs, conversation_id, robot_code):
+            self.refs = refs
+            return self._sent
+
+    def _handler(self, *, image_search, asset_sender, conn=None):
+        conn = conn or _FakeConn([[_product_row()]])
+        return KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            image_search=image_search, asset_sender=asset_sender,
+            robot_code="robot"), conn
+
+    def test_asset_miss_falls_to_image_recall(self):
+        sender = self._ImageSender()
+        handler, conn = self._handler(
+            image_search=lambda q: [
+                {"score": 0.51, "name": "习酒窖藏1988",
+                 "image_ref": "r1/细节图/0"},
+                {"score": 0.30, "name": "低分噪声",  # 低于阈值被过滤
+                 "image_ref": "r2/细节图/0"},
+            ],
+            asset_sender=sender)
+        reply, intent, _ = handler._answer(conn, "发我习酒窖藏1998 的细节图",
+                                           conversation_id="cid")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("相关图片", reply)
+        self.assertIn("习酒窖藏1988", reply)
+        self.assertEqual([("r1", "细节图", 0)], sender.refs)  # 低分被滤
+
+    def test_no_hit_keeps_text_fallback(self):
+        handler, conn = self._handler(
+            image_search=lambda q: [], asset_sender=self._ImageSender())
+        reply, _, _ = handler._answer(conn, "发我习酒窖藏1998 的细节图",
+                                      conversation_id="cid")
+        self.assertIn("还没有附件", reply)
+
+    def test_recall_exception_fails_open(self):
+        def _boom(q):
+            raise RuntimeError("milvus down")
+
+        handler, conn = self._handler(
+            image_search=_boom, asset_sender=self._ImageSender())
+        reply, _, _ = handler._answer(conn, "发我习酒窖藏1998 的细节图",
+                                      conversation_id="cid")
+        self.assertIn("还没有附件", reply)
+
+    def test_no_conversation_or_sender_disabled(self):
+        handler, conn = self._handler(
+            image_search=lambda q: [{"score": 0.9, "name": "n",
+                                     "image_ref": "r1/f/0"}],
+            asset_sender=None)
+        reply, _, _ = handler._answer(conn, "发我习酒窖藏1998 的细节图",
+                                      conversation_id="cid")
+        self.assertIn("还没有附件", reply)
+
+
+class SendImageRefsTests(unittest.TestCase):
+    """AssetSender.send_image_refs：回指解析、单图直发、多图长图。"""
+
+    def _sender(self, record, **kw):
+        return AssetSenderTests()._sender(record, **kw)
+
+    _RECORD = {"fields": {"细节图": [
+        {"filename": "a.png", "url": "http://oss/a"},
+        {"filename": "b.png", "url": "http://oss/b"}]}}
+
+    def test_single_ref_direct_send(self):
+        sender, client = self._sender(self._RECORD)
+        with mock.patch.object(assets_module.media, "ensure_media_id",
+                               return_value=("@m1", "image")):
+            sent = sender.send_image_refs(
+                object(), refs=[("r1", "细节图", 0)],
+                conversation_id="cid", robot_code="robot")
+        self.assertEqual(1, sent)
+        self.assertEqual([("sampleImageMsg", {"photoURL": "@m1"})],
+                         client.sent)
+
+    def test_multi_refs_stitched(self):
+        sender, client = self._sender(self._RECORD,
+                                      stitcher=lambda imgs: (b"j", 2))
+        with mock.patch.object(assets_module.media, "cached_media",
+                               return_value=None), \
+             mock.patch.object(assets_module.media, "download_bytes",
+                               side_effect=lambda url, **kw: url.encode()), \
+             mock.patch.object(assets_module.media, "upload_media",
+                               return_value="@long"), \
+             mock.patch.object(assets_module.media, "save_media"):
+            sent = sender.send_image_refs(
+                object(), refs=[("r1", "细节图", 0), ("r1", "细节图", 1)],
+                conversation_id="cid", robot_code="robot")
+        self.assertEqual(1, sent)
+        self.assertEqual([("sampleImageMsg", {"photoURL": "@long"})],
+                         client.sent)
+
+    def test_invalid_refs_return_zero(self):
+        sender, client = self._sender(self._RECORD)
+        sent = sender.send_image_refs(
+            object(), refs=[("r1", "不存在字段", 0), ("r1", "细节图", 9)],
+            conversation_id="cid", robot_code="robot")
+        self.assertEqual(0, sent)
+        self.assertEqual([], client.sent)
+
+
+class SearchImagesTests(unittest.TestCase):
+    """rag_docs.search_images：kind=image 限定 + 返回形态。"""
+
+    def test_search_images(self):
+        from common.kb_qa import rag_docs as rag_module
+
+        captured = {}
+
+        class _Milvus:
+            def close(self):
+                pass
+
+        def _search(milvus, vector, limit, kind):
+            captured["kind"] = kind
+            return [{"id": "product-img:r1:细节图:0", "score": 0.51,
+                     "kind": "image", "name": "习酒窖藏1988", "text": "",
+                     "image_ref": "r1/细节图/0"}]
+
+        fake_store = types.SimpleNamespace(
+            connect=lambda path: _Milvus(), search=_search,
+            DEFAULT_PATH="/x")
+        with mock.patch.dict(sys.modules,
+                             {"common.rag.store": fake_store}), \
+             mock.patch.object(rag_module.embed, "embed_text",
+                               return_value=[0.1, 0.2]):
+            hits = rag_module.search_images(
+                "习酒包装图", provider="ctaigw", api_key="k", environ={})
+        self.assertEqual("image", captured["kind"])
+        self.assertEqual([{"score": 0.51, "name": "习酒窖藏1988",
+                           "image_ref": "r1/细节图/0"}], hits)
+
+    def test_image_search_from_environment_requires_key(self):
+        from common.kb_qa import rag_docs as rag_module
+
+        self.assertIsNone(rag_module.image_search_from_environment({}))
+        fn = rag_module.image_search_from_environment(
+            {"RAG_EMBED_API_KEY": "k", "RAG_EMBED_PROVIDER": "ctaigw"})
+        self.assertTrue(callable(fn))
 
 
 if __name__ == "__main__":

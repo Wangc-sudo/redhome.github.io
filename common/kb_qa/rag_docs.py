@@ -76,6 +76,68 @@ def search_vector(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
     ]
 
 
+#: 文字搜图命中下限（COSINE）。2026-10-21 实测「习酒 包装 礼盒」真实
+#: 命中 top1=0.4975；0.45 以下基本是噪声（跨模态分数整体偏低）。
+MIN_IMAGE_SCORE = 0.45
+
+#: 一次最多发几张召回图（超出截断；>2 张由 assets 拼长图）。
+MAX_RECALL_IMAGES = 4
+
+
+def search_images(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
+                  environ=None, limit=MAX_RECALL_IMAGES):
+    """文字搜图：kind="image" 限定模态，返回 [{score, name, image_ref}]。
+
+    image_ref = ``record_id/字段名/序号``，回指 AI 表附件位置（调用方
+    据此 get_record 取签名 URL 下载）。与 search_vector 同款 fail-open
+    约定：异常由调用方兜底。
+    """
+    values = os.environ if environ is None else environ
+    from common.rag import store
+
+    milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
+    model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
+             or embed.default_model(provider))
+    dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
+    vector = embed.embed_text(
+        question, api_key, model=model,
+        dimensions=int(dim_text) if dim_text else None,
+        provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
+    try:
+        hits = store.search(milvus, vector, limit=limit, kind="image")
+    finally:
+        # 与 search_vector 同款：排他 flock 即用即放（防与凌晨灌库冲突）。
+        try:
+            milvus.close()
+        except Exception:
+            pass
+    return [
+        {"score": hit.get("score"), "name": hit.get("name") or "",
+         "image_ref": hit.get("image_ref") or ""}
+        for hit in hits
+    ]
+
+
+def image_search_from_environment(environ=None):
+    """env 齐备返回图片召回 callable，缺失返回 None（图召回关闭）。"""
+    values = os.environ if environ is None else environ
+    provider = values.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
+    api_key = values.get("RAG_EMBED_API_KEY") or values.get("JINA_API_KEY")
+    if not api_key:
+        return None
+    if provider == embed.PROVIDER_OPENAI and not values.get("RAG_EMBED_BASE_URL"):
+        return None
+    if provider not in (embed.PROVIDER_JINA, embed.PROVIDER_OPENAI,
+                        embed.PROVIDER_CTAIGW):
+        return None
+
+    def _search(question):
+        return search_images(question, provider=provider, api_key=api_key,
+                             environ=values)
+
+    return _search
+
+
 def _index_of(doc_entry_id):
     """``doc:{doc_id}:{序号:04d}`` → int 序号；解析失败返回 -1。"""
     try:
