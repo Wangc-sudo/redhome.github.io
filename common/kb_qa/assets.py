@@ -29,6 +29,10 @@ ASSET_TERMS = (
 #: 单条消息最多直发几个附件（一个字段可能多个文件，防刷屏）。
 MAX_DELIVER = 2
 
+#: 多图字段拼长图的取图上限（2026-10-22 裁决：多图竖拼一条长图优于
+#: 逐条刷屏；质检证书类实测全是 PNG 扫描件，发票字段多达 8~10 张）。
+MAX_STITCH_IMAGES = 8
+
 #: send_group_message 的 msg_key / msgParam 形态（钉钉机器人群消息）。
 _IMAGE_MSG_KEY = "sampleImageMsg"
 _FILE_MSG_KEY = "sampleFile"
@@ -61,18 +65,35 @@ class AssetSender:
     """附件直发器。所有外部调用异常上抛，由调用方（_answer）降级。"""
 
     def __init__(self, *, dingtalk_client, base_id, sheet_id,
-                 oapi_token_factory, max_deliver=MAX_DELIVER):
+                 oapi_token_factory, max_deliver=MAX_DELIVER, stitcher=None):
         self._client = dingtalk_client
         self._base_id = base_id
         self._sheet_id = sheet_id
         self._oapi_token_factory = oapi_token_factory
         self._max_deliver = max_deliver
+        self._stitcher = stitcher or _default_stitcher
 
     def send(self, conn, *, row, field_name, conversation_id, robot_code):
-        """直发 row 的 field_name 附件（前 max_deliver 个）。返回发送个数。"""
+        """直发 row 的 field_name 附件。返回发送的消息条数。
+
+        形态：字段全是图片且超过逐条上限（发票/细节图多图场景）→ 竖拼
+        一张长图发单条；否则逐条直发（前 max_deliver 个）。拼图任何一步
+        失败回退逐条（fail-open）。
+        """
         record = self._client.get_record(self._base_id, self._sheet_id,
                                          row["record_id"])
         attachments = (record.get("fields") or {}).get(field_name) or []
+        if (len(attachments) > self._max_deliver
+                and all(media.is_image_name(
+                    m.get("filename") or m.get("name"))
+                    for m in attachments)):
+            try:
+                return self._send_long_image(
+                    conn, row=row, field_name=field_name,
+                    attachments=attachments,
+                    conversation_id=conversation_id, robot_code=robot_code)
+            except Exception:
+                pass  # 拼图失败回退逐条发送
         oapi_token = self._oapi_token_factory()
         sent = 0
         for index, meta in enumerate(attachments[:self._max_deliver]):
@@ -87,6 +108,29 @@ class AssetSender:
             sent += 1
         return sent
 
+    def _send_long_image(self, conn, *, row, field_name, attachments,
+                         conversation_id, robot_code):
+        """多图竖拼长图 → 上传 → 单条图片消息。media_id 走同款 3 天缓存。"""
+        cache_key = f"{row['record_id']}:{field_name}:long"
+        cached = media.cached_media(conn, cache_key)
+        if cached:
+            media_id = cached["media_id"]
+        else:
+            images = []
+            for meta in attachments[:MAX_STITCH_IMAGES]:
+                url = media._extract_attachment_url(meta)
+                if url:
+                    images.append(media.download_bytes(url))
+            content, _used = self._stitcher(images)
+            file_name = f"{field_name}-长图.jpg"
+            media_id = media.upload_media(
+                self._oapi_token_factory(), "image", file_name, content)
+            media.save_media(conn, cache_key, media_id, "image", file_name)
+        self._client.send_group_message(
+            robot_code, conversation_id, _IMAGE_MSG_KEY,
+            {"photoURL": media_id})
+        return 1
+
     def _deliver(self, media_id, media_type, file_name,
                  conversation_id, robot_code):
         if media_type == "image":
@@ -100,6 +144,13 @@ class AssetSender:
             robot_code, conversation_id, _FILE_MSG_KEY,
             {"mediaId": media_id, "fileName": file_name,
              "fileType": file_type})
+
+
+def _default_stitcher(images):
+    """长图拼接（Pillow 可选依赖，未安装抛 StitchError 回退逐条发送）。"""
+    from common.kb_qa.long_image import stitch_vertical
+
+    return stitch_vertical(images)
 
 
 def build_from_environment(environ=None):

@@ -18,3 +18,6 @@ croniter==3.0.4
 # 实测冒烟（2026-10-12）为准；embedding 走 jina API 无需本地推理依赖。
 pymilvus==3.0.2
 milvus-lite==3.2.1
+# 多图附件竖拼长图（common/kb_qa/long_image.py，2026-10-22 质检证书多图
+# 场景裁决）；惰性导入的可选依赖——镜像未重建时自动回退逐条发送。
+pillow==11.3.0

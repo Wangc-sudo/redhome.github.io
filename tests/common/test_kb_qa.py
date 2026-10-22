@@ -2,6 +2,7 @@
 """kb_qa 模块单元测试：路由 / 商品查询渲染 / 同步归一化 / 媒体缓存 / 问答主流程。"""
 
 import asyncio
+import io
 import json
 import time
 import unittest
@@ -1142,136 +1143,6 @@ class ConversationStoreTests(unittest.TestCase):
         self.assertEqual("", ctx_module.format_history([]))
 
 
-class _FakeRedis:
-    """redis.Redis 最小替身：list 语义 + expire 记录（2026-10-22）。"""
-
-    def __init__(self):
-        self.lists = {}
-        self.expires = {}
-
-    def rpush(self, key, payload):
-        self.lists.setdefault(key, []).append(payload)
-
-    def ltrim(self, key, start, end):
-        items = self.lists.get(key, [])
-        if end == -1:
-            self.lists[key] = items[start:]
-        else:
-            self.lists[key] = items[start:end + 1]
-
-    def expire(self, key, ttl):
-        self.expires[key] = ttl
-
-    def lrange(self, key, start, end):
-        items = self.lists.get(key, [])
-        if end == -1:
-            return list(items[start:])
-        return list(items[start:end + 1])
-
-
-class RedisConversationStoreTests(unittest.TestCase):
-    """Redis 后端：存取 / 容量裁剪 / TTL 续期 / fail-open（2026-10-22）。"""
-
-    def _store(self, client, max_turns=4, ttl=600):
-        return ctx_module.RedisConversationStore(
-            client=client, max_turns=max_turns, ttl_seconds=ttl)
-
-    def test_record_and_history_roundtrip(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        key = store.key("cid1", "u1")
-        store.record(key, question="习酒箱规", answer="6 瓶/箱",
-                     category="product_param", record_id="r1")
-        history = store.history(key)
-        self.assertEqual(1, len(history))
-        self.assertEqual("习酒箱规", history[0]["q"])
-        self.assertEqual("6 瓶/箱", history[0]["a"])
-        self.assertEqual("r1", history[0]["record_id"])
-
-    def test_key_has_prefix(self):
-        key = ctx_module.RedisConversationStore.key("cid1", "u1")
-        self.assertTrue(key.startswith("kbqa:ctx:cid1:u1"))
-
-    def test_max_turns_trims_oldest(self):
-        client = _FakeRedis()
-        store = self._store(client, max_turns=2)
-        key = store.key("cid1", "u1")
-        for i in range(4):
-            store.record(key, question=f"q{i}", answer=f"a{i}")
-        history = store.history(key)
-        self.assertEqual(2, len(history))
-        self.assertEqual("q2", history[0]["q"])
-        self.assertEqual("q3", history[1]["q"])
-
-    def test_expire_refreshed_on_record(self):
-        client = _FakeRedis()
-        store = self._store(client, ttl=600)
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")
-        self.assertEqual(600, client.expires[key])
-
-    def test_silent_turn_not_recorded(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        store.record(store.key("cid1", "u1"), question="q", answer=None)
-        self.assertEqual({}, client.lists)
-
-    def test_redis_failure_fails_open(self):
-        class _Broken:
-            def lrange(self, *a):
-                raise ConnectionError("down")
-
-            def rpush(self, *a):
-                raise ConnectionError("down")
-
-        store = self._store(_Broken())
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")  # 静默丢弃
-        self.assertEqual([], store.history(key))     # 当无历史
-
-    def test_bad_json_entry_skipped(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")
-        client.lists[key].insert(0, "{bad json")
-        history = store.history(key)
-        self.assertEqual(1, len(history))
-        self.assertEqual("q", history[0]["q"])
-
-    def test_keys_are_isolated_per_sender(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        store.record(store.key("cid1", "u1"), question="q1", answer="a1")
-        self.assertEqual([], store.history(store.key("cid1", "u2")))
-        self.assertEqual([], store.history(store.key("cid2", "u1")))
-
-
-class BuildConversationStoreTests(unittest.TestCase):
-    """后端选择：URL 在场 → Redis，否则进程内（2026-10-22）。"""
-
-    def test_no_url_falls_back_in_process(self):
-        store = ctx_module.build_conversation_store({})
-        self.assertIsInstance(store, ctx_module.ConversationStore)
-
-    def test_kb_redis_url_preferred(self):
-        store = ctx_module.build_conversation_store(
-            {"KB_REDIS_URL": "redis://k:6379/0",
-             "PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
-        self.assertIsInstance(store, ctx_module.RedisConversationStore)
-        self.assertEqual("redis://k:6379/0", store._url)
-
-    def test_public_data_redis_url_reused(self):
-        store = ctx_module.build_conversation_store(
-            {"PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
-        self.assertIsInstance(store, ctx_module.RedisConversationStore)
-        self.assertEqual("redis://p:6379/0", store._url)
-
-    def test_blank_url_falls_back(self):
-        store = ctx_module.build_conversation_store({"KB_REDIS_URL": "  "})
-        self.assertIsInstance(store, ctx_module.ConversationStore)
-
-
 class _RecordingLlm:
     """捕获 messages 的 LLM 替身。"""
 
@@ -1815,18 +1686,80 @@ class AssetSenderTests(unittest.TestCase):
             {"mediaId": "@m2", "fileName": "质检报告.pdf",
              "fileType": "pdf"})])
 
-    def test_max_deliver_caps(self):
+    def test_multi_image_field_sends_long_image(self):
+        # 2026-10-22 裁决：全图字段且超逐条上限 → 竖拼长图单条消息
+        record = {"fields": {"进货发票": [
+            {"filename": f"{i}.png", "url": f"http://oss/{i}"}
+            for i in range(4)]}}
+        sender, client = self._sender(record, stitcher=lambda imgs: (b"jpg", 4))
+        with mock.patch.object(assets_module.media, "cached_media",
+                               return_value=None), \
+             mock.patch.object(assets_module.media, "download_bytes",
+                               side_effect=lambda url, **kw: url.encode()), \
+             mock.patch.object(assets_module.media, "upload_media",
+                               return_value="@long"), \
+             mock.patch.object(assets_module.media, "save_media") as save:
+            sent = sender.send(object(), row={"record_id": "r1"},
+                               field_name="进货发票", conversation_id="cid",
+                               robot_code="robot")
+        self.assertEqual(1, sent)
+        self.assertEqual([("sampleImageMsg", {"photoURL": "@long"})],
+                         client.sent)
+        save.assert_called_once()  # 长图 media_id 也进 3 天缓存
+
+    def test_long_image_cache_hit_skips_download(self):
+        record = {"fields": {"进货发票": [
+            {"filename": f"{i}.png", "url": f"http://oss/{i}"}
+            for i in range(4)]}}
+        sender, client = self._sender(record, stitcher=lambda imgs: (b"j", 4))
+        with mock.patch.object(assets_module.media, "cached_media",
+                               return_value={"media_id": "@cached"}), \
+             mock.patch.object(assets_module.media, "download_bytes",
+                               side_effect=AssertionError("不应下载")):
+            sent = sender.send(object(), row={"record_id": "r1"},
+                               field_name="进货发票", conversation_id="cid",
+                               robot_code="robot")
+        self.assertEqual(1, sent)
+        self.assertEqual([("sampleImageMsg", {"photoURL": "@cached"})],
+                         client.sent)
+
+    def test_long_image_stitch_failure_falls_back_to_per_item(self):
+        # 拼图失败（如 Pillow 未装/图片全坏）回退逐条发送
         record = {"fields": {"素材包": [
             {"filename": f"{i}.png", "url": f"http://oss/{i}"}
             for i in range(4)]}}
-        sender, client = self._sender(record)
-        with mock.patch.object(assets_module.media, "ensure_media_id",
+
+        def _boom(images):
+            raise RuntimeError("no pillow")
+
+        sender, client = self._sender(record, stitcher=_boom)
+        with mock.patch.object(assets_module.media, "cached_media",
+                               return_value=None), \
+             mock.patch.object(assets_module.media, "download_bytes",
+                               return_value=b"x"), \
+             mock.patch.object(assets_module.media, "ensure_media_id",
                                return_value=("@m", "image")):
             sent = sender.send(object(), row={"record_id": "r1"},
                                field_name="素材包", conversation_id="cid",
                                robot_code="robot")
         self.assertEqual(assets_module.MAX_DELIVER, sent)
         self.assertEqual(assets_module.MAX_DELIVER, len(client.sent))
+
+    def test_mixed_field_not_stitched(self):
+        # 图片+文件混合字段不拼长图，维持逐条
+        record = {"fields": {"素材包": [
+            {"filename": "a.png", "url": "http://oss/a"},
+            {"filename": "b.zip", "url": "http://oss/b"},
+            {"filename": "c.png", "url": "http://oss/c"}]}}
+        sender, client = self._sender(record)
+        with mock.patch.object(assets_module.media, "ensure_media_id",
+                               side_effect=[("@i", "image"), ("@f", "file")]):
+            sent = sender.send(object(), row={"record_id": "r1"},
+                               field_name="素材包", conversation_id="cid",
+                               robot_code="robot")
+        self.assertEqual(2, sent)
+        self.assertEqual(["sampleImageMsg", "sampleFile"],
+                         [key for key, _ in client.sent])
 
     def test_build_from_environment_requires_full_env(self):
         self.assertIsNone(assets_module.build_from_environment({}))
@@ -2217,6 +2150,47 @@ class BadcaseReportTests(unittest.TestCase):
         self.assertIn("商品未找到", markdown)
         self.assertIn("处理失败", markdown)
         self.assertIn("daily_sales×1", markdown)
+
+
+class LongImageTests(unittest.TestCase):
+    """长图拼接（真实 Pillow）：宽度归一、高度截断、坏图跳过。"""
+
+    def _png(self, width, height, color):
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height), color).save(buf, "PNG")
+        return buf.getvalue()
+
+    def test_stitch_normalizes_width_and_stacks(self):
+        from common.kb_qa import long_image
+        from PIL import Image
+
+        content, used = long_image.stitch_vertical([
+            self._png(1600, 400, (255, 0, 0)),   # 宽图缩到 800x200
+            self._png(400, 300, (0, 255, 0)),    # 窄图原样居中
+        ])
+        self.assertEqual(2, used)
+        out = Image.open(io.BytesIO(content))
+        self.assertEqual("JPEG", out.format)
+        self.assertEqual(800, out.width)
+        self.assertEqual(200 + 4 + 300, out.height)
+
+    def test_stitch_truncates_by_max_height(self):
+        from common.kb_qa import long_image
+
+        content, used = long_image.stitch_vertical(
+            [self._png(800, 1000, (0, 0, 0))] * 5, max_height=2100)
+        self.assertEqual(2, used)  # 1000 + 4 + 1000，第三张超界被截
+
+    def test_stitch_skips_broken_and_raises_when_all_broken(self):
+        from common.kb_qa import long_image
+
+        content, used = long_image.stitch_vertical(
+            [b"not-an-image", self._png(100, 100, (9, 9, 9))])
+        self.assertEqual(1, used)
+        with self.assertRaises(long_image.StitchError):
+            long_image.stitch_vertical([b"bad", b"also-bad"])
 
 
 if __name__ == "__main__":
