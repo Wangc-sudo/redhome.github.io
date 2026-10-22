@@ -36,9 +36,12 @@ def _like_escape(text):
 def find_products(conn, keyword, *, limit=_MAX_ROWS):
     """按关键词找商品，返回 DictCursor 行列表（可能为空）。
 
-    整词 miss 后按分词回退（长词优先，最多试 3 个）：用户消息常带
-    无关后缀（「习酒窖藏1998 箱规」验收），整词 LIKE 必 miss，
-    分词「习酒窖藏1998」能中（2026-10-10 验收事故）。
+    整词 miss 后的回退链（2026-10-22 精度修复）：
+    1. 多词 AND 组合——所有分词同时命中品名（「53°500ml*6 习酒窖藏1988
+       新包装 2025款」整词带空格必 miss，单最长词「53°500ml*6」回退曾
+       命中同规格的千峰翠韵张冠李戴；AND 组合下四个词同时约束直接唯一）；
+    2. 单词回退——CJK 词优先于规格词（度数/容量型 token 判别力最低），
+       同组内长词优先，最多试 3 个。
     """
     kw = (keyword or "").strip()
     if not kw:
@@ -47,13 +50,39 @@ def find_products(conn, keyword, *, limit=_MAX_ROWS):
     if rows:
         return _decode_json_fields(rows)
     tokens = sorted(
-        (t for t in kw.split() if len(t) >= 2), key=len, reverse=True
+        (t for t in kw.split() if len(t) >= 2), key=_token_rank
     )
+    if len(tokens) >= 2:
+        rows = _search_all_tokens(conn, tokens[:4], limit)
+        if rows:
+            return _decode_json_fields(rows)
     for token in tokens[:3]:
         rows = _search(conn, token, limit)
         if rows:
             return _decode_json_fields(rows)
     return []
+
+
+def _token_rank(token):
+    """分词排序键：含 CJK 的词在前（品名判别力高），同类内长词优先。"""
+    has_cjk = any("一" <= ch <= "鿿" for ch in token)
+    return (0 if has_cjk else 1, -len(token))
+
+
+def _search_all_tokens(conn, tokens, limit):
+    """多词 AND 组合检索：每个词都必须命中品名（交集语义）。"""
+    likes = [f"%{_like_escape(t)}%" for t in tokens]
+    clause = " AND ".join(["`name` LIKE %s ESCAPE '\\\\'"] * len(tokens))
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"SELECT * FROM `kb_products` WHERE {clause}"
+            " ORDER BY `name` LIMIT %s",
+            (*likes, limit),
+        )
+        return list(cursor.fetchall())
+    finally:
+        cursor.close()
 
 
 def _decode_json_fields(rows):

@@ -180,9 +180,39 @@ class ProductQueryTests(unittest.TestCase):
         self.assertEqual(4, len(conn.cursor_instance.executed))
 
     def test_all_tokens_miss_returns_empty(self):
-        # 整词 3 次 + 分词两个各 3 次全 miss
-        conn = _FakeConn([[], [], [], [], [], [], [], [], []])
+        # 整词 3 次 + AND 组合 1 次 + 分词两个各 3 次全 miss
+        conn = _FakeConn([[]] * 10)
         self.assertEqual([], find_products(conn, "不存在 的词"))
+
+    def test_multi_token_and_search_beats_longest_token(self):
+        # 2026-10-22 事故回归：「53°500ml*6 习酒窖藏1988 新包装 2025款」
+        # 整词带空格必 miss，按最长词「53°500ml*6」回退曾命中同规格的
+        # 千峰翠韵（张冠李戴）。AND 组合检索先行：四个词同时约束品名。
+        row = _product_row(name="53°500ml*6习酒窖藏1988新包装2025款(浙江)")
+        conn = _FakeConn([[], [], [], [row]])
+        rows = find_products(conn, "53°500ml*6 习酒窖藏1988 新包装 2025款")
+        self.assertEqual("53°500ml*6习酒窖藏1988新包装2025款(浙江)",
+                         rows[0]["name"])
+        sql, params = conn.cursor_instance.executed[3]
+        self.assertEqual(4, sql.count("LIKE"))  # 四词 AND
+        self.assertIn("AND", sql)
+        self.assertEqual(5, len(params))        # 4 个 like + limit
+
+    def test_single_token_fallback_prefers_cjk_over_spec(self):
+        # AND miss 后的单词回退：品名词「习酒窖藏1988」必须先于
+        # 规格词「53°500ml*6」（规格词判别力最低，同规格跨品牌撞车）。
+        conn = _FakeConn([[], [], [], [], [], [], [_product_row()]])
+        rows = find_products(conn, "53°500ml*6 习酒窖藏1988")
+        self.assertEqual(1, len(rows))
+        # 第 5 次查询 = 单词回退第一轮（code/69码 精确 + limit 参数）
+        sql, params = conn.cursor_instance.executed[4]
+        self.assertEqual(("习酒窖藏1988",) * 3, params[:3])
+
+    def test_token_rank_cjk_first(self):
+        self.assertEqual(
+            ["习酒窖藏1988", "新包装", "53°500ml*6"],
+            sorted(["53°500ml*6", "新包装", "习酒窖藏1988"],
+                   key=products._token_rank))
 
     def test_render_param_answer_skips_null_fields(self):
         text = render_param_answer(_product_row(gift_bag_spec=None))
