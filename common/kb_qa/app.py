@@ -509,8 +509,13 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         """
         if self._llm is not None:
             try:
-                return render_product_answer(self._llm, question, rows,
-                                             history=history)
+                answer = render_product_answer(self._llm, question, rows,
+                                               history=history)
+                # 推理版模型预算耗尽时返回空串（不抛异常）——空答案等同
+                # 失败，降模板渲染，绝不让用户看到静默（2026-10-22 实测）。
+                if answer:
+                    return answer
+                self._log("kb qa: llm product render empty")
             except LlmError:
                 self._log("kb qa: llm product render failed")
         if len(rows) > 1:
@@ -568,8 +573,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return _DOC_FALLBACK, DOC_QA, None
         if self._llm is not None:
             try:
-                return render_doc_answer(self._llm, question, chunks,
-                                         history=history), DOC_QA, None
+                answer = render_doc_answer(self._llm, question, chunks,
+                                           history=history)
+                # 空串降摘录（同 _render_products 的推理版预算坑）。
+                if answer:
+                    return answer, DOC_QA, None
+                self._log("kb qa: llm doc render empty")
             except LlmError:
                 self._log("kb qa: llm doc render failed")
         return _render_doc_excerpt(chunks), DOC_QA, None

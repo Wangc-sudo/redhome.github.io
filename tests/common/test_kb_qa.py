@@ -2676,3 +2676,42 @@ class SearchImagesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmEmptyAnswerFallbackTests(unittest.TestCase):
+    """2026-10-22 事故回归：推理版模型预算耗尽返回空串（不抛异常）——
+    空答案必须降模板/摘录，绝不能静默不回（audit reply_kind=none）。"""
+
+    def _handler(self, llm_answer, conn_script):
+        conn = _FakeConn(conn_script)
+
+        class _EmptyLlm:
+            def chat(self, messages, **kw):
+                return llm_answer
+
+        return KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=_EmptyLlm()), conn
+
+    def test_empty_product_answer_falls_back_to_template(self):
+        handler, conn = self._handler("", [[_product_row()]])
+        reply, intent, matched = handler._answer(conn, "习酒窖藏1998 箱规")
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertIn("箱规：6", reply)  # P1 模板兜底
+
+    def test_empty_doc_answer_falls_back_to_excerpt(self):
+        handler, conn = self._handler("", [])
+        handler._doc_search = lambda conn, q, k=3: [
+            {"doc_title": "手册A", "content": "三同两不同指的是原料相同。"}]
+        reply, intent, _ = handler._answer(conn, "三同两不同是啥")
+        self.assertEqual(DOC_QA, intent)
+        self.assertIn("三同两不同指的是", reply)  # 摘录兜底
+
+    def test_render_budget_raised(self):
+        # 钉住预算：渲染调用点必须 ≥2048（推理版 reasoning 共享预算）
+        import inspect
+
+        from common.kb_qa import llm as llm_mod
+        for fn in (llm_mod.render_product_answer, llm_mod.render_doc_answer):
+            src = inspect.getsource(fn)
+            self.assertIn("max_tokens=2048", src)
