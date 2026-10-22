@@ -210,10 +210,14 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             self._finish_audit(conn, msg_id, intent, matched,
                                "text" if reply else "none",
                                meta=meta, reply=reply, latency_ms=latency_ms)
-            if ctx_key is not None:
+            # 噪声轮过滤（2026-10-22）：CHITCHAT 轮（HELP 帮助文案等）
+            # 不进历史，避免稀释 4 轮窗口里的有效上文。subject=最近命中
+            # 商品名，供历史透出「上文涉及商品」（指代补全锚点）。
+            if ctx_key is not None and intent != CHITCHAT:
                 self._context_store.record(
                     ctx_key, question=text, answer=reply,
-                    category=intent, record_id=matched)
+                    category=intent, record_id=matched,
+                    subject=meta.get("subject"))
             conn.commit()
         except Exception as exc:
             conn.rollback()
@@ -350,8 +354,11 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
                 # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
                 return render_clarify(intent.keyword, rows), intent.category, None
-            if meta is not None and "recall_source" not in meta:
-                meta["recall_source"] = "products"
+            if meta is not None:
+                if "recall_source" not in meta:
+                    meta["recall_source"] = "products"
+                # 对话层（2026-10-22）：透出命中商品名，作指代追问锚点。
+                meta["subject"] = rows[0].get("name")
             reply = self._render_products(text, rows, intent, history)
             return reply, intent.category, rows[0]["record_id"]
         if intent.category == PRODUCT_ASSET:
@@ -363,6 +370,9 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             # 精度（2026-10-21）：商品相关度与附件字段名联合选择——
             # 「习酒窖藏1988 质检报告」曾命中红习酱的「礼袋」。
             row, field_name, items = pick_asset(rows, text)
+            if meta is not None:
+                # 对话层（2026-10-22）：透出命中商品名，作指代追问锚点。
+                meta["subject"] = (row or rows[0]).get("name")
             if row is None:
                 return (
                     f"「{rows[0]['name']}」的资料里还没有附件。",

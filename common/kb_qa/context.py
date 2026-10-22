@@ -32,13 +32,18 @@ DEFAULT_TTL_SECONDS = 600
 SNIPPET_CHARS = 120
 
 
-def _turn_payload(question, answer, category, record_id):
-    """单轮存储载荷（进程内与 Redis 两后端同构）。"""
+def _turn_payload(question, answer, category, record_id, subject):
+    """单轮存储载荷（进程内与 Redis 两后端同构）。
+
+    subject（2026-10-22）：本轮命中商品名（如有），供 format_history
+    透出「上文涉及商品」——指代补全不再只靠被截断的答案文本猜。
+    """
     return {
         "q": (question or "")[:SNIPPET_CHARS],
         "a": (answer or "")[:SNIPPET_CHARS],
         "category": category,
         "record_id": record_id,
+        "subject": subject,
     }
 
 
@@ -67,12 +72,14 @@ class ConversationStore:
             return []
         return list(turns)
 
-    def record(self, key, *, question, answer, category=None, record_id=None):
+    def record(self, key, *, question, answer, category=None, record_id=None,
+               subject=None):
         """记一轮（回复为空的静默轮不记）。"""
         if not answer:
             return
         turns, _ = self._turns.get(key, (deque(maxlen=self._max_turns), 0))
-        turns.append(_turn_payload(question, answer, category, record_id))
+        turns.append(_turn_payload(question, answer, category, record_id,
+                                   subject))
         self._turns[key] = (turns, self._now())
 
 
@@ -126,12 +133,13 @@ class RedisConversationStore:
                 continue  # 坏片跳过，不拖累整段历史
         return turns
 
-    def record(self, key, *, question, answer, category=None, record_id=None):
+    def record(self, key, *, question, answer, category=None, record_id=None,
+               subject=None):
         """记一轮（回复为空的静默轮不记）；后端异常静默。"""
         if not answer:
             return
         payload = json.dumps(
-            _turn_payload(question, answer, category, record_id),
+            _turn_payload(question, answer, category, record_id, subject),
             ensure_ascii=False, default=str)
         try:
             client = self._redis()
@@ -156,11 +164,22 @@ def build_conversation_store(environ=None, *, max_turns=DEFAULT_MAX_TURNS,
 
 
 def format_history(history):
-    """历史 → prompt 文本段（最近在前）。空调用方不拼接该段。"""
+    """历史 → prompt 文本段（最近在前）。空调用方不拼接该段。
+
+    末尾透出最近一次命中商品（「上文涉及商品」）：指代追问（它/那款/
+    价格呢）的锚点，不再只靠被截断的答案文本猜（2026-10-22）。
+    旧条目无 subject 字段时自动跳过。
+    """
     if not history:
         return ""
     lines = ["# 对话历史（最近的在前）"]
+    subject = None
     for turn in reversed(history):
+        if subject is None:
+            subject = turn.get("subject")
         lines.append(f"客服：{turn['q']}")
         lines.append(f"助手：{turn['a']}")
+    if subject:
+        lines.append("")
+        lines.append(f"上文涉及商品：{subject}")
     return "\n".join(lines)
