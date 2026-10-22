@@ -23,13 +23,16 @@ import os
 import time
 from collections import deque
 
-#: 默认保留轮数与过期时间（秒）。4 轮足够覆盖「问→追问→再追问」；
-#: 10 分钟是客服群一个话题的自然寿命。
-DEFAULT_MAX_TURNS = 4
+#: 默认保留轮数与过期时间（秒）。6 轮覆盖「问→追问→再追问」并留出
+#: 话题内余量（2026-10-22 由 4 上调）；10 分钟是客服群一个话题的
+#: 自然寿命。
+DEFAULT_MAX_TURNS = 6
 DEFAULT_TTL_SECONDS = 600
 
-#: 历史进 LLM prompt 时每轮问答的截断长度（控 token）。
-SNIPPET_CHARS = 120
+#: 历史进 LLM prompt 时每轮问答的截断长度（控 token）。与渲染 prompt
+#: 的「回答控制在 200 字以内」对齐（2026-10-22 由 120 上调——列表轮
+#: 商品名曾在 120 字处被截掉）。
+SNIPPET_CHARS = 200
 
 
 def _turn_payload(question, answer, category, record_id, subject):

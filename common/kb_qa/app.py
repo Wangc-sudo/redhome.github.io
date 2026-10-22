@@ -570,7 +570,7 @@ def main(argv=None):
     vector_search = rag_docs.from_environment()
     if vector_search is None:
         print("kb qa: vector recall not configured, running BM25 only")
-    # 对话层（2026-10-21）：会话上下文（同人同群最近 4 轮 / TTL 10
+    # 对话层（2026-10-21）：会话上下文（同人同群最近 6 轮 / TTL 10
     # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
     # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
     # 重启不丢），否则进程内兜底；fail-open，Redis 不可达只当轮无历史。
