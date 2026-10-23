@@ -249,6 +249,25 @@ def _build_dingtalk_org_ddl() -> tuple[str, ...]:
     return (_DINGTALK_ORG_MEMBER_DDL,)
 
 
+# 部门目录（2026-10-24）：collect_directory 遍历树时顺手落全量部门
+# （含无人直属的管理节点），供领导投影映射部门名。独立版本而非改写
+# raw-dingtalk-org-v1（校验和红线）。
+_DINGTALK_ORG_DEPT_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dingtalk_org_dept` (\n"
+    "  `dept_id` BIGINT NOT NULL,\n"
+    "  `dept_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`dept_id`),\n"
+    "  KEY `idx_synced_at` (`synced_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def _build_dingtalk_org_dept_ddl() -> tuple[str, ...]:
+    return (_DINGTALK_ORG_DEPT_DDL,)
+
+
 # 电商月目标表（渠道销售目标达成率9，2026-09-18 纳入采集）。DDL 文本复用
 # finance_schema 的表定义生成，与既有 raw 表同构（业务列 + 技术列 +
 # idx_synced_at/idx_sync_run_id）。独立版本而非改写 raw-dingtalk-v1
@@ -490,6 +509,8 @@ def _build_mart_fact_filled_by_ddl() -> tuple[str, ...]:
 _MIGRATIONS = (
     ("raw-dingtalk-v1", "dingtalk", _build_dingtalk_ddl()),
     ("raw-dingtalk-org-v1", "dingtalk", _build_dingtalk_org_ddl()),
+    # 部门目录（2026-10-24 领导投影配套）：独立版本，勿并入 org-v1。
+    ("raw-dingtalk-org-dept-v1", "dingtalk", _build_dingtalk_org_dept_ddl()),
     (
         "raw-dingtalk-channel-monthly-target-v1",
         "dingtalk",

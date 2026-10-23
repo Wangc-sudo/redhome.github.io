@@ -656,12 +656,29 @@ class MartExtractRepository:
         return [dict(row) for row in rows]
 
     def read_org_dept_names(self):
-        """dept_id → dept_name 全量映射（跨全部历史快照）。
+        """dept_id → dept_name 映射。目录表优先，成员行历史映射兜底。
 
         领导管的部门可能是「纯管理节点」（成员都挂子部门、无人直属），
-        只从最新快照的成员归属映射会漏名（实测 5 个部门 None）——历史
-        快照里有过归属的部门都有名字，全表扫一遍补齐。
+        成员归属映射会漏名——2026-10-24 起同步落全量部门目录
+        （``dingtalk_org_dept``，含管理节点），优先读它；表未建（迁移
+        未跑）或为空时回退全历史成员归属映射（向后兼容）。
         """
+        try:
+            sql = (
+                "SELECT `dept_id`, `dept_name` FROM `dingtalk_org_dept` "
+                "WHERE `sync_run_id` = ("
+                "  SELECT `sync_run_id` FROM `dingtalk_org_dept` "
+                "  ORDER BY `synced_at` DESC LIMIT 1)"
+            )
+            with contextlib.closing(self._raw.cursor()) as cursor:
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+            if rows:
+                return {str(row["dept_id"]): row["dept_name"]
+                        for row in rows}
+        except Exception:
+            # 表不存在（迁移未跑）等情形：回退旧映射，不阻断投影。
+            pass
         sql = (
             "SELECT `dept_id`, MAX(`dept_name`) AS `dept_name` "
             "FROM `dingtalk_org_member` WHERE `dept_id` IS NOT NULL "

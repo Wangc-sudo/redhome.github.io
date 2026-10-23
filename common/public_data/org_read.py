@@ -51,6 +51,19 @@ class OrgMemberRecord:
 
 
 @dataclass(frozen=True)
+class OrgDeptRecord:
+    """遍历中实际见到的一个部门（目录条目，含无人直属的管理节点）。
+
+    2026-10-24 新增：领导投影的部门名映射只从成员归属行建会漏掉「纯
+    管理节点」（事业部/中心级，成员都挂下级）——目录在遍历树时天然
+    在手，顺手落库。
+    """
+
+    dept_id: int
+    name: str | None
+
+
+@dataclass(frozen=True)
 class OrgSeedEntry:
     """一个钉钉企业的采集声明。
 
@@ -343,20 +356,19 @@ def load_org_seed(path):
 # 部门子树 → 成员（给定网关即纯函数）
 # ---------------------------------------------------------------------------
 
-def collect_members(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
-    """把每个区域的部门子树展开为成员记录。
+def collect_directory(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
+    """把每个区域的部门子树展开为成员记录 **+ 部门目录**。
 
-    *regions* 是 ``(region, dept_ids)`` 对，**顺序即优先级**：一名成员同时
-    出现在多个区域的展开结果里时，归最早的区域（兜底区域 ``other`` 应排在
-    最后——它通常含根部门，展开即全公司）。
+    返回 ``(members, departments)``：目录条目 = 遍历中实际见到的全部
+    部门（含无人直属的管理节点），按 dept_id 去重（多区域重叠子树先到
+    先得）。
 
-    显式失败、绝不静默降级：
-      * 成员详情缺 ``name`` → :class:`OrgReadError`；
-      * 展开结果为零成员 → :class:`OrgReadError`（真实目录不会为空）；
-      * 部门树超过 *max_depth* 层 → :class:`OrgReadError`（视为数据异常）。
+    其余语义与 :func:`collect_members` 完全一致（顺序即优先级、显式
+    失败、零成员报错、层级上限）。
     """
     records = []
     claimed = set()
+    departments = {}
 
     for region, dept_ids in regions:
         dept_names = {}
@@ -377,6 +389,8 @@ def collect_members(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
                     # 区域种子的根部门没有 listsub 带来的名字，单独解析一次。
                     known_name = gateway.get_department_name(dept_id)
                 dept_name = known_name or dept_names.get(dept_id)
+                departments.setdefault(
+                    dept_id, OrgDeptRecord(dept_id=dept_id, name=dept_name))
 
                 for user_id in gateway.list_user_ids(dept_id):
                     if user_id in claimed:
@@ -403,4 +417,21 @@ def collect_members(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
 
     if not records:
         raise OrgReadError("org directory returned zero members")
-    return tuple(records)
+    return tuple(records), tuple(departments.values())
+
+
+def collect_members(gateway, regions, *, max_depth=_MAX_TREE_DEPTH):
+    """把每个区域的部门子树展开为成员记录。
+
+    *regions* 是 ``(region, dept_ids)`` 对，**顺序即优先级**：一名成员同时
+    出现在多个区域的展开结果里时，归最早的区域（兜底区域 ``other`` 应排在
+    最后——它通常含根部门，展开即全公司）。
+
+    显式失败、绝不静默降级：
+      * 成员详情缺 ``name`` → :class:`OrgReadError`；
+      * 展开结果为零成员 → :class:`OrgReadError`（真实目录不会为空）；
+      * 部门树超过 *max_depth* 层 → :class:`OrgReadError`（视为数据异常）。
+    """
+    members, _departments = collect_directory(
+        gateway, regions, max_depth=max_depth)
+    return members
