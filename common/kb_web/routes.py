@@ -149,7 +149,14 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         if history is None:
             raise HTTPException(status_code=404, detail="not found")
 
-        result = service.answer(userid, content, history_messages=history)
+        # clarify 闭环（2026-10-23）：先 pop 上一轮候选（消费即作废），
+        # 本轮再发反问则把新候选存回。
+        pending = store.pop_pending(userid, sid)
+        result = service.answer(userid, content, history_messages=history,
+                                pending=pending)
+        pending_candidates = result.pop("pending_candidates", None)
+        if pending_candidates:
+            store.set_pending(userid, sid, pending_candidates)
         now = _now_text()
         store.append(userid, sid, [
             {"role": "user", "content": content, "ts": now},
@@ -169,6 +176,8 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             raise HTTPException(status_code=400, detail="bad request")
         result = service.answer(userid, last_user["content"],
                                 history_messages=history)
+        # 重答不改变 clarify 状态：状态键不透给前端。
+        result.pop("pending_candidates", None)
         now = _now_text()
         store.append(userid, sid, [
             {"role": "assistant", "content": result["reply"], "ts": now,

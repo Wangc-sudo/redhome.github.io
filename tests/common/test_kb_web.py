@@ -81,6 +81,22 @@ class WebSessionStoreTests(unittest.TestCase):
         self.assertEqual(sess_module.MAX_MESSAGES_PER_SESSION, len(messages))
         self.assertEqual("m10", messages[0]["content"])  # 最旧被裁
 
+    def test_pending_roundtrip_and_consumed(self):
+        """clarify 候选（2026-10-23）：存→取→消费即作废。"""
+        store = self._store()
+        sid = store.create_session("u1")
+        self.assertIsNone(store.pop_pending("u1", sid))
+        store.set_pending("u1", sid, [{"record_id": "r1", "name": "习酒"}])
+        self.assertEqual(1, len(store.pop_pending("u1", sid)))
+        self.assertIsNone(store.pop_pending("u1", sid))
+
+    def test_delete_session_clears_pending(self):
+        store = self._store()
+        sid = store.create_session("u1")
+        store.set_pending("u1", sid, [{"record_id": "r1", "name": "习酒"}])
+        store.delete("u1", sid)
+        self.assertIsNone(store.pop_pending("u1", sid))
+
 
 # ---------------------------------------------------------------------------
 # ACL
@@ -289,6 +305,30 @@ class KbWebServiceTests(unittest.TestCase):
         prompt = calls[0][0]["content"]
         self.assertIn("摘要酒 箱规", prompt)  # Web 历史进入渲染
 
+    def test_pending_choice_hits_candidate(self):
+        """clarify Web 接线（2026-10-23）：候选 +「第一个」→ 参数卡，
+        候选回填供改选。"""
+        conn = _SvcConn([[], [self._row()]])   # 编码精确 miss → 品名精确命中
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, log=lambda _: None)
+        pending = [{"record_id": "rec1", "name": "习酒窖藏1998",
+                    "code": "SP001"}]
+        result = service.answer("u1", "第一个", history_messages=[],
+                                pending=pending)
+        self.assertIn("箱规：6", result["reply"])
+        self.assertEqual(1, len(result["pending_candidates"]))
+
+    def test_clarify_returns_pending_candidates(self):
+        conn = _SvcConn([[
+            self._row(),
+            {**self._row(), "record_id": "rec2", "name": "习酒窖藏1988"},
+        ]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, log=lambda _: None)
+        result = service.answer("u1", "习酒窖藏", history_messages=[])
+        self.assertIn("你要问的是哪一个", result["reply"])
+        self.assertEqual(2, len(result["pending_candidates"]))
+
 
 # ---------------------------------------------------------------------------
 # 路由
@@ -297,7 +337,7 @@ class _StubService:
     def __init__(self):
         self.calls = []
 
-    def answer(self, userid, content, *, history_messages):
+    def answer(self, userid, content, *, history_messages, pending=None):
         self.calls.append((userid, content))
         return {"reply": "答案", "intent": "product_param",
                 "meta": {"tools": [], "rounds": None, "latency_ms": 5},
@@ -381,6 +421,41 @@ class KbRoutesTests(unittest.TestCase):
                            cookies=cookies)
         self.assertEqual(200, resp.status_code)
         self.assertEqual(("u1", "问一"), service.calls[-1])
+
+    def test_pending_roundtrip_across_messages(self):
+        """clarify 闭环路由链路（2026-10-23）：第一轮存候选、第二轮收到、
+        响应不透出状态键。"""
+        seen = []
+
+        class _ClarifyStub:
+            def answer(self, userid, content, *, history_messages,
+                       pending=None):
+                seen.append(pending)
+                return {"reply": "r", "intent": "PRODUCT_PARAM",
+                        "meta": {"tools": [], "rounds": None,
+                                 "latency_ms": 1},
+                        "attachments": [],
+                        "pending_candidates": [
+                            {"record_id": "r1", "name": "A", "code": ""}]}
+
+        store = sess_module.WebSessionStore()
+        client = _make_client(store=store, service=_ClarifyStub())
+        cookies = _login_cookie("u1")
+        sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+
+        resp1 = client.post(f"/kb/api/sessions/{sid}/messages",
+                            json={"content": "习酒窖藏"}, cookies=cookies)
+        self.assertEqual(200, resp1.status_code)
+        self.assertNotIn("pending_candidates", resp1.json())
+        self.assertIsNone(seen[0])  # 第一轮无 pending
+
+        resp2 = client.post(f"/kb/api/sessions/{sid}/messages",
+                            json={"content": "第一个"}, cookies=cookies)
+        self.assertEqual(200, resp2.status_code)
+        self.assertNotIn("pending_candidates", resp2.json())
+        # 第二轮拿到上一轮存的候选
+        self.assertEqual(1, len(seen[1]))
+        self.assertEqual("r1", seen[1][0]["record_id"])
 
     def test_empty_content_400(self):
         client = _make_client()

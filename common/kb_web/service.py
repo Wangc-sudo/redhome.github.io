@@ -86,8 +86,14 @@ class KbWebService:
             agent_runner=agent_runner if llm is not None else None,
         )
 
-    def answer(self, userid, content, *, history_messages):
-        """主入口：返回 {reply,intent,meta,attachments}；永不抛（降级话术）。"""
+    def answer(self, userid, content, *, history_messages, pending=None):
+        """主入口：返回 {reply,intent,meta,attachments,pending_candidates}；
+        永不抛（降级话术）。
+
+        pending（2026-10-23 clarify Web 接线）：上一轮反问的候选列表，
+        由调用方从会话存储 pop（消费即作废）传入；本轮若再发反问，
+        返回值的 pending_candidates 非空，调用方负责存回。
+        """
         started = self._now()
         meta = {}
         history = web_history_from_messages(history_messages)
@@ -96,7 +102,7 @@ class KbWebService:
         try:
             reply, intent, _matched = handler._answer(
                 conn, content, history=history, conversation_id=None,
-                meta=meta)
+                meta=meta, pending=pending)
             conn.commit()
         except Exception as exc:
             conn.rollback()
@@ -124,4 +130,6 @@ class KbWebService:
                 "latency_ms": latency_ms,
             },
             "attachments": attachments,
+            # clarify 闭环状态（路由层消费，不透给前端）。
+            "pending_candidates": meta.get("pending_candidates"),
         }
