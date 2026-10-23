@@ -1352,8 +1352,9 @@ class DeptLeaderExtractTests(unittest.TestCase):
     def test_unchanged_leader_snapshot_skips_write(self, _lock, _txn):
         payloads = [self._payload("u1", "谢坚钰", "1049919540", "总经办",
                                   ["1049919540"])]
-        digest = MartExtractService._content_digest(["1049919540|u1"])
-        service = self._service(payloads, previous_digest=digest)
+        digest = MartExtractService._content_digest(["1049919540|u1|总经办"])
+        service = self._service(payloads, previous_digest=digest,
+                                dept_names={"1049919540": "总经办"})
         service.extract()
         self.repository.replace_dim_dept_leaders.assert_not_called()
 
