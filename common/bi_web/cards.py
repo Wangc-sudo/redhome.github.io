@@ -322,6 +322,13 @@ _CARDS = (
           queries.run_table_qd_bill_platform, {"date": "dates"}),
     _card("table_qd_bill_items", "table",
           queries.run_table_qd_bill_items, {"date": "dates"}),
+    # 平台账单费用（渠道BI 阶段4 B 方案，2026-10-23）：读人工导入通道落库的
+    # fact_manual_report（dataset=platform_bill_monthly），补财务AI表里没有的
+    # 推广类型明细与发货/税/运费科目。与上面三张账单卡同源互补，不重复计数。
+    _card("table_qd_bill_manual", "table",
+          queries.run_table_qd_bill_manual, {"date": "dates"}),
+    _card("table_qd_bill_manual_detail", "table",
+          queries.run_table_qd_bill_manual_detail, {"date": "dates"}),
     _card("table_qd_product_series", "table",
           queries.run_table_qd_product_series, {"date": "dates"}),
     _card("table_qd_product_bands", "table",

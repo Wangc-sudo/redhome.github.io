@@ -271,6 +271,16 @@ qd-channel-sales:
       title: "账单费用项 TOP"
       source: "财务AI表格 · 店铺扣点费用管理"
       span: 4
+    # 平台账单（阶段4 B 方案，2026-10-23）：人工导入通道 fact_manual_report，
+    # 补财务AI表没有的推广类型明细与发货/税/运费科目；月份取最近已导入月。
+    - card: table_qd_bill_manual
+      title: "平台账单·科目汇总"
+      source: "平台账单 · 人工导入"
+      span: 6
+    - card: table_qd_bill_manual_detail
+      title: "平台账单·明细"
+      source: "平台账单 · 人工导入"
+      span: 6
     - card: table_qd_product_series
       title: "商品系列结构"
       source: "WDT · 交易单"

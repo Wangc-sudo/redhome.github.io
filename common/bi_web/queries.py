@@ -4217,6 +4217,108 @@ def run_table_qd_bill_items(connection, params) -> dict:
     return _qd_table(columns, rows, anchor)
 
 
+# --- 面板 3d/3e：平台账单费用（渠道BI 阶段4 B 方案，2026-10-23） -------------
+# 财务每月从各平台后台导出账单（推广消耗/平台扣点/发货费/电商税/运费险…），
+# 经人工导入通道落到 mart_ops.fact_manual_report（dataset=platform_bill_monthly）。
+# 与上面三张账单卡互补：那三张读 fact_fin_store_expense（财务AI表，只有店铺
+# 扣点与推广充值），本组覆盖财务表里没有的**推广类型明细**（关键词/人群/全站）
+# 与发货/税/运费等科目。切换 A 方案（平台 API 直连）时只需换源，卡面不变。
+#
+# 窄表把多维度压成 dim_scope（字段名 + 连接）与 dimension_value（取值 | 连接），
+# 这里按 dim_scope 反解成字典——模板后续加维度也不会错位。
+BILL_MANUAL_DATASET = "platform_bill_monthly"
+BILL_MANUAL_METRIC = "amount"
+
+
+def _bill_manual_period(connection, anchor):
+    """最近一个**已导入**月份的首日（不晚于锚点月）；从未导入返回 None。
+
+    账单是月报、导入常滞后于月份，锚定当月会经常性空白；故退回最近有数月，
+    月份号显示在列标题上，不静默冒充当月。
+    """
+    return _fetch_one(
+        connection,
+        "SELECT MAX(`period_start`) AS `period_start` "
+        "FROM `fact_manual_report` WHERE `dataset` = %s AND `period_start` <= %s",
+        (BILL_MANUAL_DATASET, anchor.replace(day=1)),
+    )
+
+
+def _bill_manual_rows(connection, period_start):
+    """某月平台账单明细：窄表行 → ``{维度字段: 值, 'amount': Decimal}``。"""
+    if period_start is None:
+        return []
+    rows = _fetch_rows(
+        connection,
+        "SELECT `dim_scope`, `dimension_value`, `value` "
+        "FROM `fact_manual_report` WHERE `dataset` = %s "
+        "AND `metric` = %s AND `period_start` = %s",
+        (BILL_MANUAL_DATASET, BILL_MANUAL_METRIC, period_start),
+    )
+    items = []
+    for row in rows:
+        item = dict(zip(row["dim_scope"].split("+"), row["dimension_value"].split("|")))
+        item["amount"] = row["value"]
+        items.append(item)
+    return items
+
+
+def run_table_qd_bill_manual(connection, params) -> dict:
+    """面板3d 平台账单·科目汇总（table）：按费用科目汇总 + 占比。"""
+    anchor = _hz_anchor(params)
+    period_start = _bill_manual_period(connection, anchor)
+    ym = period_start.strftime("%Y-%m") if period_start else None
+    items = _bill_manual_rows(connection, period_start)
+
+    totals = {}
+    for item in items:
+        key = item.get("fee_item") or "未填科目"
+        totals[key] = totals.get(key, Decimal(0)) + (item["amount"] or Decimal(0))
+    grand = sum(totals.values(), Decimal(0))
+    rows = [
+        {
+            "fee_item": name,
+            "total": total,
+            "share": (total / grand) if grand else None,
+        }
+        for name, total in sorted(
+            totals.items(), key=lambda kv: abs(kv[1]), reverse=True
+        )
+    ]
+    columns = [
+        {"key": "fee_item", "title": "费用科目"},
+        {"key": "total", "title": f"金额({ym})" if ym else "金额", "format": "wan"},
+        {"key": "share", "title": "占比", "format": "percent"},
+    ]
+    return _qd_table(columns, rows, anchor)
+
+
+def run_table_qd_bill_manual_detail(connection, params) -> dict:
+    """面板3e 平台账单·明细（table）：平台 × 店铺 × 费用科目 逐行，金额降序。"""
+    anchor = _hz_anchor(params)
+    period_start = _bill_manual_period(connection, anchor)
+    ym = period_start.strftime("%Y-%m") if period_start else None
+    items = _bill_manual_rows(connection, period_start)
+    items.sort(key=lambda item: abs(item["amount"] or Decimal(0)), reverse=True)
+
+    rows = [
+        {
+            "platform": item.get("platform") or "未填平台",
+            "store": item.get("store") or "",
+            "fee_item": item.get("fee_item") or "未填科目",
+            "amount": item["amount"],
+        }
+        for item in items
+    ]
+    columns = [
+        {"key": "platform", "title": "平台"},
+        {"key": "store", "title": "店铺"},
+        {"key": "fee_item", "title": "费用科目"},
+        {"key": "amount", "title": f"金额({ym})" if ym else "金额", "format": "wan"},
+    ]
+    return _qd_table(columns, rows, anchor)
+
+
 def run_table_qd_product_series(connection, params) -> dict:
     """面板4a 商品系列结构（table）：``fetch_product_structure`` series。"""
     from common.broadcast.queries import fetch_product_structure
