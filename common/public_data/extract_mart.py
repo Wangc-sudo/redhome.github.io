@@ -1361,8 +1361,11 @@ class MartExtractService:
                 }
         leader_rows = [leaders[key] for key in sorted(leaders)]
 
+        # digest 含 dept_name（2026-10-24 实测坑）：部门名映射来源改进后
+        # 名字变了但 (dept_id, user_id) 不变——不含名字的指纹会跳过写入。
         digest = self._content_digest(
-            "{}|{}".format(row["dept_id"], row["user_id"])
+            "{}|{}|{}".format(
+                row["dept_id"], row["user_id"], row.get("dept_name") or "")
             for row in leader_rows
         )
         skipped = (
