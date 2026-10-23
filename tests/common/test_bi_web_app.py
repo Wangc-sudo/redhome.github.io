@@ -2184,9 +2184,10 @@ class BiWebAppIntegrationTests(unittest.TestCase):
             # hz-offline-sales（nav_order 5，2026-10-09 杭州大屏）、
             # offline-all-sales（6，线下整体）、sx-offline-sales（7，
             # 绍兴）与 qd-channel-sales（8，渠道）插在 l1(0) 与
-            # l2-region(10) 之间。
+            # l2-region(10) 之间；ops-health（9，2026-10-24 运营闭环）
+            # 跟在渠道之后。
             ["l1-cockpit", "hz-offline-sales", "offline-all-sales",
-             "sx-offline-sales", "qd-channel-sales",
+             "sx-offline-sales", "qd-channel-sales", "ops-health",
              "l2-region", "l2-channel", "l2-product",
              "l2-people", "l2-fund-safety", "l2-ecom", "l2-ecom-people",
              "l2-dining", "l2-hall",
