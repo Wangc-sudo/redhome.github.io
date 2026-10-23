@@ -1,6 +1,6 @@
 # dops-ntp 云上编排片段（2026-09-23）
 # 云上实际编排在服务器本地 /opt/dops/docker-compose.dops.yml，本文件是仓库副本，
-# 变更时两边同步（同 pages-cloud.conf 惯例，随 PR 收口）。
+# 变更时两边同步（同 docker/cloud/nginx-pages.conf 惯例，随 PR 收口）。
 #
 # 原理：容器共享宿主机内核时钟，chronyd 加 SYS_TIME 直接校准宿主机时钟，
 # 宿主机上全部容器（dops-scheduler / dingtalk-gateway / dops-nginx ...）自动
