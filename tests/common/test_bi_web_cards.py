@@ -143,6 +143,12 @@ STAGE_B_CARD_IDS = (
     "table_qd_purchase_inbound",
     "table_qd_order_risk",
     "table_qd_notes",
+    # 运营闭环看板（2026-10-24 用户裁决）：填报完成率/播报触达/数据
+    # 新鲜度/异常出口，共 94 张。
+    "table_ops_intake_today",
+    "table_ops_broadcast_today",
+    "table_ops_freshness",
+    "table_ops_exceptions",
 )
 
 #: The cards the L1 cockpit places without any URL parameter.
@@ -250,6 +256,10 @@ EXPECTED_CHARTS = {
     "table_qd_purchase_inbound": "table",
     "table_qd_order_risk": "table",
     "table_qd_notes": "table",
+    "table_ops_intake_today": "table",
+    "table_ops_broadcast_today": "table",
+    "table_ops_freshness": "table",
+    "table_ops_exceptions": "table",
 }
 
 #: card_id -> the queries.run_* function it must be bound to.
@@ -344,6 +354,10 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_qd_purchase_inbound": queries.run_table_qd_purchase_inbound,
     "table_qd_order_risk": queries.run_table_qd_order_risk,
     "table_qd_notes": queries.run_table_qd_notes,
+    "table_ops_intake_today": queries.run_table_ops_intake_today,
+    "table_ops_broadcast_today": queries.run_table_ops_broadcast_today,
+    "table_ops_freshness": queries.run_table_ops_freshness,
+    "table_ops_exceptions": queries.run_table_ops_exceptions,
 }
 
 #: card_id -> URL-parameter whitelist, param name -> filter source.
@@ -462,6 +476,11 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_qd_purchase_inbound": {"date": "dates"},
     "table_qd_order_risk": {"date": "dates"},
     "table_qd_notes": {"date": "dates"},
+    # 运营闭环卡无 URL 参数（锚点=容器本地今日）。
+    "table_ops_intake_today": {},
+    "table_ops_broadcast_today": {},
+    "table_ops_freshness": {},
+    "table_ops_exceptions": {},
 }
 
 #: card_id -> (grans, default_gran)。日月星粒度批次（执行提示词 §4.4）
@@ -509,7 +528,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(90, len(REGISTRY))
+        self.assertEqual(94, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

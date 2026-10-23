@@ -357,6 +357,16 @@ _CARDS = (
           queries.run_table_qd_order_risk, {"date": "dates"}),
     _card("table_qd_notes", "table",
           queries.run_table_qd_notes, {"date": "dates"}),
+    # 运营闭环看板（ops-health，2026-10-24 用户裁决）：一屏回答「今天系统
+    # 转没转起来」。锚点=容器本地今日，无筛选参数。
+    _card("table_ops_intake_today", "table",
+          queries.run_table_ops_intake_today),
+    _card("table_ops_broadcast_today", "table",
+          queries.run_table_ops_broadcast_today),
+    _card("table_ops_freshness", "table",
+          queries.run_table_ops_freshness),
+    _card("table_ops_exceptions", "table",
+          queries.run_table_ops_exceptions),
     _card("pie_sku_mtd", "pie", queries.run_pie_sku_mtd),
     _card(
         "kpi_sku_mtd", "scalar", queries.run_kpi_sku_mtd,
