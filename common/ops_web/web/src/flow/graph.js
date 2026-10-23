@@ -64,9 +64,18 @@ const COLLECT_TO_PROCESS = {
   'sync-channel-sales': ['extract-channel'],
 };
 
+//: 区域线播报家族（2026-10-24 用户裁决「播报类功能收成任务详情里的开关」）：
+//: 同区域的提醒/催办/榜单家族合并为一张「日报任务」主卡（虚拟家族
+//: daily-report），子线在卡片展开行里各自开关/运行/详情——ModuleNode
+//: 成员行形态不变，组件零改动；平台线（collect/process 泳道）不聚合。
+export const DAILY_REPORT_FAMILIES = new Set([
+  'robot', 'robot-check', 'leaderboard', 'leaderboard-html', 'pages',
+]);
+
 //: 播报日历的消费家族（读 dim_calendar 决定播报节奏的管线）——
 //: 日历节点到这些家族模块画「消费」连线（只读拓扑）。
-export const CALENDAR_CONSUMER_FAMILIES = new Set(['robot', 'robot-check']);
+//: 2026-10-24 起区域播报家族聚合为 daily-report（见上）。
+export const CALENDAR_CONSUMER_FAMILIES = new Set(['daily-report']);
 
 //: 未归类池最多展示人数（超出截断，防节点过长）。
 export const POOL_LIMIT = 50;
@@ -82,6 +91,7 @@ export function familyOf(serviceId, regionKey) {
 
 /** 家族展示名（先映射表，缺省用首成员的类别标签）。 */
 const FAMILY_LABEL = {
+  'daily-report': '日报任务',
   'robot': '填报提醒',
   'robot-check': '催办未填 + DING',
   'pages': '榜单页生成',
@@ -119,7 +129,12 @@ export function taskBroken(service) {
 function collectFamilyModules(key, services, { badge = null } = {}) {
   const families = {};
   for (const service of services) {
-    const family = familyOf(service.service_id, key);
+    let family = familyOf(service.service_id, key);
+    // 区域线播报家族收拢（2026-10-24）：提醒/催办/榜单 → 「日报任务」
+    // 一张主卡；子线独立性与粒度在成员行保留（各自开关）。
+    if (key !== PLATFORM_KEY && DAILY_REPORT_FAMILIES.has(family)) {
+      family = 'daily-report';
+    }
     if (!families[family]) families[family] = [];
     families[family].push(service);
   }
