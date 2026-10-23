@@ -24,6 +24,7 @@ from common.kb_qa.app import (
     KbStreamHandler,
     _merge_doc_hits,
     _parse_choice,
+    _parse_correction,
     callback_message_id,
     parse_conversation_allowlist,
 )
@@ -2585,6 +2586,108 @@ class ClarifyPendingTests(unittest.TestCase):
         key = store.key("cid1", "u1")
         store.set_pending(key, self.CANDIDATES)   # 静默
         self.assertIsNone(store.pop_pending(key))
+
+
+class CorrectionTests(unittest.TestCase):
+    """负反馈修正（2026-10-23 对话层第 2 项）：「不是这个，是1988那款」
+    「不对，是第二个」。"""
+
+    CANDIDATES = ClarifyPendingTests.CANDIDATES
+    HISTORY = [{"q": "习酒窖藏1998 箱规", "a": "📦 参数卡…",
+                "category": "product_param", "record_id": "r1",
+                "subject": "习酒窖藏1998"}]
+
+    def test_parse_correction_with_new_keyword(self):
+        self.assertEqual("1988", _parse_correction("不是这个，是1988那款"))
+        self.assertEqual("第二个", _parse_correction("不对，是第二个"))
+        self.assertEqual("习酒483", _parse_correction("错了，要习酒483"))
+
+    def test_parse_correction_without_keyword(self):
+        self.assertIsNone(_parse_correction("不是这个"))
+        self.assertIsNone(_parse_correction("不对"))
+
+    def test_parse_correction_rejects_normal_and_tone(self):
+        self.assertFalse(_parse_correction("习酒窖藏1998 箱规"))
+        self.assertFalse(_parse_correction("不是吧"))
+
+    def test_correction_requeries_with_new_keyword(self):
+        # 「不是这个，是习酒窖藏1988那款」→ 按新关键词重查出卡
+        conn = _FakeConn([[_product_row(record_id="r9", name="习酒窖藏1988")]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, matched = handler._answer(
+            conn, "不是这个，是习酒窖藏1988那款", history=list(self.HISTORY))
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertEqual("r9", matched)
+        self.assertIn("习酒窖藏1988", reply)
+
+    def test_correction_reselects_from_pending(self):
+        # 选择命中后候选回填 →「不对，是第二个」改选第二款
+        conn = _FakeConn([[_product_row(
+            record_id="r2", name="53°500ml*6 习酒窖藏1998 雅致版")]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, matched = handler._answer(
+            conn, "不对，是第二个", history=list(self.HISTORY),
+            pending=list(self.CANDIDATES))
+        self.assertEqual("r2", matched)
+        self.assertIn("雅致版", reply)
+
+    def test_correction_multi_hit_clarifies_again(self):
+        # 新关键词仍多款 → 再反问并存 pending
+        conn = _FakeConn([[
+            _product_row(),
+            _product_row(record_id="r2", name="习酒窖藏1988"),
+        ]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        meta = {}
+        reply, intent, matched = handler._answer(
+            conn, "不是这个，是习酒窖藏那款", history=list(self.HISTORY),
+            meta=meta)
+        self.assertIn("你要问的是哪一个", reply)
+        self.assertEqual(2, len(meta["pending_candidates"]))
+
+    def test_correction_without_keyword_guides(self):
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, _ = handler._answer(
+            conn, "不是这个", history=list(self.HISTORY))
+        self.assertIn("哪一款", reply)
+
+    def test_correction_miss_asks_for_code(self):
+        conn = _FakeConn([[]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, _ = handler._answer(
+            conn, "不对，是飞天茅台那款", history=list(self.HISTORY))
+        self.assertIn("也没查到", reply)
+
+    def test_correction_requires_history(self):
+        # 无上文的「不是…」不拦，走正常路由
+        conn = _FakeConn([[], [], [], [], [], [], [], []])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, _ = handler._answer(conn, "不是这个，是1988那款")
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertIn("没有找到", reply)
+
+    def test_selection_keeps_pending_for_reselect(self):
+        # 选择命中出卡时候选回填（meta 透出 → process 再存）
+        conn = _FakeConn([
+            [],
+            [_product_row(
+                record_id="r1",
+                name="53°500ml*6 习酒窖藏1998 新包装 2025款")],
+        ])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        meta = {}
+        reply, _, matched = handler._answer(
+            conn, "第一个", pending=list(self.CANDIDATES), meta=meta)
+        self.assertEqual("r1", matched)
+        self.assertEqual(2, len(meta["pending_candidates"]))
 
     def test_process_failure_marks_failed_audit(self):
         import asyncio
