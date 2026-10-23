@@ -1720,6 +1720,28 @@ class AgentToolExecutorTests(unittest.TestCase):
         sql, _ = executor._conn.cursor_instance.executed[-1]
         self.assertIn("`business_date`<=CURDATE()", sql)
 
+    def test_product_stats(self):
+        # 商品库统计（2026-10-24）：总数 + 品牌/大类分布
+        executor = self._executor([
+            {"c": 3},                                        # COUNT fetchone
+            [{"k": "习酒", "c": 2}, {"k": "摘要", "c": 1}],   # brand GROUP
+            [{"k": "窖藏98", "c": 3}],                        # category GROUP
+        ])
+        result = json.loads(executor.execute("product_stats", {}))
+        self.assertEqual(3, result["total"])
+        self.assertEqual("习酒", result["by_brand"][0]["name"])
+        self.assertEqual(2, result["by_brand"][0]["count"])
+        self.assertEqual("窖藏98", result["by_category"][0]["name"])
+
+    def test_product_stats_registered_and_not_narrowed(self):
+        # 工具注册 + 系统提示词提及；商品库全员开放，不在 Web 业务收窄面
+        names = {t["function"]["name"] for t in agent_module.TOOLS}
+        self.assertIn("product_stats", names)
+        self.assertIn("product_stats", agent_module._SYSTEM_PROMPT)
+        from common.kb_web.service import tools_for
+        narrow = {t["function"]["name"] for t in tools_for(False)}
+        self.assertIn("product_stats", narrow)
+
     def test_search_docs_merges_bm25_and_vector(self):
         executor = self._executor(
             [],
