@@ -1248,11 +1248,15 @@ class IncrementalOrgMemberTests(unittest.TestCase):
 class DeptLeaderExtractTests(unittest.TestCase):
     """dim_dept_leader 投影（2026-10-24）：部门 × 领导关系。"""
 
-    def _service(self, leader_payloads, *, previous_digest=None):
+    def _service(self, leader_payloads, *, previous_digest=None,
+                 dept_names=None):
         self.repository = Mock()
         self.repository.read_org_members.return_value = []
         self.repository.read_org_leader_payloads.return_value = list(
             leader_payloads)
+        # 部门名目录（全历史快照映射）；默认空。
+        self.repository.read_org_dept_names.return_value = dict(
+            dept_names or {})
         self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = True
@@ -1285,17 +1289,18 @@ class DeptLeaderExtractTests(unittest.TestCase):
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_leaders_projected_multi_dept(self, _lock, _txn):
-        # 一人带两个部门 → 两行；部门名从同快照成员归属映射
-        # （线下运营中心的成员行提供 1050135497 的部门名）
-        service = self._service([
-            self._payload("u1", "谢坚钰", "1049919540", "总经办",
-                          ["1049919540", "1050135497"]),
-            self._payload("u2", "许辉", "1050193465", "电商组",
-                          ["1050193465"]),
-            {"user_id": "u3", "name": "普通成员", "dept_id": "1050135497",
-             "dept_name": "线下运营中心",
-             "payload_json": json.dumps({"leader_in_dept": []})},
-        ])
+        # 一人带两个部门 → 两行；部门名来自全历史快照目录（领导管的
+        # 纯管理节点部门——无直属成员——也能映射到名字）
+        service = self._service(
+            [
+                self._payload("u1", "谢坚钰", "1049919540", "总经办",
+                              ["1049919540", "1050135497"]),
+                self._payload("u2", "许辉", "1050193465", "电商组",
+                              ["1050193465"]),
+            ],
+            dept_names={"1049919540": "总经办", "1050135497": "线下运营中心",
+                        "1050193465": "电商组"},
+        )
         result = service.extract()
 
         self.repository.replace_dim_dept_leaders.assert_called_once()
