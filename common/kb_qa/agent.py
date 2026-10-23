@@ -40,10 +40,11 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 2. 产品手册/品牌工艺/卖点话术/售后流程/销售总结规划 → search_docs
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
 4. 各渠道销售额汇总对比 → channel_sales
-5. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
+5. 商品库统计（总数、按品牌/大类分布）→ product_stats
+6. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
    query_sql 写一条 SELECT（只能用白名单表，大表必须带日期过滤，
    结果超 100 行用 GROUP BY 聚合）
-6. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+7. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
@@ -84,6 +85,16 @@ TOOLS = [
                 },
                 "required": ["query"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "product_stats",
+            "description": "商品库统计：商品总数、按品牌/大类的数量分布"
+                           "（回答「有多少种商品」这类统计问题；找具体商品"
+                           "用 search_products）",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -355,6 +366,32 @@ class ToolExecutor:
                 for row in rows[:5]
             ],
         }
+
+    def _tool_product_stats(self, args):
+        """商品库统计（2026-10-24）：总数 + 按品牌/大类分布。
+
+        补「有多少种商品」这类统计问题的空白——search_products 是关键词
+        检索答不了计数（用户实测 agent 连查三次只能拒答）。商品库全员
+        开放，本工具不在 Web 业务白名单收窄面内。
+        """
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) AS c FROM `kb_products`")
+            total = (cursor.fetchone() or {}).get("c", 0)
+            by_brand = self._group_counts(cursor, "brand")
+            by_category = self._group_counts(cursor, "category")
+        finally:
+            cursor.close()
+        return {"total": total, "by_brand": by_brand,
+                "by_category": by_category}
+
+    @staticmethod
+    def _group_counts(cursor, column):
+        cursor.execute(
+            f"SELECT `{column}` AS k, COUNT(*) AS c FROM `kb_products`"
+            f" GROUP BY `{column}` ORDER BY c DESC LIMIT 10")
+        return [{"name": row["k"], "count": row["c"]}
+                for row in cursor.fetchall() if row.get("k")]
 
     def _tool_search_docs(self, args):
         query = str(args.get("query") or "").strip()
