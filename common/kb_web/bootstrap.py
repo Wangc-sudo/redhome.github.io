@@ -83,4 +83,8 @@ def build_kb_web_deps(settings, environ=None):
         "member_name_lookup": member_name_lookup,
         "session_secure": (env.get("BI_WEB_SESSION_SECURE", "")
                            .strip().lower() in ("1", "true", "yes")),
+        # 免登前端 corpId（与 BI 应用同 Corp，两个变量名都认）。
+        "corp_id": ((env.get("KB_DINGTALK_CORPID") or "").strip()
+                    or (env.get("BI_DINGTALK_CORPID") or "").strip()
+                    or None),
     }

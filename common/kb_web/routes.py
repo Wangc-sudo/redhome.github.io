@@ -24,7 +24,7 @@ def _now_text():
 def register_kb_routes(app: FastAPI, *, service, store, session_secret,
                        auth_client=None, record_fetcher=None,
                        member_name_lookup=None, session_secure=False,
-                       guide_config=None):
+                       guide_config=None, corp_id=None):
     """注册 /kb/api 路由组。依赖全注入：
 
     service          KbWebService（问答主链路）
@@ -74,6 +74,11 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
     # ------------------------------------------------------------------
     # 引导与用户信息
     # ------------------------------------------------------------------
+    @app.get("/kb/api/public-config")
+    def kb_public_config():
+        # 免登前端原料（corpId 非敏感，钉钉容器内公开可见）。
+        return {"corp_id": corp_id or ""}
+
     @app.get("/kb/api/bootstrap")
     def kb_bootstrap(userid=Depends(require_userid)):
         name = None
