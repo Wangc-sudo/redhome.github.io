@@ -189,8 +189,11 @@ class ShippedOrgSeedTests(unittest.TestCase):
         self.assertEqual(regions["vanke"], (1050251442, 1049750665))
         # hq（总部子树，含总经办/财务部，BI 免登 admin 所在区域）。
         self.assertEqual(regions["hq"], (1050143465,))
-        # other 含根部门 1050135497，递归展开即全公司——靠顺序兜底。
-        self.assertIn(1050135497, regions["other"])
+        # other 含真根部门 1，递归展开即全公司——靠顺序兜底。
+        # 2026-10-24 修复：此前注释误把 1050135497（实为线下运营中心）
+        # 当根部门，电商事业部/餐饮部/综合事务部/千峰四个一级分支从未
+        # 被遍历（钉钉全员 123 vs 采集 97，差 26 人）。
+        self.assertIn(1, regions["other"])
 
 
 class LoadOrgSeedTests(unittest.TestCase):
