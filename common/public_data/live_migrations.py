@@ -14,6 +14,9 @@ from common.public_data.channel_map import (
     channel_map_ddl_statements,
     channel_map_v2_ddl_statements,
 )
+from common.public_data.channel_order_daily import (
+    channel_order_daily_ddl_statements,
+)
 from common.public_data.data_fix import data_fix_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
@@ -617,6 +620,14 @@ _MIGRATIONS = (
         "mart-ops-channel-map-v1",
         "mart",
         channel_map_ddl_statements(),
+    ),
+    (
+        # 订单口径渠道日销（2026-10-23 第 3 步）：fact_order_line 按
+        # dim_channel_map 聚合成 fact_channel_order_daily，与人工填报口径的
+        # fact_channel_daily_sales 双轨并存，避免两种口径混行互相覆盖。
+        "mart-ops-channel-order-daily-v1",
+        "mart",
+        channel_order_daily_ddl_statements(),
     ),
     (
         # v2：业务线分类列 business_line（2026-10-23 裁决 5：线上渠道/线下

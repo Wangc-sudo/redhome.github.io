@@ -42,6 +42,7 @@ SERVICE_CATEGORIES = {
     "project-mart": "加工",
     "extract-mart": "加工",
     "extract-channel": "加工",
+    "channel-order-daily": "加工",
     "channel-missing-check": "催办",
     "freshness-check": "催办",
     "channel-daily-qudao": "播报",

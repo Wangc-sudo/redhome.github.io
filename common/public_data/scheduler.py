@@ -193,6 +193,16 @@ _COMMAND_TABLE = {
         "--dataset", "channel_daily_sales",
         "--dataset", "channel_monthly_target",
     ),
+    # 渠道日销·订单口径（2026-10-23 第 3 步）：fact_order_line →
+    # fact_channel_order_daily。数据层按 (business_date, channel_key) 幂等
+    # upsert，手动触发无需 --force。放在 extract-mart 之后（17:00）跑。
+    "channel-order-daily": {
+        "argv": [
+            "common.public_data.channel_order_daily",
+            "--live-read",
+            "--confirm-local-test-write",
+        ],
+    },
     "channel-missing-check": _mart_cli_entry("channel-missing", region="qudao"),
     # 10:45 T+1 重算用默认日期（今天）：渠道板块锚定「business_date 之前
     # 最近有效日」= T-1，带 --date yesterday 反而退到 T-2（2026-09-28 裁决，
