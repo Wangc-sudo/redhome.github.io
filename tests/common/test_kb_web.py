@@ -329,6 +329,53 @@ class KbWebServiceTests(unittest.TestCase):
         self.assertIn("你要问的是哪一个", result["reply"])
         self.assertEqual(2, len(result["pending_candidates"]))
 
+    def test_business_query_closed_text_for_unauthorized(self):
+        """业务数据通道未开放话术（2026-10-24 运维定稿）：非白名单 +
+        业务问句 → 固定话术短路（不碰 DB、不调 agent）。"""
+        touched = []
+
+        class _GuardConn:
+            def cursor(self):
+                touched.append(1)
+                raise AssertionError("不应碰 DB")
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        service = svc_module.KbWebService(
+            connection_factory=lambda: _GuardConn(),
+            acl=_AllowAcl(False), log=lambda _: None)
+        result = service.answer("u1", "杭州昨天销售额", history_messages=[])
+        self.assertIn("还没开放", result["reply"])
+        self.assertIn("报表渠道", result["reply"])
+        self.assertEqual("SALES_QUERY", result["intent"])
+        self.assertEqual([], touched)  # 未碰 DB
+
+    def test_business_query_not_blocked_for_authorized(self):
+        """白名单用户不受阻（agent 链路灯照旧）。"""
+        conn = _SvcConn([])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn,
+            acl=_AllowAcl(True), log=lambda _: None)
+        result = service.answer("u1", "杭州昨天销售额", history_messages=[])
+        # 无 LLM 时 SALES_QUERY 落 agent 不可用兜底（不是未开放话术）
+        self.assertNotIn("还没开放", result["reply"])
+
+    def test_product_query_not_blocked_for_unauthorized(self):
+        """非白名单用户的商品问句不受影响（商品工具不在收窄面）。"""
+        conn = _SvcConn([[self._row()]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn,
+            acl=_AllowAcl(False), log=lambda _: None)
+        result = service.answer("u1", "习酒窖藏1998 箱规", history_messages=[])
+        self.assertIn("箱规：6", result["reply"])
+
 
 # ---------------------------------------------------------------------------
 # 路由
