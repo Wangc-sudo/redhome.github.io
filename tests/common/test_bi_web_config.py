@@ -737,7 +737,8 @@ class BiSeedFileTests(unittest.TestCase):
         # 渠道销售BI看板（2026-10-13 运维裁决：8300/qudao.html 静态页切
         # BI，同 hangzhou.html 反代方案 A，真源走渠道线事实表）：经营驾驶
         # 舱组、nav_order 8（sx 7 之后）、date 筛选、七卡布局；同日旧页
-        # 13 个渠道专属面板逐块迁成 21 张 BI 卡追加在后（共 28 卡）。
+        # 13 个渠道专属面板逐块迁成 21 张 BI 卡追加在后；2026-10-23 阶段4
+        # 再追加平台账单两卡（共 29 卡）。
         qd = configs["qd-channel-sales"]
         self.assertEqual(8, qd.nav_order)
         self.assertEqual("经营驾驶舱", qd.group)
@@ -753,6 +754,9 @@ class BiSeedFileTests(unittest.TestCase):
              "table_qd_monthly_kpi", "table_qd_expense",
              "table_qd_expense_rate", "table_qd_bill_category",
              "table_qd_bill_platform", "table_qd_bill_items",
+             # 平台账单（阶段4 B 方案，2026-10-23）：人工导入通道落库的
+             # fact_manual_report，补财务AI表未覆盖的费用科目。
+             "table_qd_bill_manual", "table_qd_bill_manual_detail",
              "table_qd_product_series", "table_qd_product_bands",
              "table_qd_product_top", "table_qd_product_summary",
              "table_qd_refund_reason", "table_qd_gmv_factors",
@@ -766,6 +770,7 @@ class BiSeedFileTests(unittest.TestCase):
         self.assertEqual(
             (4, 4, 4, 8, 4, 12, 12,
              12, 6, 6, 4, 4, 4,
+             6, 6,
              6, 6, 6, 6, 6, 6,
              12, 12, 12, 6, 6,
              12, 12, 12),

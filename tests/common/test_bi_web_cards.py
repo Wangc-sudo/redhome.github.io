@@ -85,7 +85,8 @@ STAGE_B_CARD_IDS = (
     "bar_hz_dept",
     "table_hz_people_progress",
     "table_hz_unfilled_today",
-    # 部门进度表（2026-10-17 部门主视角裁决）：hz/sx/oa 各一卡，共 88 张。
+    # 部门进度表（2026-10-17 部门主视角裁决）：hz/sx/oa 各一卡，共 88 张；
+    # 平台账单两卡（2026-10-23 阶段4 B 方案）追加后 90 张。
     "table_hz_dept_progress",
     # 线下整体销售BI看板七卡（2026-10-10 裁决：8300/offline_all.html
     # 静态页切 BI，同 hangzhou.html 反代方案 A），共 51 张。
@@ -124,6 +125,10 @@ STAGE_B_CARD_IDS = (
     "table_qd_bill_category",
     "table_qd_bill_platform",
     "table_qd_bill_items",
+    # 平台账单费用（渠道BI 阶段4 B 方案，2026-10-23）：人工导入通道
+    # fact_manual_report，补财务AI表没有的推广类型明细与发货/税/运费科目。
+    "table_qd_bill_manual",
+    "table_qd_bill_manual_detail",
     "table_qd_product_series",
     "table_qd_product_bands",
     "table_qd_product_top",
@@ -229,6 +234,8 @@ EXPECTED_CHARTS = {
     "table_qd_bill_category": "table",
     "table_qd_bill_platform": "table",
     "table_qd_bill_items": "table",
+    "table_qd_bill_manual": "table",
+    "table_qd_bill_manual_detail": "table",
     "table_qd_product_series": "table",
     "table_qd_product_bands": "table",
     "table_qd_product_top": "table",
@@ -321,6 +328,8 @@ EXPECTED_RUN_FUNCTIONS = {
     "table_qd_bill_category": queries.run_table_qd_bill_category,
     "table_qd_bill_platform": queries.run_table_qd_bill_platform,
     "table_qd_bill_items": queries.run_table_qd_bill_items,
+    "table_qd_bill_manual": queries.run_table_qd_bill_manual,
+    "table_qd_bill_manual_detail": queries.run_table_qd_bill_manual_detail,
     "table_qd_product_series": queries.run_table_qd_product_series,
     "table_qd_product_bands": queries.run_table_qd_product_bands,
     "table_qd_product_top": queries.run_table_qd_product_top,
@@ -437,6 +446,8 @@ EXPECTED_PARAMS_SCHEMA = {
     "table_qd_bill_category": {"date": "dates"},
     "table_qd_bill_platform": {"date": "dates"},
     "table_qd_bill_items": {"date": "dates"},
+    "table_qd_bill_manual": {"date": "dates"},
+    "table_qd_bill_manual_detail": {"date": "dates"},
     "table_qd_product_series": {"date": "dates"},
     "table_qd_product_bands": {"date": "dates"},
     "table_qd_product_top": {"date": "dates"},
@@ -498,7 +509,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_registry_contains_exactly_the_stage_b_cards(self):
         self.assertEqual(set(STAGE_B_CARD_IDS), set(REGISTRY))
-        self.assertEqual(88, len(REGISTRY))
+        self.assertEqual(90, len(REGISTRY))
         for card_id in STAGE_B_CARD_IDS:
             self.assertIsInstance(REGISTRY[card_id], Card)
 

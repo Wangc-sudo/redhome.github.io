@@ -86,7 +86,51 @@ GROUP BY dimension_value;
 
 占位模板（`source` 为「待填-*」）会被当场拒绝，防止未填就 `--apply`。
 
-## 六、遗留项
+## 六、平台账单（渠道BI 阶段4 B 方案，2026-10-23）
+
+财务/运营每月从各平台后台导出账单，整理成五列后导入：
+
+```
+月份,平台,店铺,费用科目,金额
+2025-01,拼多多,PDD习酒旗舰店,推广-全站,12345.60
+2025-01,天猫,,平台扣点,5200.50
+```
+
+模板 `platform_bill_monthly`（平台 × 店铺 × 费用科目 × 月，单位元）。
+
+```bash
+docker exec -w /opt/dops/repo -e PYTHONPATH=/opt/dops/repo dops-scheduler \
+  python3 -m common.public_data.cli import-manual \
+  --template platform_bill_monthly --file /tmp/平台账单-2026-10.csv \
+  --period 2026-10 --apply --imported-by <姓名>
+```
+
+**与财务AI表三张账单卡的分工**：既有 `table_qd_expense*` / `table_qd_bill_*` 读
+`fact_fin_store_expense`（店铺扣点 + 推广充值，财务AI表同步），本模板补的是财务表
+里**没有**的推广类型明细（关键词/人群/全站）与发货费/电商税/运费险/服务费。两者
+互补、不重复计数。A 方案（平台 API 直连）上线后只需换源，卡面不变。
+
+**BI 侧两张卡**（渠道看板，`dataset=platform_bill_monthly`）：
+
+* `table_qd_bill_manual` —— 按费用科目汇总 + 占比；
+* `table_qd_bill_manual_detail` —— 平台 × 店铺 × 费用科目 明细，金额降序。
+
+**月份口径**：账单是月报、导入常滞后于月份，两卡取「不晚于锚点月的**最近一个已
+导入月份**」，月份号显示在列标题（`金额(2025-01)`）上——不静默冒充当月；从未导入
+则空表且标题不带月份。
+
+**窄表形态**（写卡片 SQL 前必读）：多维度被压成 `dim_scope`（字段名 `+` 连接）
+与 `dimension_value`（取值 `|` 连接），空维度留空串：
+
+```
+dim_scope        = 'platform+store+fee_item'
+dimension_value  = '天猫||平台扣点'      # 无店铺
+metric           = 'amount'   unit = '元'
+```
+
+## 七、遗留项
 
 * ⑥季度预实 / ⑨ / ⑪体验馆 / ⑬月度同比 的模板待业务给表头，照上节 SOP 填即可；
-* 暂不提供「按期间重投历史」的独立命令，重投即重跑 `import-manual --apply`。
+* 暂不提供「按期间重投历史」的独立命令，重投即重跑 `import-manual --apply`；
+* 平台账单**真实月份数据尚缺**：现库里只有财务样例（2025-01，3 行）用于验收，
+  拿到真实账单后按上节命令整月导入即可覆盖（同期间换文件=先删后插）。
