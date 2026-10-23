@@ -322,13 +322,13 @@ class TestShippedCalendarSeed(unittest.TestCase):
         self.assertEqual(rest_days, [])
         self.assertEqual(source, SOURCE_LOCAL)
 
-    def test_shipped_seed_covers_2025_01_through_2026_12(self):
+    def test_shipped_seed_covers_2025_01_through_2027_12(self):
         months = load_calendar_seed(SEED_PATH, fallback=False)
-        self.assertEqual(len(months), 24)
+        self.assertEqual(len(months), 36)
         self.assertEqual(
             [(year, month) for year, month, _, _ in months],
             [(year, month)
-             for year in (2025, 2026) for month in range(1, 13)],
+             for year in (2025, 2026, 2027) for month in range(1, 13)],
         )
         for _, _, _, source in months:
             self.assertEqual(source, SOURCE_LOCAL)
@@ -343,7 +343,7 @@ class TestShippedCalendarSeed(unittest.TestCase):
         self.assertEqual(
             {(year, month): rest_days for year, month, rest_days, _ in months},
             {(year, month): []
-             for year in (2025, 2026) for month in range(1, 13)},
+             for year in (2025, 2026, 2027) for month in range(1, 13)},
         )
 
     def test_shipped_seed_never_declares_a_derived_rest_days_list(self):

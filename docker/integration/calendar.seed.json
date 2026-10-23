@@ -194,6 +194,91 @@
       "holidays": [],
       "makeupWorkdays": [],
       "_说明": "自证：基准周日休[6,13,20,27] + 大休周六19 ⇒ [6,13,19,20,27]。大休周六待 HR 确认。"
+    },
+    {
+      "year": 2027,
+      "month": 1,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 2,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 3,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 4,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 5,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 6,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 7,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 8,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 9,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 10,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 11,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": []
+    },
+    {
+      "year": 2027,
+      "month": 12,
+      "bigRestSaturdays": [],
+      "holidays": [],
+      "makeupWorkdays": [],
+      "_说明": "2027 年 1-12 月（2026-10-23 补齐，翻年不断档）：现行口径为播报日历——rest 恒空、每天都是播报日，休息日一律由 DB 裁决层 dim_calendar_override 承载（如 2026-10-31 大休）。三个数组仅作历史档案占位，不参与推导。"
     }
   ]
 }

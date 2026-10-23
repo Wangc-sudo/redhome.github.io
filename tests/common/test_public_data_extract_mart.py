@@ -11,6 +11,7 @@ from common.public_data.extract_mart import (
     MartExtractRepository,
     MartExtractService,
     MartExtractError,
+    _drop_placeholder_channel_rows,
     _normalize_region_keys,
 )
 from common.public_data.mart_extract_schema import (
@@ -323,6 +324,48 @@ class RegionKeyNormalizeTests(unittest.TestCase):
         rows = [{"region": "杭州"}]
         _normalize_region_keys(self._dataset("channel_daily_sales"), rows)
         self.assertEqual(rows[0]["region"], "杭州")
+
+
+class ChannelPlaceholderRowTests(unittest.TestCase):
+    """渠道日销预置空行/未来日期行过滤（2026-10-23 运维裁决，写入侧根治）。
+
+    AI 表被上游预置到月底的空行（sales_amount NULL）不该进 fact——否则
+    MAX(business_date) 锚点被带偏到月底，智能体会把未来日期当成今天。
+    """
+
+    @staticmethod
+    def _dataset(name="channel_daily_sales"):
+        return next(d for d in EXTRACT_DATASETS if d.dataset == name)
+
+    def test_null_and_blank_amount_rows_dropped(self):
+        rows = [
+            {"business_date": "2026-10-20", "sales_amount": None},
+            {"business_date": "2026-10-20", "sales_amount": ""},
+            {"business_date": "2026-10-20", "sales_amount": "   "},
+            {"business_date": "2026-10-20", "sales_amount": 0},
+            {"business_date": "2026-10-20", "sales_amount": 12345},
+        ]
+        kept = _drop_placeholder_channel_rows(self._dataset(), rows)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual([r["sales_amount"] for r in kept], [0, 12345])
+
+    def test_future_dated_rows_dropped(self):
+        rows = [
+            {"business_date": date(2099, 1, 1), "sales_amount": 100},
+            {"business_date": "2099-01-02", "sales_amount": 100},
+            {"business_date": "2020-01-01", "sales_amount": 100},
+            {"business_date": None, "sales_amount": 100},
+        ]
+        kept = _drop_placeholder_channel_rows(self._dataset(), rows)
+        self.assertEqual(len(kept), 2)
+
+    def test_other_datasets_are_untouched(self):
+        rows = [{"business_date": "2099-01-01", "sales_amount": None}]
+        self.assertEqual(
+            _drop_placeholder_channel_rows(
+                self._dataset("daily_report_offline"), rows),
+            rows,
+        )
 
 
 class OtherMemberResolveTests(unittest.TestCase):

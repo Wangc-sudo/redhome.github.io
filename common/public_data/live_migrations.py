@@ -10,6 +10,7 @@ from common.kb_qa.schema import (
 )
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
+from common.public_data.channel_map import channel_map_ddl_statements
 from common.public_data.data_fix import data_fix_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
@@ -597,6 +598,14 @@ _MIGRATIONS = (
         "mart-ops-kb-web-acl-v1",
         "mart",
         kb_web_acl_ddl_statements(),
+    ),
+    (
+        # 渠道映射表（2026-10-23 渠道管线迁 WDT 第 2 步）：dim_channel_map
+        # （抬头→渠道，含 panel 归属）+ 审计表。只建表不灌数——映射真值由
+        # probe 校准后用独立脚本 upsert（按 match_type+match_value 幂等）。
+        "mart-ops-channel-map-v1",
+        "mart",
+        channel_map_ddl_statements(),
     ),
     (
         # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：
