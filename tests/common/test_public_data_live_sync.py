@@ -12,6 +12,7 @@ from common.public_data.manifest import (
     SourceManifest,
     WdtDataset,
 )
+from common.public_data.org_read import OrgSeedEntry
 
 
 def _dt_sheet(*, dataset="test_dataset"):
@@ -376,6 +377,26 @@ class _FakeOrgGateway:
         return {"userid": user_id, "name": "张三"}
 
 
+class _NamedOrgGateway(_FakeOrgGateway):
+    """另一个企业的目录——成员不同，用于验证两家企业合并落库。"""
+
+    def list_user_ids(self, dept_id):
+        return ["eyl-1"]
+
+    def get_user(self, user_id):
+        return {"userid": user_id, "name": "阿良"}
+
+
+class _CollidingOrgGateway(_FakeOrgGateway):
+    """另一个企业，但成员 id 与默认企业撞号——合并会静默覆盖，必须失败。"""
+
+    def list_user_ids(self, dept_id):
+        return ["u1"]
+
+    def get_user(self, user_id):
+        return {"userid": user_id, "name": "阿良"}
+
+
 class OrgSyncTests(unittest.TestCase):
     """The contact-directory branch of the dingtalk line."""
 
@@ -563,6 +584,92 @@ def _log_with_ctx(events, tag):
         events.append(tag)
         return _ctx()
     return _inner
+
+
+class MultiOrgSyncTests(unittest.TestCase):
+    """接入第二个钉钉企业（易元宏雷）后的同步行为。"""
+
+    def _org_manifest(self):
+        return SourceManifest(
+            dingtalk_sheets=(),
+            wdt_datasets=(),
+            sha256="a" * 64,
+            dingtalk_org=OrgDataset(
+                dataset="org_directory",
+                target_table="dingtalk_org_member",
+            ),
+        )
+
+    def _service(self, *, org_seeds, org_gateways):
+        self.org_repo = Mock()
+        self.mart_repo = Mock()
+        self.connections = Mock()
+        return LiveSyncService(
+            dingtalk_gateway=Mock(),
+            wdt_gateway=Mock(),
+            dingtalk_repository=Mock(),
+            wdt_repository=Mock(),
+            mart_repository=self.mart_repo,
+            connections=self.connections,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            org_repository=self.org_repo,
+            org_seeds=org_seeds,
+            org_gateways=org_gateways,
+        )
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_two_corps_merge_into_one_run(self, mock_lock, mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        seeds = (
+            OrgSeedEntry(key="xishuicun", credential="dingtalk",
+                         regions=(("hangzhou", (1,)),)),
+            OrgSeedEntry(key="eyl", credential="dingtalk_eyl",
+                         regions=(("eyl", (2,)),)),
+        )
+        svc = self._service(
+            org_seeds=seeds,
+            org_gateways={"dingtalk": _FakeOrgGateway(),
+                          "dingtalk_eyl": _NamedOrgGateway()},
+        )
+        svc.sync(self._org_manifest(), source="dingtalk")
+
+        members = self.org_repo.upsert_members.call_args.args[0]
+        self.assertEqual([m.user_id for m in members], ["u1", "eyl-1"])
+        self.assertEqual([m.region for m in members], ["hangzhou", "eyl"])
+        # 两家企业共用同一个 sync_run_id：投影按最新 run 圈定，分 run 会丢人
+        self.assertEqual(
+            self.org_repo.upsert_members.call_args.kwargs["sync_run_id"],
+            _RUN_ID,
+        )
+
+    @patch("common.public_data.live_sync.transaction")
+    @patch("common.public_data.live_sync.named_lock")
+    def test_colliding_user_id_across_corps_fails_loudly(self, mock_lock,
+                                                          mock_txn):
+        mock_lock.side_effect = lambda *a, **k: _ctx()
+        mock_txn.side_effect = lambda *a, **k: _ctx()
+
+        seeds = (
+            OrgSeedEntry(key="xishuicun", credential="dingtalk",
+                         regions=(("hangzhou", (1,)),)),
+            # 两个企业各自内部都有 u1——合并后后者会静默覆盖前者。
+            OrgSeedEntry(key="eyl", credential="dingtalk_eyl",
+                         regions=(("eyl", (1,)),)),
+        )
+        svc = self._service(
+            org_seeds=seeds,
+            org_gateways={"dingtalk": _FakeOrgGateway(),
+                          "dingtalk_eyl": _CollidingOrgGateway()},
+        )
+        with self.assertRaisesRegex(LiveSyncError, "collides"):
+            svc.sync(self._org_manifest(), source="dingtalk")
+
+        self.org_repo.upsert_members.assert_not_called()
+        self.mart_repo.mark_failed.assert_called_once()
 
 
 if __name__ == "__main__":
