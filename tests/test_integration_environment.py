@@ -148,8 +148,11 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # nginx conf 真源同步 + HUP 平滑重载：conf 只落 repo 不拷贝到
         # /opt/dops/nginx/ 时 nginx 永远跑旧配置；且须在 force-recreate
         # 长驻服务之前完成（先拉起 pages-web 再切流量）。
-        self.assertIn("docker/integration/nginx/pages-cloud.conf", text)
-        self.assertIn("cp docker/integration/nginx/pages-cloud.conf", text)
+        # 真源唯一（2026-10-23）：docker/cloud/nginx-pages.conf——此前同步源是
+        # integration/pages-cloud.conf 而修复都写进 cloud 版，双真源漂移使
+        # listen 80 三次被部署回退丢失（全站断）。
+        self.assertIn("docker/cloud/nginx-pages.conf", text)
+        self.assertIn("cp docker/cloud/nginx-pages.conf", text)
         self.assertIn("kill -s HUP nginx", text)
         self.assertLess(
             text.index("kill -s HUP nginx"),
@@ -165,7 +168,7 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # conf 内榜单页正则含 {}，nginx 配置解析要求整段加引号，否则
         # nginx -t emerg、切流静默失效（2026-10-13 实测踩到）。
         nginx_conf = (
-            REPOSITORY_ROOT / "docker" / "integration" / "nginx" / "pages-cloud.conf"
+            REPOSITORY_ROOT / "docker" / "cloud" / "nginx-pages.conf"
         ).read_text(encoding="utf-8")
         self.assertIn(
             'location ~ "^/[a-z0-9_]+(-\\d{4}-\\d{2}-\\d{2})?\\.html$"',
@@ -180,7 +183,7 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # 个渠道板块，回落 pages-web 止血），同日 13 板块逐块迁成 21 张 BI 卡
         # 后重新挂桥（见下方第四座桥）。
         nginx_conf = (
-            REPOSITORY_ROOT / "docker" / "integration" / "nginx" / "pages-cloud.conf"
+            REPOSITORY_ROOT / "docker" / "cloud" / "nginx-pages.conf"
         ).read_text(encoding="utf-8")
         bridges = {
             "/hangzhou.html": "hz-offline-sales",

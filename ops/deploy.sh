@@ -103,10 +103,14 @@ apply() {
   # 配置。落盘前先备份 → 再 nginx -t 校验 → 通过才 HUP；校验失败回滚旧
   # conf 并告警（2026-10-13 实测：正则含 {} 未加引号使 nginx -t emerg 失败，
   # HUP 静默失效、切流不生效，且 nginx 重启会启动失败——须拦在门内）。
+  # 真源收敛（2026-10-23）：此前同步源是 docker/integration/nginx/pages-cloud.conf，
+  # 而后续修复都写进 docker/cloud/nginx-pages.conf——双真源漂移，每次部署都用
+  # 旧版覆盖云上 conf，listen 80 三次被回退丢失（dt.yyhlzj.com 全站断）。
+  # 现唯一真源=docker/cloud/nginx-pages.conf，integration 旧文件已删除。
   NGINX_CONF=/opt/dops/nginx/pages.conf
-  if [ -f docker/integration/nginx/pages-cloud.conf ]; then
+  if [ -f docker/cloud/nginx-pages.conf ]; then
     cp "$NGINX_CONF" "$NGINX_CONF.prev" 2>/dev/null || true
-    cp docker/integration/nginx/pages-cloud.conf "$NGINX_CONF"
+    cp docker/cloud/nginx-pages.conf "$NGINX_CONF"
     if docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t >/dev/null 2>&1; then
       docker compose -f "$COMPOSE_FILE" kill -s HUP nginx 2>/dev/null || true
     else
