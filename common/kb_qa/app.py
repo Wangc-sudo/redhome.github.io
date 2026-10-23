@@ -599,9 +599,14 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
 
     def _safe_reply(self, incoming, text):
         conversation_id = getattr(incoming, "conversation_id", "") or ""
+        # 单聊（conversationType=2）无群 openConversationId，
+        # groupMessages/send 必失败——走 SDK reply_text（sessionWebhook）。
+        # 2026-10-22 单聊验证发现：此前单聊回复必走群通道报错。
+        is_single = getattr(incoming, "conversation_type", "") == "2"
         sender_uid = incoming.sender_staff_id or ""
         try:
-            if self._reply_client is not None and conversation_id:
+            if (self._reply_client is not None and conversation_id
+                    and not is_single):
                 self._reply_client.send_group_markdown(
                     self._robot_code, conversation_id,
                     _REPLY_TITLE, text,
