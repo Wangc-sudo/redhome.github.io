@@ -401,7 +401,8 @@ class _FakeHeaders:
 
 
 class _FakeCallback:
-    def __init__(self, message_id, text, conversation_id="cid1"):
+    def __init__(self, message_id, text, conversation_id="cid1",
+                 conversation_type=None):
         self.headers = _FakeHeaders(message_id)
         self.data = {
             "conversationId": conversation_id,
@@ -411,6 +412,8 @@ class _FakeCallback:
             "senderNick": "测试",
             "isAdmin": False,
         }
+        if conversation_type is not None:
+            self.data["conversationType"] = conversation_type
 
 
 class MessageIdExtractionTests(unittest.TestCase):
@@ -514,6 +517,49 @@ class ReplyChannelTests(unittest.TestCase):
         handler.reply_text = lambda text, incoming: sent.append(text)
         handler._safe_reply(_FakeIncoming(), "答案")
         self.assertEqual(["答案"], sent)
+
+    def test_single_chat_uses_reply_text_even_with_client(self):
+        # 2026-10-22 单聊验证：conversationType=2 无群 openConversationId，
+        # groupMessages/send 必失败——单聊必须走 reply_text（sessionWebhook）
+        client = _FakeReplyClient()
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            reply_client=client, robot_code="robot1",
+        )
+        incoming = _FakeIncoming()
+        incoming.conversation_type = "2"
+        sent = []
+        handler.reply_text = lambda text, inc: sent.append(text)
+        handler._safe_reply(incoming, "答案")
+        self.assertEqual(["答案"], sent)
+        self.assertEqual([], client.calls)  # 群通道未被调用
+
+    def test_group_chat_still_uses_group_messages(self):
+        # 群聊（conversationType=1）保持 groupMessages 通道
+        client = _FakeReplyClient()
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            reply_client=client, robot_code="robot1",
+        )
+        incoming = _FakeIncoming()
+        incoming.conversation_type = "1"
+        handler._safe_reply(incoming, "答案")
+        self.assertEqual(1, len(client.calls))
+
+    def test_single_chat_end_to_end(self):
+        # 单聊全链模拟：到达 → 应答 → reply_text 回复（群通道不触碰）
+        client = _FakeReplyClient()
+        conn = _FakeConn([1, [_product_row()]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            reply_client=client, robot_code="robot1")
+        sent = []
+        handler.reply_text = lambda text, inc: sent.append(text)
+        asyncio.run(handler.process(
+            _FakeCallback("m1", "习酒窖藏1998 箱规", conversation_type="2")))
+        self.assertEqual(1, len(sent))
+        self.assertIn("箱规：6", sent[0])  # 无 LLM → P1 模板
+        self.assertEqual([], client.calls)
 
 
 class EnsureMediaIdTests(unittest.TestCase):
