@@ -616,7 +616,8 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
                seed_path=None, card_cache=None, session_secret=None,
                auth_client=None, viewer_resolver=None,
-               session_secure=False, corp_id=None, agent_id=None) -> FastAPI:
+               session_secure=False, corp_id=None, agent_id=None,
+               kb_web=None) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
@@ -740,6 +741,15 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     @app.get("/")
     def root():
         return RedirectResponse(f"/d/{_DEFAULT_DASHBOARD_ID}")
+
+    # 小易 Web 对话面（2026-10-23，方案 V1）：/kb/api/* 路由组。kb_web
+    # 为 register_kb_routes 的 kwargs dict；None=不挂载（缺配降级）。
+    # 认证只要求登录（HMAC session），业务数据工具收窄在 service 层
+    # 经 kb_web_acl 角色白名单做（与 bi_authz 看板授权语义不混用）。
+    if kb_web:
+        from common.kb_web.routes import register_kb_routes
+
+        register_kb_routes(app, **kb_web)
 
     @app.get("/healthz")
     def healthz():
@@ -927,6 +937,14 @@ def main():
         ).strip().lower() in ("1", "true", "yes")
         dashboard_source = build_dashboard_config_source()
         seed_path = os.environ.get("PUBLIC_DATA_BI_SEED") or None
+        # 小易 Web 对话面依赖（fail-open：缺配/异常 → None 不挂载，
+        # 看板面不受影响）。
+        try:
+            from common.kb_web.bootstrap import build_kb_web_deps
+
+            kb_web = build_kb_web_deps(settings)
+        except Exception:
+            kb_web = None
         application = create_app(
             settings=settings,
             dashboard_source=dashboard_source,
@@ -937,6 +955,7 @@ def main():
             session_secure=session_secure,
             corp_id=corp_id,
             agent_id=agent_id,
+            kb_web=kb_web,
         )
     except Exception as exc:
         print(f"bi-web startup failed: invalid configuration ({type(exc).__name__})")

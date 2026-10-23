@@ -390,6 +390,17 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if meta is not None:
                 # 对话层（2026-10-22）：透出命中商品名，作指代追问锚点。
                 meta["subject"] = (row or rows[0]).get("name")
+                # Web 通道（2026-10-23）：附件清单结构化透出，前端据此
+                # 渲染下载链接（/kb/api/attachments/... 现取签名 URL）。
+                if row is not None and items:
+                    meta["asset"] = {
+                        "record_id": row["record_id"],
+                        "field": field_name,
+                        "names": [
+                            (m.get("filename") or m.get("name") or "")
+                            for m in items
+                        ],
+                    }
             if row is None:
                 # 附件字段没匹配上（如问「包装什么样」而字段名不含包装）——
                 # 向量图召回兜底：文字搜图跨字段跨商品找图直发。

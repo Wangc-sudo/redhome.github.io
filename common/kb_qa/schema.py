@@ -110,3 +110,20 @@ _KB_QA_AUDIT_V3_DDL = """ALTER TABLE `kb_qa_audit`
 def kb_audit_v3_ddl_statements():
     """mart-ops-kb-qa-audit-v3：kb_qa_audit 加 token 用量列。"""
     return (_KB_QA_AUDIT_V3_DDL,)
+
+
+# Web 通道角色白名单（2026-10-23 裁决：业务数据按角色白名单）——
+# 小易 Web 前端用户默认只答商品/手册；行在册才开放日销/渠道/query_sql
+# 等经营数据工具。独立于 bi_authz（那是看板授权，语义不混用）。
+_KB_WEB_ACL_DDL = """CREATE TABLE IF NOT EXISTS `kb_web_acl` (
+  `userid` varchar(128) NOT NULL COMMENT '钉钉 userid（免登带入）',
+  `allow_business` tinyint NOT NULL DEFAULT 0 COMMENT '1=开放业务数据工具',
+  `note` varchar(255) NULL,
+  `created_at` datetime NOT NULL,
+  PRIMARY KEY (`userid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+
+
+def kb_web_acl_ddl_statements():
+    """mart-ops-kb-web-acl-v1：Web 通道业务数据白名单表。"""
+    return (_KB_WEB_ACL_DDL,)
