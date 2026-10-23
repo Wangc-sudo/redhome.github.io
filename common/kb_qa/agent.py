@@ -520,21 +520,31 @@ class ToolExecutor:
 
 
 def run_agent(llm, question, *, executor, history=None,
-              max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None, meta=None):
+              max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None, meta=None,
+              tools=None):
     """agent loop：问题 → 工具调用（≤max_rounds 轮）→ 答案。
 
     返回答案文本；LLM 异常/畸形/超限无答案 → None（调用方降级）。
     chat_with_tools 注入点（测试替身），缺省调 llm.chat_with_tools。
     meta（反馈闭环埋点）：传入 dict 时回填 ``tools``（工具名序列）与
     ``rounds``（LLM 调用轮数），供调用方落审计；不传零副作用。
+    tools（2026-10-23 Web 通道角色白名单）：可offering的工具子集，
+    None=全部 TOOLS。LLM 只能调用被 offering 的工具，越权工具根本
+    不出现在协议面（比事后拦截干净）。
     """
     call = chat_with_tools or llm.chat_with_tools
+    tools = TOOLS if tools is None else tools
     if meta is not None:
         meta["tools"] = []
         meta["rounds"] = 0
     history_text = format_history(history) if history else ""
-    tables_text = "\n".join(f"- {name}：{desc}"
-                            for name, desc in _SQL_TABLES.items())
+    # 工具子集运行时（Web 角色白名单）同步收窄 prompt：没 offering
+    # query_sql 就不列出可用表，避免模型凭空写 SQL。
+    offered = {t.get("function", {}).get("name") for t in tools}
+    tables_text = (
+        "\n".join(f"- {name}：{desc}" for name, desc in _SQL_TABLES.items())
+        if "query_sql" in offered else "（本通道未开放）"
+    )
     messages = [
         {"role": "system",
          "content": (_SYSTEM_PROMPT
@@ -544,7 +554,7 @@ def run_agent(llm, question, *, executor, history=None,
     ]
     for round_index in range(max_rounds):
         try:
-            response = call(messages, tools=TOOLS)
+            response = call(messages, tools=tools)
         except LlmError:
             return None
         except Exception:

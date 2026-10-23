@@ -6,6 +6,7 @@ from common.kb_qa.schema import (
     kb_audit_v2_ddl_statements,
     kb_audit_v3_ddl_statements,
     kb_ddl_statements,
+    kb_web_acl_ddl_statements,
 )
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
@@ -589,6 +590,13 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-audit-v3",
         "mart",
         kb_audit_v3_ddl_statements(),
+    ),
+    (
+        # Web 通道角色白名单（2026-10-23 裁决）：kb_web_acl，在册用户才
+        # 开放业务数据工具（日销/渠道/query_sql），默认只答商品/手册。
+        "mart-ops-kb-web-acl-v1",
+        "mart",
+        kb_web_acl_ddl_statements(),
     ),
     (
         # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：
