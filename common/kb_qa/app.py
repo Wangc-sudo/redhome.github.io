@@ -49,6 +49,7 @@ from common.kb_qa.router import (
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
+    SALES_QUERY,
     classify,
 )
 
@@ -56,6 +57,12 @@ from common.kb_qa.router import (
 _DOC_FALLBACK = (
     "产品手册问答还在接入中。现在可以先问我商品参数"
     "（如「习酒窖藏1998 箱规」）或素材（如「发我摘要酒细节图」）。"
+)
+
+#: 业务数据问句（SALES_QUERY）在 agent 不可用/无答案时的诚实兜底——
+#: 不能落 render_not_found（那句话术是按商品语境写的，会误导）。
+_SALES_FALLBACK = (
+    "业务数据查询暂时不可用，请稍后再试。商品参数、素材、手册问答不受影响。"
 )
 
 #: 素材分支 P1 形态：列出附件清单 + 指引；原生图片/文件直发待
@@ -353,6 +360,15 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         if not text:
             return None, CHITCHAT, None
         intent = classify(text)
+        if intent.category == SALES_QUERY:
+            # 业务数据问句（销售额/完成率/排名…）直接进工具调用 agent——
+            # 不先走商品直查：商品表对它必然全 miss，白烧一次 LLM 改写 +
+            # 一次检索才轮到 agent（2026-10-23 实测「看下拼多多昨天销售
+            # 金额」链路）。
+            agent_answer = self._try_agent(conn, text, history, meta=meta)
+            if agent_answer:
+                return agent_answer, "agent", None
+            return _SALES_FALLBACK, SALES_QUERY, None
         if intent.category in (PRODUCT_PARAM, PRODUCT_FILTER):
             rows = find_products(conn, intent.keyword)
             if not rows:

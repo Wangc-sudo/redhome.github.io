@@ -40,6 +40,7 @@ from common.kb_qa.router import (
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
+    SALES_QUERY,
     classify,
     extract_keyword,
 )
@@ -127,6 +128,25 @@ class RouterTests(unittest.TestCase):
     def test_bare_product_name_falls_to_param(self):
         intent = classify("习酒窖藏1998")
         self.assertEqual(PRODUCT_PARAM, intent.category)
+
+    def test_sales_query_intent(self):
+        """业务数据问句 → SALES_QUERY（直接进 agent，不先走商品直查）。"""
+        for text in (
+            "看下拼多多的昨天销售金额",
+            "看下PDD 女儿红店，昨天销售金额",
+            "杭州今天销售额",
+            "各区域完成率排名",
+            "本周出库量环比",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(SALES_QUERY, classify(text).category)
+
+    def test_sales_words_do_not_swallow_product_intents(self):
+        """商品语境优先：附件/参数词仍先于业务数据词。"""
+        self.assertEqual(PRODUCT_ASSET, classify("发我红习酱的质检报告").category)
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1998 箱规多少").category)
+        # 商品名本身不含业务数据词，裸商品名仍走疑似商品名直查
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1998").category)
 
     def test_chitchat(self):
         self.assertEqual(CHITCHAT, classify("你好").category)
@@ -1874,14 +1894,46 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         self.assertEqual([], seen)
 
     def test_agent_none_falls_back_to_not_found(self):
-        # 商品全 miss + agent 无答案 → not_found（业务问句被兜底成商品直查）
+        # 商品全 miss + agent 无答案 → not_found（真·商品问句，非业务问句——
+        # 业务问句自 2026-10-23 起走 SALES_QUERY 分支，不再经商品直查）。
         conn = _FakeConn([])
         handler = KbStreamHandler(
             connection_factory=lambda: conn, log=lambda _: None,
             agent_runner=lambda conn, text, history, meta=None: None)
-        reply, intent, _ = handler._answer(conn, "今天杭州出了多少货")
+        reply, intent, _ = handler._answer(conn, "习酒窖藏9999")
         self.assertEqual(PRODUCT_PARAM, intent)
         self.assertIn("没有找到", reply)
+
+    def test_sales_query_goes_to_agent_without_product_lookup(self):
+        """SALES_QUERY 直通 agent：全程不碰商品表（不烧商品检索/reparse）。"""
+        seen = []
+
+        def runner(conn, text, history, meta=None):
+            seen.append(text)
+            return "拼多多昨天 10.2 万"
+
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=runner)
+        reply, intent, _ = handler._answer(conn, "看下拼多多的昨天销售金额")
+        self.assertEqual("agent", intent)
+        self.assertIn("10.2", reply)
+        self.assertEqual(["看下拼多多的昨天销售金额"], seen)
+        # 没有任何商品表查询（PRODUCT_PARAM 路径会 SELECT kb_products）
+        product_sql = [sql for sql, _ in conn.cursor_instance.executed
+                       if "kb_products" in sql]
+        self.assertEqual([], product_sql)
+
+    def test_sales_query_agent_none_falls_back_honestly(self):
+        """agent 不可用 → SALES 专用兜底（不落商品语境的「没有找到」）。"""
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history, meta=None: None)
+        reply, intent, _ = handler._answer(conn, "杭州今天销售额")
+        self.assertEqual(SALES_QUERY, intent)
+        self.assertIn("暂时不可用", reply)
 
     def test_chitchat_miss_agent_none_falls_back_to_help(self):
         # 规则完全未命中 + agent 无答案 → HELP_TEXT
