@@ -21,7 +21,11 @@ def build_kb_web_deps(settings, environ=None):
     """返回 register_kb_routes 的 kwargs；缺关键配置返回 None。"""
     env = os.environ if environ is None else environ
 
-    session_secret = (env.get("BI_WEB_SESSION_SECRET") or "").strip()
+    # kb 专用密钥优先：BI_WEB_SESSION_SECRET 一旦设置会翻转看板页面的
+    # 认证重定向行为（redirect_pages），榜单页不能动——kb 用独立密钥
+    # 隔离该副作用（同一 cookie 体系，仅 /kb 路由消费）。
+    session_secret = ((env.get("KB_WEB_SESSION_SECRET") or "").strip()
+                      or (env.get("BI_WEB_SESSION_SECRET") or "").strip())
     app_key = (env.get("KB_DINGTALK_APP_KEY") or "").strip()
     app_secret = (env.get("KB_DINGTALK_APP_SECRET") or "").strip()
     operator_id = (env.get("KB_DINGTALK_OPERATOR_ID") or "").strip()
