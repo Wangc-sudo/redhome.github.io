@@ -124,6 +124,10 @@ _WEB_DIR = Path(__file__).parent / "web"
 #: (or simply removing the dist directory) rolls straight back to V0.
 _REACT_DIST_DIR = Path(__file__).parents[2] / "frontend" / "bi-react" / "dist"
 
+#: 小易 Web 对话前端产物（common/kb_web/web/dist，Vite 构建入库，
+#: ops-web 同款模式）。check_dir=False：未构建时 /kb 仅 API 可用。
+_KB_DIST_DIR = Path(__file__).parents[1] / "kb_web" / "web" / "dist"
+
 
 def _shell_index_html() -> Path:
     """Pick the ``/d/{id}`` shell: bi.html first, dist as fallback, else legacy.
@@ -750,6 +754,10 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
         from common.kb_web.routes import register_kb_routes
 
         register_kb_routes(app, **kb_web)
+        # SPA 静态壳挂在 API 之后（Starlette 按注册序匹配，/kb/api/*
+        # 已先注册不会被 mount 吞掉）。无客户端路由，html=True 即可。
+        app.mount("/kb", StaticFiles(directory=_KB_DIST_DIR, html=True,
+                                     check_dir=False), name="kb-web")
 
     @app.get("/healthz")
     def healthz():
