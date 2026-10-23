@@ -47,16 +47,22 @@ from common.public_data import report_roster
 from common.public_data.org_proxy_grant import fetch_proxy_targets, is_proxy_for
 
 
-def _monthly_target_for(connection, region_cfg, table_name, business_date):
+def _monthly_target_for(connection, region_cfg, table_name, business_date,
+                        scope=None):
     """月目标快照源（2026-10-07「所有数据入库」）：``dim_report_target``
     优先，Nacos ``monthlyTargets`` 兜底（未迁库区域的过渡通道）。
 
     返回**元**口径（fact.monthly_target 列口径）：dim 存万元，经
     ``fetch_intake_target_yuan`` ×10000（2026-10-19 单位混列修复）；
     Nacos 兜底值本就是元，不动。
+
+    *scope*：目标登记表的作用域，缺省为报数群区域。代填时必须传**被代填
+    人所属区域**（2026-10-23）：其他区域（``other``）人的目标登记在
+    ``scope='other'``，按报数群区域（如 ``offline_all``）查不到 → 快照
+    NULL → 回执无完成度、「其他」桶月目标缺人。
     """
     db_value = report_roster.fetch_intake_target_yuan(
-        connection, region_cfg.region, table_name,
+        connection, scope or region_cfg.region, table_name,
         business_date.strftime("%Y-%m"),
     )
     if db_value is not None:
@@ -287,6 +293,48 @@ def build_recorded_reply(*, month, day, weekday, value, old_value, progress):
     if progress is not None:
         total_disp, target_disp, ratio_str = progress
         lines.append(f"📊 本月累计 {total_disp} / 目标 {target_disp}，完成 {ratio_str}")
+    lines.append("祝您下班愉快 🎉")
+    return "\n".join(lines)
+
+
+def build_proxy_recorded_reply(*, month, day, weekday, target_name, proxy_name,
+                               writes):
+    """代填回执（2026-10-23 用户裁决「群里 @机器人 代填」）。
+
+    句式与自报回执同款——**回显被代填人的完成情况**（销量 + 本月累计/
+    目标/完成率），末行点明代填人（留痕另落 ``filled_by`` 列）。
+
+    ``writes`` = ``[(数据格, 金额, 旧值|None, progress|None)]``；单格时
+    省略数据格前缀（与个人自报逐字同形），多板块时逐格带前缀。
+    """
+    lines = []
+    if len(writes) == 1:
+        cell, value, old_disp, progress = writes[0]
+        lines.append(
+            f"✅ 已记录 {target_name} {month}月{day}日（周{weekday}）"
+            f"销量：{value}"
+        )
+        if old_disp:
+            lines.append(f"🔁 已覆盖之前填报的 {old_disp}")
+        if progress is not None:
+            total_disp, target_disp, ratio_str = progress
+            lines.append(
+                f"📊 本月累计 {total_disp} / 目标 {target_disp}，"
+                f"完成 {ratio_str}"
+            )
+    else:
+        lines.append(
+            f"✅ 已记录 {target_name} {month}月{day}日（周{weekday}）："
+        )
+        for cell, value, old_disp, progress in writes:
+            line = f"{cell}：{value}"
+            if old_disp:
+                line += f"（🔁 覆盖旧值 {old_disp}）"
+            lines.append(line)
+            progress_line = _progress_line(cell, progress)
+            if progress_line:
+                lines.append(progress_line)
+    lines.append(f"👤 由 {proxy_name} 代填")
     lines.append("祝您下班愉快 🎉")
     return "\n".join(lines)
 
@@ -560,10 +608,11 @@ def _aux_stores(connection, *, region_cfg, business_date, workdays,
 
 def _record_value(connection, *, region_cfg, member, table_name,
                   business_date, value, now, workdays, key_suffix=None,
-                  filled_by=None):
+                  filled_by=None, target_scope=None):
     """单格写入 + 进度（/补签 复用）。返回 ``(数据格, 金额, 旧值文案|None, progress)``。
 
     *filled_by*：代填留痕——自报=None，代填/补签=代填人 user_id。
+    *target_scope*：月目标登记表作用域，代填时传**被代填人所属区域**。
     """
     old_value = _write_report(
         connection,
@@ -571,7 +620,8 @@ def _record_value(connection, *, region_cfg, member, table_name,
         member=member,
         table_name=table_name,
         monthly_target=_monthly_target_for(
-            connection, region_cfg, table_name, business_date),
+            connection, region_cfg, table_name, business_date,
+            scope=target_scope),
         business_date=business_date,
         value=value,
         now=now,
@@ -644,6 +694,8 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             f"⛔ 你未被授权代填「{target_name}」。",
             region=region_cfg.region, name=name,
         )
+    # 月目标属人：登记在被代填人所属区域（other 区域人 ≠ 报数群区域）。
+    target_scope = target.get("region") or region_cfg.region
     workdays = fetch_workdays(
         connection, year=business_date.year, month=business_date.month
     )
@@ -664,7 +716,7 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
                 connection, region_cfg=region_cfg, member=target,
                 table_name=f"{store}·{metric}", business_date=business_date,
                 value=value, now=now, workdays=workdays, key_suffix=metric,
-                filled_by=sender_uid,
+                filled_by=sender_uid, target_scope=target_scope,
             ))
     else:
         value = parse_report_amount(body)
@@ -678,20 +730,18 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             connection, region_cfg=region_cfg, member=target,
             table_name=table_name, business_date=business_date,
             value=value, now=now, workdays=workdays,
-            filled_by=sender_uid,
+            filled_by=sender_uid, target_scope=target_scope,
         ))
-    lines = [
-        f"✅ 已代录（管理人 {name} 为 {target_name} 补签 "
-        f"{business_date.month}月{business_date.day}日）："
-    ]
-    for cell, value, old_disp, progress in writes:
-        line = f"{cell}：{value}"
-        if old_disp:
-            line += f"（🔁 覆盖旧值 {old_disp}）"
-        lines.append(line)
-        progress_line = _progress_line(cell, progress)
-        if progress_line:
-            lines.append(progress_line)
+    # 2026-10-23 用户裁决：代填回执回显**被代填人**的完成情况，句式与
+    # 自报同款（此前是「管理人 X 为 Y 补签」的事务性表述，看不出完成度归属）。
+    lines = [build_proxy_recorded_reply(
+        month=business_date.month,
+        day=business_date.day,
+        weekday=_WEEKDAYS[business_date.weekday()],
+        target_name=target_name,
+        proxy_name=name,
+        writes=writes,
+    )]
     if is_rest_day:
         lines.append(_rest_day_note(business_date))
     return IntakeOutcome(
