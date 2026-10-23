@@ -10,7 +10,10 @@ from common.kb_qa.schema import (
 )
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
-from common.public_data.channel_map import channel_map_ddl_statements
+from common.public_data.channel_map import (
+    channel_map_ddl_statements,
+    channel_map_v2_ddl_statements,
+)
 from common.public_data.data_fix import data_fix_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
@@ -614,6 +617,13 @@ _MIGRATIONS = (
         "mart-ops-channel-map-v1",
         "mart",
         channel_map_ddl_statements(),
+    ),
+    (
+        # v2：业务线分类列 business_line（2026-10-23 裁决 5：线上渠道/线下
+        # 网点/餐饮/体验馆与团购）。v1 已在生产建表，补列只能走 ALTER。
+        "mart-ops-channel-map-v2",
+        "mart",
+        channel_map_v2_ddl_statements(),
     ),
     (
         # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：
