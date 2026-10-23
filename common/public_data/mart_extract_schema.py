@@ -727,6 +727,24 @@ def order_line_buyer_ddl_statements() -> tuple:
     return (_FACT_ORDER_LINE_BUYER_DDL,)
 
 
+# 渠道抬头（2026-10-23 渠道管线迁 WDT 第一步）：订单行补 buyer_nick——
+# B2B 渠道单的「抬头」（客户主体：深圳丰享信息技术有限公司/朴朴各城市
+# 公司/浙江天猫（寄售）…）在这个字段，customer_name 只在 B2C 零售单填
+# （2026-10-22 JY202610222323 单实锤：customer_name 空、buyer_nick=丰享）。
+# 渠道日销按 dim_channel_map 的抬头映射从此列聚合。v1-v4 已冻结，另起
+# v5 增量；空值保留 NULL（B2C 单 buyer_nick 为空是常态）。
+_FACT_ORDER_LINE_BUYER_NICK_DDL = (
+    "ALTER TABLE `fact_order_line`\n"
+    "  ADD COLUMN `buyer_nick` VARCHAR(200) DEFAULT NULL,\n"
+    "  ADD KEY `idx_order_line_buyer_nick` (`buyer_nick`)"
+)
+
+
+def order_line_buyer_nick_ddl_statements() -> tuple:
+    """fact_order_line 渠道抬头补列（独立迁移版本 mart-extract-order-line-v5）。"""
+    return (_FACT_ORDER_LINE_BUYER_NICK_DDL,)
+
+
 # 取消单（BI 阶段 2）：主投影剔除 trade_status=4（已取消、明细实付全 0），
 # 另立一表按单保留，供月度取消率。每单一行、不展明细、不存金额；
 # cancel_time 取下单时间（payload created，缺失回退 modified）。

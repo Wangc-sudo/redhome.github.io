@@ -327,6 +327,7 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
             order_cancel_ddl_statements,
             order_line_area_ddl_statements,
             order_line_buyer_ddl_statements,
+            order_line_buyer_nick_ddl_statements,
             order_line_ddl_statements,
         )
 
@@ -337,6 +338,8 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
         for statement in order_line_area_ddl_statements():
             columns |= set(self._ADD_COLUMN_RE.findall(statement))
         for statement in order_line_buyer_ddl_statements():
+            columns |= set(self._ADD_COLUMN_RE.findall(statement))
+        for statement in order_line_buyer_nick_ddl_statements():
             columns |= set(self._ADD_COLUMN_RE.findall(statement))
 
         self.assertEqual(

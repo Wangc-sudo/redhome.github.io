@@ -40,6 +40,7 @@ from common.public_data.mart_extract_schema import (
     finance_expense_ddl_statements,
     order_line_area_ddl_statements,
     order_line_buyer_ddl_statements,
+    order_line_buyer_nick_ddl_statements,
     order_line_ddl_statements,
     order_line_channel_ddl_statements,
     order_cancel_ddl_statements,
@@ -492,6 +493,9 @@ _MIGRATIONS = (
     ("mart-extract-order-line-v3", "mart", order_line_area_ddl_statements()),
     # 买家列（2026-10-12 BI 阶段 2）：独立版本而非改写 v1-v3（校验和红线）。
     ("mart-extract-order-line-v4", "mart", order_line_buyer_ddl_statements()),
+    # 渠道抬头列（2026-10-23 渠道管线迁 WDT 第一步）：同上红线，另起 v5。
+    ("mart-extract-order-line-v5", "mart",
+     order_line_buyer_nick_ddl_statements()),
     # 取消单表（2026-10-12 BI 阶段 2）：独立建表版本，勿并入已冻结版本。
     ("mart-extract-order-cancel-v1", "mart", order_cancel_ddl_statements()),
     ("mart-extract-channel-ops-v1", "mart", channel_ops_ddl_statements()),
