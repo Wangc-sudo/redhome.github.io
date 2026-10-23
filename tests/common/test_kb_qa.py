@@ -137,6 +137,8 @@ class RouterTests(unittest.TestCase):
             "杭州今天销售额",
             "各区域完成率排名",
             "本周出库量环比",
+            "拼多多店铺习酒习水村专卖店标题是那个",
+            "这个酒哪个门店在卖",
         ):
             with self.subTest(text=text):
                 self.assertEqual(SALES_QUERY, classify(text).category)
