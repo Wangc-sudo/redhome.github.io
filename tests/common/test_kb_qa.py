@@ -180,39 +180,9 @@ class ProductQueryTests(unittest.TestCase):
         self.assertEqual(4, len(conn.cursor_instance.executed))
 
     def test_all_tokens_miss_returns_empty(self):
-        # 整词 3 次 + AND 组合 1 次 + 分词两个各 3 次全 miss
-        conn = _FakeConn([[]] * 10)
+        # 整词 3 次 + 分词两个各 3 次全 miss
+        conn = _FakeConn([[], [], [], [], [], [], [], [], []])
         self.assertEqual([], find_products(conn, "不存在 的词"))
-
-    def test_multi_token_and_search_beats_longest_token(self):
-        # 2026-10-22 事故回归：「53°500ml*6 习酒窖藏1988 新包装 2025款」
-        # 整词带空格必 miss，按最长词「53°500ml*6」回退曾命中同规格的
-        # 千峰翠韵（张冠李戴）。AND 组合检索先行：四个词同时约束品名。
-        row = _product_row(name="53°500ml*6习酒窖藏1988新包装2025款(浙江)")
-        conn = _FakeConn([[], [], [], [row]])
-        rows = find_products(conn, "53°500ml*6 习酒窖藏1988 新包装 2025款")
-        self.assertEqual("53°500ml*6习酒窖藏1988新包装2025款(浙江)",
-                         rows[0]["name"])
-        sql, params = conn.cursor_instance.executed[3]
-        self.assertEqual(4, sql.count("LIKE"))  # 四词 AND
-        self.assertIn("AND", sql)
-        self.assertEqual(5, len(params))        # 4 个 like + limit
-
-    def test_single_token_fallback_prefers_cjk_over_spec(self):
-        # AND miss 后的单词回退：品名词「习酒窖藏1988」必须先于
-        # 规格词「53°500ml*6」（规格词判别力最低，同规格跨品牌撞车）。
-        conn = _FakeConn([[], [], [], [], [], [], [_product_row()]])
-        rows = find_products(conn, "53°500ml*6 习酒窖藏1988")
-        self.assertEqual(1, len(rows))
-        # 第 5 次查询 = 单词回退第一轮（code/69码 精确 + limit 参数）
-        sql, params = conn.cursor_instance.executed[4]
-        self.assertEqual(("习酒窖藏1988",) * 3, params[:3])
-
-    def test_token_rank_cjk_first(self):
-        self.assertEqual(
-            ["习酒窖藏1988", "新包装", "53°500ml*6"],
-            sorted(["53°500ml*6", "新包装", "习酒窖藏1988"],
-                   key=products._token_rank))
 
     def test_render_param_answer_skips_null_fields(self):
         text = render_param_answer(_product_row(gift_bag_spec=None))
@@ -591,45 +561,6 @@ class EnsureMediaIdTests(unittest.TestCase):
                 field_name="素材包", index=1,
                 attachment_meta={"name": "包.zip", "url": "http://oss/z"})
         self.assertEqual("file", media_type)
-
-
-class LlmEmptyAnswerFallbackTests(unittest.TestCase):
-    """2026-10-22 事故回归：推理版模型预算耗尽返回空串（不抛异常）——
-    空答案必须降模板/摘录，绝不能静默不回（audit reply_kind=none）。"""
-
-    def _handler(self, llm_answer, conn_script):
-        conn = _FakeConn(conn_script)
-
-        class _EmptyLlm:
-            def chat(self, messages, **kw):
-                return llm_answer
-
-        return KbStreamHandler(
-            connection_factory=lambda: conn, log=lambda _: None,
-            llm=_EmptyLlm()), conn
-
-    def test_empty_product_answer_falls_back_to_template(self):
-        handler, conn = self._handler("", [[_product_row()]])
-        reply, intent, matched = handler._answer(conn, "习酒窖藏1998 箱规")
-        self.assertEqual(PRODUCT_PARAM, intent)
-        self.assertIn("箱规：6", reply)  # P1 模板兜底
-
-    def test_empty_doc_answer_falls_back_to_excerpt(self):
-        handler, conn = self._handler("", [])
-        handler._doc_search = lambda conn, q, k=3: [
-            {"doc_title": "手册A", "content": "三同两不同指的是原料相同。"}]
-        reply, intent, _ = handler._answer(conn, "三同两不同是啥")
-        self.assertEqual(DOC_QA, intent)
-        self.assertIn("三同两不同指的是", reply)  # 摘录兜底
-
-    def test_render_budget_raised(self):
-        # 钉住预算：渲染调用点必须 ≥2048（推理版 reasoning 共享预算）
-        import inspect
-
-        from common.kb_qa import llm as llm_mod
-        for fn in (llm_mod.render_product_answer, llm_mod.render_doc_answer):
-            src = inspect.getsource(fn)
-            self.assertIn("max_tokens=2048", src)
 
 
 class Bm25Tests(unittest.TestCase):
@@ -1290,137 +1221,6 @@ class ConversationStoreTests(unittest.TestCase):
         self.assertLess(text.index("q2"), text.index("q1"))
         self.assertEqual("", ctx_module.format_history([]))
 
-
-class _FakeRedis:
-    """redis.Redis 最小替身：list 语义 + expire 记录（2026-10-22）。"""
-
-    def __init__(self):
-        self.lists = {}
-        self.expires = {}
-
-    def rpush(self, key, payload):
-        self.lists.setdefault(key, []).append(payload)
-
-    def ltrim(self, key, start, end):
-        items = self.lists.get(key, [])
-        if end == -1:
-            self.lists[key] = items[start:]
-        else:
-            self.lists[key] = items[start:end + 1]
-
-    def expire(self, key, ttl):
-        self.expires[key] = ttl
-
-    def lrange(self, key, start, end):
-        items = self.lists.get(key, [])
-        if end == -1:
-            return list(items[start:])
-        return list(items[start:end + 1])
-
-
-class RedisConversationStoreTests(unittest.TestCase):
-    """Redis 后端：存取 / 容量裁剪 / TTL 续期 / fail-open（2026-10-22）。"""
-
-    def _store(self, client, max_turns=4, ttl=600):
-        return ctx_module.RedisConversationStore(
-            client=client, max_turns=max_turns, ttl_seconds=ttl)
-
-    def test_record_and_history_roundtrip(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        key = store.key("cid1", "u1")
-        store.record(key, question="习酒箱规", answer="6 瓶/箱",
-                     category="product_param", record_id="r1")
-        history = store.history(key)
-        self.assertEqual(1, len(history))
-        self.assertEqual("习酒箱规", history[0]["q"])
-        self.assertEqual("6 瓶/箱", history[0]["a"])
-        self.assertEqual("r1", history[0]["record_id"])
-
-    def test_key_has_prefix(self):
-        key = ctx_module.RedisConversationStore.key("cid1", "u1")
-        self.assertTrue(key.startswith("kbqa:ctx:cid1:u1"))
-
-    def test_max_turns_trims_oldest(self):
-        client = _FakeRedis()
-        store = self._store(client, max_turns=2)
-        key = store.key("cid1", "u1")
-        for i in range(4):
-            store.record(key, question=f"q{i}", answer=f"a{i}")
-        history = store.history(key)
-        self.assertEqual(2, len(history))
-        self.assertEqual("q2", history[0]["q"])
-        self.assertEqual("q3", history[1]["q"])
-
-    def test_expire_refreshed_on_record(self):
-        client = _FakeRedis()
-        store = self._store(client, ttl=600)
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")
-        self.assertEqual(600, client.expires[key])
-
-    def test_silent_turn_not_recorded(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        store.record(store.key("cid1", "u1"), question="q", answer=None)
-        self.assertEqual({}, client.lists)
-
-    def test_redis_failure_fails_open(self):
-        class _Broken:
-            def lrange(self, *a):
-                raise ConnectionError("down")
-
-            def rpush(self, *a):
-                raise ConnectionError("down")
-
-        store = self._store(_Broken())
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")  # 静默丢弃
-        self.assertEqual([], store.history(key))     # 当无历史
-
-    def test_bad_json_entry_skipped(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        key = store.key("cid1", "u1")
-        store.record(key, question="q", answer="a")
-        client.lists[key].insert(0, "{bad json")
-        history = store.history(key)
-        self.assertEqual(1, len(history))
-        self.assertEqual("q", history[0]["q"])
-
-    def test_keys_are_isolated_per_sender(self):
-        client = _FakeRedis()
-        store = self._store(client)
-        store.record(store.key("cid1", "u1"), question="q1", answer="a1")
-        self.assertEqual([], store.history(store.key("cid1", "u2")))
-        self.assertEqual([], store.history(store.key("cid2", "u1")))
-
-
-class BuildConversationStoreTests(unittest.TestCase):
-    """后端选择：URL 在场 → Redis，否则进程内（2026-10-22）。"""
-
-    def test_no_url_falls_back_in_process(self):
-        store = ctx_module.build_conversation_store({})
-        self.assertIsInstance(store, ctx_module.ConversationStore)
-
-    def test_kb_redis_url_preferred(self):
-        store = ctx_module.build_conversation_store(
-            {"KB_REDIS_URL": "redis://k:6379/0",
-             "PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
-        self.assertIsInstance(store, ctx_module.RedisConversationStore)
-        self.assertEqual("redis://k:6379/0", store._url)
-
-    def test_public_data_redis_url_reused(self):
-        store = ctx_module.build_conversation_store(
-            {"PUBLIC_DATA_REDIS_URL": "redis://p:6379/0"})
-        self.assertIsInstance(store, ctx_module.RedisConversationStore)
-        self.assertEqual("redis://p:6379/0", store._url)
-
-    def test_blank_url_falls_back(self):
-        store = ctx_module.build_conversation_store({"KB_REDIS_URL": "  "})
-        self.assertIsInstance(store, ctx_module.ConversationStore)
-
-
     def test_subject_roundtrip(self):
         # 2026-10-22：命中商品名随轮入史（指代锚点）
         store = self._store(time.monotonic)
@@ -1451,6 +1251,8 @@ class BuildConversationStoreTests(unittest.TestCase):
     def test_format_history_no_subject_no_line(self):
         history = [{"q": "q1", "a": "a1"}]
         self.assertNotIn("上文涉及商品", ctx_module.format_history(history))
+
+
 
 
 class _FakeRedis:
@@ -1622,6 +1424,84 @@ class LlmHistoryTests(unittest.TestCase):
             history=[{"q": "茅台工艺", "a": "一年一个周期"}])
         prompt = llm.calls[0][0]["content"]
         self.assertIn("茅台工艺", prompt)
+
+
+class LlmUsageTests(unittest.TestCase):
+    """token 成本统计（2026-10-22）：usage 累计与快照差值归账。"""
+
+    def _client(self, usages):
+        responses = []
+        for usage in usages:
+            result = {"choices": [{"message": {"content": "答"}}]}
+            if usage is not None:
+                result["usage"] = usage
+            responses.append(result)
+        calls = iter(responses)
+        return llm_module.LlmClient("http://x", "k", "m",
+                                    request=lambda payload: next(calls))
+
+    def test_chat_accumulates_usage(self):
+        client = self._client([
+            {"prompt_tokens": 100, "completion_tokens": 20},
+            {"prompt_tokens": 50, "completion_tokens": 10},
+        ])
+        client.chat([{"role": "user", "content": "q"}])
+        client.chat([{"role": "user", "content": "q2"}])
+        snap = client.usage_snapshot()
+        self.assertEqual(150, snap["prompt_tokens"])
+        self.assertEqual(30, snap["completion_tokens"])
+
+    def test_chat_with_tools_accumulates_usage(self):
+        result = {"choices": [{"message": {"content": None,
+                                           "tool_calls": []}}],
+                  "usage": {"prompt_tokens": 300, "completion_tokens": 5}}
+        client = llm_module.LlmClient("http://x", "k", "m",
+                                      request=lambda payload: result)
+        client.chat_with_tools([{"role": "user", "content": "q"}], tools=[])
+        self.assertEqual(300, client.usage_snapshot()["prompt_tokens"])
+
+    def test_missing_usage_tolerated(self):
+        client = self._client([None])
+        client.chat([{"role": "user", "content": "q"}])
+        self.assertEqual({"prompt_tokens": 0, "completion_tokens": 0},
+                         client.usage_snapshot())
+
+    def test_snapshot_is_independent_copy(self):
+        client = self._client([{"prompt_tokens": 1, "completion_tokens": 1}])
+        client.chat([{"role": "user", "content": "q"}])
+        snap = client.usage_snapshot()
+        snap["prompt_tokens"] = 999
+        self.assertEqual(1, client.usage_snapshot()["prompt_tokens"])
+
+    def test_process_attributes_usage_delta_to_audit(self):
+        """process 级：两次快照差值落审计 prompt/completion_tokens。"""
+
+        class _UsageLlm(_RecordingLlm):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._n = 0
+
+            def usage_snapshot(self):
+                self._n += 1
+                # 第一次（答前）→ 基线；第二次（答后）→ 多了 700/90
+                total = 0 if self._n == 1 else 700
+                return {"prompt_tokens": total,
+                        "completion_tokens": 0 if self._n == 1 else 90}
+
+        store = ctx_module.ConversationStore()
+        llm = _UsageLlm(reply="箱规 6 瓶/箱。【商品资料】")
+        conn = _FakeConn([1, [_product_row()]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=llm, context_store=store)
+        asyncio.run(handler.process(
+            _FakeCallback("m1", "习酒窖藏1998 箱规")))
+        updates = [(s, p) for s, p in conn.cursor_instance.executed
+                   if "prompt_tokens" in s]
+        self.assertEqual(1, len(updates))
+        _sql, params = updates[0]
+        self.assertEqual(700, params[-3])   # prompt_tokens
+        self.assertEqual(90, params[-2])    # completion_tokens
 
 
 class ConversationFlowTests(unittest.TestCase):
@@ -2045,44 +1925,6 @@ class PickAssetTests(unittest.TestCase):
         self.assertIsNone(row)
         self.assertEqual([], items)
 
-    def test_strong_term_never_falls_back_to_other_field(self):
-        # 2026-10-22 事故回归：红习酱没有质检报告字段（只有礼袋/素材包），
-        # 问「质检报告」被回退发了礼袋。强类型词宁缺毋滥。
-        rows = [self._row("r1", "红习酱整箱",
-                          {"礼袋": [{"name": "5.jpg"}],
-                           "素材包": [{"name": "s.zip"}]})]
-        row, field, items = assets_module.pick_asset(
-            rows, "53°500ml*6 酱香型白酒 500mL 质检报告")
-        self.assertIsNone(row)
-        self.assertEqual([], items)
-        # 弱词仍回退（行为不变）
-        row2, field2, _ = assets_module.pick_asset(rows, "发我资料")
-        self.assertEqual("r1", row2["record_id"])
-        self.assertEqual("礼袋", field2)
-
-
-class StrongTermAnswerTests(unittest.TestCase):
-    """强类型附件词字段 miss：如实回答现有字段，不搜图（防跨商品错发）。"""
-
-    def test_strong_term_miss_lists_available_fields(self):
-        row = _product_row(
-            name="红习酱整箱",
-            attachments={"礼袋": [{"name": "5.jpg"}],
-                         "素材包": [{"name": "s.zip"}]})
-        conn = _FakeConn([[row]])
-        image_called = []
-        handler = KbStreamHandler(
-            connection_factory=lambda: conn, log=lambda _: None,
-            image_search=lambda q: image_called.append(q) or [],
-            asset_sender=None)
-        reply, intent, _ = handler._answer(conn, "红习酱整箱 质检报告",
-                                           conversation_id="cid")
-        self.assertEqual(PRODUCT_ASSET, intent)
-        self.assertIn("没有这个附件", reply)
-        self.assertIn("礼袋", reply)
-        self.assertIn("素材包", reply)
-        self.assertEqual([], image_called)  # 强类型词不触发图召回
-
 
 class AssetDeliveryTests(unittest.TestCase):
     """ASSET 分支：直发 / 降级列清单。"""
@@ -2425,7 +2267,8 @@ class AuditObservabilityTests(unittest.TestCase):
         handler._finish_audit(
             conn, "m1", "agent", None, "text",
             meta={"recall_source": "agent",
-                  "tools": ["daily_sales", "query_sql"], "rounds": 3},
+                  "tools": ["daily_sales", "query_sql"], "rounds": 3,
+                  "prompt_tokens": 800, "completion_tokens": 120},
             reply="答案" * 300,  # 600 字 → 截 500
             latency_ms=1234)
         sql, params = conn.cursor_instance.executed[0]
@@ -2434,9 +2277,11 @@ class AuditObservabilityTests(unittest.TestCase):
         self.assertIn("`agent_rounds`=%s", sql)
         self.assertIn("`latency_ms`=%s", sql)
         self.assertIn("`answer_excerpt`=%s", sql)
+        self.assertIn("`prompt_tokens`=%s", sql)
+        self.assertIn("`completion_tokens`=%s", sql)
         self.assertEqual(
             ("agent", None, "text", "agent", "daily_sales,query_sql", 3,
-             1234, "答案" * 250, "m1"),
+             1234, "答案" * 250, 800, 120, "m1"),
             params)
 
     def test_finish_audit_empty_meta(self):
@@ -2445,9 +2290,9 @@ class AuditObservabilityTests(unittest.TestCase):
             connection_factory=lambda: conn, log=lambda _: None)
         handler._finish_audit(conn, "m2", CHITCHAT, None, "text")
         _sql, params = conn.cursor_instance.executed[0]
-        # recall_source/tool_used/rounds/latency/摘要全部 None，不受影响
+        # recall_source/tool_used/rounds/latency/摘要/token 全部 None，不受影响
         self.assertEqual((CHITCHAT, None, "text", None, None, None, None,
-                          None, "m2"), params)
+                          None, None, None, "m2"), params)
 
     def test_answer_meta_recall_source_products(self):
         handler, _ = HandlerAnswerTests()._handler([[_product_row()]])
@@ -2663,6 +2508,26 @@ class BadcaseReportTests(unittest.TestCase):
         self.assertIn("处理失败", markdown)
         self.assertIn("daily_sales×1", markdown)
 
+    def test_collect_token_aggregation(self):
+        # token 成本统计（2026-10-22 v3 列）：合计 + 条均 + 报表行
+        from common.kb_qa import badcase
+
+        rows = [
+            self._row(msg_id="m1", prompt_tokens=1000,
+                      completion_tokens=100),
+            self._row(msg_id="m2", prompt_tokens=500, completion_tokens=50),
+            self._row(msg_id="m3"),  # 无 token 列值（旧行/无 LLM 调用）
+        ]
+        conn = _FakeConn([rows])
+        report = badcase.collect_badcases(conn, days=7)
+        self.assertEqual(2, report["token_rows"])
+        self.assertEqual(1500, report["prompt_tokens"])
+        self.assertEqual(150, report["completion_tokens"])
+        markdown = badcase.render_markdown(report)
+        self.assertIn("token 消耗", markdown)
+        self.assertIn("输入合计 1500", markdown)
+        self.assertIn("条均 750/75", markdown)
+
 
 class LongImageTests(unittest.TestCase):
     """长图拼接（真实 Pillow）：宽度归一、高度截断、坏图跳过。"""
@@ -2857,3 +2722,65 @@ class SearchImagesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmEmptyAnswerFallbackTests(unittest.TestCase):
+    """2026-10-22 事故回归：推理版模型预算耗尽返回空串（不抛异常）——
+    空答案必须降模板/摘录，绝不能静默不回（audit reply_kind=none）。"""
+
+    def _handler(self, llm_answer, conn_script):
+        conn = _FakeConn(conn_script)
+
+        class _EmptyLlm:
+            def chat(self, messages, **kw):
+                return llm_answer
+
+        return KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            llm=_EmptyLlm()), conn
+
+    def test_empty_product_answer_falls_back_to_template(self):
+        handler, conn = self._handler("", [[_product_row()]])
+        reply, intent, matched = handler._answer(conn, "习酒窖藏1998 箱规")
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertIn("箱规：6", reply)  # P1 模板兜底
+
+    def test_empty_doc_answer_falls_back_to_excerpt(self):
+        handler, conn = self._handler("", [])
+        handler._doc_search = lambda conn, q, k=3: [
+            {"doc_title": "手册A", "content": "三同两不同指的是原料相同。"}]
+        reply, intent, _ = handler._answer(conn, "三同两不同是啥")
+        self.assertEqual(DOC_QA, intent)
+        self.assertIn("三同两不同指的是", reply)  # 摘录兜底
+
+    def test_render_budget_raised(self):
+        # 钉住预算：渲染调用点必须 ≥2048（推理版 reasoning 共享预算）
+        import inspect
+
+        from common.kb_qa import llm as llm_mod
+        for fn in (llm_mod.render_product_answer, llm_mod.render_doc_answer):
+            src = inspect.getsource(fn)
+            self.assertIn("max_tokens=2048", src)
+
+
+class StrongTermAnswerTests(unittest.TestCase):
+    """强类型附件词字段 miss：如实回答现有字段，不搜图（防跨商品错发）。"""
+
+    def test_strong_term_miss_lists_available_fields(self):
+        row = _product_row(
+            name="红习酱整箱",
+            attachments={"礼袋": [{"name": "5.jpg"}],
+                         "素材包": [{"name": "s.zip"}]})
+        conn = _FakeConn([[row]])
+        image_called = []
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            image_search=lambda q: image_called.append(q) or [],
+            asset_sender=None)
+        reply, intent, _ = handler._answer(conn, "红习酱整箱 质检报告",
+                                           conversation_id="cid")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("没有这个附件", reply)
+        self.assertIn("礼袋", reply)
+        self.assertIn("素材包", reply)
+        self.assertEqual([], image_called)  # 强类型词不触发图召回

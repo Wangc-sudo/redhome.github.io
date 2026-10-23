@@ -16,6 +16,7 @@ None，handler 按「无 LLM」运行。
 
 import json
 import os
+import threading
 import urllib.request
 
 from common.kb_qa.context import format_history
@@ -33,6 +34,26 @@ class LlmClient:
         self._model = model
         self._timeout = timeout
         self._request = request or self._http_post
+        # token 成本统计（2026-10-22）：OpenAI 兼容响应的 usage 累计，
+        # 调用方用 usage_snapshot 前后差值归账到单条消息（遥测口径，
+        # 并发极端场景允许轻微串账，不作计费真源）。
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        self._usage_lock = threading.Lock()
+
+    def _accumulate_usage(self, result):
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            return
+        with self._usage_lock:
+            for field in ("prompt_tokens", "completion_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int):
+                    self._usage[field] += value
+
+    def usage_snapshot(self):
+        """累计 token 用量快照（dict 副本，两次快照差值=区间用量）。"""
+        with self._usage_lock:
+            return dict(self._usage)
 
     def _http_post(self, payload):
         request = urllib.request.Request(
@@ -56,6 +77,7 @@ class LlmClient:
         }
         try:
             result = self._request(payload)
+            self._accumulate_usage(result)
             return result["choices"][0]["message"]["content"].strip()
         except LlmError:
             raise
@@ -82,6 +104,7 @@ class LlmClient:
         }
         try:
             result = self._request(payload)
+            self._accumulate_usage(result)
             message = result["choices"][0]["message"]
         except LlmError:
             raise

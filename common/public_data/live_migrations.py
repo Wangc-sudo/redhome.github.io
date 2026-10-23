@@ -2,7 +2,11 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from common.kb_qa.schema import kb_audit_v2_ddl_statements, kb_ddl_statements
+from common.kb_qa.schema import (
+    kb_audit_v2_ddl_statements,
+    kb_audit_v3_ddl_statements,
+    kb_ddl_statements,
+)
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
 from common.public_data.data_fix import data_fix_ddl_statements
@@ -574,6 +578,13 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-audit-v2",
         "mart",
         kb_audit_v2_ddl_statements(),
+    ),
+    (
+        # token 成本统计（2026-10-22）：kb_qa_audit 加 prompt_tokens /
+        # completion_tokens（每条消息 LLM 用量合计，遥测口径）。
+        "mart-ops-kb-qa-audit-v3",
+        "mart",
+        kb_audit_v3_ddl_statements(),
     ),
     (
         # 工作日历 DB 裁决层（2026-10-10「后端给非技术同学用」）：
