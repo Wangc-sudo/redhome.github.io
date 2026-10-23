@@ -261,6 +261,9 @@ class ProductQueryTests(unittest.TestCase):
         clarify = render_clarify("习酒", rows)
         self.assertIn("1. 习酒窖藏1998", clarify)
         self.assertIn("2. 习酒窖藏1988", clarify)
+        # 2026-10-23 对话层优化：每行带编码（可直接回编码选中）
+        self.assertIn("（编码：SP001）", clarify)
+        self.assertIn("回序号或编码都可以", clarify)
         self.assertIn("换个说法", render_not_found("不存在"))
 
     def test_render_filter_truncation_hint(self):
@@ -2471,14 +2474,20 @@ class ClarifyPendingTests(unittest.TestCase):
     直接命中候选，不再被当成新商品名直查。"""
 
     CANDIDATES = [
-        {"record_id": "r1", "name": "53°500ml*6 习酒窖藏1998 新包装 2025款"},
-        {"record_id": "r2", "name": "53°500ml*6 习酒窖藏1998 雅致版"},
+        {"record_id": "r1", "code": "习酒483",
+         "name": "53°500ml*6 习酒窖藏1998 新包装 2025款"},
+        {"record_id": "r2", "code": "习酒484",
+         "name": "53°500ml*6 习酒窖藏1998 雅致版"},
     ]
 
     def test_parse_choice_ordinals(self):
         self.assertEqual("r1", _parse_choice("1", self.CANDIDATES)["record_id"])
         self.assertEqual("r2", _parse_choice("第2个", self.CANDIDATES)["record_id"])
         self.assertEqual("r1", _parse_choice("第一款", self.CANDIDATES)["record_id"])
+
+    def test_parse_choice_by_code(self):
+        # clarify 列表带编码，用户可直接回编码选中（大小写不敏感）
+        self.assertEqual("r2", _parse_choice("习酒484", self.CANDIDATES)["record_id"])
 
     def test_parse_choice_out_of_range_is_not_a_choice(self):
         self.assertIsNone(_parse_choice("9", self.CANDIDATES))

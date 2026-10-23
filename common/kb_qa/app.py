@@ -85,6 +85,12 @@ def _parse_choice(text, candidates):
     normalized = (text or "").strip()
     if not normalized or not candidates:
         return None
+    # 编码精确匹配（clarify 列表每行带编码，用户可直接回编码选中）。
+    lowered = normalized.lower()
+    for cand in candidates:
+        code = (cand.get("code") or "").lower()
+        if code and lowered == code:
+            return cand
     match = _CHOICE_RE.match(normalized)
     if match:
         token = match.group(1)
@@ -455,7 +461,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 if meta is not None:
                     meta["pending_candidates"] = [
                         {"record_id": row["record_id"],
-                         "name": row.get("name") or ""}
+                         "name": row.get("name") or "",
+                         "code": row.get("code") or ""}
                         for row in rows
                     ]
                 return render_clarify(intent.keyword, rows), intent.category, None
