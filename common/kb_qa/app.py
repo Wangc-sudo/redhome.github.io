@@ -812,6 +812,78 @@ def build_client(app_key, app_secret, handler, *, client_factory=None):
     return client
 
 
+def build_kb_handler(*, connection_factory, reply_client, robot_code,
+                     conversation_ids, log=print):
+    """KbStreamHandler 装配（2026-10-24 机器人合并抽取）。
+
+    从 main 抽出供两处复用：独立 kb-gateway 进程（回退路径）与
+    dingtalk-gateway 合并进程（RoutedStreamHandler 的 kb 侧）。
+    llm/向量/图召回/上下文/agent/附件直发全部按 env 装配，fail-open
+    降级语义与原 main 逐字一致——两份调用共享一份装配，杜绝漂移。
+    """
+    # P2：LLM 未配置（KB_LLM_* 缺失）或模型未开通时 from_environment 返回
+    # None，handler 按「无 LLM」降级 P1 模板运行，不影响 P1 既有能力。
+    llm = from_environment()
+    if llm is None:
+        log("kb qa: LLM not configured, running in P1 template mode")
+    # 向量召回（2026-10-20，rag 第三期接线）：RAG_EMBED_* 未配或 provider
+    # 不支持时 from_environment 返回 None，纯 BM25 运行；配好即生效。
+    from common.kb_qa import rag_docs
+
+    vector_search = rag_docs.from_environment()
+    if vector_search is None:
+        log("kb qa: vector recall not configured, running BM25 only")
+    # 文字搜图（2026-10-22）：kind=image 图召回，附件字段 miss 时兜底直发；
+    # 同一组 RAG_EMBED_* env，缺配返回 None 关闭。
+    image_search = rag_docs.image_search_from_environment()
+    if image_search is None:
+        log("kb qa: image recall not configured")
+    # 对话层（2026-10-21）：会话上下文（同人同群最近 6 轮 / TTL 10
+    # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
+    # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
+    # 重启不丢），否则进程内兜底；fail-open，Redis 不可达只当轮无历史。
+    from common.kb_qa.context import build_conversation_store
+
+    context_store = build_conversation_store()
+    log(f"kb qa: context backend = {type(context_store).__name__}")
+
+    # 工具调用 agent（2026-10-21）：规则 miss 的消息由 LLM 自主决定查
+    # 商品/查文档/查业务数据（agg_offline_daily / fact_channel_daily_sales
+    # 预定义只读查询，白名单参数）。LLM 未配置则不启用（规则兜底照旧）。
+    agent_runner = None
+    if llm is not None:
+        from common.kb_qa.agent import ToolExecutor, run_agent
+
+        def agent_runner(conn, text, history, meta=None):
+            executor = ToolExecutor(
+                conn, doc_search=search_docs, vector_search=vector_search)
+            return run_agent(llm, text, executor=executor, history=history,
+                             meta=meta)
+    else:
+        log("kb qa: agent disabled (no LLM)")
+
+    # 附件直发（2026-10-21）：AI 表签名 URL → 下载 → 钉钉媒体库 → 群
+    # 文件/图片消息；env 缺失则关闭（ASSET 分支降级列清单）。
+    from common.kb_qa import assets
+
+    asset_sender = assets.build_from_environment()
+    if asset_sender is None:
+        log("kb qa: asset delivery disabled (missing env)")
+
+    return KbStreamHandler(
+        connection_factory=connection_factory,
+        conversation_ids=conversation_ids,
+        reply_client=reply_client,
+        robot_code=robot_code,
+        llm=llm,
+        vector_search=vector_search,
+        context_store=context_store,
+        agent_runner=agent_runner,
+        asset_sender=asset_sender,
+        image_search=image_search,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="kb_qa.app")
     parser.add_argument("--live-send", action="store_true")
@@ -839,66 +911,11 @@ def main(argv=None):
     reply_client = DingTalkClient(
         app_key, app_secret, os.environ["KB_DINGTALK_OPERATOR_ID"]
     )
-    # P2：LLM 未配置（KB_LLM_* 缺失）或模型未开通时 from_environment 返回
-    # None，handler 按「无 LLM」降级 P1 模板运行，不影响 P1 既有能力。
-    llm = from_environment()
-    if llm is None:
-        print("kb qa: LLM not configured, running in P1 template mode")
-    # 向量召回（2026-10-20，rag 第三期接线）：RAG_EMBED_* 未配或 provider
-    # 不支持时 from_environment 返回 None，纯 BM25 运行；配好即生效。
-    from common.kb_qa import rag_docs
-
-    vector_search = rag_docs.from_environment()
-    if vector_search is None:
-        print("kb qa: vector recall not configured, running BM25 only")
-    # 文字搜图（2026-10-22）：kind=image 图召回，附件字段 miss 时兜底直发；
-    # 同一组 RAG_EMBED_* env，缺配返回 None 关闭。
-    image_search = rag_docs.image_search_from_environment()
-    if image_search is None:
-        print("kb qa: image recall not configured")
-    # 对话层（2026-10-21）：会话上下文（同人同群最近 6 轮 / TTL 10
-    # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
-    # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
-    # 重启不丢），否则进程内兜底；fail-open，Redis 不可达只当轮无历史。
-    from common.kb_qa.context import build_conversation_store
-
-    context_store = build_conversation_store()
-    print(f"kb qa: context backend = {type(context_store).__name__}")
-
-    # 工具调用 agent（2026-10-21）：规则 miss 的消息由 LLM 自主决定查
-    # 商品/查文档/查业务数据（agg_offline_daily / fact_channel_daily_sales
-    # 预定义只读查询，白名单参数）。LLM 未配置则不启用（规则兜底照旧）。
-    agent_runner = None
-    if llm is not None:
-        from common.kb_qa.agent import ToolExecutor, run_agent
-
-        def agent_runner(conn, text, history, meta=None):
-            executor = ToolExecutor(
-                conn, doc_search=search_docs, vector_search=vector_search)
-            return run_agent(llm, text, executor=executor, history=history,
-                             meta=meta)
-    else:
-        print("kb qa: agent disabled (no LLM)")
-
-    # 附件直发（2026-10-21）：AI 表签名 URL → 下载 → 钉钉媒体库 → 群
-    # 文件/图片消息；env 缺失则关闭（ASSET 分支降级列清单）。
-    from common.kb_qa import assets
-
-    asset_sender = assets.build_from_environment()
-    if asset_sender is None:
-        print("kb qa: asset delivery disabled (missing env)")
-
-    handler = KbStreamHandler(
+    handler = build_kb_handler(
         connection_factory=lambda: db.connect(settings.mart_database),
-        conversation_ids=allowlist,
         reply_client=reply_client,
         robot_code=app_key,
-        llm=llm,
-        vector_search=vector_search,
-        context_store=context_store,
-        agent_runner=agent_runner,
-        asset_sender=asset_sender,
-        image_search=image_search,
+        conversation_ids=allowlist,
     )
     client = build_stream_client(app_key, app_secret, handler)
     client.start_forever()

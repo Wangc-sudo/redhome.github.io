@@ -27,6 +27,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import threading
 import time
@@ -169,6 +170,55 @@ def build_stream_client(app_key, app_secret, handler, *, card_handler=None):
     return _build(app_key, app_secret, handler, card_handler=card_handler)
 
 
+def kb_qa_merge_enabled(environ=None):
+    """机器人合并开关（2026-10-24）：env GATEWAY_KB_QA_ENABLE=1 时本进程
+    并入小易问答（RoutedStreamHandler 按群分发），kb-gateway 容器下线。
+    缺省关闭=纯报数，行为与合并前逐字一致（回退=关开关+重启 kb-gateway）。"""
+    env = os.environ if environ is None else environ
+    return (env.get("GATEWAY_KB_QA_ENABLE") or "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def build_routed_stream_handler(*, report_handler, region_configs,
+                                credentials, connection_factory):
+    """合并模式装配：问答 handler + 群集合冲突断言 + 总路由 handler。
+
+    问答的回复 client 用 gateway 凭据（应用 B）构造——问答走
+    ``send_group_markdown`` 主动外发（刻意避开 sessionWebhook 的 errcode
+    静默坑），与 Stream 同应用后机器人身份一致。模块级以便测试 patch。
+    """
+    from common.dingtalk import DingTalkClient
+    from common.gateway.stream_router import (
+        RoutedStreamHandler,
+        assert_no_group_overlap,
+    )
+    from common.kb_qa.app import build_kb_handler, parse_conversation_allowlist
+
+    kb_ids = frozenset(
+        parse_conversation_allowlist(os.environ.get("KB_QA_CONVERSATION_IDS"))
+    )
+    # 启动断言：报数群 ∩ 问答群必须为空（同群两边登记=路由歧义，
+    # 启动失败优于运行期错路由）。
+    assert_no_group_overlap(region_configs, kb_ids)
+    creds = credentials["dingtalk"]
+    reply_client = DingTalkClient(
+        creds["app_key"], creds["app_secret"],
+        os.environ["KB_DINGTALK_OPERATOR_ID"],
+    )
+    kb_handler = build_kb_handler(
+        connection_factory=connection_factory,
+        reply_client=reply_client,
+        robot_code=creds["app_key"],
+        conversation_ids=kb_ids,
+    )
+    return RoutedStreamHandler(
+        report_handler=report_handler,
+        kb_handler=kb_handler,
+        region_configs=region_configs,
+        kb_conversation_ids=kb_ids,
+    )
+
+
 def build_card_callback_handler(*, region_configs, connection_factory):
     from common.gateway.card_menu import MenuCardCallbackHandler
     return MenuCardCallbackHandler(
@@ -244,6 +294,16 @@ def _handle_run(args):
                 region_configs=region_configs,
                 connection_factory=lambda: connect_mart(settings),
             )
+            if kb_qa_merge_enabled():
+                # 机器人合并（2026-10-24）：总路由按 conversation_id 分发
+                # 报数/问答；同群重叠在装配处断言拒绝启动。
+                handler = build_routed_stream_handler(
+                    report_handler=handler,
+                    region_configs=region_configs,
+                    credentials=credentials,
+                    connection_factory=lambda: connect_mart(settings),
+                )
+                print("gateway: kb qa merge enabled (routed stream)")
             client = build_stream_client(
                 credentials["dingtalk"]["app_key"],
                 credentials["dingtalk"]["app_secret"],
