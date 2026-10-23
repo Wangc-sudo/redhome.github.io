@@ -655,6 +655,23 @@ class MartExtractRepository:
             rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+    def read_org_dept_names(self):
+        """dept_id → dept_name 全量映射（跨全部历史快照）。
+
+        领导管的部门可能是「纯管理节点」（成员都挂子部门、无人直属），
+        只从最新快照的成员归属映射会漏名（实测 5 个部门 None）——历史
+        快照里有过归属的部门都有名字，全表扫一遍补齐。
+        """
+        sql = (
+            "SELECT `dept_id`, MAX(`dept_name`) AS `dept_name` "
+            "FROM `dingtalk_org_member` WHERE `dept_id` IS NOT NULL "
+            "GROUP BY `dept_id`"
+        )
+        with contextlib.closing(self._raw.cursor()) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return {str(row["dept_id"]): row["dept_name"] for row in rows}
+
     def replace_dim_dept_leaders(self, rows, *, sync_run_id, synced_at):
         """整体替换 ``dim_dept_leader``（领导关系随快照全量替换，卸任
         随之消失——与 dim_robot_member 的替换语义同理）。"""
@@ -1321,12 +1338,9 @@ class MartExtractService:
         if not rows:
             return None
 
-        # dept_id → dept_name 映射：同快照成员归属行覆盖所有有人的部门。
-        dept_names = {
-            str(row["dept_id"]): row["dept_name"]
-            for row in rows
-            if row.get("dept_id")
-        }
+        # dept_id → dept_name 映射：跨全部历史快照（纯管理节点也覆盖，
+        # 见 read_org_dept_names 注释）。
+        dept_names = self._repository.read_org_dept_names()
         leaders = {}
         for row in rows:
             try:
