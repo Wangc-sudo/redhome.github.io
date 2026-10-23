@@ -71,6 +71,7 @@ _ORDER_LINE_COLUMNS = (
     "trade_time",
     "trade_status",
     "buyer_id",
+    "buyer_nick",
     "spec_no",
     "goods_name",
     "brand_name",
@@ -299,6 +300,10 @@ def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
                 # 买家标识（WDT 交易级 customer_id，2026-10-12 实测确认）；
                 # 拼多多按隐私协议不返回 → NULL，查询层显式计数。
                 "buyer_id": _clean(payload.get("customer_id")) or None,
+                # 渠道抬头（2026-10-23）：B2B 渠道单的客户主体（丰享/朴朴/
+                # 天猫寄售…）在 buyer_nick；customer_name 只在 B2C 零售单填
+                # （JY202610222323 实锤）。B2C 单此列为空 → NULL。
+                "buyer_nick": _clean(payload.get("buyer_nick")) or None,
                 "spec_no": spec_no,
                 "goods_name": _clean(detail.get("goods_name")) or None,
                 "brand_name": brand_index.get(spec_no, _UNMATCHED_BRAND),
