@@ -547,7 +547,9 @@ class BiSeedFileTests(unittest.TestCase):
              # 绍兴线下销售BI看板（2026-10-10：8300/shaoxing.html 切 BI）
              "sx-offline-sales",
              # 渠道销售BI看板（2026-10-13：8300/qudao.html 切 BI）
-             "qd-channel-sales"},
+             "qd-channel-sales",
+             # 运营闭环看板（2026-10-24 用户裁决：填报/播报/新鲜度/异常）
+             "ops-health"},
             set(mapping),
         )
         configs = {
@@ -673,7 +675,8 @@ class BiSeedFileTests(unittest.TestCase):
         # 例外（常亮大屏 300s 自动刷新，config.py 下限 60 内）：
         # hz-offline-sales（2026-10-09 运维裁决）、offline-all-sales 与
         # sx-offline-sales（2026-10-10 同方案）、qd-channel-sales
-        # （2026-10-13 同方案）——全站唯四轮询页。
+        # （2026-10-13 同方案）、ops-health（2026-10-24 运营闭环——填报
+        # 完成率/播报触达的价值在当日，T+1 无意义）——全站唯五轮询页。
         for dashboard_id, config in configs.items():
             with self.subTest(dashboard=dashboard_id, field="refresh"):
                 expected = (
@@ -681,6 +684,7 @@ class BiSeedFileTests(unittest.TestCase):
                     if dashboard_id in (
                         "hz-offline-sales", "offline-all-sales",
                         "sx-offline-sales", "qd-channel-sales",
+                        "ops-health",
                     )
                     else 86400
                 )

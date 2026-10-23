@@ -615,3 +615,32 @@ l2-contract:
     - card: table_contract_writeoff
       title: "品牌×渠道核销进度"
       span: 12
+
+# 运营闭环看板（2026-10-24 用户裁决）：一屏回答「今天系统转没转起来」——
+# 填报完成率（dim x fact）、播报触达（robot_outbox）、数据新鲜度（各
+# fact 最新日期与入库时间）、异常出口（未投递/问答失败/管线失败）。
+# 无筛选参数：锚点=容器本地今日。锁 18080 办公网（内部运营面，不上 80）。
+ops-health:
+  title: "运营闭环"
+  icon: "/static/icons/people.svg"
+  group: "经营驾驶舱"
+  enabled: true
+  refresh_seconds: 300
+  nav_order: 9
+  cards:
+    - card: table_ops_intake_today
+      title: "今日填报完成率"
+      source: "机器人报数 · dim_robot_member x fact"
+      span: 6
+    - card: table_ops_broadcast_today
+      title: "今日播报触达"
+      source: "robot_outbox"
+      span: 6
+    - card: table_ops_freshness
+      title: "数据新鲜度"
+      source: "fact 表最新业务日期与入库时间"
+      span: 6
+    - card: table_ops_exceptions
+      title: "异常出口"
+      source: "robot_outbox / kb_qa_audit / pd_ops_run_history"
+      span: 6
