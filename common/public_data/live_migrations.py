@@ -24,6 +24,7 @@ from common.public_data.ops_credential import (
     ops_web_credential_ddl_statements,
 )
 from common.public_data.ops_token import ops_web_token_ddl_statements
+from common.public_data.phone_registry import phone_registry_ddl_statements
 from common.public_data.mart_extract_schema import (
     _AGG_OFFLINE_DAILY_DDL,
     _CHANNEL_SALES_ROBOT_INBOX_DDL,
@@ -363,6 +364,13 @@ def _build_mart_bi_authz_ddl() -> tuple[str, ...]:
 # （校验和红线）。
 def _build_mart_pipeline_ops_ddl() -> tuple[str, ...]:
     return pipeline_ops_ddl_statements()
+
+
+# 公司电信号码台账（2026-10-23）：dim_phone_number（号码 ↔ 持卡人）+
+# dim_phone_binding（号码 ↔ 平台账号）+ 审计。解决「店铺/平台账号收验证码
+# 找不到卡在谁手里」——原台账只有电信开户名，与实际持卡人不符。
+def _build_mart_phone_registry_ddl() -> tuple[str, ...]:
+    return phone_registry_ddl_statements()
 
 
 # 填报人名册（2026-10-06，运维裁决）：dim_report_roster + 变更审计。
@@ -724,6 +732,14 @@ _MIGRATIONS = (
         "mart-ops-token-v1",
         "mart",
         ops_web_token_ddl_statements(),
+    ),
+    (
+        # 公司电信号码台账（2026-10-23 用户裁决「直接入 DB」）：号码 ↔ 持卡人
+        # ↔ 平台账号三键映射，收验证码时一条 SQL 定位到人和设备。
+        # 台账不存任何密码（源 Excel 含明文口令，导入时已剔除）。
+        "mart-ops-phone-registry-v1",
+        "mart",
+        _build_mart_phone_registry_ddl(),
     ),
 )
 

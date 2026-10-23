@@ -80,6 +80,10 @@ _DDL_WHITELIST = frozenset(
         # dim_channel_map / dim_channel_map_audit；被 live_migrations 引用，
         # 渠道管线迁 WDT 第 2 步，2026-10-23）
         "common/public_data/channel_map.py",
+        # 电信号码台账 schema 定义模块（mart-ops-phone-registry-v1 的 DDL 源：
+        # dim_phone_number / dim_phone_binding / dim_phone_number_audit；
+        # 被 live_migrations 引用，同上引用关系）
+        "common/public_data/phone_registry.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关
