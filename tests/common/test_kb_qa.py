@@ -157,6 +157,11 @@ class RouterTests(unittest.TestCase):
     def test_keyword_strips_noise(self):
         self.assertEqual("摘要酒", extract_keyword("请问摘要酒的重量是多少呢？"))
 
+    def test_keyword_strips_colloquial_noise(self):
+        # 口语词剥离（2026-10-23 用户反馈「多个字就匹配不出」）
+        self.assertEqual("习酒窖藏1998", extract_keyword("帮我看下习酒窖藏1998那个"))
+        self.assertEqual("红习酱", extract_keyword("有没有红习酱"))
+
     def test_keyword_strips_brackets(self):
         # 2026-10-10 验收事故：用户按指引带直角引号发送，残留括号全 miss
         self.assertEqual(
@@ -205,6 +210,42 @@ class ProductQueryTests(unittest.TestCase):
         # 整词 3 次 + 分词两个各 3 次全 miss
         conn = _FakeConn([[], [], [], [], [], [], [], [], []])
         self.assertEqual([], find_products(conn, "不存在 的词"))
+
+    def test_fuzzy_fallback_fixes_typo(self):
+        # 错别字「1989」（2026-10-23 用户反馈）：前三段字符串包含全 miss，
+        # bigram 模糊段命中「…1998」（关键词覆盖率 5/6≈0.83）
+        name = "53°500ml*6 习酒窖藏1998 新包装 2025款"
+        conn = _FakeConn([
+            [], [], [],                         # 整词三段
+            [], [], [],                         # 单词回退三段（单 token）
+            [{"name": name}, {"name": "红习酱 500ml"}],   # fuzzy 全表名
+            [_product_row(name=name)],                    # fuzzy IN 查询
+        ])
+        rows = find_products(conn, "习酒窖藏1989")
+        self.assertEqual(1, len(rows))
+        self.assertIn("1998", rows[0]["name"])
+
+    def test_fuzzy_fallback_fixes_fragment_with_residue(self):
+        # 品名片段连写（品名有空格，LIKE 必 miss）：关键词 bigram 全部
+        # 落在品名里（覆盖率 1.0）→ 命中
+        name = "53°500ml*6 习酒窖藏1998 新包装 2025款"
+        conn = _FakeConn([
+            [], [], [],
+            [], [], [],
+            [{"name": name}],
+            [_product_row(name=name)],
+        ])
+        rows = find_products(conn, "习酒窖藏1998新包装")
+        self.assertEqual(1, len(rows))
+
+    def test_fuzzy_fallback_rejects_unrelated(self):
+        # 无关词零重合，不进结果、也不发第二次查询（宁缺毋滥）
+        conn = _FakeConn([
+            [], [], [],
+            [], [], [],
+            [{"name": "53°500ml*6 习酒窖藏1998 新包装 2025款"}],
+        ])
+        self.assertEqual([], find_products(conn, "矿泉水饮料"))
 
     def test_render_param_answer_skips_null_fields(self):
         text = render_param_answer(_product_row(gift_bag_spec=None))
@@ -847,9 +888,10 @@ class HandlerP2Tests(unittest.TestCase):
             '{"category": "PRODUCT_PARAM", "keyword": "习酒窖藏1998"}',
             "口语化答案",
         )
-        # 首次整词 3 段 + 分词 3 段全 miss → 二次解析换关键词 → 首段即命中
+        # 首次整词 3 段 + 分词 3 段 + fuzzy 段（SELECT name 空表）全 miss
+        # → 二次解析换关键词 → 首段即命中
         handler, _ = self._handler(
-            [[], [], [], [], [], [], [_product_row()]], llm=llm
+            [[], [], [], [], [], [], [], [_product_row()]], llm=llm
         )
         reply, _, matched = handler._answer(
             handler._connection_factory(), "习酒窖藏1998 箱规"

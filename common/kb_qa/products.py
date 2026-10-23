@@ -41,7 +41,10 @@ def find_products(conn, keyword, *, limit=_MAX_ROWS):
        新包装 2025款」整词带空格必 miss，单最长词「53°500ml*6」回退曾
        命中同规格的千峰翠韵张冠李戴；AND 组合下四个词同时约束直接唯一）；
     2. 单词回退——CJK 词优先于规格词（度数/容量型 token 判别力最低），
-       同组内长词优先，最多试 3 个。
+       同组内长词优先，最多试 3 个；
+    3. 字符 bigram 模糊兜底（2026-10-23 用户反馈「错别字/多几个字就
+       匹配不出」）——前三段全是字符串包含，错一个字必 miss；bigram
+       集合对单字替换天然鲁棒。
     """
     kw = (keyword or "").strip()
     if not kw:
@@ -60,7 +63,63 @@ def find_products(conn, keyword, *, limit=_MAX_ROWS):
         rows = _search(conn, token, limit)
         if rows:
             return _decode_json_fields(rows)
-    return []
+    return _decode_json_fields(_search_fuzzy(conn, kw, limit))
+
+
+#: 模糊兜底最低分（max(Dice, 关键词覆盖率)）。错别字案例实测 0.8+、
+#: 品名片段/带残留案例关键词覆盖率 ≈1.0，0.6 以下基本是无关词，宁缺毋滥。
+_FUZZY_MIN_SCORE = 0.6
+
+
+def _bigrams(text):
+    """字符 bigram 集合（模糊匹配用；单字退化为 {字} 防空集）。"""
+    text = "".join((text or "").split())
+    if len(text) < 2:
+        return {text} if text else set()
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _search_fuzzy(conn, kw, limit):
+    """字符 bigram 相似度兜底：对错别字与口语多字残留容错。
+
+    score = max(Dice, 关键词覆盖率)——Dice 治单字替换（两边长度相近时
+    重合度高）；关键词覆盖率（交集中 bigram 数 / 关键词 bigram 数）治
+    「关键词是品名片段或带少量残留」场景：关键词的 bigram 基本都能在
+    品名里找到 = 用户基本说对了名字。全表 825 行纯 Python 毫秒级。
+    """
+    kw_grams = _bigrams(kw)
+    if not kw_grams:
+        return []
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT `name` FROM `kb_products`")
+        names = [row["name"] for row in cursor.fetchall()]
+        scored = []
+        for name in names:
+            name_grams = _bigrams(name)
+            if not name_grams:
+                continue
+            overlap = len(kw_grams & name_grams)
+            if not overlap:
+                continue
+            dice = 2 * overlap / (len(kw_grams) + len(name_grams))
+            kw_coverage = overlap / len(kw_grams)
+            score = max(dice, kw_coverage)
+            if score >= _FUZZY_MIN_SCORE:
+                scored.append((score, name))
+        if not scored:
+            return []
+        scored.sort(reverse=True)
+        top_names = [name for _, name in scored[:limit]]
+        placeholders = ",".join(["%s"] * len(top_names))
+        cursor.execute(
+            f"SELECT * FROM `kb_products` WHERE `name` IN ({placeholders})",
+            tuple(top_names),
+        )
+        rows = {row["name"]: row for row in cursor.fetchall()}
+        return [rows[name] for name in top_names if name in rows]
+    finally:
+        cursor.close()
 
 
 def _token_rank(token):
