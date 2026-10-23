@@ -76,6 +76,10 @@ _DDL_WHITELIST = frozenset(
         # 舰队月检 schema 定义模块（mart-ops-fleet-audit-v1 的 DDL 源：
         # pd_ops_fleet_audit；被 live_migrations 引用，同上引用关系）
         "common/public_data/fleet_audit.py",
+        # 渠道映射 schema 定义模块（mart-ops-channel-map-v1 的 DDL 源：
+        # dim_channel_map / dim_channel_map_audit；被 live_migrations 引用，
+        # 渠道管线迁 WDT 第 2 步，2026-10-23）
+        "common/public_data/channel_map.py",
         # 独立运维脚本：wdt 商品目录一次性同步，自带 dim_product DDL
         "common/public_data/product_catalog.py",
         # 独立 SQLite 榜单服务，与 RDS 体系无关

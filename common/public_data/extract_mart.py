@@ -22,6 +22,7 @@ import logging
 import re
 import textwrap
 from dataclasses import dataclass, field
+from datetime import date
 
 from common.calendar_utils import month_days
 from common.public_data.dataset_filter import matches_any
@@ -57,6 +58,56 @@ def _normalize_region_keys(dataset, rows):
         if display in _REGION_KEY_BY_DISPLAY:
             row["region"] = _REGION_KEY_BY_DISPLAY[display]
     return rows
+
+
+def _coerce_date(value):
+    """业务日期列值 → ``date``；不可解析（None/空/异常形态）→ ``None``。"""
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _drop_placeholder_channel_rows(dataset, rows):
+    """丢弃渠道日销的「预置空行 / 未来日期行」（2026-10-23 运维裁决）。
+
+    渠道负责人在 AI 表把空行预置到月底作为填报台账（每天 21 行，
+    ``sales_amount`` 全 NULL，另有一行 0），同步批原样带入 raw，extract
+    又原样写进 ``fact_channel_daily_sales``。后果：``MAX(business_date)``
+    锚点被带偏到月底（10-31），智能体答「最新日期/昨天」时把未来日期当成
+    今天并给出「各渠道都没数据」的错误结论（PR #202 只在查询侧加
+    ``business_date <= CURDATE()`` 兜底，管道侧未根治）。
+
+    此处在**写入侧**根治：金额为空的行与未来日期行一律不进 fact。
+    真实填报的 0 元（有金额值）保留，历史行不受影响。存量未来行需一次性
+    清理（upsert 无删除路径，见运维脚本）。
+    """
+    if dataset.dataset != "channel_daily_sales":
+        return rows
+    today = date.today()
+    kept = []
+    dropped = 0
+    for row in rows:
+        amount = row.get("sales_amount")
+        if amount is None or (isinstance(amount, str) and not amount.strip()):
+            dropped += 1
+            continue
+        row_date = _coerce_date(row.get("business_date"))
+        if row_date is not None and row_date > today:
+            dropped += 1
+            continue
+        kept.append(row)
+    if dropped:
+        logger.info(
+            "dataset=%s 丢弃预置空行/未来日期行 %d 条（保留 %d 条）",
+            dataset.dataset, dropped, len(kept),
+        )
+    return kept
 
 
 def _parse_user_field(value):
@@ -1004,6 +1055,7 @@ class MartExtractService:
             rows = _normalize_region_keys(dataset, rows)
             rows = _resolve_other_member_rows(
                 dataset, rows, self._mart_connection)
+            rows = _drop_placeholder_channel_rows(dataset, rows)
             if dataset.dataset == "channel_daily_sales":
                 # 机器人填报归并（2026-10-09 裁决：AI 表为真源，robot 仅在
                 # AI 空/无行时兜底；复用 AI recordId 覆盖，fact 每业务键
