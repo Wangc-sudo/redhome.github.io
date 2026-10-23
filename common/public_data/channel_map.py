@@ -36,7 +36,6 @@ _CHANNEL_MAP_DDL = (
     "  `channel_key` VARCHAR(32) NOT NULL,\n"
     "  `channel_label` VARCHAR(64) NOT NULL,\n"
     "  `panel` VARCHAR(32) NOT NULL DEFAULT 'channel',\n"
-    "  `business_line` VARCHAR(32) NOT NULL DEFAULT 'online',\n"
     "  `match_type` VARCHAR(16) NOT NULL,\n"
     "  `match_mode` VARCHAR(8) NOT NULL DEFAULT 'exact',\n"
     "  `match_value` VARCHAR(255) NOT NULL,\n"
@@ -112,7 +111,10 @@ _SELECT_SQL = (
     "FROM `dim_channel_map` {where} ORDER BY `priority` ASC, `id` ASC"
 )
 
-#: 已建库补齐 business_line 列（v1 先建表后加列的存量库）。
+#: 已建库补齐 business_line 列（v1 先建表后加列的存量库）。**列只在此处加**——
+#: v1 的 CREATE TABLE 刻意不含该列：MySQL 无 ADD COLUMN IF NOT EXISTS，
+#: 两处都加会让迁移重放报 1060 Duplicate column（CI 集成测试每个用例类都
+#: 重建一次库并全量重放迁移，2026-10-23 实锤）。
 _CHANNEL_MAP_V2_DDL = (
     "ALTER TABLE `dim_channel_map` "
     "ADD COLUMN `business_line` VARCHAR(32) NOT NULL DEFAULT 'online' "
