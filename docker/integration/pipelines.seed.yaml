@@ -161,6 +161,17 @@ extract-channel:
   reads: [raw_dingtalk, mart_ops]
   depends_on: [sync-channel-sales]
   description: "渠道日销 T+1 提取（fact_channel_daily_sales + fact_channel_store_target，点名册依赖）"
+# 渠道日销·订单口径（2026-10-23 第 3 步）：不读 AI 表，直接把 fact_order_line
+# 按 dim_channel_map 聚合成 fact_channel_order_daily。与上面的人工填报口径
+# 双轨并存（对账期），退役人工口径是第 4 步、需运维裁决。
+# 时间放在 extract-mart（17:00）之后——fact_order_line 由它重建。
+channel-order-daily:
+  kind: apps
+  category: 加工
+  enabled: true
+  schedule: "0 19 * * *"
+  reads: [mart_ops]
+  description: "渠道日销·订单口径聚合（fact_order_line -> fact_channel_order_daily）"
 channel-missing-check:
   kind: business
   category: 催办
