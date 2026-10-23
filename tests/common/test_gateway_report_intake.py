@@ -43,7 +43,15 @@ class _Cursor:
             self._one = {"x": 1} if self._conn.admin else None
         elif "dim_report_target" in sql:
             # 区域个人月目标（v4 入库）：默认空 → 回退 Nacos monthlyTargets
-            self._rows = list(self._conn.db_target_rows)
+            rows = self._conn.db_target_rows
+            if params and rows and isinstance(rows[0], dict) \
+                    and "scope" in rows[0]:
+                # 带 scope 键的行按 (scope, person_name) 精确过滤，
+                # 模拟生产 SQL 的 WHERE —— 用于验证「按被代填人区域取目标」。
+                rows = [r for r in rows
+                        if r.get("scope") == params[0]
+                        and r.get("person_name") == params[1]]
+            self._rows = list(rows)
         elif "ORDER BY (`monthly_target` IS NULL)" in sql:
             # 当日已有行（业务键）查询
             self._rows = []
@@ -108,6 +116,16 @@ def _member(user_id="u1", name="张三", region="hangzhou", dept="杭中"):
         "user_id": user_id, "name": name, "region": region,
         "dept_id": "1049728636", "dept_name": dept,
     }
+
+
+def _oa_cfg():
+    """线下整体群（代填其他区域人的场合：群区域 ≠ 被代填人区域）。"""
+    return RegionConfig(
+        region="offline_all", display="线下整体",
+        table_url="https://example.com/all",
+        robot_code="rc", open_conversation_id="conv-oa",
+        aliases={}, cc_user_ids=(),
+    )
 
 
 class ParseAmountTests(unittest.TestCase):
@@ -917,9 +935,9 @@ class AuxCommandTests(unittest.TestCase):
         self.assertEqual(inserts[0][2], "老张")  # 经 aliases 映射表内用名
         self.assertEqual(inserts[0][4], date(2026, 9, 10))
         self.assertEqual(inserts[0][5], 12800)
-        self.assertIn("已代录", outcome.reply)
-        self.assertIn("王城", outcome.reply)
-        self.assertIn("张三丰", outcome.reply)
+        # 回执回显被代填人 + 代填人（2026-10-23 代填回执句式）
+        self.assertIn("已记录 张三丰 9月10日（周四）销量：12800", outcome.reply)
+        self.assertIn("由 王城 代填", outcome.reply)
 
     def test_backfill_defaults_to_today(self):
         conn = _Conn(
@@ -987,7 +1005,7 @@ class AuxCommandTests(unittest.TestCase):
             sender_uid="u1", now=_NOW,
         )
         self.assertTrue(outcome.overwritten)
-        self.assertIn("🔁 覆盖旧值 300", outcome.reply)
+        self.assertIn("🔁 已覆盖之前填报的 300", outcome.reply)
 
     def test_backfill_multi_metric_body(self):
         conn = _Conn(
@@ -1007,6 +1025,82 @@ class AuxCommandTests(unittest.TestCase):
         self.assertEqual(inserts[0][0],
                          "stream:vanke:u8:2026-09-11:零售")
         self.assertEqual(inserts[0][2], "莲荷里体验馆·零售")
+
+
+class ProxyFillTests(unittest.TestCase):
+    """群里代填（/补签）：目标快照与回执都归**被代填人**。
+
+    2026-10-23 用户裁决：其他区域（``other``）的填报方式 = 群里 @机器人
+    代填，回执须回显被代填人的完成情况（销量 + 本月累计/目标/完成率）。
+
+    修复前月目标按**报数群区域**查 ``dim_report_target``——其他区域人的
+    目标登记在 ``scope='other'``，在 offline_all 群查不到 → 快照 NULL →
+    回执无完成度，且「其他」桶月目标缺人。
+    """
+
+    @staticmethod
+    def _inserts(conn):
+        return [p for sql, p in conn.executed
+                if sql.lstrip().startswith("INSERT")]
+
+    @staticmethod
+    def _conn(db_targets=(), facts=()):
+        return _Conn(
+            members=[_member(user_id="u1", name="王城", region="hq",
+                             dept="总部"),
+                     _member(user_id="u9", name="余云涛", region="other",
+                             dept="省外销售部")],
+            admin=True, db_targets=list(db_targets), facts=list(facts),
+        )
+
+    def test_target_snapshot_uses_the_target_members_region(self):
+        conn = self._conn(db_targets=[
+            {"scope": "other", "person_name": "余云涛",
+             "monthly_target": 56.9},          # 万元 → 569000 元
+            {"scope": "offline_all", "person_name": "余云涛",
+             "monthly_target": 999},
+        ])
+        outcome = handle_report(
+            conn, region_cfg=_oa_cfg(), text="/补签 余云涛 20400",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][6], 569000)  # 被代填人区域的目标
+        self.assertEqual(inserts[0][7], "u1")    # filled_by 留痕
+
+    def test_reply_shows_the_target_members_progress(self):
+        conn = self._conn(facts=[{
+            "responsible_person": "余云涛", "department": "省外销售部",
+            "region": "other", "business_date": _DAY,
+            "sales_amount": 492288, "monthly_target": 569000,
+        }])
+        outcome = handle_report(
+            conn, region_cfg=_oa_cfg(), text="/补签 余云涛 20400",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        self.assertIn("已记录 余云涛 9月11日（周五）销量：20400", outcome.reply)
+        self.assertIn("📊 本月累计 492288 / 目标 569000，完成 86.5%",
+                      outcome.reply)
+        self.assertIn("由 王城 代填", outcome.reply)
+        self.assertTrue(outcome.reply.endswith("祝您下班愉快 🎉"))
+
+    def test_reply_without_target_has_no_progress_line(self):
+        # 无有效目标 → 不出完成度，但销量与代填留痕照常回显。
+        conn = self._conn(facts=[{
+            "responsible_person": "余云涛", "department": "省外销售部",
+            "region": "other", "business_date": _DAY,
+            "sales_amount": 492288, "monthly_target": None,
+        }])
+        outcome = handle_report(
+            conn, region_cfg=_oa_cfg(), text="/补签 余云涛 20400",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertIn("销量：20400", outcome.reply)
+        self.assertNotIn("📊", outcome.reply)
+        self.assertIn("由 王城 代填", outcome.reply)
 
 
 if __name__ == "__main__":
