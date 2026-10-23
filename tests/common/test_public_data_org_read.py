@@ -10,6 +10,7 @@ from common.public_data.org_read import (
     OrgReadError,
     OrgReadGateway,
     OrgSeedEntry,
+    collect_directory,
     collect_members,
     load_multi_org_seed,
     load_org_seed,
@@ -402,6 +403,34 @@ class CollectMembersTests(unittest.TestCase):
         gateway = _FakeGateway(users={1: []}, dept_names={1: "根部门"})
         with self.assertRaisesRegex(OrgReadError, "zero members"):
             collect_members(gateway, (("r", (1,)),))
+
+    def test_collect_directory_returns_dept_catalog(self):
+        """目录（2026-10-24）：遍历到的全部部门（含无人直属节点）。"""
+        gateway = _FakeGateway(
+            sub_depts={1: [(2, "子部门"), (3, "空部门")], 2: [], 3: []},
+            users={1: ["u1"], 2: ["u2"], 3: []},   # 部门 3 无人直属
+            dept_names={1: "根部门"},
+            details={
+                "u1": {"userid": "u1", "name": "张三"},
+                "u2": {"userid": "u2", "name": "李四"},
+            },
+        )
+        members, departments = collect_directory(gateway, (("r", (1,)),))
+        self.assertEqual(["u1", "u2"], [m.user_id for m in members])
+        catalog = {d.dept_id: d.name for d in departments}
+        self.assertEqual(
+            {1: "根部门", 2: "子部门", 3: "空部门"}, catalog)
+
+    def test_collect_members_compatible_wrapper(self):
+        """兼容包装：只取成员，目录忽略。"""
+        gateway = _FakeGateway(
+            sub_depts={1: []},
+            users={1: ["u1"]},
+            dept_names={1: "根部门"},
+            details={"u1": {"userid": "u1", "name": "张三"}},
+        )
+        records = collect_members(gateway, (("r", (1,)),))
+        self.assertEqual(1, len(records))
 
     def test_member_without_a_name_raises(self):
         gateway = _FakeGateway(

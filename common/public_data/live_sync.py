@@ -9,7 +9,7 @@ from common.public_data.dingtalk_read import DingTalkReadError
 from common.public_data.org_read import (
     OrgReadError,
     OrgSeedEntry,
-    collect_members,
+    collect_directory,
 )
 from common.public_data.transforms import apply_transform
 from common.public_data.wdt_read import PaginationLimitExceeded, WdtReadError
@@ -411,11 +411,16 @@ class LiveSyncService:
         with named_lock(conn, lock_name):
             members = []
             seen = {}
+            departments = {}
             for entry in self._org_seeds:
                 gateway = self._org_gateways.get(entry.credential)
                 if gateway is None:
                     raise LiveSyncError("org gateway is not configured")
-                for record in collect_members(gateway, entry.regions):
+                org_members, org_depts = collect_directory(
+                    gateway, entry.regions)
+                for dept in org_depts:
+                    departments.setdefault(dept.dept_id, dept)
+                for record in org_members:
                     if record.user_id in seen:
                         # 跨企业撞号会让后者静默覆盖前者，宁可显式失败。
                         raise LiveSyncError(
@@ -426,6 +431,13 @@ class LiveSyncService:
         with transaction(conn):
             self._org_repo.upsert_members(
                 tuple(members),
+                sync_run_id=run_id,
+                synced_at=self._now(),
+            )
+            # 部门目录（2026-10-24）：遍历树时天然产出，供领导投影映射
+            # 「纯管理节点」部门名；跨企业按 dept_id 去重（先到先得）。
+            self._org_repo.upsert_departments(
+                tuple(departments.values()),
                 sync_run_id=run_id,
                 synced_at=self._now(),
             )

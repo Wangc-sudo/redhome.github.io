@@ -201,6 +201,30 @@ class OrgRawRepository:
                     sync_run_id,
                 ))
 
+    def upsert_departments(self, departments, *, sync_run_id, synced_at):
+        """Upsert 部门目录（``dingtalk_org_dept``，PK dept_id）。
+
+        2026-10-24 新增：目录在 collect_directory 遍历树时天然产出，
+        供领导投影映射「纯管理节点」（无人直属部门）的名字。
+        """
+        sql = (
+            "INSERT INTO `dingtalk_org_dept` "
+            "(`dept_id`, `dept_name`, `synced_at`, `sync_run_id`) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE "
+            "`dept_name` = VALUES(`dept_name`), "
+            "`synced_at` = VALUES(`synced_at`), "
+            "`sync_run_id` = VALUES(`sync_run_id`)"
+        )
+        with contextlib.closing(self._connection.cursor()) as cursor:
+            cursor.executemany(
+                sql,
+                [
+                    (dept.dept_id, dept.name, synced_at, sync_run_id)
+                    for dept in departments
+                ],
+            )
+
     def summary_for_run(self, sync_run_id):
         """Row-level summary for *sync_run_id* (used by rebuild-projection)."""
         sql = (

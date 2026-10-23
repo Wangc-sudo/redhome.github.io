@@ -630,6 +630,39 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         self.assertIn("ORDER BY `synced_at` DESC LIMIT 1", sql)
         self.assertIn("`sync_run_id` = (", sql)
 
+    def test_dept_names_prefer_catalog_table(self):
+        # 目录表有行 → 用目录，不再查成员表（2026-10-24 部门目录采集）
+        repo = self._repo(
+            [{"dept_id": 1050135497, "dept_name": "线下运营中心"}])
+        names = repo.read_org_dept_names()
+        self.assertEqual({"1050135497": "线下运营中心"}, names)
+        executed = self.raw.cursor_instance.executed
+        self.assertEqual(1, len(executed))
+        self.assertIn("dingtalk_org_dept", executed[0][0])
+
+    def test_dept_names_fall_back_to_member_history_when_catalog_empty(self):
+        # 目录表空 → 回退成员历史映射
+        repo = self._repo([])
+        names = repo.read_org_dept_names()
+        self.assertEqual({}, names)
+        executed = self.raw.cursor_instance.executed
+        self.assertEqual(2, len(executed))
+        self.assertIn("dingtalk_org_member", executed[1][0])
+
+    def test_dept_names_fall_back_when_catalog_table_missing(self):
+        # 目录表不存在（迁移未跑）→ 回退成员历史映射，不阻断
+        class _BoomCursor(_RecordingCursor):
+            def execute(self, sql, params=None):
+                if "dingtalk_org_dept" in sql:
+                    raise RuntimeError("1146")
+                super().execute(sql, params)
+
+        raw = _FakeConnection()
+        raw.cursor_instance = _BoomCursor(
+            [{"dept_id": "9", "dept_name": "历史部"}])
+        repo = MartExtractRepository(raw, _FakeConnection())
+        self.assertEqual({"9": "历史部"}, repo.read_org_dept_names())
+
     def test_replace_dim_robot_member_deletes_then_inserts_active_rows(self):
         repo = self._repo()
         repo.replace_dim_robot_member(
