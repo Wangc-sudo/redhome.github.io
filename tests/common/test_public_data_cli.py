@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from common.public_data.cli import load_source_credentials, main
+from common.public_data.org_read import OrgSeedEntry
 
 
 class BuildExtractServiceTests(unittest.TestCase):
@@ -243,10 +244,12 @@ class LiveSyncOrgCliTests(unittest.TestCase):
              patch("common.public_data.cli.require_live_run"), \
              patch("common.public_data.cli.load_manifest") as load_manifest, \
              patch("common.public_data.cli.load_source_credentials"), \
-             patch("common.public_data.cli.load_org_seed") as load_org, \
+             patch("common.public_data.cli.load_multi_org_seed") as load_org, \
              patch("common.public_data.cli.build_service") as build_service:
             load_manifest.return_value.dingtalk_org = manifest_org
-            load_org.return_value = (("hangzhou", (1049728636,)),)
+            load_org.return_value = (OrgSeedEntry(
+                key="default", credential="dingtalk",
+                regions=(("hangzhou", (1049728636,)),)),)
             build_service.return_value.sync.return_value = {
                 "run_id": "r", "datasets": [],
             }
@@ -256,23 +259,24 @@ class LiveSyncOrgCliTests(unittest.TestCase):
             ])
         return load_org, build_service
 
-    def test_declared_and_seeded_passes_regions_to_the_service(self):
+    def test_declared_and_seeded_passes_seeds_to_the_service(self):
         load_org, build_service = self._run(
             settings=Mock(org_seed_path=Path("/app/org.seed.json")),
             manifest_org=Mock(),
         )
         load_org.assert_called_once_with(Path("/app/org.seed.json"))
-        self.assertEqual(
-            build_service.call_args.args[3], (("hangzhou", (1049728636,)),),
-        )
+        seeds = build_service.call_args.kwargs["org_seeds"]
+        self.assertEqual(len(seeds), 1)
+        self.assertEqual(seeds[0].key, "default")
+        self.assertEqual(seeds[0].credential, "dingtalk")
 
-    def test_declared_without_a_seed_passes_empty_regions(self):
+    def test_declared_without_a_seed_passes_empty_seeds(self):
         load_org, build_service = self._run(
             settings=Mock(org_seed_path=None),
             manifest_org=Mock(),
         )
         load_org.assert_not_called()
-        self.assertEqual(build_service.call_args.args[3], ())
+        self.assertEqual(build_service.call_args.kwargs["org_seeds"], ())
 
     def test_undeclared_org_never_reads_the_seed(self):
         load_org, build_service = self._run(
@@ -280,7 +284,7 @@ class LiveSyncOrgCliTests(unittest.TestCase):
             manifest_org=None,
         )
         load_org.assert_not_called()
-        self.assertEqual(build_service.call_args.args[3], ())
+        self.assertEqual(build_service.call_args.kwargs["org_seeds"], ())
 
 
 class PipelineGateCliTests(unittest.TestCase):

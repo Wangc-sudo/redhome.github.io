@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from common.public_data.dataset_filter import matches_any
 from common.public_data.db import named_lock, transaction
 from common.public_data.dingtalk_read import DingTalkReadError
-from common.public_data.org_read import OrgReadError, collect_members
+from common.public_data.org_read import (
+    OrgReadError,
+    OrgSeedEntry,
+    collect_members,
+)
 from common.public_data.transforms import apply_transform
 from common.public_data.wdt_read import PaginationLimitExceeded, WdtReadError
 
@@ -73,6 +77,8 @@ class LiveSyncService:
         org_gateway=None,
         org_repository=None,
         org_regions=(),
+        org_gateways=None,
+        org_seeds=(),
     ):
         self._dingtalk_gateway = dingtalk_gateway
         self._wdt_gateway = wdt_gateway
@@ -85,6 +91,20 @@ class LiveSyncService:
         self._org_gateway = org_gateway
         self._org_repo = org_repository
         self._org_regions = tuple(org_regions)
+        if org_seeds:
+            # 多企业：*(seed, gateway)* 由调用方按 credential 段装配好。
+            self._org_seeds = tuple(org_seeds)
+            self._org_gateways = dict(org_gateways or {})
+        else:
+            # 单企业旧签名：包装成一个默认企业，走同一条代码路径。
+            self._org_seeds = (
+                (OrgSeedEntry(key="default", credential="default",
+                              regions=tuple(org_regions)),)
+                if org_regions else ()
+            )
+            self._org_gateways = (
+                {"default": org_gateway} if org_gateway is not None else {}
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -374,20 +394,38 @@ class LiveSyncService:
     def _sync_org_dataset(self, org_dataset, run_id):
         # The manifest declared the directory sync, so a missing gateway or
         # seed is a misconfiguration — fail loudly, never silently skip.
-        if self._org_gateway is None:
+        if self._org_repo is None:
+            raise LiveSyncError("org repository is not configured")
+        if self._org_gateway is None and not self._org_gateways:
             raise LiveSyncError("org gateway is not configured")
-        if not self._org_regions:
+        if not self._org_seeds:
             raise LiveSyncError("org regions are not configured")
 
         conn = self._connections.dingtalk
+        # 一把锁覆盖所有企业：raw 以 user_id 为主键、多家企业合并落库，分锁
+        # 会让并发的两次 run 互相覆盖。同理多家企业必须在**同一个 run 内**
+        # 一次写完——投影「当前全集」按最新 run 的 sync_run_id 圈定，分多次
+        # run 会让前一家企业的人被误判为离职而消失。
         lock_name = f"public-data:dingtalk:{org_dataset.dataset}"
 
         with named_lock(conn, lock_name):
-            members = collect_members(self._org_gateway, self._org_regions)
+            members = []
+            seen = {}
+            for entry in self._org_seeds:
+                gateway = self._org_gateways.get(entry.credential)
+                if gateway is None:
+                    raise LiveSyncError("org gateway is not configured")
+                for record in collect_members(gateway, entry.regions):
+                    if record.user_id in seen:
+                        # 跨企业撞号会让后者静默覆盖前者，宁可显式失败。
+                        raise LiveSyncError(
+                            "org member id collides across orgs")
+                    seen[record.user_id] = entry.key
+                    members.append(record)
 
         with transaction(conn):
             self._org_repo.upsert_members(
-                members,
+                tuple(members),
                 sync_run_id=run_id,
                 synced_at=self._now(),
             )

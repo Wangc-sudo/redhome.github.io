@@ -50,6 +50,21 @@ class OrgMemberRecord:
     payload: dict
 
 
+@dataclass(frozen=True)
+class OrgSeedEntry:
+    """一个钉钉企业的采集声明。
+
+    钉钉的**一个企业内部应用只能访问本企业的通讯录**，跨企业拉不到人。所以
+    第二个企业（易元宏雷）必须配独立的一套 AppKey/AppSecret，``credential``
+    即 source-credentials JSON 里的 section 名；``key`` 标记这批成员来自哪个
+    企业，会写进 raw 行的 ``region``。
+    """
+
+    key: str
+    credential: str
+    regions: tuple[tuple[str, tuple[int, ...]], ...]
+
+
 class OrgReadGateway:
     """钉钉通讯录的只读 API 面。
 
@@ -219,31 +234,13 @@ class OrgReadGateway:
 # 区域 → 部门 种子（版本受控，非凭据；sync 与 extract 两线都可读）
 # ---------------------------------------------------------------------------
 
-def load_org_seed(path):
-    """解析版本受控的「区域 → 顶层部门 ID」种子。
+def _parse_regions(regions):
+    """把 ``{region: [dept_id, ...]}`` 解析为 ``((region, dept_ids), ...)``。
 
-    形态::
-
-        {"version": 1,
-         "regions": {"hangzhou": [1049728636], "shaoxing": [...], "other": [...]}}
-
-    返回 ``((region, (dept_id, ...)), ...)``，**保持文档顺序**——顺序即区域
-    优先级（见 :func:`collect_members`）。部门 ID 是递归展开的*起点*：子
-    部门自动纳入，新设部门不再需要手工补登记（spec §10 的父子混列隐患）。
+    **保持文档顺序**——顺序即区域优先级（见 :func:`collect_members`）。部门
+    ID 是递归展开的*起点*：子部门自动纳入，新设部门不再需要手工补登记
+    （spec §10 的父子混列隐患）。
     """
-    import json
-    from pathlib import Path
-
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise OrgReadError("org seed is not a readable JSON file") from exc
-    if not isinstance(raw, dict):
-        raise OrgReadError("org seed must be a JSON object")
-    if raw.get("version") != 1:
-        raise OrgReadError("org seed version must be 1")
-
-    regions = raw.get("regions")
     if not isinstance(regions, dict) or not regions:
         raise OrgReadError("org seed regions must be a non-empty object")
 
@@ -266,6 +263,80 @@ def load_org_seed(path):
             parsed.append(dept_id)
         result.append((region, tuple(parsed)))
     return tuple(result)
+
+
+def load_multi_org_seed(path):
+    """解析版本受控的「企业 → 区域 → 顶层部门 ID」种子。
+
+    v1（向后兼容，单企业）::
+
+        {"version": 1,
+         "regions": {"hangzhou": [1049728636], "shaoxing": [...], "other": [...]}}
+
+    视为一个 ``key="default"``、走 ``dingtalk`` 凭据段的组织。
+
+    v2（2026-10-23 新增，多企业）::
+
+        {"version": 2,
+         "orgs": [{"key": "xishuicun", "credential": "dingtalk",
+                   "regions": {"hq": [...], "shaoxing": [...]}},
+                  {"key": "eyl", "credential": "dingtalk_eyl",
+                   "regions": {"eyl": [1]}}]}
+
+    ``credential`` 是 source-credentials JSON 里的 section 名——**钉钉一个
+    企业内部应用只能访问本企业通讯录**，所以第二个企业必须配独立的一套
+    AppKey/AppSecret，不能用同一个应用跨企业拉人。
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OrgReadError("org seed is not a readable JSON file") from exc
+    if not isinstance(raw, dict):
+        raise OrgReadError("org seed must be a JSON object")
+
+    version = raw.get("version")
+    if version == 1:
+        return (OrgSeedEntry(key="default", credential="dingtalk",
+                             regions=_parse_regions(raw.get("regions"))),)
+    if version != 2:
+        raise OrgReadError("org seed version must be 1 or 2")
+
+    orgs = raw.get("orgs")
+    if not isinstance(orgs, list) or not orgs:
+        raise OrgReadError("org seed orgs must be a non-empty array")
+
+    result = []
+    seen_keys = set()
+    for item in orgs:
+        if not isinstance(item, Mapping):
+            raise OrgReadError("org seed orgs entries must be objects")
+        key = item.get("key")
+        credential = item.get("credential")
+        if not isinstance(key, str) or not key:
+            raise OrgReadError("org seed org key must be a non-empty string")
+        if not isinstance(credential, str) or not credential:
+            raise OrgReadError("org seed org credential must be a section name")
+        if key in seen_keys:
+            raise OrgReadError("org seed repeats org key")
+        seen_keys.add(key)
+        result.append(OrgSeedEntry(
+            key=key,
+            credential=credential,
+            regions=_parse_regions(item.get("regions")),
+        ))
+    return tuple(result)
+
+
+def load_org_seed(path):
+    """解析版本受控的「区域 → 顶层部门 ID」种子（单企业形态）。
+
+    返回 ``((region, (dept_id, ...)), ...)``，保持文档顺序。需要多企业时改
+    用 :func:`load_multi_org_seed`。
+    """
+    return load_multi_org_seed(path)[0].regions
 
 
 # ---------------------------------------------------------------------------

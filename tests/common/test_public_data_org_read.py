@@ -9,7 +9,9 @@ from pathlib import Path
 from common.public_data.org_read import (
     OrgReadError,
     OrgReadGateway,
+    OrgSeedEntry,
     collect_members,
+    load_multi_org_seed,
     load_org_seed,
 )
 
@@ -227,6 +229,77 @@ class LoadOrgSeedTests(unittest.TestCase):
     def test_rejects_malformed_json(self):
         with self.assertRaises(OrgReadError):
             load_org_seed(_seed_file(self, "{not json"))
+
+
+class LoadMultiOrgSeedTests(unittest.TestCase):
+    """多企业形态的种子解析（2026-10-23：接入易元宏雷）。"""
+
+    def test_parses_every_declared_enterprise(self):
+        path = _seed_file(self, {
+            "version": 2,
+            "orgs": [
+                {"key": "xishuicun", "credential": "dingtalk",
+                 "regions": {"hangzhou": [1], "shaoxing": [2]}},
+                {"key": "eyl", "credential": "dingtalk_eyl",
+                 "regions": {"eyl": [9]}},
+            ],
+        })
+        entries = load_multi_org_seed(path)
+        self.assertEqual([e.key for e in entries], ["xishuicun", "eyl"])
+        self.assertEqual([e.credential for e in entries],
+                         ["dingtalk", "dingtalk_eyl"])
+        self.assertEqual(entries[0].regions,
+                         (("hangzhou", (1,)), ("shaoxing", (2,))))
+        self.assertEqual(entries[1].regions, (("eyl", (9,)),))
+
+    def test_v1_seed_is_read_as_one_default_enterprise(self):
+        path = _seed_file(self, {
+            "version": 1,
+            "regions": {"hangzhou": [1], "other": [9]},
+        })
+        entries = load_multi_org_seed(path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].key, "default")
+        self.assertEqual(entries[0].credential, "dingtalk")
+        # 单企业形态下 load_org_seed 的返回必须保持不变。
+        self.assertEqual(load_org_seed(path),
+                         (("hangzhou", (1,)), ("other", (9,))))
+
+    def test_rejects_a_missing_orgs_array(self):
+        path = _seed_file(self, {"version": 2, "regions": {"a": [1]}})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
+
+    def test_rejects_an_empty_orgs_array(self):
+        path = _seed_file(self, {"version": 2, "orgs": []})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
+
+    def test_rejects_an_entry_without_a_key(self):
+        path = _seed_file(self, {"version": 2, "orgs": [
+            {"credential": "dingtalk", "regions": {"a": [1]}}]})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
+
+    def test_rejects_an_entry_without_a_credential(self):
+        path = _seed_file(self, {"version": 2, "orgs": [
+            {"key": "eyl", "regions": {"a": [1]}}]})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
+
+    def test_rejects_a_repeated_org_key(self):
+        path = _seed_file(self, {"version": 2, "orgs": [
+            {"key": "eyl", "credential": "dingtalk_eyl", "regions": {"a": [1]}},
+            {"key": "eyl", "credential": "dingtalk_eyl", "regions": {"b": [2]}}]})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
+
+    def test_rejects_a_bad_dept_id_inside_an_org(self):
+        path = _seed_file(self, {"version": 2, "orgs": [
+            {"key": "eyl", "credential": "dingtalk_eyl",
+             "regions": {"a": [0]}}]})
+        with self.assertRaises(OrgReadError):
+            load_multi_org_seed(path)
 
 
 # ---------------------------------------------------------------------------
