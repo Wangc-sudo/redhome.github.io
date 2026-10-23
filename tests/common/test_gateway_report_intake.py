@@ -3,6 +3,7 @@
 import unittest
 from datetime import date, datetime
 from decimal import Decimal
+from unittest import mock
 
 from common.gateway.report_intake import (
     STREAM_RUN_ID,
@@ -12,10 +13,12 @@ from common.gateway.report_intake import (
     build_not_member_reply,
     handle_report,
     parse_aux_command,
+    parse_proxy_text,
     parse_report_amount,
     parse_report_metrics,
     region_for_conversation,
 )
+from common.gateway import report_intake as ri
 from common.daily_robot.mart_tasks import MartTaskError
 from common.region_config import RegionConfig
 
@@ -41,6 +44,8 @@ class _Cursor:
         elif "bi_authz_grant" in sql:
             self._rows = []
             self._one = {"x": 1} if self._conn.admin else None
+        elif "dim_org_proxy_grant" in sql:
+            self._rows = list(self._conn.proxy_rows)
         elif "dim_report_target" in sql:
             # 区域个人月目标（v4 入库）：默认空 → 回退 Nacos monthlyTargets
             rows = self._conn.db_target_rows
@@ -85,12 +90,13 @@ class _Cursor:
 
 class _Conn:
     def __init__(self, *, workdays=_WORKDAYS, members=(), facts=(), existing=None,
-                 admin=False, db_targets=()):
+                 admin=False, db_targets=(), proxy_rows=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.member_rows = list(members)
         self.fact_rows = list(facts)
         self.existing_row = existing
         self.db_target_rows = list(db_targets)
+        self.proxy_rows = list(proxy_rows)
         self.executed = []
         self.commits = 0
         self.admin = admin
@@ -1101,6 +1107,125 @@ class ProxyFillTests(unittest.TestCase):
         self.assertIn("销量：20400", outcome.reply)
         self.assertNotIn("📊", outcome.reply)
         self.assertIn("由 王城 代填", outcome.reply)
+
+
+class NaturalProxyTests(unittest.TestCase):
+    """自然语言代填（2026-10-23 用户裁决）：群里直接写「姓名 金额」。
+
+    其他区域的填报方式就是代填，不必每次打 /补签 前缀。触发条件从严：
+    仅**有代填资格者**（bi_authz admin 或 dim_org_proxy_grant 授权）且
+    文本唯一命中在册成员姓名、且不是自己 —— 其余情形一律不干预，走原
+    自报/多板块路径（不误录、不改既有语义）。
+    """
+
+    @staticmethod
+    def _inserts(conn):
+        return [p for sql, p in conn.executed
+                if sql.lstrip().startswith("INSERT")]
+
+    def test_parse_proxy_text_hits_the_member(self):
+        self.assertEqual(
+            parse_proxy_text("余云涛 20400", ["余云涛", "李树军"], "王城"),
+            ("余云涛", "20400"),
+        )
+
+    def test_parse_proxy_text_ignores_self(self):
+        self.assertIsNone(parse_proxy_text("王城 20400", ["王城"], "王城"))
+
+    def test_parse_proxy_text_needs_a_body(self):
+        self.assertIsNone(parse_proxy_text("余云涛", ["余云涛"], "王城"))
+
+    def test_parse_proxy_text_is_none_on_ambiguity(self):
+        # 两个等长姓名同时命中 → 宁可走原路径，不猜
+        self.assertIsNone(
+            parse_proxy_text("余云涛 李树军 20400", ["余云涛", "李树军"], "王城")
+        )
+
+    def test_natural_proxy_records_for_the_target_member(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城", region="hq",
+                             dept="总部"),
+                     _member(user_id="u9", name="余云涛", region="other",
+                             dept="省外销售部")],
+            admin=True,
+            db_targets=[{"scope": "other", "person_name": "余云涛",
+                         "monthly_target": 56.9}],
+            facts=[{"responsible_person": "余云涛",
+                    "department": "省外销售部", "region": "other",
+                    "business_date": _DAY, "sales_amount": 492288,
+                    "monthly_target": 569000}],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_oa_cfg(), text="@日报小机器人 余云涛 20400",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][2], "余云涛")   # 署名=被代填人
+        self.assertEqual(inserts[0][4], _DAY)      # 日期=今天
+        self.assertEqual(inserts[0][5], 20400)
+        self.assertEqual(inserts[0][6], 569000)    # 目标取 other 作用域
+        self.assertEqual(inserts[0][7], "u1")      # filled_by=代填人
+        self.assertIn("已记录 余云涛 9月11日（周五）销量：20400", outcome.reply)
+        self.assertIn("📊 本月累计 492288 / 目标 569000，完成 86.5%",
+                      outcome.reply)
+        self.assertIn("由 王城 代填", outcome.reply)
+
+    def test_natural_proxy_supports_multi_metric_regions(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城", region="hq",
+                             dept="总部"),
+                     _member(user_id="u8", name="林燕山", region="vanke",
+                             dept="莲荷里体验馆"),
+                     _member(user_id="u2", name="徐春燕", region="vanke",
+                             dept="莲荷里体验馆")],
+            admin=True,
+        )
+        outcome = handle_report(
+            conn, region_cfg=_vanke_cfg(), text="林燕山 莲荷 零售 500",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][2], "莲荷里体验馆·零售")
+        self.assertEqual(inserts[0][7], "u1")
+        self.assertIn("由 王城 代填", outcome.reply)
+
+    def test_natural_proxy_ignored_without_proxy_capability(self):
+        # 无 admin、无代填授权：姓名+数字按原语义记为**自己**的报数。
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城", region="offline_all",
+                             dept="总部"),
+                     _member(user_id="u9", name="余云涛", region="other",
+                             dept="省外销售部")],
+        )
+        outcome = handle_report(
+            conn, region_cfg=_oa_cfg(), text="余云涛 20400",
+            sender_uid="u1", now=_NOW,
+        )
+        self.assertEqual(outcome.status, "recorded")
+        inserts = self._inserts(conn)
+        self.assertEqual(inserts[0][2], "王城")
+        self.assertIsNone(inserts[0][7])
+        self.assertNotIn("代填", outcome.reply)
+
+    def test_natural_proxy_unauthorized_target_is_rejected(self):
+        conn = _Conn(
+            members=[_member(user_id="u1", name="王城", region="offline_all",
+                             dept="总部"),
+                     _member(user_id="u9", name="余云涛", region="other",
+                             dept="省外销售部")],
+        )
+        with mock.patch.object(ri, "_proxy_regions", return_value=["other"]), \
+                mock.patch.object(ri, "is_proxy_for", return_value=False):
+            outcome = handle_report(
+                conn, region_cfg=_oa_cfg(), text="余云涛 20400",
+                sender_uid="u1", now=_NOW,
+            )
+        self.assertIn("未被授权代填", outcome.reply)
+        self.assertEqual(self._inserts(conn), [])  # 拒绝即不落库
 
 
 if __name__ == "__main__":

@@ -339,6 +339,37 @@ def build_proxy_recorded_reply(*, month, day, weekday, target_name, proxy_name,
     return "\n".join(lines)
 
 
+def parse_proxy_text(text, member_names, self_name=None):
+    """自然语言代填解析：「姓名 报数正文」→ ``(被代填人, 正文)``。
+
+    2026-10-23 用户裁决：其他区域（``other``）的填报方式就是群里代填，
+    不必每次打 ``/补签`` 前缀。从严判定，任一条件不满足即返回 ``None``
+    （调用方继续走自报/多板块解析，绝不静默改判）：
+
+    * 文本唯一命中在册成员姓名（多命中取最长，等长仍多个 → 放弃）；
+    * 命中的不是发送人自己（自报不走代填）；
+    * 姓名之后还有正文（光一个名字不是报数）。
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    # 去重：同一人可能同时出现在报数群区域与代填授权区域两份名单里，
+    # 不去重会被下面的「等长多命中」判成歧义而放弃。
+    pool = list(dict.fromkeys(n for n in member_names if n))
+    hits = [n for n in pool if n != self_name and n in stripped]
+    if not hits:
+        return None
+    longest = max(len(h) for h in hits)
+    top = [h for h in hits if len(h) == longest]
+    if len(top) != 1:
+        return None
+    target = top[0]
+    body = stripped.replace(target, " ", 1).strip()
+    if not body:
+        return None
+    return target, body
+
+
 # ---------------------------------------------------------------------------
 # 按群路由（spec §9：单连接、conversationId → region）
 # ---------------------------------------------------------------------------
@@ -671,12 +702,68 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
             "格式 9-20 / 9/20 / 9月20 / 0920。",
             region=region_cfg.region, name=name,
         )
-    target_name = match.group("name")
+    return _proxy_record(
+        connection, region_cfg=region_cfg, sender_uid=sender_uid, name=name,
+        now=now, business_date=business_date,
+        target_name=match.group("name"), body=match.group("body"),
+    )
+
+
+def _try_proxy_intent(connection, text, *, region_cfg, sender_uid, name,
+                      business_date, now):
+    """自然语言代填入口（2026-10-23）：「姓名 金额」——仅**有代填资格
+    者**命中他人姓名时介入。
+
+    * 无 admin、无代填授权 → ``None``：维持既有语义（记为发送人自己
+      的报数），不静默改判、不扩大权限面；
+    * 有资格但对目标人未授权 → 明确拒绝且不落库（防误录他人名下）；
+    * 正文无数字 → ``None``（非报数消息，走原格式提示）。
+    """
+    is_admin = _is_admin(connection, sender_uid)
+    proxy_regions = _proxy_regions(connection, sender_uid)
+    if not is_admin and not proxy_regions:
+        return None
+    search_regions = list(dict.fromkeys([region_cfg.region, *proxy_regions]))
+    members = _collect_members(connection, search_regions)
+    parsed = parse_proxy_text(text, [m["name"] for m in members], name)
+    if parsed is None:
+        return None
+    target_name, body = parsed
+    if parse_report_amount(body) is None:
+        return None
+    return _proxy_record(
+        connection, region_cfg=region_cfg, sender_uid=sender_uid, name=name,
+        now=now, business_date=business_date,
+        target_name=target_name, body=body,
+    )
+
+
+def _collect_members(connection, regions):
+    """多区域成员合并（按 user_id 去重，跨区域名单不重复计数）。"""
+    members = []
+    seen = set()
+    for region in regions:
+        for member in fetch_region_members(connection, region=region):
+            key = member.get("user_id") or member.get("name")
+            if key in seen:
+                continue
+            seen.add(key)
+            members.append(member)
+    return members
+
+
+def _proxy_record(connection, *, region_cfg, sender_uid, name, now,
+                  business_date, target_name, body):
+    """代填落库（/补签 与自然语言代填共用）：找人 → 授权 → 写入 → 回执。
+
+    署名为目标成员（业务键与本人自报一致，重报走覆盖）；``filled_by``
+    留代填人；月目标快照按**被代填人所属区域**取。
+    """
+    is_admin = _is_admin(connection, sender_uid)
+    proxy_regions = _proxy_regions(connection, sender_uid)
     # 找人：报数群区域 + 代填授权区域（跨区域，如 offline_all 群代填 other 的人）
     search_regions = list(dict.fromkeys([region_cfg.region, *proxy_regions]))
-    members = []
-    for _r in search_regions:
-        members.extend(fetch_region_members(connection, region=_r))
+    members = _collect_members(connection, search_regions)
     targets = [m for m in members if m["name"] == target_name]
     if len(targets) != 1:
         return IntakeOutcome(
@@ -700,7 +787,6 @@ def _aux_backfill(connection, match, *, region_cfg, sender_uid, name, now):
         connection, year=business_date.year, month=business_date.month
     )
     is_rest_day = business_date not in workdays
-    body = match.group("body")
     writes = []
     entries = parse_report_metrics(body)
     if entries is not None:
@@ -844,6 +930,15 @@ def handle_report(connection, *, region_cfg, text, sender_uid, now,
             business_date=business_date, workdays=workdays, now=now,
             all_region_cfgs=all_region_cfgs,
         )
+
+    # 自然语言代填（2026-10-23 用户裁决）：「姓名 金额」——其他区域就是
+    # 这么填的，无需 /补签 前缀。仅有代填资格者命中他人姓名时介入。
+    proxy_outcome = _try_proxy_intent(
+        connection, text, region_cfg=region_cfg, sender_uid=sender_uid,
+        name=name, business_date=business_date, now=now,
+    )
+    if proxy_outcome is not None:
+        return proxy_outcome
 
     # 多板块报数（vanke 模型：数据格 = 门店 × {零售,团购}，权限 = 部门归属）。
     entries = parse_report_metrics(text)
