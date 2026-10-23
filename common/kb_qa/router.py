@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """意图路由（P1 纯规则；客服场景问题高度集中，规则先覆盖约 80%）。
 
-分类优先级：PRODUCT_ASSET > PRODUCT_PARAM > PRODUCT_FILTER > DOC_QA > CHITCHAT。
+分类优先级：PRODUCT_ASSET > PRODUCT_PARAM > SALES_QUERY > PRODUCT_FILTER
+> DOC_QA > CHITCHAT。
 P2 接入 LLM 时本模块输出作为规则层，未命中再走 qwen/DeepSeek 分类兜底。
 
 2026-10-10 运维裁决「全数据非敏感」：无 BLOCKED 类别，无角色门禁。
@@ -16,6 +17,7 @@ _STRIP_CHARS_RE = re.compile(r"[「」【】《》〈〉\"'“”‘’()（）\
 PRODUCT_PARAM = "PRODUCT_PARAM"
 PRODUCT_FILTER = "PRODUCT_FILTER"
 PRODUCT_ASSET = "PRODUCT_ASSET"
+SALES_QUERY = "SALES_QUERY"
 DOC_QA = "DOC_QA"
 CHITCHAT = "CHITCHAT"
 
@@ -28,6 +30,15 @@ _ASSET_WORDS = (
 _PARAM_WORDS = (
     "箱规", "盒规", "尺寸", "重量", "材质", "69码", "条码",
     "规格", "编码", "礼袋", "多重", "多大", "几瓶装", "几件",
+)
+#: 业务数据问句（销售额/完成率/排名…）→ 直接进工具调用 agent。
+#: 不设此意图时这类问句会落到「疑似商品名直查」兜底——商品表必然全 miss，
+#: 白烧一次 LLM 改写 + 一次商品检索才轮到 agent（2026-10-23 实测「看下
+#: 拼多多昨天销售金额」链路），规则层先拦最省。
+_SALES_WORDS = (
+    "销售额", "销售金额", "销量", "卖了多少", "卖了", "出货", "出了多少",
+    "完成率", "达成率", "达成", "营业额", "流水", "排名", "排行",
+    "环比", "同比",
 )
 #: 按条件筛选商品列表。
 _FILTER_WORDS = ("有哪些", "哪些", "所有", "全部", "列表", "几款")
@@ -85,6 +96,9 @@ def classify(text):
     for word in _PARAM_WORDS:
         if word in normalized:
             return Intent(PRODUCT_PARAM, keyword, f"命中参数词「{word}」")
+    for word in _SALES_WORDS:
+        if word in normalized:
+            return Intent(SALES_QUERY, keyword, f"命中业务数据词「{word}」")
     for word in _FILTER_WORDS:
         if word in normalized:
             return Intent(PRODUCT_FILTER, keyword, f"命中筛选词「{word}」")
