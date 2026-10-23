@@ -29,6 +29,7 @@ from common.public_data.dataset_filter import matches_any
 from common.public_data.db import named_lock, transaction
 from common.public_data.mart_extract_schema import (
     DIM_CALENDAR,
+    DIM_DEPT_LEADER,
     DIM_ROBOT_MEMBER,
     EXTRACT_DATASETS,
 )
@@ -633,6 +634,48 @@ class MartExtractRepository:
             rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+    def read_org_leader_payloads(self):
+        """读最新快照的 (user_id, name, dept_id, dept_name, payload_json)。
+
+        与 read_org_members 同快照圈定；供领导关系投影解析
+        ``leader_in_dept``（嵌套数组在 Python 侧解析，比 SQL JSON 函数
+        展开直观）。raw 空返回 []。
+        """
+        sql = textwrap.dedent(
+            """\
+            SELECT `user_id`, `name`, `dept_id`, `dept_name`, `payload_json`
+            FROM `dingtalk_org_member`
+            WHERE `sync_run_id` = (
+              SELECT `sync_run_id` FROM `dingtalk_org_member`
+              ORDER BY `synced_at` DESC LIMIT 1
+            )"""
+        )
+        with contextlib.closing(self._raw.cursor()) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_dim_dept_leaders(self, rows, *, sync_run_id, synced_at):
+        """整体替换 ``dim_dept_leader``（领导关系随快照全量替换，卸任
+        随之消失——与 dim_robot_member 的替换语义同理）。"""
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(f"DELETE FROM `{DIM_DEPT_LEADER}`")
+            if rows:
+                cursor.executemany(
+                    f"INSERT INTO `{DIM_DEPT_LEADER}` "
+                    "(`dept_id`, `dept_name`, `user_id`, `name`, "
+                    "`synced_at`, `sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    [
+                        (
+                            row["dept_id"], row.get("dept_name"),
+                            row["user_id"], row["name"], synced_at,
+                            sync_run_id,
+                        )
+                        for row in rows
+                    ],
+                )
+
     def replace_dim_robot_member(self, rows, *, sync_run_id, synced_at):
         """用 *rows* **整体替换** ``dim_robot_member``。
 
@@ -1003,6 +1046,10 @@ class MartExtractService:
                 org_summary = self._extract_org_members(run_id, synced_at)
                 if org_summary is not None:
                     datasets_summary.append(org_summary)
+                leader_summary = self._extract_dept_leaders(
+                    run_id, synced_at)
+                if leader_summary is not None:
+                    datasets_summary.append(leader_summary)
 
             if run_ecom:
                 ecom_summary = self._extract_ecom_people(run_id, synced_at)
@@ -1256,6 +1303,75 @@ class MartExtractService:
                 record_ids=[row["user_id"] for row in rows],
                 records_read=len(rows),
                 records_written=0 if skipped else len(rows),
+                run_id=run_id,
+                skipped=skipped,
+                digest=digest,
+            )
+        except Exception as exc:
+            raise _ProjectionFailure() from exc
+
+    def _extract_dept_leaders(self, run_id, synced_at):
+        """把最新通讯录快照的领导关系投影为 ``dim_dept_leader``。
+
+        跟随 ``_extract_org_members`` 同一快照；raw 为空跳过（不清空，
+        语义同 org 维度）。领导跨部门任职是常态（一人可带多部门），
+        按 (dept_id, user_id) 展开成多行。
+        """
+        rows = self._repository.read_org_leader_payloads()
+        if not rows:
+            return None
+
+        # dept_id → dept_name 映射：同快照成员归属行覆盖所有有人的部门。
+        dept_names = {
+            str(row["dept_id"]): row["dept_name"]
+            for row in rows
+            if row.get("dept_id")
+        }
+        leaders = {}
+        for row in rows:
+            try:
+                payload = json.loads(row.get("payload_json") or "{}")
+            except (TypeError, ValueError):
+                continue
+            for entry in payload.get("leader_in_dept") or []:
+                if not entry.get("leader"):
+                    continue
+                dept_id = str(entry.get("dept_id") or "")
+                if not dept_id:
+                    continue
+                leaders[(dept_id, row["user_id"])] = {
+                    "dept_id": dept_id,
+                    "dept_name": dept_names.get(dept_id),
+                    "user_id": row["user_id"],
+                    "name": row["name"],
+                }
+        leader_rows = [leaders[key] for key in sorted(leaders)]
+
+        digest = self._content_digest(
+            "{}|{}".format(row["dept_id"], row["user_id"])
+            for row in leader_rows
+        )
+        skipped = (
+            self._incremental
+            and not self._full_rebuild
+            and self._repository.last_summary_digest(DIM_DEPT_LEADER) == digest
+        )
+        if skipped:
+            logger.info("dataset=%s 内容 digest 未变化，跳过写入", DIM_DEPT_LEADER)
+        else:
+            with transaction(self._mart_connection):
+                self._repository.replace_dim_dept_leaders(
+                    leader_rows, sync_run_id=run_id, synced_at=synced_at
+                )
+
+        try:
+            return self._save_summary(
+                dataset=DIM_DEPT_LEADER,
+                record_ids=[
+                    f"{row['dept_id']}:{row['user_id']}" for row in leader_rows
+                ],
+                records_read=len(leader_rows),
+                records_written=0 if skipped else len(leader_rows),
                 run_id=run_id,
                 skipped=skipped,
                 digest=digest,

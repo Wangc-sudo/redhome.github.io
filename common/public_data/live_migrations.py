@@ -44,6 +44,7 @@ from common.public_data.mart_extract_schema import (
     _FACT_ORDER_LINE_CHANNEL_DDL,
     _FACT_ORDER_LINE_DDL,
     channel_ops_ddl_statements,
+    dept_leader_ddl_statements,
     legacy_ddl_statements as extract_ddl,
     finance_ddl_statements,
     finance_expense_ddl_statements,
@@ -514,6 +515,8 @@ _MIGRATIONS = (
      order_line_buyer_nick_ddl_statements()),
     # 取消单表（2026-10-12 BI 阶段 2）：独立建表版本，勿并入已冻结版本。
     ("mart-extract-order-cancel-v1", "mart", order_cancel_ddl_statements()),
+    # 部门领导表（2026-10-24 组织采集补齐配套）：同上红线，独立版本。
+    ("mart-extract-dept-leader-v1", "mart", dept_leader_ddl_statements()),
     ("mart-extract-channel-ops-v1", "mart", channel_ops_ddl_statements()),
     (
         "mart-extract-daily-report-date-index-v1",
