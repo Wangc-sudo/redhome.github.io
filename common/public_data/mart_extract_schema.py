@@ -29,6 +29,10 @@ FACT_FIN_STORE_FUNDS = "fact_fin_store_funds"
 FACT_FIN_STORE_EXPENSE = "fact_fin_store_expense"
 DIM_CALENDAR = "dim_calendar"
 DIM_ROBOT_MEMBER = "dim_robot_member"
+# 部门领导关系（2026-10-24 用户裁决）：从通讯录快照 payload 的
+# leader_in_dept 投影「部门 × 领导」——领导跨部门任职是常态（实测谢坚钰
+# 带 5 个部门），一人一行的 dim_robot_member 答不了「这个部门谁负责」。
+DIM_DEPT_LEADER = "dim_dept_leader"
 
 
 @dataclass(frozen=True)
@@ -510,6 +514,23 @@ _DIM_ROBOT_MEMBER_DDL = (
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 )
 
+# 部门领导关系（2026-10-24）：dim_robot_member 一人一行答不了「这个部门
+# 谁负责」；本表从通讯录 payload 的 leader_in_dept 展开，随 org 提取同
+# 快照全量替换。
+_DIM_DEPT_LEADER_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_dept_leader` (\n"
+    "  `dept_id` VARCHAR(64) NOT NULL,\n"
+    "  `dept_name` VARCHAR(255) DEFAULT NULL,\n"
+    "  `user_id` VARCHAR(64) NOT NULL,\n"
+    "  `name` VARCHAR(128) NOT NULL,\n"
+    "  `synced_at` DATETIME(6) NOT NULL,\n"
+    "  `sync_run_id` CHAR(36) NOT NULL,\n"
+    "  PRIMARY KEY (`dept_id`, `user_id`),\n"
+    "  KEY `idx_leader_user` (`user_id`),\n"
+    "  KEY `idx_leader_name` (`name`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
 
 def legacy_ddl_statements() -> tuple:
     """返回提取层 DDL（按依赖顺序：先扩 ENUM，后建表）。"""
@@ -520,6 +541,12 @@ def legacy_ddl_statements() -> tuple:
         _DIM_CALENDAR_DDL,
         _DIM_ROBOT_MEMBER_DDL,
     )
+
+
+def dept_leader_ddl_statements() -> tuple:
+    """部门领导表 DDL——独立迁移版本（校验和红线：勿并入已冻结的
+    legacy 集合，否则已迁移库的 checksum 判定漂移）。"""
+    return (_DIM_DEPT_LEADER_DDL,)
 
 
 def finance_ddl_statements() -> tuple:

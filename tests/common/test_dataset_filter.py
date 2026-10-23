@@ -248,6 +248,7 @@ class ExtractDatasetFilterTests(unittest.TestCase):
             {"source_record_id": "r1", "region": "hangzhou"},
         ]
         self.repository.read_org_members.return_value = []
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()

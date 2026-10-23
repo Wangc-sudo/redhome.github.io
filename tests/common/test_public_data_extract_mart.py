@@ -1,5 +1,6 @@
 """Tests for the extraction layer (raw_dingtalk -> mart_ops)."""
 
+import json
 import unittest
 from datetime import date, datetime, timezone
 from unittest.mock import Mock, patch
@@ -448,6 +449,7 @@ class MartExtractServiceTests(unittest.TestCase):
         ]
         # 默认「从未同步过通讯录」：返回空列表，跳过 dim_robot_member 步骤。
         self.repository.read_org_members.return_value = list(org_rows)
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()
@@ -660,6 +662,7 @@ class EcomPeopleExtractTests(unittest.TestCase):
     def _service(self, detail_rows, target_rows):
         self.repository = Mock()
         self.repository.read_org_members.return_value = []
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = (
             list(detail_rows), list(target_rows),
         )
@@ -733,6 +736,9 @@ class OrgMemberExtractTests(unittest.TestCase):
     def _service(self, org_rows):
         self.repository = Mock()
         self.repository.read_org_members.return_value = list(org_rows)
+        # 领导投影（2026-10-24）：Mock 默认返回值是 truthy 的 Mock 会触发
+        # 领导提取——显式置空，保持既有用例只关注成员维度。
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.mart_repository = Mock()
         self.mart_connection = _FakeConnection()
@@ -762,6 +768,9 @@ class OrgMemberExtractTests(unittest.TestCase):
         rows = self.repository.upsert_dim_robot_member.call_args.args[0]
         self.assertEqual(rows[0]["region"], "hangzhou")
 
+        # 成员摘要（领导投影在本用例被置空跳过，save_dataset_summary
+        # 只被调一次）。
+        self.mart_repository.save_dataset_summary.assert_called_once()
         kwargs = self.mart_repository.save_dataset_summary.call_args.kwargs
         self.assertEqual(kwargs["source_name"], EXTRACT_SOURCE_NAME)
         self.assertEqual(kwargs["dataset_name"], "dim_robot_member")
@@ -972,6 +981,7 @@ class IncrementalExtractTests(unittest.TestCase):
         self.repository = Mock()
         self.repository.read_dataset.return_value = list(rows)
         self.repository.read_org_members.return_value = []
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_extract_started_at.return_value = since
         self.repository.last_summary_digest.return_value = previous_digest
@@ -1117,6 +1127,7 @@ class IncrementalCalendarTests(unittest.TestCase):
     def _service(self, *, previous_digest=None, full_rebuild=False):
         self.repository = Mock()
         self.repository.read_org_members.return_value = []
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = True
@@ -1189,6 +1200,8 @@ class IncrementalOrgMemberTests(unittest.TestCase):
     def _service(self, *, previous_digest=None):
         self.repository = Mock()
         self.repository.read_org_members.return_value = list(self._ROWS)
+        # 领导投影（2026-10-24）置空：本类只关注成员维度增量语义。
+        self.repository.read_org_leader_payloads.return_value = []
         self.repository.read_ecom_source.return_value = ([], [])
         self.repository.last_summary_digest.return_value = previous_digest
         self.repository.has_skipped_column.return_value = True
@@ -1230,6 +1243,114 @@ class IncrementalOrgMemberTests(unittest.TestCase):
 
         self.repository.upsert_dim_robot_member.assert_called_once()
         self.repository.replace_dim_robot_member.assert_not_called()
+
+
+class DeptLeaderExtractTests(unittest.TestCase):
+    """dim_dept_leader 投影（2026-10-24）：部门 × 领导关系。"""
+
+    def _service(self, leader_payloads, *, previous_digest=None):
+        self.repository = Mock()
+        self.repository.read_org_members.return_value = []
+        self.repository.read_org_leader_payloads.return_value = list(
+            leader_payloads)
+        self.repository.read_ecom_source.return_value = ([], [])
+        self.repository.last_summary_digest.return_value = previous_digest
+        self.repository.has_skipped_column.return_value = True
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=lambda: _RUN_ID,
+            datasets=(),
+            calendar_months=(),
+        )
+
+    @staticmethod
+    def _payload(user_id, name, dept_id, dept_name, leader_depts):
+        return {
+            "user_id": user_id,
+            "name": name,
+            "dept_id": dept_id,
+            "dept_name": dept_name,
+            "payload_json": json.dumps({
+                "leader_in_dept": [
+                    {"dept_id": d, "leader": True} for d in leader_depts
+                ] + [{"dept_id": "999", "leader": False}],  # 非领导不投影
+            }),
+        }
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_leaders_projected_multi_dept(self, _lock, _txn):
+        # 一人带两个部门 → 两行；部门名从同快照成员归属映射
+        # （线下运营中心的成员行提供 1050135497 的部门名）
+        service = self._service([
+            self._payload("u1", "谢坚钰", "1049919540", "总经办",
+                          ["1049919540", "1050135497"]),
+            self._payload("u2", "许辉", "1050193465", "电商组",
+                          ["1050193465"]),
+            {"user_id": "u3", "name": "普通成员", "dept_id": "1050135497",
+             "dept_name": "线下运营中心",
+             "payload_json": json.dumps({"leader_in_dept": []})},
+        ])
+        result = service.extract()
+
+        self.repository.replace_dim_dept_leaders.assert_called_once()
+        rows = self.repository.replace_dim_dept_leaders.call_args.args[0]
+        self.assertEqual(3, len(rows))
+        by_key = {(r["dept_id"], r["user_id"]): r for r in rows}
+        self.assertEqual(
+            "线下运营中心",
+            by_key[("1050135497", "u1")]["dept_name"])
+        self.assertEqual("总经办", by_key[("1049919540", "u1")]["dept_name"])
+        self.assertEqual("电商组", by_key[("1050193465", "u2")]["dept_name"])
+
+        summaries = [
+            call.kwargs["dataset_name"]
+            for call in self.mart_repository.save_dataset_summary.mock_calls
+            if "dataset_name" in call.kwargs
+        ]
+        self.assertIn("dim_dept_leader", summaries)
+        leader_summary = next(
+            d for d in result.datasets if d["dataset"] == "dim_dept_leader")
+        self.assertEqual(3, leader_summary["records_read"])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_empty_raw_skips_leaders_too(self, _lock, _txn):
+        service = self._service([])
+        service.extract()
+        self.repository.replace_dim_dept_leaders.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_no_leaders_writes_empty_and_summarises(self, _lock, _txn):
+        # 快照有人但无人是领导 → 表清空（卸任语义）+ 摘要照常
+        service = self._service([
+            {"user_id": "u1", "name": "张三", "dept_id": "1049919540",
+             "dept_name": "总经办",
+             "payload_json": json.dumps({"leader_in_dept": []})},
+        ])
+        result = service.extract()
+        self.repository.replace_dim_dept_leaders.assert_called_once()
+        rows = self.repository.replace_dim_dept_leaders.call_args.args[0]
+        self.assertEqual([], rows)
+        leader_summary = next(
+            d for d in result.datasets if d["dataset"] == "dim_dept_leader")
+        self.assertEqual(0, leader_summary["records_read"])
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_unchanged_leader_snapshot_skips_write(self, _lock, _txn):
+        payloads = [self._payload("u1", "谢坚钰", "1049919540", "总经办",
+                                  ["1049919540"])]
+        digest = MartExtractService._content_digest(["1049919540|u1"])
+        service = self._service(payloads, previous_digest=digest)
+        service.extract()
+        self.repository.replace_dim_dept_leaders.assert_not_called()
 
 
 if __name__ == "__main__":
