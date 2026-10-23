@@ -28,6 +28,9 @@ TITLE_CHARS = 18
 
 _KEY_INDEX = "kbqa:web:idx"
 _KEY_SESSION = "kbqa:web:sess"
+#: clarify 待选择候选键（2026-10-23 Web 侧接线）：与群内 kbqa:pending
+#: 同语义——消费即作废，TTL 随会话滑动。
+_KEY_PENDING = "kbqa:web:pending"
 
 
 class _MemoryKV:
@@ -108,6 +111,10 @@ class WebSessionStore:
     def _session_key(userid, sid):
         return f"{_KEY_SESSION}:{userid}:{sid}"
 
+    @staticmethod
+    def _pending_key(userid, sid):
+        return f"{_KEY_PENDING}:{userid}:{sid}"
+
     # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
@@ -183,6 +190,31 @@ class WebSessionStore:
         self._write_json(self._index_key(userid), remaining)
         try:
             self._kv().delete(self._session_key(userid, sid))
+            self._kv().delete(self._pending_key(userid, sid))
         except Exception:
             pass
         return True
+
+    # ------------------------------------------------------------------
+    # clarify 待选择候选（2026-10-23）
+    # ------------------------------------------------------------------
+    def set_pending(self, userid, sid, candidates):
+        """存 clarify 反问的候选列表（[{record_id,name,code}…]）。"""
+        self._write_json(self._pending_key(userid, sid), list(candidates))
+
+    def pop_pending(self, userid, sid):
+        """取出并作废候选（消费语义）；无/异常返回 None。
+
+        注意 default 用 [] 不用 None：_read_json 按 default 类型校验
+        载荷（防类型污染），None 的 NoneType 会让任何 list 载荷判型
+        失败恒返回 default。
+        """
+        key = self._pending_key(userid, sid)
+        value = self._read_json(key, [])
+        if not value:
+            return None
+        try:
+            self._kv().delete(key)
+        except Exception:
+            pass
+        return value
