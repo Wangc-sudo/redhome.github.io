@@ -19,15 +19,6 @@ from common.kb_qa.context import DEFAULT_MAX_TURNS
 #: 业务数据工具名（白名单外用户不可见）。
 _BUSINESS_TOOLS = frozenset(("daily_sales", "channel_sales", "query_sql"))
 
-#: 业务数据通道未开放（ACL 未授权）时的固定解释话术（2026-10-24 运维
-#: 定稿原文）。非白名单用户问业务数据（SALES_QUERY：订单/出库/退款/
-#: 库存/人员目标…）时在规则层短路——不放给 agent：它的业务工具已被
-#: 收窄，LLM 只能自由发挥，回答口径不受控。
-BUSINESS_CHANNEL_CLOSED_TEXT = (
-    "订单、出库、退款、库存、人员目标这类，本来可以走数据查询，"
-    "但目前这条通道还没开放，所以暂时查不了，得麻烦走原来的报表渠道。"
-)
-
 
 def web_history_from_messages(messages, *, max_turns=DEFAULT_MAX_TURNS):
     """Web 会话消息列表 → kb_qa 对话层 history 形态（最近 max_turns 轮）。
@@ -75,7 +66,11 @@ class KbWebService:
         from common.kb_qa.app import KbStreamHandler
 
         llm = self._llm
-        allow_business = bool(self._acl and self._acl.is_allowed(userid))
+        # 2026-10-24 用户裁决「解除业务限制，客服也能查销售量」：
+        # 业务数据工具不再按角色白名单收窄，Web 与群内同权。
+        # acl 模块留仓备用（未来如需再收紧，恢复本行判定即可）：
+        # allow_business = bool(self._acl and self._acl.is_allowed(userid))
+        allow_business = True
 
         def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
@@ -106,21 +101,6 @@ class KbWebService:
         started = self._now()
         meta = {}
         history = web_history_from_messages(history_messages)
-        # 业务数据通道按角色白名单开放（fail-closed：未配 acl 也拦）。
-        # 未授权 + 业务问句 → 固定话术短路，不建 handler、不碰 DB、
-        # 不烧 LLM。
-        from common.kb_qa.router import SALES_QUERY, classify
-
-        if not (self._acl and self._acl.is_allowed(userid)):
-            if classify(content).category == SALES_QUERY:
-                return {
-                    "reply": BUSINESS_CHANNEL_CLOSED_TEXT,
-                    "intent": SALES_QUERY,
-                    "meta": {"tools": [], "rounds": None,
-                             "latency_ms": int((self._now() - started) * 1000)},
-                    "attachments": [],
-                    "pending_candidates": None,
-                }
         handler = self._build_handler(userid)
         conn = self._connection_factory()
         try:
