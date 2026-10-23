@@ -329,33 +329,16 @@ class KbWebServiceTests(unittest.TestCase):
         self.assertIn("你要问的是哪一个", result["reply"])
         self.assertEqual(2, len(result["pending_candidates"]))
 
-    def test_business_query_closed_text_for_unauthorized(self):
-        """业务数据通道未开放话术（2026-10-24 运维定稿）：非白名单 +
-        业务问句 → 固定话术短路（不碰 DB、不调 agent）。"""
-        touched = []
-
-        class _GuardConn:
-            def cursor(self):
-                touched.append(1)
-                raise AssertionError("不应碰 DB")
-
-            def commit(self):
-                pass
-
-            def rollback(self):
-                pass
-
-            def close(self):
-                pass
-
+    def test_business_query_open_for_all(self):
+        """2026-10-24 用户裁决「解除业务限制」：无白名单也走 agent 链路
+        （无 LLM 时落 agent 不可用兜底，绝不是「通道未开放」话术）。"""
+        conn = _SvcConn([])
         service = svc_module.KbWebService(
-            connection_factory=lambda: _GuardConn(),
+            connection_factory=lambda: conn,
             acl=_AllowAcl(False), log=lambda _: None)
         result = service.answer("u1", "杭州昨天销售额", history_messages=[])
-        self.assertIn("还没开放", result["reply"])
-        self.assertIn("报表渠道", result["reply"])
         self.assertEqual("SALES_QUERY", result["intent"])
-        self.assertEqual([], touched)  # 未碰 DB
+        self.assertNotIn("还没开放", result["reply"])
 
     def test_business_query_not_blocked_for_authorized(self):
         """白名单用户不受阻（agent 链路灯照旧）。"""
