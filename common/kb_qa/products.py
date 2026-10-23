@@ -231,10 +231,18 @@ def render_filter_answer(rows, keyword):
 
 
 def render_clarify(keyword, rows):
-    """命中多款时反问确认，不猜。"""
+    """命中多款时反问确认，不猜。
+
+    每行带商品编码（2026-10-23 对话层优化）：同名款的差异藏在长名字的
+    括号里（版本/年份），纯名字列表用户还得逐行比对；编码是客服熟知的
+    短标识，也可以直接回编码选中（_parse_choice 认编码）。
+    """
     lines = [f"「{keyword}」匹配到 {len(rows)} 款，你要问的是哪一个？"]
     for index, row in enumerate(rows, 1):
-        lines.append(f"{index}. {row['name']}")
+        code = row.get("code")
+        suffix = f"（编码：{code}）" if code else ""
+        lines.append(f"{index}. {row['name']}{suffix}")
+    lines.append("回序号或编码都可以。")
     return "\n".join(lines)
 
 
