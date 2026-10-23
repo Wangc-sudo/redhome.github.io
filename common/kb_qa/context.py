@@ -59,6 +59,7 @@ class ConversationStore:
         self._ttl = ttl_seconds
         self._now = now
         self._turns = {}
+        self._pending = {}
 
     @staticmethod
     def key(conversation_id, sender_id):
@@ -85,9 +86,32 @@ class ConversationStore:
                                    subject))
         self._turns[key] = (turns, self._now())
 
+    # ---- clarify 待选择状态（2026-10-23 对话层闭环） ----------------------
+    # 多款同名反问「你要问哪一个」后，用户回「第一个」「2022那款」必须在
+    # 下一条消息里接得住——此前无 pending 状态，选择回复会被当成新商品名
+    # 直查（必然 miss）。pending 随 key 同人同群隔离，消费即作废（pop），
+    # 任一条新消息都会消费它：选中则闭环，说了别的则自然作废不污染后续。
+
+    def set_pending(self, key, candidates):
+        """存待选择候选列表（[{record_id, name}…]，TTL 跟随会话）。"""
+        self._pending[key] = (list(candidates), self._now())
+
+    def pop_pending(self, key):
+        """取出并作废待选择候选（消费语义）；无/过期返回 None。"""
+        entry = self._pending.pop(key, None)
+        if not entry:
+            return None
+        candidates, ts = entry
+        if self._now() - ts > self._ttl:
+            return None
+        return candidates
+
 
 #: Redis 键前缀（与 biweb:card 同风格，杜绝跨面混淆）。
 _KEY_PREFIX = "kbqa:ctx"
+#: clarify 待选择状态键前缀（消费即作废，GET+DEL 两步——GETDEL 需
+#: Redis 6.2+，两步非原子但对「同人同群短时选择」场景足够）。
+_PENDING_PREFIX = "kbqa:pending"
 
 #: 后端选择环境变量：KB_REDIS_URL 优先，其次复用 bi-web 的
 #: PUBLIC_DATA_REDIS_URL（同一 Redis 实例，kb-gateway 经 app.env 已注入）。
@@ -151,6 +175,35 @@ class RedisConversationStore:
             client.expire(key, self._ttl)
         except Exception:
             pass
+
+    @staticmethod
+    def _pending_key(key):
+        return _PENDING_PREFIX + key[len(_KEY_PREFIX):]
+
+    def set_pending(self, key, candidates):
+        """存待选择候选列表（JSON，EX 跟随会话 TTL）；异常静默。"""
+        try:
+            self._redis().setex(
+                self._pending_key(key), self._ttl,
+                json.dumps(list(candidates), ensure_ascii=False, default=str))
+        except Exception:
+            pass
+
+    def pop_pending(self, key):
+        """取出并作废待选择候选（消费语义）；无/异常返回 None。"""
+        try:
+            client = self._redis()
+            pending_key = self._pending_key(key)
+            raw = client.get(pending_key)
+            client.delete(pending_key)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
 
 
 def build_conversation_store(environ=None, *, max_turns=DEFAULT_MAX_TURNS,
