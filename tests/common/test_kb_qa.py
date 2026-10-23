@@ -23,6 +23,7 @@ from common.kb_qa import rag_docs, sync_wiki
 from common.kb_qa.app import (
     KbStreamHandler,
     _merge_doc_hits,
+    _parse_choice,
     callback_message_id,
     parse_conversation_allowlist,
 )
@@ -1320,11 +1321,12 @@ class ConversationStoreTests(unittest.TestCase):
 
 
 class _FakeRedis:
-    """redis.Redis 最小替身：list 语义 + expire 记录（2026-10-22）。"""
+    """redis.Redis 最小替身：list + string 语义 + expire 记录（2026-10-22）。"""
 
     def __init__(self):
         self.lists = {}
         self.expires = {}
+        self.values = {}
 
     def rpush(self, key, payload):
         self.lists.setdefault(key, []).append(payload)
@@ -1344,6 +1346,17 @@ class _FakeRedis:
         if end == -1:
             return list(items[start:])
         return list(items[start:end + 1])
+
+    def setex(self, key, ttl, payload):
+        self.values[key] = payload
+        self.expires[key] = ttl
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def delete(self, key):
+        self.values.pop(key, None)
+        self.lists.pop(key, None)
 
 
 class RedisConversationStoreTests(unittest.TestCase):
@@ -2451,6 +2464,118 @@ class AuditObservabilityTests(unittest.TestCase):
         meta = {}
         handler._answer(conn, "嗯", meta=meta)
         self.assertNotIn("recall_source", meta)
+
+
+class ClarifyPendingTests(unittest.TestCase):
+    """clarify 选择闭环（2026-10-23）：反问后用户回「第一个」「2022那款」
+    直接命中候选，不再被当成新商品名直查。"""
+
+    CANDIDATES = [
+        {"record_id": "r1", "name": "53°500ml*6 习酒窖藏1998 新包装 2025款"},
+        {"record_id": "r2", "name": "53°500ml*6 习酒窖藏1998 雅致版"},
+    ]
+
+    def test_parse_choice_ordinals(self):
+        self.assertEqual("r1", _parse_choice("1", self.CANDIDATES)["record_id"])
+        self.assertEqual("r2", _parse_choice("第2个", self.CANDIDATES)["record_id"])
+        self.assertEqual("r1", _parse_choice("第一款", self.CANDIDATES)["record_id"])
+
+    def test_parse_choice_out_of_range_is_not_a_choice(self):
+        self.assertIsNone(_parse_choice("9", self.CANDIDATES))
+
+    def test_parse_choice_fragment_unique_only(self):
+        self.assertEqual("r2", _parse_choice("雅致版", self.CANDIDATES)["record_id"])
+        self.assertEqual("r1", _parse_choice("2025那款", self.CANDIDATES)["record_id"])
+        # 片段多义（两个候选都含「习酒」）→ 不猜
+        self.assertIsNone(_parse_choice("习酒", self.CANDIDATES))
+
+    def test_parse_choice_rejects_normal_question(self):
+        self.assertIsNone(_parse_choice("箱规多少", self.CANDIDATES))
+
+    def test_answer_pending_ordinal_hits_candidate(self):
+        # pending + 「第一个」→ 直接按候选名精确命中渲染参数卡，零 LLM
+        conn = _FakeConn([
+            [],                                 # 编码/69码精确 miss
+            [_product_row(                       # 品名精确命中
+                record_id="r1",
+                name="53°500ml*6 习酒窖藏1998 新包装 2025款")],
+        ])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, matched = handler._answer(
+            conn, "第一个", pending=list(self.CANDIDATES))
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertEqual("r1", matched)
+        self.assertIn("习酒窖藏1998", reply)
+
+    def test_answer_pending_non_choice_falls_through(self):
+        # pending 在场但用户问了新问题 → 正常路由（pending 已作废语义）
+        conn = _FakeConn([[_product_row()]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        reply, intent, matched = handler._answer(
+            conn, "习酒窖藏1998 箱规", pending=list(self.CANDIDATES))
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertEqual("rec1", matched)
+        self.assertIn("箱规：6", reply)
+
+    def test_clarify_emits_pending_candidates(self):
+        conn = _FakeConn([[
+            _product_row(),
+            _product_row(record_id="r2", name="习酒窖藏1988"),
+        ]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None, llm=None)
+        meta = {}
+        reply, intent, matched = handler._answer(conn, "习酒窖藏", meta=meta)
+        self.assertIn("你要问的是哪一个", reply)
+        self.assertEqual(2, len(meta["pending_candidates"]))
+        self.assertEqual("rec1", meta["pending_candidates"][0]["record_id"])
+
+    def test_pending_store_in_process_backend(self):
+        store = ctx_module.ConversationStore()
+        key = store.key("cid1", "u1")
+        self.assertIsNone(store.pop_pending(key))
+        store.set_pending(key, self.CANDIDATES)
+        self.assertEqual(2, len(store.pop_pending(key)))
+        # 消费即作废
+        self.assertIsNone(store.pop_pending(key))
+
+    def test_pending_store_in_process_backend_expires(self):
+        clock = [1000.0]
+        store = ctx_module.ConversationStore(now=lambda: clock[0])
+        key = store.key("cid1", "u1")
+        store.set_pending(key, self.CANDIDATES)
+        clock[0] += 601
+        self.assertIsNone(store.pop_pending(key))
+
+    def test_pending_store_redis_backend(self):
+        client = _FakeRedis()
+        store = ctx_module.RedisConversationStore(client=client)
+        key = store.key("cid1", "u1")
+        store.set_pending(key, self.CANDIDATES)
+        pending_key = "kbqa:pending:cid1:u1"
+        self.assertIn(pending_key, client.values)
+        self.assertEqual(600, client.expires[pending_key])
+        popped = store.pop_pending(key)
+        self.assertEqual(2, len(popped))
+        self.assertNotIn(pending_key, client.values)
+
+    def test_pending_store_redis_failure_fails_open(self):
+        class _Broken:
+            def get(self, *a):
+                raise ConnectionError("down")
+
+            def delete(self, *a):
+                raise ConnectionError("down")
+
+            def setex(self, *a):
+                raise ConnectionError("down")
+
+        store = ctx_module.RedisConversationStore(client=_Broken())
+        key = store.key("cid1", "u1")
+        store.set_pending(key, self.CANDIDATES)   # 静默
+        self.assertIsNone(store.pop_pending(key))
 
     def test_process_failure_marks_failed_audit(self):
         import asyncio

@@ -20,6 +20,7 @@ P2 fail-open 铁律：LLM 未配置/不可达/超时/返回畸形时全部降级
 
 import argparse
 import os
+import re
 import time
 from datetime import datetime
 
@@ -46,6 +47,7 @@ from common.kb_qa.products import (
 from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
+    Intent,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
@@ -64,6 +66,41 @@ _DOC_FALLBACK = (
 _SALES_FALLBACK = (
     "业务数据查询暂时不可用，请稍后再试。商品参数、素材、手册问答不受影响。"
 )
+
+#: clarify 选择形态：序号词映射与正则（「1」「第2个」「第一款」「3.」）。
+_ORDINALS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8}
+_CHOICE_RE = re.compile(r"^第?([1-9一二两三四五六七八])[个款条号]?[。.!！]?$")
+#: 候选名片段的口语后缀（「2022那款」「雅致版这个」）。
+_CHOICE_SUFFIXES = ("那款", "这款", "那个", "这个", "那瓶", "这瓶")
+
+
+def _parse_choice(text, candidates):
+    """clarify 反问后的选择解析：序号或候选名片段 → 命中候选 dict。
+
+    非选择形态 / 序号越界 / 片段多义（命中多个候选）→ None（交给正常
+    路由，不猜）。「第一个」之类此前会被当成新商品名直查必 miss
+    （2026-10-23 云上验收撞见）。
+    """
+    normalized = (text or "").strip()
+    if not normalized or not candidates:
+        return None
+    match = _CHOICE_RE.match(normalized)
+    if match:
+        token = match.group(1)
+        index = int(token) if token.isdigit() else _ORDINALS[token]
+        if 1 <= index <= len(candidates):
+            return candidates[index - 1]
+        return None
+    frag = normalized
+    for suffix in _CHOICE_SUFFIXES:
+        if frag.endswith(suffix):
+            frag = frag[: -len(suffix)]
+    frag = frag.strip()
+    if len(frag) < 2:
+        return None
+    hits = [cand for cand in candidates if frag in (cand.get("name") or "")]
+    return hits[0] if len(hits) == 1 else None
 
 #: 素材分支 P1 形态：列出附件清单 + 指引；原生图片/文件直发待
 #: 媒体消息 msgKey 形态实证后替换（media.py 已备好下载/上传/缓存）。
@@ -211,6 +248,11 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
             meta = {}
+            # clarify 待选择闭环（2026-10-23）：上一条若是多款反问，先取出
+            # 候选（消费即作废），本轮是选择形态则 _answer 内直接命中。
+            pending = None
+            if ctx_key is not None:
+                pending = self._context_store.pop_pending(ctx_key)
             # token 成本统计（2026-10-22）：LLM 用量前后快照差值归账到
             # 本条消息（遥测口径）。_RecordingLlm 类替身无 usage_snapshot，
             # getattr 守卫。
@@ -218,7 +260,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             usage_before = usage_snap() if usage_snap else None
             reply, intent, matched = self._answer(
                 conn, text, history=history, conversation_id=conversation_id,
-                meta=meta)
+                meta=meta, pending=pending)
             if usage_before is not None:
                 usage_after = usage_snap()
                 meta["prompt_tokens"] = max(
@@ -239,6 +281,10 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     ctx_key, question=text, answer=reply,
                     category=intent, record_id=matched,
                     subject=meta.get("subject"))
+            # 本轮发出的是多款反问 → 存候选，等下一条选择消息闭环。
+            if ctx_key is not None and meta.get("pending_candidates"):
+                self._context_store.set_pending(
+                    ctx_key, meta["pending_candidates"])
             conn.commit()
         except Exception as exc:
             conn.rollback()
@@ -348,7 +394,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     # ------------------------------------------------------------------
 
     def _answer(self, conn, text, history=None, conversation_id=None,
-                meta=None):
+                meta=None, pending=None):
         """返回 (reply, intent, matched_record_id)。reply=None 表示静默。
 
         history（对话层）：同人同群最近几轮问答，透传给 LLM 二次解析与
@@ -356,9 +402,26 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         conversation_id：附件直发需要目标群；None 时 ASSET 分支只列清单。
         meta（反馈闭环埋点）：传入 dict 时回填 recall_source/tools/rounds，
         供审计落列；不传零副作用。
+        pending（对话层闭环）：上一轮 clarify 反问的候选列表（已被调用方
+        消费——本轮说了别的就自然作废）。选择形态命中时直接渲染参数卡，
+        不重新分类、不花 LLM。
         """
         if not text:
             return None, CHITCHAT, None
+        if pending:
+            choice = _parse_choice(text, pending)
+            if choice is not None:
+                rows = find_products(conn, choice["name"])
+                if rows:
+                    if meta is not None:
+                        meta["recall_source"] = "products"
+                        meta["subject"] = rows[0].get("name")
+                    reply = self._render_products(
+                        text, rows,
+                        Intent(PRODUCT_PARAM, choice["name"], "clarify 选择"),
+                        history)
+                    return reply, PRODUCT_PARAM, rows[0]["record_id"]
+            # 非选择形态/解析失败/候选已删：落正常路由（pending 已作废）。
         intent = classify(text)
         if intent.category == SALES_QUERY:
             # 业务数据问句（销售额/完成率/排名…）直接进工具调用 agent——
@@ -386,6 +449,15 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 return render_not_found(intent.keyword), intent.category, None
             if len(rows) > 1 and intent.category == PRODUCT_PARAM:
                 # 多款同名 → 规则反问确认（不猜，不受 LLM 影响）。
+                # 候选列表透出给调用方存 pending（2026-10-23 闭环）：用户
+                # 下一条回「第一个」「2022那款」可直接命中，不再被当成
+                # 新商品名直查。
+                if meta is not None:
+                    meta["pending_candidates"] = [
+                        {"record_id": row["record_id"],
+                         "name": row.get("name") or ""}
+                        for row in rows
+                    ]
                 return render_clarify(intent.keyword, rows), intent.category, None
             if meta is not None:
                 if "recall_source" not in meta:
