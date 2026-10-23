@@ -25,6 +25,7 @@ from common.public_data.extract_mart import (
 )
 from common.public_data.mart_extract_schema import (
     DIM_CALENDAR,
+    DIM_DEPT_LEADER,
     DIM_ROBOT_MEMBER,
     EXTRACT_DATASETS,
     dataset_by_name,
@@ -34,9 +35,11 @@ from common.public_data.mart_extract_schema import (
 _NOW = datetime(2026, 9, 16, 8, tzinfo=timezone.utc)
 _RUN_ID = "00000000-0000-0000-0000-0000000000e2"
 
-#: mart 侧允许被写语句触碰的表（注册目标表 + 提取层自有的两张维度表）。
+#: mart 侧允许被写语句触碰的表（注册目标表 + 提取层自有的维度表；
+#: dim_dept_leader 于 2026-10-24 随部门领导投影加入）。
 _MART_WRITABLE_TABLES = frozenset(
-    {d.target_table for d in EXTRACT_DATASETS} | {DIM_CALENDAR, DIM_ROBOT_MEMBER}
+    {d.target_table for d in EXTRACT_DATASETS}
+    | {DIM_CALENDAR, DIM_ROBOT_MEMBER, DIM_DEPT_LEADER}
 )
 
 def _statement_table(sql):
@@ -71,6 +74,11 @@ class _RawCursor:
         # 罐头应答无 source_record_id 的 KeyError；(b) replace_store_targets
         # 写未注册进 mart 白名单的 fact_channel_store_target。
         if "channel_daily_sales" in last or "channel_monthly_target" in last:
+            return []
+        # 部门目录表（2026-10-24）：本测试族不建模目录 → 空表触发
+        # read_org_dept_names 回退到成员归属映射（下一条查询命中
+        # dingtalk_org_member）。
+        if "dingtalk_org_dept" in last:
             return []
         if "dingtalk_org_member" in last:
             return list(self._org_rows)
