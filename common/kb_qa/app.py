@@ -108,6 +108,42 @@ def _parse_choice(text, candidates):
     hits = [cand for cand in candidates if frag in (cand.get("name") or "")]
     return hits[0] if len(hits) == 1 else None
 
+
+#: 负反馈修正（2026-10-23 对话层第 2 项）：「不是这个，是1988那款」
+#: 「不对，是第二个」。前缀词 + 「是X」新指定（X 可带那款/这款后缀）。
+_NEGATION_RE = re.compile(
+    r"^(?:不是|不对|错了|搞错了?|弄错了?)(?:这个|这款|这瓶|这一个|了|的)?"
+    r"[，,。.!！\s]*(?:是|要|想看|问)?(.+?)(?:那款|这款|那个|这个|那瓶|这瓶)?[。.!！]?$"
+)
+
+
+#: 语气词（「不是吧」「不是吗」是否认语气而非负反馈修正，不拦）。
+_NEGATION_FALSE_FRIENDS = {"不是吧", "不是吗", "不会吧", "不是吧你"}
+
+
+def _parse_correction(text):
+    """负反馈修正解析。三态：False=非负反馈；None=负反馈但无新指定；
+    str=新指定的关键词（「是1988那款」→「1988」）。
+
+    只在 history 非空时由调用方启用（修正必有上文；无上文的「不是…」
+    更可能是正常问句，不拦）。
+    """
+    normalized = (text or "").strip().rstrip("。.!！")
+    if normalized in _NEGATION_FALSE_FRIENDS:
+        return False
+    # 纯负反馈（无新指定）：整串只剩否定词与指示词
+    if normalized in ("不是", "不对", "错了", "搞错", "搞错了", "弄错",
+                      "弄错了", "不是这个", "不是这款", "不是那个", "不是那款"):
+        return None
+    match = _NEGATION_RE.match(normalized)
+    if not match:
+        return False
+    keyword = match.group(1).strip(" 的吗呢吧？?！!，,。.")
+    # 捕获组回溯吃到指示词（「不是这个」的「这个」）= 无新指定
+    if keyword in ("这个", "这款", "这瓶", "那个", "那款", "那瓶", "它"):
+        return None
+    return keyword if len(keyword) >= 2 else None
+
 #: 素材分支 P1 形态：列出附件清单 + 指引；原生图片/文件直发待
 #: 媒体消息 msgKey 形态实证后替换（media.py 已备好下载/上传/缓存）。
 _ASSET_PENDING = "文件直发功能接入中，请先到 AI 表「产品资料」对应行下载："
@@ -422,12 +458,50 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     if meta is not None:
                         meta["recall_source"] = "products"
                         meta["subject"] = rows[0].get("name")
+                        # 候选回填（2026-10-23 负反馈配套）：选中出卡后仍可
+                        # 改选——「不对，是第二个」下一轮经负反馈分支里的
+                        # pending 改选命中。
+                        meta["pending_candidates"] = pending
                     reply = self._render_products(
                         text, rows,
                         Intent(PRODUCT_PARAM, choice["name"], "clarify 选择"),
                         history)
                     return reply, PRODUCT_PARAM, rows[0]["record_id"]
-            # 非选择形态/解析失败/候选已删：落正常路由（pending 已作废）。
+            # 非选择形态/解析失败/候选已删：继续往下（pending 已作废语义——
+            # 但负反馈分支还会用到它做改选，故这里不 return）。
+        correction = _parse_correction(text)
+        if correction is not False and history:
+            # 负反馈修正（「不是这个，是1988那款」「不对，是第二个」）。
+            if correction:
+                # 先看是不是对刚才候选的改选（选择命中后候选被回填）。
+                if pending:
+                    re_choice = _parse_choice(correction, pending)
+                    if re_choice is not None:
+                        correction = re_choice["name"]
+                rows = find_products(conn, correction)
+                if rows:
+                    if len(rows) > 1:
+                        if meta is not None:
+                            meta["pending_candidates"] = [
+                                {"record_id": row["record_id"],
+                                 "name": row.get("name") or "",
+                                 "code": row.get("code") or ""}
+                                for row in rows
+                            ]
+                        return (render_clarify(correction, rows),
+                                PRODUCT_PARAM, None)
+                    if meta is not None:
+                        meta["recall_source"] = "products"
+                        meta["subject"] = rows[0].get("name")
+                    reply = self._render_products(
+                        text, rows,
+                        Intent(PRODUCT_PARAM, correction, "负反馈修正"),
+                        history)
+                    return reply, PRODUCT_PARAM, rows[0]["record_id"]
+                return (f"「{correction}」也没查到，发我完整品名或编码，"
+                        "我精确查一下。"), PRODUCT_PARAM, None
+            return ("好的，那你想问的是哪一款？发我品名或编码。"
+                    ), PRODUCT_PARAM, None
         intent = classify(text)
         if intent.category == SALES_QUERY:
             # 业务数据问句（销售额/完成率/排名…）直接进工具调用 agent——
