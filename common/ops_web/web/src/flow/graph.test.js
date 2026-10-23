@@ -102,26 +102,41 @@ describe('buildGraph', () => {
       rosterRows: [{ scope: 'hangzhou', enabled: 1, person_name: '张三' }],
       targets: { hangzhou: { 张三: 100 } },
     }));
-    const modules = g.taskNodes.map((n) => n.family).sort();
-    expect(modules).toEqual(['pages', 'robot', 'robot-check']);
+    // 播报收拢（2026-10-24 用户裁决）：robot/robot-check/pages 三家族
+    // 合并为一张「日报任务」主卡，子线在成员行各自开关。
+    const modules = g.taskNodes.map((n) => n.family);
+    expect(modules).toEqual(['daily-report']);
     expect(g.taskNodes.every((n) => n.regionKey === 'hangzhou')).toBe(true);
-    // 区域→模块 N:1 边（不含汇聚边与日历消费边）
+    // 主卡成员=三条子线全在
+    expect(g.taskNodes[0].services.map((s) => s.service_id).sort())
+      .toEqual(['pages-hangzhou', 'robot-check-hangzhou', 'robot-hangzhou']);
+    expect(g.taskNodes[0].label).toBe('日报任务');
+    // 区域→模块边收敛为一条（不含汇聚边与日历消费边）
     const familyEdges = g.edges.filter((e) => !e.converge && !e.consumes);
-    expect(familyEdges.map((e) => e.id).sort()).toEqual([
-      'e:hangzhou:pages', 'e:hangzhou:robot', 'e:hangzhou:robot-check',
-    ]);
+    expect(familyEdges.map((e) => e.id)).toEqual(['e:hangzhou:daily-report']);
     expect(familyEdges.every((e) => e.from === 'region:hangzhou')).toBe(true);
-    // 日历消费边：robot/robot-check 家族挂 global:calendar（2026-10-17）
+    // 日历消费边：聚合主卡挂 global:calendar
     const consumeEdges = g.edges.filter((e) => e.consumes);
-    expect(consumeEdges.map((e) => e.to).sort()).toEqual([
-      'module:hangzhou:robot', 'module:hangzhou:robot-check',
-    ]);
+    expect(consumeEdges.map((e) => e.to)).toEqual(['module:hangzhou:daily-report']);
     expect(consumeEdges.every((e) => e.from === 'global:calendar')).toBe(true);
     // 名册/目标计数
     const hz = g.regionNodes.find((n) => n.key === 'hangzhou');
     expect(hz.rosterCount).toBe(1);
     expect(hz.targetSum).toBe(100);
     expect(hz.badge).toEqual({ text: '已闭环', cls: 'ok' });
+  });
+
+  it('播报收拢不波及平台线家族', () => {
+    // 平台线（region=null）的同名家 services 保持各自家族模块，
+    // 不收进 daily-report（采集/加工泳道的流水线语义不变）。
+    const g = buildGraph(raw({
+      groups: [{
+        region: null,
+        services: [svc('sync-dingtalk'), svc('extract-mart')],
+      }],
+    }));
+    const families = g.taskNodes.map((n) => n.family).sort();
+    expect(families).toEqual(['extract-mart', 'sync-dingtalk']);
   });
 
   it('徽标 warn 或成员 broken 让边标红', () => {
@@ -161,11 +176,12 @@ describe('buildGraph', () => {
       'cv:hangzhou:offline_all', 'cv:other:offline_all', 'cv:shaoxing:offline_all',
     ]);
     expect(cv.every((e) => e.broken === false)).toBe(true);
-    // 聚合下游照常成模块，边 broken 不带徽标语义（只认成员 broken）
-    const aggEdge = g.edges.find((e) => e.id === 'e:offline_all:leaderboard');
+    // 聚合下游照常成模块（播报收拢后为 daily-report 主卡），边 broken
+    // 不带徽标语义（只认成员 broken）
+    const aggEdge = g.edges.find((e) => e.id === 'e:offline_all:daily-report');
     expect(aggEdge.broken).toBe(false);
     expect(g.taskNodes.find((n) => n.regionKey === 'offline_all').family)
-      .toBe('leaderboard');
+      .toBe('daily-report');
   });
 
   it('补集桶虚拟节点：名册有启用行即补出', () => {
