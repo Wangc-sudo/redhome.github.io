@@ -39,6 +39,34 @@ export const LANE_W = {
 export const REGION_X = LANE_X.region;
 export const TASK_X = LANE_X.app;
 
+// -- 业务线分组（2026-10-24 用户裁决「面板按 sheet 切割」）---------------------
+//: 画布区域层按权威源 Excel 的 sheet 目录分组展示，顺序即 sheet 顺序。
+//: 未列入的注册区域落「未分组」段尾部。muted 组（总部职能）不报数，
+//: 只展示不亮警告徽章。放 layout.js 保持 graph→layout 单向依赖。
+export const BUSINESS_GROUPS = [
+  { key: 'offline', label: '线下网点', regions: ['hangzhou', 'shaoxing', 'other'] },
+  { key: 'province_ops', label: '省外与运营中心', regions: ['province_ops'] },
+  { key: 'vanke', label: '体验馆与团购', regions: ['vanke'] },
+  { key: 'qudao', label: '线上渠道', regions: ['qudao'] },
+  { key: 'dining', label: '餐饮', regions: ['dining', 'junpin'] },
+  { key: 'hq', label: '总部职能', regions: ['hq'], muted: true },
+];
+
+//: region_key → 分组（未注册进任何组的区域返回 null=未分组段）。
+export function groupOf(regionKey) {
+  for (const group of BUSINESS_GROUPS) {
+    if (group.regions.includes(regionKey)) return group;
+  }
+  return null;
+}
+
+//: 区域排序键：组序 → 组内 regions 声明序 → 未分组按字典序殿后。
+export function regionSortKey(regionKey) {
+  const group = groupOf(regionKey);
+  if (!group) return `${BUSINESS_GROUPS.length}:zz:${regionKey}`;
+  return `${BUSINESS_GROUPS.indexOf(group)}:${group.regions.indexOf(regionKey)}`;
+}
+
 /** 区域节点动态高度：头+指标+脚 + 部门行 +（展开时）成员行。 */
 export function regionH(node, expandedRegions) {
   if (node.isAggregate) return AGG_SIZE;
@@ -112,8 +140,13 @@ export function layoutNodes({
   stackLane('process', taskNodes.filter((t) => t.stage === 'process'));
 
   // -- 区域/模块：条带之下，区域居中列、模块右列 ---------------------------
+  // 业务线分组（2026-10-24）：组切换处插额外间距；落位后按组算标题带。
   let cursorY = stripBottom + 26;
+  let lastGroupKey = null;
   for (const region of regionNodes) {
+    const gk = region.group || '__none__';
+    if (lastGroupKey !== null && gk !== lastGroupKey) cursorY += 22;
+    lastGroupKey = gk;
     const stack = taskNodes.filter((t) => t.regionKey === region.key);
     const stackTop = cursorY;
     for (const task of stack) {
@@ -133,7 +166,30 @@ export function layoutNodes({
     region.x = saved ? saved.x : REGION_X;
     region.y = saved ? saved.y : Math.round(regionY);
   }
-  return poolNode;
+
+  // 组标题带（按落位后的节点外接矩形；跟随用户拖动后的实际位置）
+  const byGroup = new Map();
+  for (const region of regionNodes) {
+    const gk = region.group || '__none__';
+    if (!byGroup.has(gk)) byGroup.set(gk, []);
+    byGroup.get(gk).push(region);
+  }
+  const groupBands = [];
+  for (const [gk, nodes] of byGroup) {
+    const group = BUSINESS_GROUPS.find((g) => g.key === gk);
+    const top = Math.min(...nodes.map((n) => n.y));
+    const bottom = Math.max(
+      ...nodes.map((n) => n.y + regionH(n, expandedRegions)));
+    groupBands.push({
+      key: gk,
+      label: group ? group.label : '未分组',
+      muted: !!(group && group.muted),
+      x: REGION_X - 60,
+      y: top - 12,
+      h: bottom - top + 24,
+    });
+  }
+  return { poolNode, groupBands };
 }
 
 // -- 连线几何 -------------------------------------------------------------------

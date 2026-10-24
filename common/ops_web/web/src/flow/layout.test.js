@@ -80,7 +80,7 @@ describe('layoutNodes', () => {
       taskNodes: [t1, t2],
       poolMembers: [],
       globalNodes: [],
-    });
+    }).poolNode;
     expect(pool).toEqual({ id: 'pool', x: 40, y: TOP_Y });
     expect(t1).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM });
     expect(t2).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM + 64 + TASK_GAP });
@@ -117,10 +117,32 @@ describe('layoutNodes', () => {
         'global:calendar': { x: 60, y: 700 },
       },
     });
-    expect(pool).toEqual({ id: 'pool', x: 9, y: 9 });
+    expect(pool.poolNode).toEqual({ id: 'pool', x: 9, y: 9 });
     expect(region).toMatchObject({ x: 400, y: 300 });
     expect(task).toMatchObject({ x: 900, y: 500 });
     expect(globalNode).toMatchObject({ x: 60, y: 700 });
+  });
+
+  it('业务线分组（2026-10-24 面板按 sheet 切割）：组带 + 组间距', () => {
+    // 线下组（hangzhou+other）与总部组（hq）之间插额外间距；
+    // 组带=各组节点外接矩形，muted 组标 muted。
+    const r1 = regionNode('hangzhou');
+    const r2 = regionNode('other');
+    const r3 = regionNode('hq');
+    r1.group = 'offline'; r2.group = 'offline'; r3.group = 'hq';
+    const { groupBands } = layoutNodes({
+      regionNodes: [r1, r2, r3], taskNodes: [], poolMembers: [],
+      globalNodes: [],
+    });
+    const rh1 = regionH(r1, NO_EXPAND);
+    const rh2 = regionH(r2, NO_EXPAND);
+    // r1→r2 同组正常间距；r2→r3 组切换多 22
+    expect(r2.y).toBe(STRIP_BOTTOM + rh1 + 26);
+    expect(r3.y).toBe(STRIP_BOTTOM + rh1 + rh2 + 26 + 22 + 26);
+    expect(groupBands.map((b) => b.key)).toEqual(['offline', 'hq']);
+    expect(groupBands[0].label).toBe('线下网点');
+    expect(groupBands[1].muted).toBe(true);
+    expect(groupBands[0].y).toBe(r1.y - 12);
   });
 
   it('全局节点与池横排成顶部功能条（2026-10-17）', () => {
