@@ -9,7 +9,12 @@ import { REGION_X, TASK_X, TOP_Y } from './layout.js';
 //: 聚合区域 → 组成它的区域键。聚合节点指标=成员桶求和，不做名册门禁
 //: （它不填报，只汇总）；形态=圆形（与矩形业务节点视觉分层）。
 export const AGGREGATE_REGIONS = {
-  offline_all: { label: '线下整体', parts: ['hangzhou', 'shaoxing', 'other'] },
+  // 2026-10-24：parts 加 province_ops（省外与运营中心，用户裁决三人同区
+  // ——线下体系的省外+运营中心，业务口径属线下整体）。
+  offline_all: {
+    label: '线下整体',
+    parts: ['hangzhou', 'shaoxing', 'other', 'province_ops'],
+  },
 };
 
 //: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
