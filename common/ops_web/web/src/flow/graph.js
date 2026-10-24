@@ -4,7 +4,7 @@
  * 输出节点/边模型 {poolMembers, regionNodes, taskNodes, edges}——可单测。
  * 节点上的 x/y 是占位默认值，由 layout.js 的 layoutNodes 统一覆写。
  */
-import { REGION_X, TASK_X, TOP_Y } from './layout.js';
+import { REGION_X, TASK_X, TOP_Y, groupOf, regionSortKey } from './layout.js';
 
 //: 聚合区域 → 组成它的区域键。聚合节点指标=成员桶求和，不做名册门禁
 //: （它不填报，只汇总）；形态=圆形（与矩形业务节点视觉分层）。
@@ -20,6 +20,9 @@ export const AGGREGATE_REGIONS = {
 //: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
 //: overview.regions 不含它——从名册/目标数据派生）。
 export const COMPLEMENT_REGION = 'other';
+
+//: 业务线分组（2026-10-24 用户裁决「面板按 sheet 切割」）：分组定义在
+//: layout.js（展示层概念，保持 graph→layout 单向依赖）。
 
 //: 不进区域层的注册区域（2026-10-19 用户裁决：测试区改制为通用功能
 //: 模块「播报试投」，与播报日历同级——它只是播报试投出口，不是业务
@@ -234,17 +237,28 @@ export function buildGraph(raw) {
     const targetSum = Object.values(targetMap)
       .reduce((sum, value) => sum + (Number(value) || 0), 0);
     const services = servicesByRegion[key] || [];
+    // 徽章口径（2026-10-24 用户裁决配套）：
+    // * 总部（hq）：不报数的职能底——只展示，永不亮警告；
+    // * 渠道（qudao）：目标是店铺级（channel_monthly_target），scope 级
+    //   无月目标不算缺口——有店铺名册+有服务即闭环。
     const badge = isPlatform
       ? { text: '平台线', cls: 'plain' }
       : isComplement
         ? { text: '补集', cls: 'plain' }
-        : regionBadge(rosterCount, targetCount, services.length);
+        : key === 'hq'
+          ? { text: '职能底', cls: 'plain' }
+          : key === 'qudao' && rosterCount > 0
+            ? (services.length
+              ? { text: '已闭环', cls: 'ok' }
+              : { text: '待下游', cls: 'warn' })
+            : regionBadge(rosterCount, targetCount, services.length);
     nextRegions.push({
       id: `region:${key}`,
       key,
       label: isPlatform ? '平台 / 无群'
         : isComplement ? '其他（补集）'
         : (spec.region.label || key),
+      group: groupOf(key)?.key || null,
       badge,
       rosterCount,
       targetCount,
@@ -282,6 +296,8 @@ export function buildGraph(raw) {
       taskCount: services.length,
       isAggregate: true,
       parts: spec.parts,
+      // 聚合节点跟随第一组成桶的分组（线下整体挂线下网点组旁）。
+      group: groupOf(spec.parts[0])?.key || null,
       x: REGION_X,
       y: TOP_Y,
     };
@@ -367,6 +383,13 @@ export function buildGraph(raw) {
       });
     }
   }
+  // 业务线分组排序（2026-10-24 面板按 sheet 切割）：组序+组内声明序，
+  // 未分组殿后；布局层按此顺序堆叠并画组标题带。
+  nextRegions.sort((a, b) => {
+    const ka = regionSortKey(a.key);
+    const kb = regionSortKey(b.key);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
   return {
     poolMembers,
     sourceNodes,

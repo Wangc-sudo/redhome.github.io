@@ -279,9 +279,12 @@ function toggleAllRegionTasks() {
   layout();
 }
 
+//: 业务线分组标题带（2026-10-24 面板按 sheet 切割）：layout 输出。
+const groupBands = ref([]);
+
 /** 自动布局（纯函数在 flow/layout.js）；池节点对象整体替换。 */
 function layout() {
-  poolNode.value = layoutNodes({
+  const laid = layoutNodes({
     regionNodes: regionNodes.value,
     taskNodes: visibleTaskNodes.value,
     poolMembers: poolMembers.value,
@@ -291,6 +294,8 @@ function layout() {
     expandedRegions: expandedRegions.value,
     expandedModules: expandedModules.value,
   });
+  poolNode.value = laid.poolNode;
+  groupBands.value = laid.groupBands || [];
 }
 
 // -- 连线几何（纯函数在 flow/layout.js，此处注入当前图状态）---------------------
@@ -497,6 +502,17 @@ watch(() => route.query.region, () => applyAnchor());
             @drag="startNodeDrag"
             @wire-start="startWire"
           />
+
+          <!-- 业务线组标题带（2026-10-24 面板按 sheet 切割） -->
+          <div
+            v-for="band in groupBands"
+            :key="band.key"
+            class="group-band"
+            :class="{ muted: band.muted }"
+            :style="{ left: band.x + 'px', top: band.y + 'px', height: band.h + 'px' }"
+          >
+            <span class="group-band-label">{{ band.label }}</span>
+          </div>
 
           <!-- 区域节点（聚合=圆形，业务=矩形） -->
           <RegionNode
@@ -749,6 +765,32 @@ watch(() => route.query.region, () => applyAnchor());
 .src-desc {
   color: #94a3b8;
   font-size: 11px;
+}
+
+/* 业务线组标题带（2026-10-24） */
+.group-band {
+  position: absolute;
+  width: 6px;
+  border-radius: 3px;
+  background: #818cf8;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.group-band.muted {
+  background: #cbd5e1;
+}
+.group-band-label {
+  position: absolute;
+  left: 12px;
+  top: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6366f1;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
+}
+.group-band.muted .group-band-label {
+  color: #94a3b8;
 }
 
 /* 节点样式已随 F3 组件化迁往 components/flow/{PoolNode,RegionNode,ModuleNode,GlobalNodes}.vue */

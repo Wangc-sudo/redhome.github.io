@@ -139,6 +139,50 @@ describe('buildGraph', () => {
     expect(families).toEqual(['extract-mart', 'sync-dingtalk']);
   });
 
+  it('业务线分组排序（2026-10-24 面板按 sheet 切割）', () => {
+    // 输入乱序 → 输出按 BUSINESS_GROUPS 组序+组内声明序
+    const g = buildGraph(raw({
+      regions: [
+        region('hq', '总部'),
+        region('vanke', '体验馆与团购'),
+        region('hangzhou', '杭州'),
+        region('shaoxing', '绍兴'),
+        region('province_ops', '省外与运营中心'),
+        region('qudao', '渠道'),
+      ],
+      groups: [],
+      rosterRows: [
+        { scope: 'hangzhou', enabled: 1, person_name: 'a' },
+        { scope: 'shaoxing', enabled: 1, person_name: 'b' },
+      ],
+      targets: { hangzhou: { a: 1 }, shaoxing: { b: 1 } },
+    }));
+    const keys = g.regionNodes.map((n) => n.key);
+    // 线下组（杭/绍）→ 省外运营 → 体验馆团购 → 渠道 → 总部；聚合线下整体
+    // 随第一桶组（offline）；其他（补集）在线下组内第三。
+    expect(keys.indexOf('hangzhou')).toBeLessThan(keys.indexOf('shaoxing'));
+    expect(keys.indexOf('shaoxing')).toBeLessThan(keys.indexOf('province_ops'));
+    expect(keys.indexOf('province_ops')).toBeLessThan(keys.indexOf('vanke'));
+    expect(keys.indexOf('vanke')).toBeLessThan(keys.indexOf('qudao'));
+    expect(keys.indexOf('qudao')).toBeLessThan(keys.indexOf('hq'));
+  });
+
+  it('徽章口径：总部职能底不警告；渠道店铺级名册视为有目标', () => {
+    const g = buildGraph(raw({
+      regions: [region('hq', '总部'), region('qudao', '渠道')],
+      groups: [{ region: 'qudao', services: [svc('channel-missing-check-qudao')] }],
+      rosterRows: [
+        { scope: 'qudao', enabled: 1, entity_type: 'store', entity_key: 'PDD店' },
+      ],
+      targets: {},
+    }));
+    const hq = g.regionNodes.find((n) => n.key === 'hq');
+    expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
+    const qd = g.regionNodes.find((n) => n.key === 'qudao');
+    // scope 级无目标但店铺名册有+有服务 → 已闭环（店铺级目标体系豁免）
+    expect(qd.badge).toEqual({ text: '已闭环', cls: 'ok' });
+  });
+
   it('徽标 warn 或成员 broken 让边标红', () => {
     const g = buildGraph(raw({
       regions: [region('hangzhou', '杭州')],
