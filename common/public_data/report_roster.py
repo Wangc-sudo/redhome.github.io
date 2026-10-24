@@ -38,7 +38,7 @@ from common.public_data.db import transaction
 #: 的直接解法（2026-10-14 代码阶段补齐）。
 SCOPES = (
     "qudao", "hangzhou", "shaoxing", "junpin", "vanke", "offline_all",
-    "dining", "hq", "other",
+    "dining", "hq", "other", "province_ops",
 )
 
 #: 合法对象类型：store=门店（渠道）、person=人员（日报）、dept=部门（餐饮）。
