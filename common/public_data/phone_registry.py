@@ -617,3 +617,73 @@ def summarize_registry(connection):
             for row in by_user
         ],
     }
+
+
+#: AI 检索（kb-qa phone_lookup 工具）的结果上限：号码 5 / 绑定 10，控 token。
+_AI_PHONE_LIMIT = 5
+_AI_BINDING_LIMIT = 10
+
+_AI_PHONE_COLS = (
+    "`phone_no`, `phone_type`, `account_name`, `actual_user`, `dept`, "
+    "`physical_device`, `status`"
+)
+
+
+def search_registry(connection, keyword):
+    """小易 agent 检索：号码/尾号/姓名/平台账号 → {"phones", "bindings"}。
+
+    纯数字关键词按号码片段（天然支持尾号，如「5690」）匹配；其余关键词按
+    持卡人/开户名/物理手机/部门模糊匹配，并带出命中人名下号码的全部绑定
+    （答「张三管哪些账号」）。只回启用行——停用的号收不到验证码，不应
+    推荐给提问人。本场景是精确映射（错配=验证码找错人），走向量模糊
+    检索不合适，故用精确 SQL。
+    """
+    key = str(keyword or "").strip()
+    if not key:
+        return {"phones": [], "bindings": []}
+    like = "%%%s%%" % key
+    if key.isdigit():
+        phones = _fetch_all(
+            connection,
+            "SELECT " + _AI_PHONE_COLS + " FROM `dim_phone_number` "
+            "WHERE `enabled` = 1 AND `phone_no` LIKE %s "
+            "ORDER BY `phone_no` LIMIT %s",
+            (like, _AI_PHONE_LIMIT),
+        )
+        bindings = _fetch_all(
+            connection,
+            "SELECT b.`phone_no`, b.`channel_category`, b.`platform_account`, "
+            "n.`actual_user` FROM `dim_phone_binding` b "
+            "LEFT JOIN `dim_phone_number` n ON n.`phone_no` = b.`phone_no` "
+            "WHERE b.`enabled` = 1 AND b.`phone_no` LIKE %s "
+            "ORDER BY b.`id` LIMIT %s",
+            (like, _AI_BINDING_LIMIT),
+        )
+        return {"phones": phones, "bindings": bindings}
+
+    phones = _fetch_all(
+        connection,
+        "SELECT " + _AI_PHONE_COLS + " FROM `dim_phone_number` "
+        "WHERE `enabled` = 1 AND (`actual_user` LIKE %s "
+        "OR `account_name` LIKE %s OR `physical_device` LIKE %s "
+        "OR `dept` LIKE %s) "
+        "ORDER BY `actual_user`, `phone_no` LIMIT %s",
+        (like, like, like, like, _AI_PHONE_LIMIT),
+    )
+    phone_nos = [row["phone_no"] for row in phones]
+    sql = (
+        "SELECT b.`phone_no`, b.`channel_category`, b.`platform_account`, "
+        "n.`actual_user` FROM `dim_phone_binding` b "
+        "LEFT JOIN `dim_phone_number` n ON n.`phone_no` = b.`phone_no` "
+        "WHERE b.`enabled` = 1 AND (b.`platform_account` LIKE %s "
+        "OR b.`channel_category` LIKE %s"
+    )
+    params = [like, like]
+    if phone_nos:
+        sql += (" OR b.`phone_no` IN (" + ",".join(["%s"] * len(phone_nos))
+                + ")")
+        params.extend(phone_nos)
+    sql += ") ORDER BY b.`id` LIMIT %s"
+    params.append(_AI_BINDING_LIMIT)
+    bindings = _fetch_all(connection, sql, tuple(params))
+    return {"phones": phones, "bindings": bindings}

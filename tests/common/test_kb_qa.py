@@ -1742,6 +1742,62 @@ class AgentToolExecutorTests(unittest.TestCase):
         narrow = {t["function"]["name"] for t in tools_for(False)}
         self.assertIn("product_stats", narrow)
 
+    def test_phone_lookup_suffix_match(self):
+        # 「5690」尾号 → 号码片段 LIKE，只回启用行；绑定带出持卡人
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三",
+              "phone_type": "主卡", "physical_device": "序号② 红色手机"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "习水村酒类专营店", "actual_user": "张三"}],
+        ])
+        result = json.loads(executor.execute(
+            "phone_lookup", {"keyword": "5690"}))
+        self.assertTrue(result["found"])
+        self.assertEqual("张三", result["phones"][0]["actual_user"])
+        self.assertEqual("习水村酒类专营店",
+                         result["bindings"][0]["platform_account"])
+        sql, params = executor._conn.cursor_instance.executed[0]
+        self.assertIn("`phone_no` LIKE %s", sql)
+        self.assertIn("`enabled` = 1", sql)
+        self.assertEqual("%5690%", params[0])
+
+    def test_phone_lookup_name_match_expands_bindings(self):
+        # 人名 → 命中号码的全部绑定 IN 展开（答「张三管哪些账号」）
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "专营店", "actual_user": "张三"}],
+        ])
+        result = json.loads(executor.execute(
+            "phone_lookup", {"keyword": "张三"}))
+        self.assertTrue(result["found"])
+        cur = executor._conn.cursor_instance
+        self.assertIn("`actual_user` LIKE %s", cur.executed[0][0])
+        sql1, params1 = cur.executed[1]
+        self.assertIn("b.`platform_account` LIKE %s", sql1)
+        self.assertIn("b.`phone_no` IN (%s)", sql1)
+        self.assertIn("13312345690", list(params1))
+
+    def test_phone_lookup_empty_keyword_and_no_match(self):
+        executor = self._executor([])
+        result = json.loads(executor.execute("phone_lookup", {"keyword": "  "}))
+        self.assertIn("error", result)
+        executor2 = self._executor([[], []])
+        result = json.loads(executor2.execute(
+            "phone_lookup", {"keyword": "查无此人"}))
+        self.assertFalse(result["found"])
+        self.assertIn("台账无匹配", result["hint"])
+
+    def test_phone_lookup_registered_and_not_narrowed(self):
+        # 工具注册 + 系统提示词提及；全员开放（同 product_stats），
+        # 不在 Web 业务收窄面内
+        names = {t["function"]["name"] for t in agent_module.TOOLS}
+        self.assertIn("phone_lookup", names)
+        self.assertIn("phone_lookup", agent_module._SYSTEM_PROMPT)
+        from common.kb_web.service import tools_for
+        narrow = {t["function"]["name"] for t in tools_for(False)}
+        self.assertIn("phone_lookup", narrow)
+
     def test_search_docs_merges_bm25_and_vector(self):
         executor = self._executor(
             [],
