@@ -38,6 +38,9 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
         <div class="agg-metrics">
           <b>{{ node.rosterCount }}</b><span>名册</span>
           <b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span>
+          <b v-if="node.completionRate != null">
+            {{ (node.completionRate * 100).toFixed(1) }}%
+          </b><span v-if="node.completionRate != null">完成率</span>
         </div>
         <button class="btn mini ghost" @mousedown.stop @click="emit('open-drawer', node)">详情</button>
       </div>
@@ -51,6 +54,13 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
         <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
         <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
         <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
+        <!-- 完成率（2026-10-26 用户裁决「播报回显完成百分比添加到面板」）：
+             本月累计/月目标，与播报回执同口径；目标 0/无 →「—」；
+             hq 职能底不报数不显示 -->
+        <span class="metric" v-if="node.group !== 'hq'">
+          <b>{{ node.completionRate == null ? '—' : (node.completionRate * 100).toFixed(1) + '%' }}</b>
+          <span>完成</span>
+        </span>
         <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
       </div>
       <!-- 部门槽（2026-10-26：点击部门行弹下拉列表选人归口，替代拉线圆点） -->
@@ -194,8 +204,8 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 52px;
-  padding: 3px 6px;
+  min-width: 46px;   /* 2026-10-26 完成率格加入后五格并排收窄 */
+  padding: 3px 4px;
   border: 1px solid #eef0f3;
   border-radius: 6px;
   background: #f9fafb;

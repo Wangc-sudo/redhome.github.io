@@ -3710,8 +3710,34 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 画布区域卡「完成率」分子（2026-10-26 用户裁决「播报回显完成
+        # 百分比添加到面板」）：当月完成额按名册在册人名归集到 scope
+        # （人名匹配而非 region——代填落群区域也能归到本人，与播报回执
+        # 「本月累计/目标，完成 X%」同口径）。恒为当月（current_month），
+        # 不随名册页翻月。读失败 fail-soft 略过（完成率格显示「—」，
+        # 不拖垮名册读面）。
+        completed_person = {}
+        try:
+            with db_connector() as connection:
+                completed_person = report_roster.fetch_month_completed_by_person(
+                    connection, current_month)
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster completed read failed: %s",
+                            type(exc).__name__)
         labels = dict(scope_pairs)
         allowed = set(visible_scopes)
+        completed = {}
+        for row in entries:
+            if (row.get("scope") not in allowed
+                    or row.get("entity_type") != "person"
+                    or not row.get("enabled")):
+                continue
+            name = row.get("person_name")
+            if not name:
+                continue
+            scope = row["scope"]
+            completed[scope] = completed.get(scope, 0.0) \
+                + completed_person.get(name, 0.0)
         # updated_at / created_at 是 DB DATETIME（pymysql 返回 datetime 对象），
         # 不经 _fmt_time 归一直接进 JSONResponse 会 json.dumps 失败 → 整接口
         # 500、/roster 页数据面全挂（2026-10-14 带会话线上实测）。出口统一为
@@ -3735,6 +3761,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             ],
             "roster": roster,
             "targets": targets,
+            "completed": completed,
             "audits": audits,
         })
 

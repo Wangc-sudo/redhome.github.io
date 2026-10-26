@@ -192,6 +192,14 @@ export function buildGraph(raw) {
   const { overview, roster, groups } = raw;
   const rosterRows = (roster && roster.roster) || [];
   const targets = (roster && roster.targets) || {};
+  //: 当月完成额（元，{scope: amount}，2026-10-26「播报回显完成百分比」
+  //: 上面板）。完成率口径=播报回执「本月累计/目标」：completed 元 ÷10000
+  //: 与 targets 万元（dim_report_target 原值）换算后相比；目标 0/无 →
+  //: null（显示「—」，与榜单「目标 0 不参与排序」同语义）。
+  const completed = (roster && roster.completed) || {};
+  const rateOf = (completedSum, targetSum) => (
+    targetSum > 0 ? completedSum / 10000 / targetSum : null
+  );
   const regions = (overview && overview.regions) || [];
 
   const poolMembers = ((overview && overview.pool) || []).slice(0, POOL_LIMIT);
@@ -240,6 +248,8 @@ export function buildGraph(raw) {
     const targetCount = Object.keys(targetMap).length;
     const targetSum = Object.values(targetMap)
       .reduce((sum, value) => sum + (Number(value) || 0), 0);
+    const completedSum = Number(completed[key]) || 0;
+    const completionRate = rateOf(completedSum, targetSum);
     const services = servicesByRegion[key] || [];
     // 徽章口径（2026-10-24 用户裁决配套）：
     // * 总部（hq）：不报数的职能底——只展示，永不亮警告；
@@ -264,6 +274,8 @@ export function buildGraph(raw) {
       rosterCount,
       targetCount,
       targetSum,
+      completedSum,
+      completionRate,
       memberCount,
       depts,
       members,
@@ -302,6 +314,9 @@ export function buildGraph(raw) {
       x: REGION_X,
       y: TOP_Y,
     };
+    // 完成额/完成率=组成桶求和后换算（口径同区域节点）。
+    agg.completedSum = partNodes.reduce((s, n) => s + (n.completedSum || 0), 0);
+    agg.completionRate = rateOf(agg.completedSum, agg.targetSum);
     nextRegions.push(agg);
     for (const part of partNodes) {
       nextEdges.push({
