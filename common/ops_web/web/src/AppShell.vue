@@ -31,6 +31,7 @@ watch(flash, (value) => {
         <router-link v-if="hasAnyCapability('org')" to="/org">组织</router-link>
         <router-link v-if="hasCapability('pipelines')" to="/pipelines">任务</router-link>
         <router-link v-if="hasCapability('calendar')" to="/calendar">日历</router-link>
+        <router-link v-if="hasCapability('phone')" to="/phones">号码</router-link>
         <router-link v-if="isAdmin()" to="/recipients">收件人</router-link>
         <router-link v-if="isAdmin()" to="/grants">授权</router-link>
         <router-link v-if="hasCapability('audit')" to="/records">记录</router-link>

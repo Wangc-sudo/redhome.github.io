@@ -37,6 +37,7 @@ const CAPABILITIES = [
   { key: 'audit', label: '操作记录' },
   { key: 'calendar', label: '播报日历' },
   { key: 'datafix', label: '数据修正' },
+  { key: 'phone', label: '号码台账' },
 ];
 
 const grants = ref([]);
