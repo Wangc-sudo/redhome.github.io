@@ -27,6 +27,13 @@ body {
 }
 .guide-logo.large { width: 72px; height: 72px; font-size: 26px; }
 .guide-sub { font-size: 13px; margin-top: 6px; color: #8f959e; }
+.login-btn {
+  margin-top: 18px; padding: 10px 28px; border: none; border-radius: 8px;
+  background: #3370ff; color: #fff; font-size: 15px; cursor: pointer;
+}
+.login-btn:disabled { opacity: 0.6; cursor: default; }
+.login-btn:hover:not(:disabled) { background: #2959d6; }
+.login-error { margin-top: 12px; font-size: 13px; color: #d83931; }
 
 /* ---- 布局 ---- */
 .layout { height: 100%; display: flex; flex-direction: column; }

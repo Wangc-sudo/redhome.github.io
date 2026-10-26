@@ -50,6 +50,7 @@ export const api = {
   authDingtalk: (authCode) => request('/kb/api/auth/dingtalk', {
     method: 'POST', body: { authCode }, retry: false,
   }),
+  qrLoginUrl: () => request('/kb/api/auth/dingtalk/login-url', { retry: false }),
   listSessions: () => request('/kb/api/sessions'),
   createSession: () => request('/kb/api/sessions', { method: 'POST' }),
   getSession: (sid) => request(`/kb/api/sessions/${sid}`),
