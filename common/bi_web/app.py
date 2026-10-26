@@ -397,6 +397,31 @@ class _TTLOptionSets:
 # Request guards
 # ---------------------------------------------------------------------------
 
+#: 公开看板（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网榜单页不需要
+#: 账号密码——群内散客直开）。这三个看板本就走 nginx 公网桥
+#: （hangzhou.html 等）面向全员；加新区请评审数据敏感度后再入列。
+PUBLIC_DASHBOARD_IDS = frozenset({
+    "hz-offline-sales", "sx-offline-sales", "offline-all-sales",
+})
+
+#: 公开看板页面所需的免登录端点前缀：壳 /d/{id}、定义与卡片、以及日期
+#: 筛选值域（公网榜单页只挂 date 筛选）。导航列表不放行（公网页无顶栏，
+#: 设计内）。
+_PUBLIC_PREFIXES = ("/d/", "/api/v1/dashboards/", "/api/v1/d/", "/api/d/")
+
+
+def _public_path(path):
+    """路径属于公开看板（或其日期筛选值域）时返回 True。"""
+    if path == "/api/v1/options/dates":
+        return True
+    for prefix in _PUBLIC_PREFIXES:
+        if path.startswith(prefix):
+            rest = path[len(prefix):]
+            dashboard_id = rest.split("/", 1)[0]
+            return dashboard_id in PUBLIC_DASHBOARD_IDS
+    return False
+
+
 def _build_auth_gate(token, session_secret, viewer_resolver, session_secure):
     """身份闸：session 优先、Bearer 兜底、deny-by-default 准入门。
 
@@ -413,6 +438,12 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure):
     def authenticate(request: Request, response: Response):
         request.state.userid = None
         request.state.viewer = None
+        if _public_path(request.url.path):
+            # 公开看板（2026-10-26 用户裁决）：杭州/绍兴/线下整体的公网
+            # 榜单页面向群内散客直开，不需要账号密码。页面壳、看板定义、
+            # 卡片数据、日期筛选值域全部放行；其余看板与端点照旧走
+            # 会话+准入门。
+            return None
         if session_secret:
             raw = request.cookies.get(auth.SESSION_COOKIE)
             if raw:
