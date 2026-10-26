@@ -9,6 +9,7 @@ from common.public_data.dingtalk_read import DingTalkReadError
 from common.public_data.org_read import (
     OrgReadError,
     OrgSeedEntry,
+    apply_org_db_overlay,
     collect_directory,
 )
 from common.public_data.transforms import apply_transform
@@ -416,8 +417,12 @@ class LiveSyncService:
                 gateway = self._org_gateways.get(entry.credential)
                 if gateway is None:
                     raise LiveSyncError("org gateway is not configured")
+                # 权威源迁 DB（2026-10-26）：dim_org_region_dept 有行的
+                # 区域以 DB 部门列表为准（页面可编辑）；无行保 seed。
+                regions = apply_org_db_overlay(
+                    entry.regions, self._connections.mart)
                 org_members, org_depts = collect_directory(
-                    gateway, entry.regions)
+                    gateway, regions)
                 for dept in org_depts:
                     departments.setdefault(dept.dept_id, dept)
                 for record in org_members:

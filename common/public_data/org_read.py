@@ -11,6 +11,7 @@
 所以测试不需要 HTTP 或凭据。所有异常消息都不得包含 URL、请求体或响应体。
 """
 
+import logging
 import time
 import urllib.parse
 from collections import deque
@@ -18,6 +19,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from common.dingtalk.client import _http_json
+
+logger = logging.getLogger(__name__)
 
 
 _TOKEN_CACHE_SECONDS = 100 * 60
@@ -350,6 +353,39 @@ def load_org_seed(path):
     用 :func:`load_multi_org_seed`。
     """
     return load_multi_org_seed(path)[0].regions
+
+
+def apply_org_db_overlay(regions, connection):
+    """DB 覆盖（2026-10-26 权威源迁 DB）：``dim_org_region_dept`` 有启用行
+    的区域，顶层部门列表改由 DB 给出（sort_order 序）；无行区域保 seed。
+
+    DB 不新增区域键——区域集合与优先级仍由 seed 定义（新增区域先在 seed
+    注册键位，DB 只管该区域的部门列表）。表不存在/读失败 → fail-open
+    原样返回并打 WARNING（采集不被配置面故障阻断）。
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT `region_key`, `dept_id` FROM `dim_org_region_dept` "
+                "WHERE `enabled`=1 "
+                "ORDER BY `region_key`, `sort_order`, `dept_id`")
+            rows = cursor.fetchall()
+    except Exception as exc:
+        logger.warning(
+            "org dept overlay fetch failed: %s -- keeping seed",
+            type(exc).__name__)
+        return regions
+    by_region = {}
+    for row in rows:
+        by_region.setdefault(str(row["region_key"]), []).append(
+            int(row["dept_id"]))
+    if not by_region:
+        return regions
+    return tuple(
+        (region, tuple(by_region[region])) if region in by_region
+        else (region, dept_ids)
+        for region, dept_ids in regions
+    )
 
 
 # ---------------------------------------------------------------------------

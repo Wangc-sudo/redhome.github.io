@@ -69,6 +69,7 @@ from common.public_data.org_assignment_override import (
 from common.public_data.org_catalog import (
     org_catalog_broadcast_v1_statements,
     org_catalog_ddl_statements,
+    org_catalog_region_dept_v1_statements,
     org_catalog_region_run_v1_statements,
     org_catalog_relay_v1_statements,
 )
@@ -719,6 +720,14 @@ _MIGRATIONS = (
         "mart-ops-region-broadcast-v1",
         "mart",
         org_catalog_broadcast_v1_statements(),
+    ),
+    (
+        # 区域→顶层部门映射表（2026-10-26 权威源迁 DB）：采集范围从
+        # org.seed.json 迁 DB。独立建表版本，顺序在 broadcast 之后无所谓
+        # 但保持同日版本相邻。
+        "mart-ops-region-dept-v1",
+        "mart",
+        org_catalog_region_dept_v1_statements(),
     ),
     (
         # 权威归属基线（2026-10-14 D2）：dim_robot_member 快照灌入

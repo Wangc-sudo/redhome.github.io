@@ -10,6 +10,7 @@ from common.public_data.org_read import (
     OrgReadError,
     OrgReadGateway,
     OrgSeedEntry,
+    apply_org_db_overlay,
     collect_directory,
     collect_members,
     load_multi_org_seed,
@@ -170,10 +171,13 @@ class ShippedOrgSeedTests(unittest.TestCase):
     def test_shipped_seed_regions_in_priority_order(self):
         # hq（总部子树，2026-09-21 随 BI 免登 admin 自举加入）排在 other
         # 兜底之前——总部成员归 hq，不被 other 的根部门展开吞掉。
+        # 2026-10-24 加 province_ops（省外与运营中心，用户裁决：余云涛/
+        # 李树军/谢坚钰三人同区）——插在 hq 之后 other 兜底之前；挂的
+        # 线下运营中心（1050135497）是杭/绍父部门，靠此顺序先被杭绍认领。
         regions = load_org_seed(_SEED_PATH)
         self.assertEqual(
             [region for region, _ in regions],
-            ["hangzhou", "shaoxing", "vanke", "hq", "other"],
+            ["hangzhou", "shaoxing", "vanke", "hq", "province_ops", "other"],
         )
 
     def test_shipped_seed_dept_ids_match_the_robot_config(self):
@@ -190,11 +194,67 @@ class ShippedOrgSeedTests(unittest.TestCase):
         self.assertEqual(regions["vanke"], (1050251442, 1049750665))
         # hq（总部子树，含总经办/财务部，BI 免登 admin 所在区域）。
         self.assertEqual(regions["hq"], (1050143465,))
+        # province_ops：线下运营中心 + 省外销售部（顺序生效——杭/绍子树
+        # 已被前序区域认领，本区只收到省外/浙中南/本级直属）。
+        self.assertEqual(regions["province_ops"], (1050135497, 1049860586))
         # other 含真根部门 1，递归展开即全公司——靠顺序兜底。
         # 2026-10-24 修复：此前注释误把 1050135497（实为线下运营中心）
         # 当根部门，电商事业部/餐饮部/综合事务部/千峰四个一级分支从未
         # 被遍历（钉钉全员 123 vs 采集 97，差 26 人）。
         self.assertIn(1, regions["other"])
+
+
+class _OverlayCursor:
+    def __init__(self, rows=(), error=None):
+        self._rows = list(rows)
+        self._error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        if self._error is not None:
+            raise self._error
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _OverlayConn:
+    def __init__(self, rows=(), error=None):
+        self._cursor = _OverlayCursor(rows, error)
+
+    def cursor(self):
+        return self._cursor
+
+
+class OrgDbOverlayTests(unittest.TestCase):
+    """dim_org_region_dept 覆盖层（2026-10-26 权威源迁 DB）。"""
+
+    SEED = (("hangzhou", (1049728636,)), ("other", (1,)))
+
+    def test_db_rows_override_seed_list_for_covered_region(self):
+        conn = _OverlayConn([
+            {"region_key": "hangzhou", "dept_id": 1050062512},
+            {"region_key": "hangzhou", "dept_id": 1049728636},
+        ])
+        merged = apply_org_db_overlay(self.SEED, conn)
+        self.assertEqual(
+            merged,
+            (("hangzhou", (1050062512, 1049728636)), ("other", (1,))),
+        )
+
+    def test_uncovered_region_keeps_seed_and_empty_table_noop(self):
+        merged = apply_org_db_overlay(self.SEED, _OverlayConn([]))
+        self.assertEqual(merged, self.SEED)
+
+    def test_db_down_is_fail_open(self):
+        conn = _OverlayConn(error=RuntimeError("no table"))
+        merged = apply_org_db_overlay(self.SEED, conn)
+        self.assertEqual(merged, self.SEED)
 
 
 class LoadOrgSeedTests(unittest.TestCase):

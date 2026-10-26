@@ -227,6 +227,30 @@ def org_catalog_broadcast_v1_statements() -> tuple:
     return _REGION_BROADCAST_ALTERS
 
 
+# ---------------------------------------------------------------------------
+# v5（2026-10-26，权威源迁 DB）：区域→顶层部门映射表
+# ---------------------------------------------------------------------------
+
+#: 部门归属映射表：sync-dingtalk 的采集范围从 org.seed.json 迁 DB（页面
+#: 可编辑）。DB 有行的区域以 DB 为准；无行的区域保 seed（混合粒度=区域）。
+_DIM_ORG_REGION_DEPT_DDL = (
+    "CREATE TABLE IF NOT EXISTS `dim_org_region_dept` (\n"
+    "  `region_key` VARCHAR(32) NOT NULL,\n"
+    "  `dept_id` BIGINT NOT NULL,\n"
+    "  `sort_order` INT NOT NULL DEFAULT 0,\n"
+    "  `enabled` TINYINT NOT NULL DEFAULT 1,\n"
+    "  `updated_by` VARCHAR(64) DEFAULT NULL,\n"
+    "  `updated_at` DATETIME(6) NOT NULL,\n"
+    "  PRIMARY KEY (`region_key`, `dept_id`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def org_catalog_region_dept_v1_statements() -> tuple:
+    """迁移 ``mart-ops-region-dept-v1``：区域→顶层部门映射表。"""
+    return (_DIM_ORG_REGION_DEPT_DDL,)
+
+
 class OrgCatalogError(ValueError):
     """目录写面数据无效（消息只含字段名，不含值）。"""
 
