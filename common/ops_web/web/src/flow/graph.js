@@ -17,9 +17,9 @@ export const AGGREGATE_REGIONS = {
   },
 };
 
-//: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
-//: overview.regions 不含它——从名册/目标数据派生）。
-export const COMPLEMENT_REGION = 'other';
+//: 补集桶虚拟节点机制已退役（2026-10-26 用户裁决摘「其他」卡）：
+//: other 已是 dim_org_region 注册区域（组织完整化后挂 96 人归编兜底），
+//: 注册行被 HIDDEN_REGION_KEYS 过滤后补集分支本就恒不可达，一并清除。
 
 //: 业务线分组（2026-10-24 用户裁决「面板按 sheet 切割」）：分组定义在
 //: layout.js（展示层概念，保持 graph→layout 单向依赖）。
@@ -33,10 +33,12 @@ export const COMPLEMENT_REGION = 'other';
 //: * dining 餐饮——规划中，零名册零任务线；
 //: * junpin 君品雅院——任务线注册了但群未配，outbox 零产出的空跑；
 //: * offline_extra 线下额外——纯归编补集，无任务线。
+//: 2026-10-26 用户裁决追加 other（「其他」归编兜底区，96 人部门树挂
+//: 「缺名册」警告是噪音；归属查看改去 /org 组织编排页）。
 //: 上线时从集合移除即恢复（qudao 的店铺级徽章特判保留备用）。
 //: hq（总部职能底 muted）是有意的只读展示，不在此列。
 export const HIDDEN_REGION_KEYS = new Set([
-  'test', 'qudao', 'dining', 'junpin', 'offline_extra',
+  'test', 'qudao', 'dining', 'junpin', 'offline_extra', 'other',
 ]);
 
 //: 平台线（region=null 的服务组）的虚拟区域键。
@@ -211,18 +213,10 @@ export function buildGraph(raw) {
   // 平台线（region=null）不再是区域节点（2026-10-17 流水线分层）：其服务
   // 按 stageOf 散落 采集/加工 泳道成模块，源→采集→加工画数据流边。
   const platform = servicesByRegion[PLATFORM_KEY] || [];
-  // 补集桶虚拟节点（组织树无成员但名册/目标存在时补出）
-  if (!regions.some((r) => r.key === COMPLEMENT_REGION)
-      && (rosterRows.some((row) => row.scope === COMPLEMENT_REGION
-                                    && Number(row.enabled) === 1)
-          || (targets[COMPLEMENT_REGION]))) {
-    regionSpecs.push({ key: COMPLEMENT_REGION, region: null });
-  }
 
   for (const spec of regionSpecs) {
     const key = spec.key;
     const isPlatform = key === PLATFORM_KEY;
-    const isComplement = key === COMPLEMENT_REGION && !spec.region;
     // 部门/成员随节点携带（部门输入端口 + 成员输出口拉线的数据底）
     const depts = isPlatform || !spec.region ? [] : (spec.region.depts || [])
       .map((dept) => ({
@@ -253,11 +247,9 @@ export function buildGraph(raw) {
     //   无月目标不算缺口——有店铺名册+有服务即闭环。
     const badge = isPlatform
       ? { text: '平台线', cls: 'plain' }
-      : isComplement
-        ? { text: '补集', cls: 'plain' }
-        : key === 'hq'
-          ? { text: '职能底', cls: 'plain' }
-          : key === 'qudao' && rosterCount > 0
+      : key === 'hq'
+        ? { text: '职能底', cls: 'plain' }
+        : key === 'qudao' && rosterCount > 0
             ? (services.length
               ? { text: '已闭环', cls: 'ok' }
               : { text: '待下游', cls: 'warn' })
@@ -266,7 +258,6 @@ export function buildGraph(raw) {
       id: `region:${key}`,
       key,
       label: isPlatform ? '平台 / 无群'
-        : isComplement ? '其他（补集）'
         : (spec.region.label || key),
       group: groupOf(key)?.key || null,
       badge,
