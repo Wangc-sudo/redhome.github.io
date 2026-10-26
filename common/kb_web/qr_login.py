@@ -36,6 +36,7 @@ _OAPI_BASE = "https://oapi.dingtalk.com"
 _USER_TOKEN_PATH = "/v1.0/oauth2/userAccessToken"
 _USER_ME_PATH = "/v1.0/contact/users/me"
 _GETBYUNIONID_PATH = "/topapi/user/getbyunionid"
+_GETUSERINFO_PATH = "/topapi/v2/user/getuserinfo"
 _ACCESS_TOKEN_PATH = "/v1.0/oauth2/accessToken"
 
 #: 企业 access_token 缓存窗口（有效期 2h，与 bi_web.auth 同纪律）。
@@ -160,16 +161,44 @@ class DingTalkQrLoginClient:
         self._token_timestamp = 0.0
 
     def exchange_qr_code(self, code):
-        """扫码授权 code → ``(userid, union_id)``；任何失败抛泛化 AuthError。"""
+        """扫码授权 code → ``(userid, union_id)``；任何失败抛泛化 AuthError。
+
+        双通道：先按**企业内部应用免登码**语义直换（topapi/v2/user/
+        getuserinfo，权限与 H5 免登同面、现成）；失败再走 OAuth2 用户授权链
+        （2026-10-26 实测：users/me 需「通讯录个人信息读」权限点，未配时
+        403 AccessTokenPermissionDenied——免登码通道可完全绕开它）。
+        ``union_id`` 仅 OAuth 通道可得，免登码通道返回 None。
+        """
         if not isinstance(code, str) or not code:
             raise AuthError("dingtalk qr login failed")
+        try:
+            return self._userid_by_auth_code(code), None
+        except AuthError:
+            _log.info("qr login: getuserinfo path failed, "
+                      "fallback to oauth chain")
         user_token = self._user_access_token(code)
         union_id = self._user_union_id(user_token)
         userid = self._userid_by_union(union_id)
         return userid, union_id
 
     # ------------------------------------------------------------------
-    # 用户授权链
+    # 通道一：企业内部应用免登码（与 H5 免登同接口同权限面）
+    # ------------------------------------------------------------------
+    def _userid_by_auth_code(self, code):
+        url = (
+            _OAPI_BASE + _GETUSERINFO_PATH
+            + "?access_token=" + urllib.parse.quote(self._access_token(), safe="")
+        )
+        result = self._call(url, method="POST", body={"code": code},
+                            errcode_gate=True, step="getuserinfo")
+        userid = result.get("userid") if isinstance(result, Mapping) else None
+        if not isinstance(userid, str) or not userid:
+            _log.warning("qr login getuserinfo: userid missing")
+            raise AuthError("dingtalk qr login failed")
+        return userid
+
+    # ------------------------------------------------------------------
+    # 通道二：OAuth2 用户授权链（兜底）
     # ------------------------------------------------------------------
     def _user_access_token(self, code):
         body = {
