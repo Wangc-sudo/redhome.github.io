@@ -359,6 +359,23 @@ export function saveRegionTargets(payload) {
   return post('/api/roster/region-targets', payload);
 }
 
+// -- 权威源迁 DB 的页面入口（2026-10-26）--------------------------------------
+
+/** 区域目录真源读（含播报配置 broadcast 与归属映射 region_depts）。 */
+export function getRegionCatalog() {
+  return request('/api/regions');
+}
+
+/** 更新区域播报配置。payload: {region_key, fields: {...白名单字段...}}。 */
+export function saveRegionBroadcast(payload) {
+  return post('/api/org/region/broadcast', payload);
+}
+
+/** 全量替换区域顶层部门映射。payload: {region_key, dept_ids: [int,...]}。 */
+export function saveRegionDepts(payload) {
+  return post('/api/org/region/depts', payload);
+}
+
 /** 发布月度目标快照。payload: {rows:[...]}。 */
 export function publishSnapshot(payload) {
   return post('/api/roster/publish-snapshot', payload);

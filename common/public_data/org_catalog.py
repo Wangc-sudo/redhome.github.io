@@ -20,6 +20,7 @@ SQL 只存在于本模块；ops-web 是唯一写方，每次变更与同事务�
 """
 
 import contextlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -251,6 +252,113 @@ def org_catalog_region_dept_v1_statements() -> tuple:
     return (_DIM_ORG_REGION_DEPT_DDL,)
 
 
+# ---------------------------------------------------------------------------
+# 播报配置与归属映射写面（2026-10-26 权威源迁 DB 的页面入口）
+# ---------------------------------------------------------------------------
+
+#: 播报配置可编辑字段（白名单）：文本列直接写、JSON 列前端传数组/对象
+#: 后端 dumps。display/label/sort_order 走既有 upsert_region 不动。
+_BROADCAST_TEXT_FIELDS = ("table_url", "robot_code", "open_conversation_id",
+                          "leaderboard_url")
+_BROADCAST_INT_FIELDS = ("remind_hour", "check_hour")
+_BROADCAST_JSON_FIELDS = ("dept_order", "store_exclude", "aliases",
+                          "cc_user_ids", "dept_label", "broadcast_exclude",
+                          "monthly_targets")
+
+
+def update_region_broadcast(connection, region_key, fields, *, actor):
+    """更新区域播报配置（白名单字段；未出现的字段不动；None=清空该列）。
+
+    审计 action='update_broadcast'，detail=变更字段名列表。返回变更的
+    字段名元组。
+    """
+    if not isinstance(fields, dict) or not fields:
+        raise OrgCatalogError("fields must be a non-empty object")
+    sets = []
+    params = []
+    changed = []
+    for key, value in fields.items():
+        if key in _BROADCAST_TEXT_FIELDS:
+            if value is not None and not isinstance(value, str):
+                raise OrgCatalogError(f"{key} must be a string")
+            sets.append(f"`{key}`=%s")
+            params.append(value)
+        elif key in _BROADCAST_INT_FIELDS:
+            if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, int)
+                    or not 0 <= value <= 23):
+                raise OrgCatalogError(f"{key} must be 0..23")
+            sets.append(f"`{key}`=%s")
+            params.append(value)
+        elif key in _BROADCAST_JSON_FIELDS:
+            if value is not None and not isinstance(value, (dict, list)):
+                raise OrgCatalogError(f"{key} must be an object or list")
+            sets.append(f"`{key}`=%s")
+            params.append(
+                None if value is None
+                else json.dumps(value, ensure_ascii=False))
+        else:
+            raise OrgCatalogError(f"unknown broadcast field: {key}")
+        changed.append(key)
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            sets.append("`updated_by`=%s")
+            params.append(actor)
+            sets.append("`updated_at`=%s")
+            params.append(_utc_now_text())
+            params.append(region_key)
+            cursor.execute(
+                f"UPDATE `dim_org_region` SET {', '.join(sets)} "
+                "WHERE `region_key`=%s", params)
+            if not cursor.rowcount:
+                raise OrgCatalogError("region not registered")
+            _insert_audit(
+                connection, actor, "update_broadcast", target_type="region",
+                region_key=region_key, detail=",".join(sorted(changed)),
+            )
+    return tuple(sorted(changed))
+
+
+def replace_region_depts(connection, region_key, dept_ids, *, actor):
+    """全量替换区域的顶层部门映射（``dim_org_region_dept``）。
+
+    *dept_ids* 顺序即展示序（sort_order=行序）；与现值的差集（新增/移除）
+    进审计 detail。空列表=清空该区域映射（采集回落 seed——兜底仍在）。
+    """
+    if not isinstance(dept_ids, list) or any(
+            isinstance(d, bool) or not isinstance(d, int) or d <= 0
+            for d in dept_ids):
+        raise OrgCatalogError("dept_ids must be a list of positive ints")
+    if len(set(dept_ids)) != len(dept_ids):
+        raise OrgCatalogError("dept_ids must not contain duplicates")
+    now = _utc_now_text()
+    with contextlib.closing(connection.cursor()) as cursor:
+        with transaction(connection):
+            cursor.execute(
+                "SELECT `dept_id` FROM `dim_org_region_dept` "
+                "WHERE `region_key`=%s AND `enabled`=1", (region_key,))
+            before = {row["dept_id"] for row in cursor.fetchall()}
+            cursor.execute(
+                "DELETE FROM `dim_org_region_dept` WHERE `region_key`=%s",
+                (region_key,))
+            for order, dept_id in enumerate(dept_ids):
+                cursor.execute(
+                    "INSERT INTO `dim_org_region_dept` "
+                    "(`region_key`, `dept_id`, `sort_order`, `enabled`, "
+                    "`updated_by`, `updated_at`) "
+                    "VALUES (%s, %s, %s, 1, %s, %s)",
+                    (region_key, dept_id, order, actor, now))
+            after = set(dept_ids)
+            detail = (
+                f"+{sorted(after - before)} -{sorted(before - after)}")
+            _insert_audit(
+                connection, actor, "set_region_depts", target_type="region",
+                region_key=region_key, detail=detail,
+            )
+    return {"added": sorted(after - before),
+            "removed": sorted(before - after)}
+
+
 class OrgCatalogError(ValueError):
     """目录写面数据无效（消息只含字段名，不含值）。"""
 
@@ -291,6 +399,40 @@ def _clean(value, limit):
     return text
 
 
+def _json_col(row, name, position):
+    """播报 JSON 文本列 → 对象（None/坏 JSON → None，不阻断读面）。"""
+    value = _get(row, name, position)
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_broadcast(row):
+    """区域行的播报配置子对象（2026-10-26 权威源迁 DB 读面）。
+
+    列位与 ``_REGION_COLUMNS`` 对齐；tuple 行（测试构造）缺列回 None。
+    """
+    return {
+        "display": _get(row, "display", 8),
+        "table_url": _get(row, "table_url", 9),
+        "robot_code": _get(row, "robot_code", 10),
+        "open_conversation_id": _get(row, "open_conversation_id", 11),
+        "remind_hour": _get(row, "remind_hour", 12),
+        "check_hour": _get(row, "check_hour", 13),
+        "leaderboard_url": _get(row, "leaderboard_url", 14),
+        "dept_order": _json_col(row, "dept_order", 15),
+        "store_exclude": _json_col(row, "store_exclude", 16),
+        "aliases": _json_col(row, "aliases", 17),
+        "cc_user_ids": _json_col(row, "cc_user_ids", 18),
+        "dept_label": _json_col(row, "dept_label", 19),
+        "broadcast_exclude": _json_col(row, "broadcast_exclude", 20),
+        "monthly_targets": _json_col(row, "monthly_targets", 21),
+    }
+
+
 def _as_region(row):
     return {
         "id": _get(row, "id", 0),
@@ -303,6 +445,8 @@ def _as_region(row):
         # 播报改投目标（2026-10-19 测试区）；迁移未应用时 fetch 层
         # fail-soft 回空目录，本键始终存在（None=不改投）。
         "relay_to": _get(row, "relay_to", 7),
+        # 播报配置（2026-10-26）：区域抽屉编辑的回显源。
+        "broadcast": _as_broadcast(row),
     }
 
 
@@ -321,7 +465,12 @@ def _as_dept(row):
 
 _REGION_COLUMNS = (
     "`id`, `region_key`, `label`, `sort_order`, `enabled`, "
-    "`updated_by`, `updated_at`, `relay_to`"
+    "`updated_by`, `updated_at`, `relay_to`, "
+    # 播报列（2026-10-26 权威源迁 DB）：组织编排页/区域抽屉编辑的回显源。
+    "`display`, `table_url`, `robot_code`, `open_conversation_id`, "
+    "`remind_hour`, `check_hour`, `leaderboard_url`, `dept_order`, "
+    "`store_exclude`, `aliases`, `cc_user_ids`, `dept_label`, "
+    "`broadcast_exclude`, `monthly_targets`"
 )
 _DEPT_COLUMNS = (
     "`id`, `region_key`, `dept_id`, `dept_name`, `sort_order`, `enabled`, "
@@ -373,9 +522,29 @@ def fetch_catalog(connection):
             exc_info=True,
         )
         return {"regions": [], "depts": []}
+    # 归属映射（2026-10-26 权威源迁 DB）：dim_org_region_dept 独立读——
+    # 表不存在（迁移未跑）不拖垮主目录（返回空映射）。
+    region_depts = {}
+    try:
+        dept_map_rows = _fetch_all(
+            connection,
+            "SELECT `region_key`, `dept_id` FROM `dim_org_region_dept` "
+            "WHERE `enabled` = 1 "
+            "ORDER BY `region_key`, `sort_order`, `dept_id`",
+        )
+        for row in dept_map_rows:
+            region_depts.setdefault(
+                str(_get(row, "region_key", 0) or ""), []).append(
+                int(_get(row, "dept_id", 1)))
+    except Exception:
+        logger.warning(
+            "dim_org_region_dept 读取失败（迁移未应用？），按空映射：",
+            exc_info=True,
+        )
     return {
         "regions": [_as_region(row) for row in region_rows],
         "depts": [_as_dept(row) for row in dept_rows],
+        "region_depts": region_depts,
     }
 
 

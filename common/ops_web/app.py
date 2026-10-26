@@ -2021,6 +2021,62 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         return JSONResponse({"status": "ok", "region_key": region_key,
                              "relay_to": "test" if relay else None})
 
+    @app.post("/api/org/region/broadcast")
+    async def org_region_broadcast(request: Request):
+        """更新区域播报配置（2026-10-26 权威源迁 DB 的页面入口）。
+
+        body：{region_key, fields: {...白名单字段...}}——未出现的字段不动，
+        None=清空该列。审计 update_broadcast。
+        """
+        viewer = require_capability(request, CAPABILITY_ORG)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        fields = payload.get("fields")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(fields, dict) or not fields:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                changed = org_catalog.update_region_broadcast(
+                    connection, region_key.strip(), fields,
+                    actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web region broadcast save failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", "changed": list(changed)})
+
+    @app.post("/api/org/region/depts")
+    async def org_region_depts(request: Request):
+        """全量替换区域的顶层部门映射（采集范围，dim_org_region_dept）。
+
+        body：{region_key, dept_ids: [int,...]}——顺序即展示序。审计
+        set_region_depts（detail=增删差集）。
+        """
+        viewer = require_capability(request, CAPABILITY_ORG)
+        payload = await _json_body(request)
+        region_key = payload.get("region_key")
+        dept_ids = payload.get("dept_ids")
+        if not isinstance(region_key, str) or not region_key.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        if not isinstance(dept_ids, list):
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                result = org_catalog.replace_region_depts(
+                    connection, region_key.strip(), dept_ids,
+                    actor=viewer.userid)
+        except org_catalog.OrgCatalogError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web region depts save failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok", **result})
+
     @app.post("/api/org/region/add")
     async def org_region_add(request: Request):
         """登记一个区域（消费侧组织目录；即使无成员也进树）。"""
