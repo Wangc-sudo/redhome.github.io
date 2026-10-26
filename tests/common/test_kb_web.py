@@ -403,6 +403,110 @@ class KbWebServiceTests(unittest.TestCase):
         self.assertIsNone(result["meta"]["tokens"])
 
 
+class _AuditConn:
+    """审计写入记录器：接住 INSERT 并记住参数。"""
+
+    def __init__(self):
+        self.inserts = []
+        self.committed = False
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=None):
+        self.inserts.append((sql, params))
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        pass
+
+
+class KbWebAuditTests(unittest.TestCase):
+    """Web 链路问答落 kb_qa_audit（2026-10-26，与群内同表同口径）。"""
+
+    def _row(self):
+        return {
+            "record_id": "rec1", "code": "SP001", "name": "习酒窖藏1998",
+            "brand": "习酒", "category": "酱香", "box_qty": 6,
+            "case_qty": 2, "size_mm": "280x190x90", "weight_kg": 1.35,
+            "material": "陶瓷", "gift_bag_spec": "双瓶装",
+            "barcode_single": "6901234567890", "barcode_case": "6901234567891",
+            "attachments": None, "extra": None,
+        }
+
+    def test_audit_written_on_success(self):
+        answer_conn = _SvcConn([[self._row()]])
+        audit_conn = _AuditConn()
+        conns = iter([answer_conn, audit_conn])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: next(conns), log=lambda _: None)
+        result = service.answer("u1", "习酒窖藏1998 箱规",
+                                history_messages=[], audit={"sid": "s1"})
+        self.assertEqual("PRODUCT_PARAM", result["intent"])
+        self.assertEqual(1, len(audit_conn.inserts))
+        sql, params = audit_conn.inserts[0]
+        self.assertIn("kb_qa_audit", sql)
+        self.assertTrue(params[0].startswith("web:s1:"))  # msg_id
+        self.assertEqual("web:s1", params[1])             # conversation_id
+        self.assertEqual("u1", params[2])                 # sender_uid
+        self.assertIn("PRODUCT_PARAM", params)            # intent
+        self.assertIn(0, params)                          # failed=0
+        self.assertTrue(audit_conn.committed)
+
+    def test_audit_skipped_without_context(self):
+        made = []
+
+        def factory():
+            conn = _SvcConn([[self._row()]])
+            made.append(conn)
+            return conn
+
+        service = svc_module.KbWebService(
+            connection_factory=factory, log=lambda _: None)
+        service.answer("u1", "习酒窖藏1998 箱规", history_messages=[])
+        # 只有问答主连接，无审计连接
+        self.assertEqual(1, len(made))
+
+    def test_audit_marks_failed_on_error(self):
+        class _BrokenConn:
+            def cursor(self):
+                raise RuntimeError("down")
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        audit_conn = _AuditConn()
+        conns = iter([_BrokenConn(), audit_conn])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: next(conns), log=lambda _: None)
+        result = service.answer("u1", "任意问题", history_messages=[],
+                                audit={"sid": "s1"})
+        self.assertEqual("error", result["intent"])
+        self.assertEqual(1, len(audit_conn.inserts))
+        _sql, params = audit_conn.inserts[0]
+        self.assertEqual(1, params[-2])       # failed=1
+        self.assertIsNone(params[11])         # answer_excerpt NULL
+
+    def test_audit_write_error_never_breaks_answer(self):
+        answer_conn = _SvcConn([[self._row()]])
+
+        class _AuditBroken:
+            def cursor(self):
+                raise RuntimeError("audit db down")
+
+        conns = iter([answer_conn, _AuditBroken()])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: next(conns), log=lambda _: None)
+        result = service.answer("u1", "习酒窖藏1998 箱规",
+                                history_messages=[], audit={"sid": "s1"})
+        self.assertIn("箱规：6", result["reply"])
+
+
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
@@ -410,7 +514,8 @@ class _StubService:
     def __init__(self):
         self.calls = []
 
-    def answer(self, userid, content, *, history_messages, pending=None):
+    def answer(self, userid, content, *, history_messages, pending=None,
+               audit=None):
         self.calls.append((userid, content))
         return {"reply": "答案", "intent": "product_param",
                 "meta": {"tools": [], "rounds": None, "latency_ms": 5},
@@ -502,7 +607,7 @@ class KbRoutesTests(unittest.TestCase):
 
         class _ClarifyStub:
             def answer(self, userid, content, *, history_messages,
-                       pending=None):
+                       pending=None, audit=None):
                 seen.append(pending)
                 return {"reply": "r", "intent": "PRODUCT_PARAM",
                         "meta": {"tools": [], "rounds": None,

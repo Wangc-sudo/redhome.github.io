@@ -13,6 +13,7 @@ agent_runner，不存共享可变状态。
 """
 
 import time
+import uuid
 
 from common.kb_qa.context import DEFAULT_MAX_TURNS
 
@@ -90,16 +91,23 @@ class KbWebService:
             agent_runner=agent_runner if llm is not None else None,
         )
 
-    def answer(self, userid, content, *, history_messages, pending=None):
+    def answer(self, userid, content, *, history_messages, pending=None,
+               audit=None):
         """主入口：返回 {reply,intent,meta,attachments,pending_candidates}；
         永不抛（降级话术）。
 
         pending（2026-10-23 clarify Web 接线）：上一轮反问的候选列表，
         由调用方从会话存储 pop（消费即作废）传入；本轮若再发反问，
         返回值的 pending_candidates 非空，调用方负责存回。
+        audit（2026-10-26 审计补齐）：传 {"sid": ...} 时把本条问答写进
+        kb_qa_audit（与群内同表同口径，badcase/token 运营统计两通道
+        合一）；None 跳过。msg_id 合成 web:{sid}:{uuid}，天然无重复
+        投递问题（发送幂等在路由层）。
         """
         started = self._now()
         meta = {}
+        failed = False
+        matched = None
         history = web_history_from_messages(history_messages)
         # 截断判定：全量配对数 > 实际带入轮数（上限 DEFAULT_MAX_TURNS）——
         # 前端据此提示「仅参考最近 N 轮」（2026-10-26 上下文可见性）。
@@ -112,12 +120,13 @@ class KbWebService:
         usage_snap = getattr(self._llm, "usage_snapshot", None)
         usage_before = usage_snap() if callable(usage_snap) else None
         try:
-            reply, intent, _matched = handler._answer(
+            reply, intent, matched = handler._answer(
                 conn, content, history=history, conversation_id=None,
                 meta=meta, pending=pending)
             conn.commit()
         except Exception as exc:
             conn.rollback()
+            failed = True
             self._log(f"kb web: answer failed: {type(exc).__name__}")
             reply, intent = "查询出了点问题，请稍后再试。", "error"
         finally:
@@ -146,6 +155,12 @@ class KbWebService:
                     "url": (f"/kb/api/attachments/{asset['record_id']}"
                             f"/{asset['field']}/{index}"),
                 })
+        if audit:
+            self._write_audit(audit, userid=userid, question=content,
+                              reply=None if failed else reply,
+                              intent=intent, matched=matched, meta=meta,
+                              tokens=tokens, latency_ms=latency_ms,
+                              failed=failed)
         return {
             "reply": reply or "",
             "intent": intent,
@@ -161,3 +176,49 @@ class KbWebService:
             # clarify 闭环状态（路由层消费，不透给前端）。
             "pending_candidates": meta.get("pending_candidates"),
         }
+
+    def _write_audit(self, audit, *, userid, question, reply, intent,
+                     matched, meta, tokens, latency_ms, failed):
+        """Web 问答审计落 kb_qa_audit（与群内同表同列语义）。
+
+        新连接 + best-effort：写失败只记日志，绝不影响已产生的答复。
+        失败行 answer_excerpt 置 NULL（同群内 _mark_failed 口径——兜底
+        话术不算答案，badcase 聚类按 failed 列统计）。
+        """
+        sid = audit.get("sid") or ""
+        msg_id = f"web:{sid}:{uuid.uuid4().hex[:12]}"
+        try:
+            conn = self._connection_factory()
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "INSERT INTO `kb_qa_audit`"
+                        " (`msg_id`, `conversation_id`, `sender_uid`,"
+                        "  `question`, `intent`, `matched_record_id`,"
+                        "  `reply_kind`, `recall_source`, `tool_used`,"
+                        "  `agent_rounds`, `latency_ms`, `answer_excerpt`,"
+                        "  `prompt_tokens`, `completion_tokens`, `failed`,"
+                        "  `created_at`)"
+                        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                        "        %s,%s)",
+                        (
+                            msg_id, f"web:{sid}", userid, question, intent,
+                            matched, "text" if reply else "none",
+                            meta.get("recall_source"),
+                            ",".join(meta.get("tools") or []) or None,
+                            meta.get("rounds"), latency_ms,
+                            (reply or "")[:500] or None,
+                            (tokens or {}).get("prompt"),
+                            (tokens or {}).get("completion"),
+                            1 if failed else 0,
+                            time.strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    )
+                finally:
+                    cursor.close()
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            self._log("kb web: audit skipped")

@@ -184,7 +184,7 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             pending = store.pop_pending(userid, sid)
             result = service.answer(userid, content,
                                     history_messages=history,
-                                    pending=pending)
+                                    pending=pending, audit={"sid": sid})
             pending_candidates = result.pop("pending_candidates", None)
             if pending_candidates:
                 store.set_pending(userid, sid, pending_candidates)
@@ -210,7 +210,8 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         if last_user is None:
             raise HTTPException(status_code=400, detail="bad request")
         result = service.answer(userid, last_user["content"],
-                                history_messages=history)
+                                history_messages=history,
+                                audit={"sid": sid})
         # 重答不改变 clarify 状态：状态键不透给前端。
         result.pop("pending_candidates", None)
         now = _now_text()
