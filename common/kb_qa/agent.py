@@ -446,14 +446,26 @@ class ToolExecutor:
         if not result["phones"] and not result["bindings"]:
             return {"found": False, "keyword": keyword,
                     "hint": "台账无匹配。请对方到 ops-web 号码台账页核实/补登记"}
-        return {
+        # 结果自压缩：一人多卡（实测 5 卡 10+ 绑定）会超 execute() 的
+        # 2000 字截断把 JSON 从中间切断——号码只留关键字段、绑定限量，
+        # 保证整体在截断线内是合法 JSON。
+        phones = [
+            {key: row.get(key) for key in (
+                "phone_no", "actual_user", "phone_type", "physical_device",
+                "status") if row.get(key) is not None}
+            for row in result["phones"]
+        ]
+        bindings = result["bindings"][:6]
+        payload = {
             "found": True,
-            "phones": result["phones"],
-            "bindings": result["bindings"],
+            "phones": phones,
+            "bindings": bindings,
             "hint": "actual_user=实际持卡人（验证码找 TA 要）；"
-                    "physical_device=卡在哪台手机；account_name=电信开户名"
-                    "（常与持卡人不符，以 actual_user 为准）",
+                    "physical_device=卡在哪台手机",
         }
+        if len(result["bindings"]) > len(bindings):
+            payload["bindings_more"] = len(result["bindings"]) - len(bindings)
+        return payload
 
     def _tool_daily_sales(self, args):
         scope = str(args.get("scope") or "").strip()

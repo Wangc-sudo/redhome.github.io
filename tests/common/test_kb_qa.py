@@ -1788,6 +1788,27 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertFalse(result["found"])
         self.assertIn("台账无匹配", result["hint"])
 
+    def test_phone_lookup_trims_to_valid_json_under_limit(self):
+        # 一人多卡场景（云上实测 5 卡 10+ 绑定超 2000 字被 execute()
+        # 从 JSON 中间切断）：绑定截 6 + more 计数，号码裁掉开户名/部门，
+        # 保证结果在截断线内仍是合法 JSON
+        phones = [{"phone_no": f"1330000111{i}", "actual_user": "张三",
+                   "phone_type": "主卡", "physical_device": "序号①",
+                   "account_name": "电信开户名", "dept": "店铺组"}
+                  for i in range(5)]
+        bindings = [{"phone_no": "13300001110",
+                     "channel_category": "抖音店铺登入主账号",
+                     "platform_account": "某很长很长的平台账号名称旗舰店专营店",
+                     "actual_user": "张三"} for _ in range(10)]
+        executor = self._executor([phones, bindings])
+        raw = executor.execute("phone_lookup", {"keyword": "张三"})
+        self.assertLessEqual(len(raw), 2000)
+        result = json.loads(raw)
+        self.assertEqual(6, len(result["bindings"]))
+        self.assertEqual(4, result["bindings_more"])
+        self.assertNotIn("account_name", result["phones"][0])
+        self.assertNotIn("dept", result["phones"][0])
+
     def test_phone_lookup_registered_and_not_narrowed(self):
         # 工具注册 + 系统提示词提及；全员开放（同 product_stats），
         # 不在 Web 业务收窄面内
