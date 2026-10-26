@@ -1258,11 +1258,12 @@ def _schedule_cell(schedule):
 # ---------------------------------------------------------------------------
 
 
-#: 认证关闭时的直通 Viewer（2026-10-26 用户裁决「认证系统全部关闭」：
-#: ops-web 锁办公网（SG 白名单），网内信任——admin 级全能力，审计
-#: actor 统一记 anon-ops。回开 = 摘掉 OPS_WEB_AUTH_DISABLED 环境变量。
+#: 认证关闭时**读面**的直通 Viewer（2026-10-26 读写分离裁决：查看面匿名
+#: 开放、写操作仍要登录会话+授权——SG 全放行的现实下「网内信任」前提
+#: 不成立，写面不能裸奔）。审计 actor 记 anon-ops；写操作走正常会话
+#: 解析后记真实 userid。回开全闸 = 摘掉 OPS_WEB_AUTH_DISABLED 环境变量。
 _OPEN_VIEWER = authz.Viewer(
-    userid="anon-ops", name="内网直通",
+    userid="anon-ops", name="匿名只读",
     scopes=frozenset(), allowed_regions=frozenset(),
     is_admin=True, admitted=True,
 )
@@ -1284,9 +1285,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     ``browser_login_token`` 非空时开放浏览器登录通道（2026-10-14，
     为无钉钉环境的运维/验收提供入口），缺省关闭。
 
-    ``auth_disabled=True``（2026-10-26 用户裁决）：所有闸直通
-    （_OPEN_VIEWER）——登录页仍在但任意路径不再拦截；回开即摘掉
-    环境变量，无代码改动。
+    ``auth_disabled=True``（2026-10-26 用户裁决，读写分离）：读面闸直通
+    （_OPEN_VIEWER）——查看面任意路径不再拦截；写方法（POST/PUT/DELETE）
+    仍走会话+授权闸，登录页承担写前登录。回开全闸即摘掉环境变量，
+    无代码改动。
     """
     if not session_secret:
         raise ValueError("ops-web requires a session secret")
@@ -1304,8 +1306,11 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     def _resolve_request_viewer(request: Request) -> authz.Viewer:
         """session → Viewer（各闸共用的解析段；未登录 401/302，解析异常 403）。"""
-        if auth_disabled:
-            # 认证关闭（2026-10-26 用户裁决）：网内直通，审计记 anon-ops。
+        if auth_disabled and request.method in ("GET", "HEAD", "OPTIONS"):
+            # 读写分离（2026-10-26 用户裁决）：认证关闭只放读面——查看匿名
+            # 直通；写方法落入下方正常会话解析：未登录 401（/api/ 前缀）、
+            # 登录后按既有授权（admin/能力×范围）判定，审计记真实 userid。
+            # 登录端点（/auth/*-login 等）不调闸，天然匿名可达。
             request.state.viewer = _OPEN_VIEWER
             return _OPEN_VIEWER
         raw = request.cookies.get(auth.SESSION_COOKIE)
@@ -4345,8 +4350,8 @@ def main():
             # 舰队清单地基（seed）缺失不拖垮权限管理面：定时任务页 503。
             _LOGGER.warning("ops-web fleet source unavailable at startup")
             fleet_source = None
-        # 认证总开关（2026-10-26 用户裁决「认证系统全部关闭。目前」）：
-        # **缺省直通**（网内信任；SG 白名单兜底办公网来源）；回开认证 =
+        # 认证总开关（2026-10-26 用户裁决，读写分离版）：**缺省读面直通**
+        # （查看匿名开放；写操作仍要登录会话+授权）；回开全量认证 =
         # 设 OPS_WEB_AUTH_DISABLED=0（宿主机 ops-web.env），无需改代码。
         auth_disabled = os.environ.get(
             "OPS_WEB_AUTH_DISABLED", "1"

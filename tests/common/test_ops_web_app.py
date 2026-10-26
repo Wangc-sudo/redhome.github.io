@@ -179,15 +179,16 @@ class FactoryTests(unittest.TestCase):
 
 
 class AuthDisabledTests(unittest.TestCase):
-    """认证总开关（2026-10-26 用户裁决「认证系统全部关闭。目前」）：
-    auth_disabled=True 时所有闸直通（内网信任；SG 白名单兜底）。"""
+    """认证总开关·读写分离（2026-10-26 用户裁决，同日从「全直通」升级为
+    「读开放、写要登录」——SG 全放行现实下写面不能裸奔）：
+    auth_disabled=True 时读方法匿名直通，写方法仍走会话+授权闸。"""
 
-    def _open_app(self):
+    def _open_app(self, viewer=None):
         return create_app(
             settings=_fake_settings(),
             session_secret=SECRET,
             db_connector=_connector(),
-            viewer_resolver=_StaticViewerResolver(),
+            viewer_resolver=_StaticViewerResolver(viewer),
             auth_disabled=True,
         )
 
@@ -197,15 +198,47 @@ class AuthDisabledTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("anon-ops", response.json()["userid"])
 
-    def test_no_session_passes_admin_gate(self):
-        # 区域写面（CAPABILITY_ORG）无会话也直通——admin 级。
+    def test_write_without_session_is_401(self):
+        # 读写分离核心：写面（POST /api/**）无会话不再直通——401。
         client = TestClient(self._open_app())
         response = client.post(
             "/api/org/region/broadcast",
             json={"region_key": "hangzhou", "fields": {}},
         )
-        # 过闸到达参数校验（400 bad_request），不是 401/302
+        self.assertEqual(401, response.status_code)
+
+    def test_write_with_admin_session_passes_gate(self):
+        # 登录 admin 写：过闸到达参数校验（400 bad_request），不是 401/403。
+        client = TestClient(self._open_app(viewer=_admin_viewer()))
+        _login(client)
+        response = client.post(
+            "/api/org/region/broadcast",
+            json={"region_key": "hangzhou", "fields": {}},
+        )
         self.assertEqual(400, response.status_code)
+
+    def test_write_with_plain_session_is_403(self):
+        # 登录但无能力授权：写面 fail-closed 403（授权判定照常生效）。
+        viewer = authz.Viewer(
+            userid="u-plain", name="路人", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(self._open_app(viewer=viewer))
+        _login(client, "u-plain")
+        response = client.post(
+            "/api/org/region/broadcast",
+            json={"region_key": "hangzhou", "fields": {}},
+        )
+        self.assertEqual(403, response.status_code)
+
+    def test_login_endpoints_stay_anonymous(self):
+        # 登录端点不调闸：未配 browser_login_token → 503 业务码
+        #（若被写面闸拦会是 401）。
+        client = TestClient(self._open_app())
+        response = client.post(
+            "/auth/browser-login", json={"user_id": "x", "token": "y"},
+        )
+        self.assertEqual(503, response.status_code)
 
     def test_default_keeps_gates(self):
         # 缺省（auth_disabled=False）行为不变：未登录 401。

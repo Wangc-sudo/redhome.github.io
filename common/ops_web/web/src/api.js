@@ -46,6 +46,13 @@ async function request(path, options = {}) {
   }
 
   if (!resp.ok) {
+    // 读写分离（2026-10-26）：查看面匿名开放，写操作要登录会话——
+    // 写方法拿到 401 = 未登录/会话过期，直接带去登录入口（登录后回来
+    // 重试）；读方法的 401/403 维持抛错，由 router 守卫处理。
+    const method = (options.method || 'GET').toUpperCase();
+    if (resp.status === 401 && method !== 'GET' && method !== 'HEAD') {
+      window.location.assign('/auth/entry?reason=write-login');
+    }
     const err = new Error(
       resp.status === 401 || resp.status === 403
         ? '登录已过期或无权限，请重新登录'
