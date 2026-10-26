@@ -257,6 +257,23 @@ async function send() {
     })
     refreshSessions()
   } catch (err) {
+    // 先拉后发（2026-10-26）：服务端不受客户端断连/超时影响，答案可能
+    // 已答完落库——先拉会话核对，末尾已是本轮问答（同内容用户消息 + 紧
+    // 跟 assistant 回复）则直接渲染，避免盲目重发造成重复消息与双倍
+    // LLM 成本。拉取也失败或末尾不是本轮答案，才按发送失败处理。
+    try {
+      const detail = await api.getSession(currentSid.value)
+      const msgs = detail.messages || []
+      const last = msgs[msgs.length - 1]
+      const prev = msgs[msgs.length - 2]
+      if (last && last.role === 'assistant' && prev
+          && prev.role === 'user' && prev.content === content) {
+        messages.value = msgs
+        sendError.value = false
+        refreshSessions()
+        return
+      }
+    } catch (e2) { /* 拉取失败则按发送失败处理 */ }
     messages.value.pop()
     draft.value = content
     if (quoted) quote.value = quoted

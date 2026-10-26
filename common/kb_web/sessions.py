@@ -12,6 +12,7 @@
 故生命周期 7 天而非 10 分钟——两套参数两种产品语义，不合并。
 """
 
+import hashlib
 import json
 import time
 import uuid
@@ -26,8 +27,17 @@ MAX_MESSAGES_PER_SESSION = 200
 #: 会话标题=首条用户消息截断长度。
 TITLE_CHARS = 18
 
+#: 发送幂等（2026-10-26「发送失败（网络异常）」治理配套）：在飞锁 TTL
+#: 须覆盖 agent 最坏时长（多轮 query_sql × 推理版模型）且大于 nginx
+#: proxy_read_timeout；结果窗给「重发/双击/弱网重试」一个直接取答案的
+#: 窗口，命中即不重跑 agent、不重复写会话。
+IDEM_LOCK_MS = 240_000
+IDEM_DONE_TTL_SECONDS = 300
+
 _KEY_INDEX = "kbqa:web:idx"
 _KEY_SESSION = "kbqa:web:sess"
+_KEY_IDEM_FLY = "kbqa:web:idem:fly"
+_KEY_IDEM_DONE = "kbqa:web:idem:done"
 #: clarify 待选择候选键（2026-10-23 Web 侧接线）：与群内 kbqa:pending
 #: 同语义——消费即作废，TTL 随会话滑动。
 _KEY_PENDING = "kbqa:web:pending"
@@ -51,6 +61,16 @@ class _MemoryKV:
 
     def setex(self, key, ttl, value):
         self._data[key] = (value, time.time() + ttl)
+
+    def set_nx(self, key, value, ttl_ms):
+        """SET NX PX 等价：键不存在或已过期才写入，返回是否抢到。"""
+        entry = self._data.get(key)
+        if entry is not None:
+            _, expires_at = entry
+            if expires_at is None or time.time() < expires_at:
+                return False
+        self._data[key] = (value, time.time() + ttl_ms / 1000.0)
+        return True
 
     def delete(self, key):
         self._data.pop(key, None)
@@ -218,3 +238,56 @@ class WebSessionStore:
         except Exception:
             pass
         return value
+
+    # ------------------------------------------------------------------
+    # 发送幂等（2026-10-26）：在飞锁 + 结果窗
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _idem_digest(userid, sid, content):
+        digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:16]
+        return userid, sid, digest
+
+    @classmethod
+    def _idem_fly_key(cls, userid, sid, content):
+        uid, sid_, digest = cls._idem_digest(userid, sid, content)
+        return f"{_KEY_IDEM_FLY}:{uid}:{sid_}:{digest}"
+
+    @classmethod
+    def _idem_done_key(cls, userid, sid, content):
+        uid, sid_, digest = cls._idem_digest(userid, sid, content)
+        return f"{_KEY_IDEM_DONE}:{uid}:{sid_}:{digest}"
+
+    def acquire_idem(self, userid, sid, content):
+        """抢在飞锁：抢到→True 可执行；已存在→False（同内容请求在飞）；
+        后端异常→True（fail-open，幂等是增强不是门禁）。"""
+        key = self._idem_fly_key(userid, sid, content)
+        try:
+            kv = self._kv()
+            if isinstance(kv, _MemoryKV):
+                return kv.set_nx(key, "1", IDEM_LOCK_MS)
+            return bool(kv.set(key, "1", nx=True, px=IDEM_LOCK_MS))
+        except Exception:
+            return True
+
+    def get_idem_done(self, userid, sid, content):
+        """结果窗命中返回上次同内容的结果 dict，否则 None。"""
+        value = self._read_json(self._idem_done_key(userid, sid, content), {})
+        return value or None
+
+    def complete_idem(self, userid, sid, content, result):
+        """答完：结果写结果窗（短 TTL）后放锁。调用前路由已完成会话
+        append——放锁时拉取会话即见本轮问答。"""
+        try:
+            self._kv().setex(self._idem_done_key(userid, sid, content),
+                             IDEM_DONE_TTL_SECONDS,
+                             json.dumps(result, ensure_ascii=False))
+        except Exception:
+            pass
+        self.release_idem(userid, sid, content)
+
+    def release_idem(self, userid, sid, content):
+        """异常路径放锁（不写结果窗，重发可重新执行）。"""
+        try:
+            self._kv().delete(self._idem_fly_key(userid, sid, content))
+        except Exception:
+            pass

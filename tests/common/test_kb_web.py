@@ -530,5 +530,127 @@ class KbRoutesTests(unittest.TestCase):
         self.assertIn(auth.SESSION_COOKIE, good.cookies)
 
 
+# ---------------------------------------------------------------------------
+# 发送幂等（2026-10-26）：在飞锁 + 结果窗
+# ---------------------------------------------------------------------------
+class IdemStoreTests(unittest.TestCase):
+    def test_acquire_complete_roundtrip(self):
+        store = sess_module.WebSessionStore()
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+        # 锁在飞：同键再抢失败
+        self.assertFalse(store.acquire_idem("u1", "s1", "问一"))
+        self.assertIsNone(store.get_idem_done("u1", "s1", "问一"))
+        store.complete_idem("u1", "s1", "问一", {"reply": "答案"})
+        # 答完：锁已放（可再抢），结果窗命中
+        self.assertEqual({"reply": "答案"},
+                         store.get_idem_done("u1", "s1", "问一"))
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+
+    def test_release_allows_retry(self):
+        store = sess_module.WebSessionStore()
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+        store.release_idem("u1", "s1", "问一")
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+        self.assertIsNone(store.get_idem_done("u1", "s1", "问一"))
+
+    def test_key_isolation_by_sid_and_content(self):
+        store = sess_module.WebSessionStore()
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+        # 不同会话 / 不同内容互不冲突
+        self.assertTrue(store.acquire_idem("u1", "s2", "问一"))
+        self.assertTrue(store.acquire_idem("u1", "s1", "问二"))
+
+    def test_backend_error_fails_open(self):
+        class _BrokenStore(sess_module.WebSessionStore):
+            def _kv(self):
+                raise RuntimeError("redis down")
+
+        store = _BrokenStore()
+        self.assertTrue(store.acquire_idem("u1", "s1", "问一"))
+        self.assertIsNone(store.get_idem_done("u1", "s1", "问一"))
+        # 写/删路径异常均被吞（不抛）
+        store.complete_idem("u1", "s1", "问一", {"reply": "x"})
+        store.release_idem("u1", "s1", "问一")
+
+
+class IdemRouteTests(unittest.TestCase):
+    def _setup(self):
+        store = sess_module.WebSessionStore()
+        service = _StubService()
+        client = _make_client(store=store, service=service)
+        cookies = _login_cookie("u1")
+        sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+        return store, service, client, cookies, sid
+
+    def test_duplicate_send_returns_cached_without_rerun(self):
+        store, service, client, cookies, sid = self._setup()
+        body = {"content": "习酒窖藏1998 箱规"}
+        resp1 = client.post(f"/kb/api/sessions/{sid}/messages",
+                            json=body, cookies=cookies)
+        self.assertEqual(200, resp1.status_code)
+        resp2 = client.post(f"/kb/api/sessions/{sid}/messages",
+                            json=body, cookies=cookies)
+        self.assertEqual(200, resp2.status_code)
+        self.assertEqual(resp1.json(), resp2.json())
+        # 重发不重跑 agent、不重复写会话
+        self.assertEqual(1, len(service.calls))
+        detail = client.get(f"/kb/api/sessions/{sid}", cookies=cookies).json()
+        self.assertEqual(2, len(detail["messages"]))
+
+    def test_different_content_passes_through(self):
+        store, service, client, cookies, sid = self._setup()
+        client.post(f"/kb/api/sessions/{sid}/messages",
+                    json={"content": "问一"}, cookies=cookies)
+        client.post(f"/kb/api/sessions/{sid}/messages",
+                    json={"content": "问二"}, cookies=cookies)
+        self.assertEqual(2, len(service.calls))
+        detail = client.get(f"/kb/api/sessions/{sid}", cookies=cookies).json()
+        self.assertEqual(4, len(detail["messages"]))
+
+    def test_in_flight_without_done_returns_409(self):
+        store, service, client, cookies, sid = self._setup()
+        # 模拟同内容请求在飞（锁被另一请求持有且迟迟未答完）
+        self.assertTrue(store.acquire_idem("u1", sid, "问一"))
+        old_wait, old_interval = (kb_routes.IDEM_WAIT_SECONDS,
+                                  kb_routes.IDEM_WAIT_INTERVAL)
+        kb_routes.IDEM_WAIT_SECONDS = 0.01
+        kb_routes.IDEM_WAIT_INTERVAL = 0
+        try:
+            resp = client.post(f"/kb/api/sessions/{sid}/messages",
+                               json={"content": "问一"}, cookies=cookies)
+        finally:
+            kb_routes.IDEM_WAIT_SECONDS = old_wait
+            kb_routes.IDEM_WAIT_INTERVAL = old_interval
+        self.assertEqual(409, resp.status_code)
+        self.assertEqual(0, len(service.calls))
+        detail = client.get(f"/kb/api/sessions/{sid}", cookies=cookies).json()
+        self.assertEqual(0, len(detail["messages"]))
+
+    def test_in_flight_done_during_wait_returns_cached(self):
+        store, service, client, cookies, sid = self._setup()
+        # 锁被另一请求持有；首次查窗为空、等待期间结果窗出现
+        self.assertTrue(store.acquire_idem("u1", sid, "问一"))
+        calls = {"n": 0}
+
+        def late_done(u, s, c):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else {"reply": "缓存答案"}
+
+        store.get_idem_done = late_done
+        old_wait, old_interval = (kb_routes.IDEM_WAIT_SECONDS,
+                                  kb_routes.IDEM_WAIT_INTERVAL)
+        kb_routes.IDEM_WAIT_SECONDS = 5
+        kb_routes.IDEM_WAIT_INTERVAL = 0
+        try:
+            resp = client.post(f"/kb/api/sessions/{sid}/messages",
+                               json={"content": "问一"}, cookies=cookies)
+        finally:
+            kb_routes.IDEM_WAIT_SECONDS = old_wait
+            kb_routes.IDEM_WAIT_INTERVAL = old_interval
+        self.assertEqual(200, resp.status_code)
+        self.assertEqual("缓存答案", resp.json()["reply"])
+        self.assertEqual(0, len(service.calls))
+
+
 if __name__ == "__main__":
     unittest.main()
