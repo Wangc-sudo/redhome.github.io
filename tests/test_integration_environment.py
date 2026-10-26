@@ -140,10 +140,11 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(1, len(code_services))
         self.assertIn("pages-web", code_services[0])
 
-        # 健康门覆盖 pages-web 容器 + 榜单页发布链探针（8300，@static
-        # 静态兜底使探针在 pages-web 故障时仍 200，不误伤部署门）。
+        # 健康门覆盖 pages-web 容器 + 榜单页发布链探针（80；8300 已于
+        # 2026-10-26 软下线为 301 跳域名。@static 静态兜底使探针在
+        # pages-web 故障时仍 200，不误伤部署门）。
         self.assertIn("--filter name=dops-pages-web", text)
-        self.assertIn("8300/hangzhou.html", text)
+        self.assertIn("80/hangzhou.html", text)
 
         # nginx conf 真源同步 + HUP 平滑重载：conf 只落 repo 不拷贝到
         # /opt/dops/nginx/ 时 nginx 永远跑旧配置；且须在 force-recreate
