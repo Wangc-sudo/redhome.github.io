@@ -10,6 +10,7 @@ from common.public_data.org_read import (
     OrgReadError,
     OrgReadGateway,
     OrgSeedEntry,
+    apply_org_db_overlay,
     collect_directory,
     collect_members,
     load_multi_org_seed,
@@ -195,6 +196,59 @@ class ShippedOrgSeedTests(unittest.TestCase):
         # 当根部门，电商事业部/餐饮部/综合事务部/千峰四个一级分支从未
         # 被遍历（钉钉全员 123 vs 采集 97，差 26 人）。
         self.assertIn(1, regions["other"])
+
+
+class _OverlayCursor:
+    def __init__(self, rows=(), error=None):
+        self._rows = list(rows)
+        self._error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        if self._error is not None:
+            raise self._error
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _OverlayConn:
+    def __init__(self, rows=(), error=None):
+        self._cursor = _OverlayCursor(rows, error)
+
+    def cursor(self):
+        return self._cursor
+
+
+class OrgDbOverlayTests(unittest.TestCase):
+    """dim_org_region_dept 覆盖层（2026-10-26 权威源迁 DB）。"""
+
+    SEED = (("hangzhou", (1049728636,)), ("other", (1,)))
+
+    def test_db_rows_override_seed_list_for_covered_region(self):
+        conn = _OverlayConn([
+            {"region_key": "hangzhou", "dept_id": 1050062512},
+            {"region_key": "hangzhou", "dept_id": 1049728636},
+        ])
+        merged = apply_org_db_overlay(self.SEED, conn)
+        self.assertEqual(
+            merged,
+            (("hangzhou", (1050062512, 1049728636)), ("other", (1,))),
+        )
+
+    def test_uncovered_region_keeps_seed_and_empty_table_noop(self):
+        merged = apply_org_db_overlay(self.SEED, _OverlayConn([]))
+        self.assertEqual(merged, self.SEED)
+
+    def test_db_down_is_fail_open(self):
+        conn = _OverlayConn(error=RuntimeError("no table"))
+        merged = apply_org_db_overlay(self.SEED, conn)
+        self.assertEqual(merged, self.SEED)
 
 
 class LoadOrgSeedTests(unittest.TestCase):
