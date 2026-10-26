@@ -201,5 +201,53 @@ class ReadSurfaceTests(unittest.TestCase):
         self.assertEqual((50,), params)
 
 
+class SearchRegistryTests(unittest.TestCase):
+    """search_registry（kb-qa phone_lookup 工具读面，2026-10-26）。
+
+    精确映射场景：纯数字=号码片段（尾号）匹配，其余=持卡人/开户名/设备/
+    部门模糊匹配 + 命中人名下绑定 IN 展开；只回启用行。
+    """
+
+    def test_digit_keyword_is_phone_fragment_match(self):
+        conn = _Conn()
+        pr.search_registry(conn, "5690")
+        sql, params = conn.executed[0]
+        self.assertIn("`phone_no` LIKE %s", sql)
+        self.assertIn("`enabled` = 1", sql)
+        self.assertEqual(("%5690%", 5), params)
+        sql2, params2 = conn.executed[1]
+        self.assertIn("b.`phone_no` LIKE %s", sql2)
+        self.assertIn("`enabled` = 1", sql2)
+        self.assertEqual(("%5690%", 10), params2)
+
+    def test_name_keyword_matches_holder_and_expands_in(self):
+        conn = _Conn({"FROM `dim_phone_number`": [
+            {"phone_no": "13300001111", "actual_user": "张三"},
+        ]})
+        result = pr.search_registry(conn, "张三")
+        self.assertEqual(1, len(result["phones"]))
+        sql, _ = conn.executed[0]
+        self.assertIn("`actual_user` LIKE %s", sql)
+        self.assertIn("`account_name` LIKE %s", sql)
+        sql2, params2 = conn.executed[1]
+        self.assertIn("b.`platform_account` LIKE %s", sql2)
+        self.assertIn("b.`phone_no` IN (%s)", sql2)
+        self.assertEqual(["%张三%", "%张三%", "13300001111", 10],
+                         list(params2))
+
+    def test_name_keyword_without_phones_skips_in(self):
+        conn = _Conn()
+        pr.search_registry(conn, "查无此人")
+        sql2, params2 = conn.executed[1]
+        self.assertNotIn(" IN (", sql2)
+        self.assertEqual(["%查无此人%", "%查无此人%", 10], list(params2))
+
+    def test_empty_keyword_short_circuits(self):
+        conn = _Conn()
+        self.assertEqual({"phones": [], "bindings": []},
+                         pr.search_registry(conn, "  "))
+        self.assertEqual([], conn.executed)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,10 +41,11 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
 4. 各渠道销售额汇总对比 → channel_sales
 5. 商品库统计（总数、按品牌/大类分布）→ product_stats
-6. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
+6. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup
+7. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
    query_sql 写一条 SELECT（只能用白名单表，大表必须带日期过滤，
    结果超 100 行用 GROUP BY 聚合）
-7. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+8. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
@@ -127,6 +128,23 @@ TOOLS = [
                     "date": {"type": "string",
                              "description": "YYYY-MM-DD，缺省为最近一天"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "phone_lookup",
+            "description": "查公司电信号码台账：手机号/尾号/姓名/平台账号 → "
+                           "实际持卡人、物理手机、绑定的平台账号。回答「尾号"
+                           "5690 是谁在用」「XX 店铺账号的验证码找谁要」",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string",
+                                "description": "手机号或尾号 / 姓名 / 平台账号名"},
+                },
+                "required": ["keyword"],
             },
         },
     },
@@ -412,6 +430,29 @@ class ToolExecutor:
                  "content": (c.get("content") or "")[:400]}
                 for c in chunks[:4]
             ],
+        }
+
+    def _tool_phone_lookup(self, args):
+        """号码台账检索（2026-10-26）：「尾号 5690 是谁」「XX 店铺验证码
+        找谁要」。精确 SQL 查 dim_phone_number/dim_phone_binding——
+        精确映射场景不走向量（错配=验证码找错人）。全员开放（同
+        product_stats），不在 Web 业务收窄面内。"""
+        from common.public_data.phone_registry import search_registry
+
+        keyword = str(args.get("keyword") or "").strip()
+        if not keyword:
+            return {"error": "keyword required"}
+        result = search_registry(self._conn, keyword)
+        if not result["phones"] and not result["bindings"]:
+            return {"found": False, "keyword": keyword,
+                    "hint": "台账无匹配。请对方到 ops-web 号码台账页核实/补登记"}
+        return {
+            "found": True,
+            "phones": result["phones"],
+            "bindings": result["bindings"],
+            "hint": "actual_user=实际持卡人（验证码找 TA 要）；"
+                    "physical_device=卡在哪台手机；account_name=电信开户名"
+                    "（常与持卡人不符，以 actual_user 为准）",
         }
 
     def _tool_daily_sales(self, args):
