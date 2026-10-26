@@ -623,6 +623,34 @@ def _build_org_overview(members, overrides, catalog=None):
         if dept_name and not group["dept_name"]:
             group["dept_name"] = dept_name
 
+    # 同名部门归并（2026-10-26 裂行修复）：覆盖成员的组带 dept_id、
+    # 基名单成员的组只有名字——「分组键取 dept_id or dept_name」会让同
+    # 一个部门裂成两行（id 键一行、名字键一行，画布出现两个同名部门）。
+    # 按 dept_name 把同名组合并：优先保留带 dept_id 的组（id 与目录
+    # sort_order 随之保留）；两组同带 id = 登记脏数据，同样合并（同区域
+    # 同名两行本身即误导，展示归一）。
+    for region_key, depts in grouped.items():
+        if not isinstance(depts, dict):
+            continue
+        by_name = {}
+        for key in list(depts):
+            group = depts[key]
+            name = group["dept_name"]
+            if not name:
+                continue
+            hit = by_name.get(name)
+            if hit is None:
+                by_name[name] = key
+                continue
+            keep_key = hit if depts[hit]["dept_id"] else key
+            drop_key = key if keep_key == hit else hit
+            keep, drop = depts[keep_key], depts[drop_key]
+            keep["members"].extend(drop["members"])
+            if not keep["dept_id"] and drop["dept_id"]:
+                keep["dept_id"] = drop["dept_id"]
+            del depts[drop_key]
+            by_name[name] = keep_key
+
     pool = grouped.pop(None, [])
     pool.sort(key=lambda item: (item["name"], item["user_id"]))
 
