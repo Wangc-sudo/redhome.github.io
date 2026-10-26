@@ -2245,6 +2245,46 @@ class RosterRegionTemplateTests(unittest.TestCase):
         self.assertEqual("绍兴", rows["潘良峰"]["scope_label"])
         self.assertEqual("person", rows["潘良峰"]["entity_type"])
 
+    def test_roster_api_reports_completed_by_scope(self):
+        """画布完成率分子（2026-10-26「播报回显完成百分比上面板」）：
+        当月完成额按名册**在册 person 型**人名归集到 scope（代填落群区域
+        也归本人——人名匹配）；停用行与店铺型不计；读失败 fail-soft。"""
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note="", enabled=0),      # 停用不计
+            _roster_row(id=13, scope="qudao", entity_type="store",
+                        entity_key="PDD店", person_name="饶佳君",
+                        aliases=None, note=""),                  # 店铺型不计
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit(), mock.patch.object(
+                report_roster, "fetch_month_completed_by_person",
+                lambda conn, ym: {"潘良峰": 120000.0, "洪强": 999.0}):
+            data = client.get("/api/roster").json()
+        self.assertEqual({"shaoxing": 120000.0}, data["completed"])
+
+    def test_roster_api_completed_read_fails_soft(self):
+        """完成额读面异常（表未迁移等）→ completed={} 兜底，名册读面不拖垮。"""
+        store = _RosterStore()
+        store.rows = [_roster_row()]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+
+        def _boom(conn, ym):
+            raise RuntimeError("table missing")
+
+        with store.patch_fetch(), store.patch_audit(), mock.patch.object(
+                report_roster, "fetch_month_completed_by_person", _boom):
+            data = client.get("/api/roster").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual({}, data["completed"])
+
 
 class RegionTargetsApiTests(unittest.TestCase):
     """区域月目标保存 API（dim_report_target 入库，2026-10-07）。"""

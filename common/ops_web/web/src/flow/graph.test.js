@@ -34,11 +34,12 @@ function raw({
   pool = [],
   rosterRows = [],
   targets = {},
+  completed = {},
   groups = [],
 } = {}) {
   return {
     overview: { regions, pool },
-    roster: { roster: rosterRows, targets },
+    roster: { roster: rosterRows, targets, completed },
     groups,
   };
 }
@@ -246,6 +247,25 @@ describe('buildGraph', () => {
     expect(aggEdge.broken).toBe(false);
     expect(g.taskNodes.find((n) => n.regionKey === 'offline_all').family)
       .toBe('daily-report');
+  });
+
+  it('完成率=当月完成额(元)/目标(万元)，目标 0 → null；聚合按桶求和换算', () => {
+    // 2026-10-26「播报回显完成百分比上面板」：与播报回执同口径。
+    const g = buildGraph(raw({
+      regions: [region('hangzhou', '杭州'), region('shaoxing', '绍兴')],
+      targets: { hangzhou: { a: 100 }, shaoxing: {} },  // 万元
+      completed: { hangzhou: 500000 },                  // 元 → 50 万 → 50%
+    }));
+    const hz = g.regionNodes.find((n) => n.key === 'hangzhou');
+    expect(hz.completedSum).toBe(500000);
+    expect(hz.completionRate).toBeCloseTo(0.5);
+    // 目标 0/无 → null（显示「—」，与榜单「目标 0 不参与」同语义）
+    expect(g.regionNodes.find((n) => n.key === 'shaoxing').completionRate)
+      .toBeNull();
+    // 聚合（offline_all parts=hangzhou/shaoxing/province_ops）：求和后换算
+    const agg = g.regionNodes.find((n) => n.key === 'offline_all');
+    expect(agg.completedSum).toBe(500000);
+    expect(agg.completionRate).toBeCloseTo(0.5);
   });
 
   it('补集桶机制已退役（2026-10-26）：other 注册行被 HIDDEN 过滤', () => {
