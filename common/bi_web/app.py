@@ -397,9 +397,11 @@ class _TTLOptionSets:
 # Request guards
 # ---------------------------------------------------------------------------
 
-#: 公开看板（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网榜单页不需要
-#: 账号密码——群内散客直开）。这三个看板本就走 nginx 公网桥
-#: （hangzhou.html 等）面向全员；加新区请评审数据敏感度后再入列。
+#: 公开看板保底集合（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网
+#: 榜单页不需要账号密码——群内散客直开）。运行集合 = 本常量 ∪
+#: bi_authz_grant（grant_type='public_dashboard'）——DB 是增量通道
+#: （ops-web 页面可增删），常量是 DB 故障时的可用性保底。加新区请评审
+#: 数据敏感度后再入列。
 PUBLIC_DASHBOARD_IDS = frozenset({
     "hz-offline-sales", "sx-offline-sales", "offline-all-sales",
 })
@@ -409,8 +411,32 @@ PUBLIC_DASHBOARD_IDS = frozenset({
 #: 设计内）。
 _PUBLIC_PREFIXES = ("/d/", "/api/v1/dashboards/", "/api/v1/d/", "/api/d/")
 
+#: 公开看板集合的 DB 缓存窗口（与 gate TTL 同风格）。
+_PUBLIC_TTL_SECONDS = 30.0
 
-def _public_path(path):
+
+def _public_dashboard_resolver(db_connector, now=time.monotonic):
+    """返回 ``() -> frozenset``：常量保底 ∪ DB 增量，TTL 缓存、读失败
+    回保底（公网榜单页可用性优先于配置面故障）。"""
+    cache = {"at": 0.0, "value": PUBLIC_DASHBOARD_IDS}
+
+    def resolve():
+        if now() - cache["at"] < _PUBLIC_TTL_SECONDS:
+            return cache["value"]
+        try:
+            from common.public_data import bi_authz
+            with db_connector() as conn:
+                extra = bi_authz.fetch_public_dashboards(conn)
+            cache["value"] = PUBLIC_DASHBOARD_IDS | frozenset(extra)
+        except Exception:
+            cache["value"] = PUBLIC_DASHBOARD_IDS
+        cache["at"] = now()
+        return cache["value"]
+
+    return resolve
+
+
+def _public_path(path, public_ids):
     """路径属于公开看板（或其日期筛选值域）时返回 True。"""
     if path == "/api/v1/options/dates":
         return True
@@ -418,11 +444,12 @@ def _public_path(path):
         if path.startswith(prefix):
             rest = path[len(prefix):]
             dashboard_id = rest.split("/", 1)[0]
-            return dashboard_id in PUBLIC_DASHBOARD_IDS
+            return dashboard_id in public_ids
     return False
 
 
-def _build_auth_gate(token, session_secret, viewer_resolver, session_secure):
+def _build_auth_gate(token, session_secret, viewer_resolver, session_secure,
+                     public_dashboards=None):
     """身份闸：session 优先、Bearer 兜底、deny-by-default 准入门。
 
     返回一个 ``authenticate(request, response)``：允许时返回 ``None``
@@ -432,19 +459,28 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure):
     未配置 token = 全开放；仅配 token = 纯 Bearer（与改造前一致）。
     Bearer 是机器通道（大屏/审计），不进准入门、不解析 Viewer——行为与
     T0 基准一致。
+
+    public_dashboards：``() -> frozenset`` 公开看板集合源（2026-10-26）；
+    None=只用保底常量。
     """
     expected = f"Bearer {token}" if token else None
 
     def authenticate(request: Request, response: Response):
         request.state.userid = None
         request.state.viewer = None
-        if _public_path(request.url.path):
+        if session_secret:
             # 公开看板（2026-10-26 用户裁决）：杭州/绍兴/线下整体的公网
             # 榜单页面向群内散客直开，不需要账号密码。页面壳、看板定义、
             # 卡片数据、日期筛选值域全部放行；其余看板与端点照旧走
-            # 会话+准入门。
-            return None
-        if session_secret:
+            # 会话+准入门。**仅认证开启时才判定**——session 未配置=全开放
+            # （旧默认），公开集合无意义且不该为一个必然放行的请求读 DB
+            # （页面壳零连接契约不破）。
+            public_ids = (
+                public_dashboards() if public_dashboards is not None
+                else PUBLIC_DASHBOARD_IDS
+            )
+            if _public_path(request.url.path, public_ids):
+                return None
             raw = request.cookies.get(auth.SESSION_COOKIE)
             if raw:
                 userid = auth.resolve_session_userid(raw, session_secret)
@@ -683,7 +719,8 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     if session_secret and viewer_resolver is None:
         viewer_resolver = authz.ViewerResolver(db_connector)
     authenticate = _build_auth_gate(
-        token, session_secret, viewer_resolver, session_secure
+        token, session_secret, viewer_resolver, session_secure,
+        public_dashboards=_public_dashboard_resolver(db_connector),
     )
     require_identity_page, require_identity_api = (
         _build_identity_dependencies(
