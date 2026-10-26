@@ -624,6 +624,45 @@ class PageLevelScopeTests(unittest.TestCase):
         self.assertEqual(["open-page"], ids)
 
 
+class PublicDashboardTests(unittest.TestCase):
+    """公开看板免登录（2026-10-26 用户裁决）：杭州/绍兴/线下整体的公网
+    榜单页面向群内散客直开。页面壳/定义/卡片/日期筛选放行；其余看板
+    与导航列表仍走会话+准入门。"""
+
+    def _client(self):
+        source = StaticDashboardSource({
+            "hz-offline-sales": _l1_mapping(),
+            "l1-cockpit": _l1_mapping(),
+        })
+        return TestClient(_session_app(dashboard_source=source))
+
+    def test_public_page_definition_and_card_open(self):
+        client = self._client()
+        # 页面壳 200（不 302 跳登录）
+        page = client.get("/d/hz-offline-sales", follow_redirects=False)
+        self.assertEqual(200, page.status_code)
+        # 看板定义与日期筛选值域放行
+        self.assertEqual(
+            200, client.get("/api/v1/dashboards/hz-offline-sales").status_code)
+        self.assertEqual(200, client.get("/api/v1/options/dates").status_code)
+
+    def test_non_public_dashboard_still_gated(self):
+        client = self._client()
+        page = client.get("/d/l1-cockpit", follow_redirects=False)
+        self.assertEqual(302, page.status_code)
+        api = client.get("/api/v1/dashboards/l1-cockpit")
+        self.assertEqual(401, api.status_code)
+        # 导航列表不放行（公网页无顶栏，设计内）
+        self.assertEqual(401, client.get("/api/v1/dashboards").status_code)
+
+    def test_public_prefix_never_matches_unknown_ids(self):
+        client = self._client()
+        # 未知看板 id 不在公开集合 → 不放行：未登录先被认证拦（302），
+        # 公开前缀不构成旁路。
+        response = client.get("/d/not-a-dashboard", follow_redirects=False)
+        self.assertEqual(302, response.status_code)
+
+
 class LegacyModeTests(unittest.TestCase):
     """session 未启用 = 旧行为逐字保留（T0 基准自证的补充）。"""
 
