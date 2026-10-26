@@ -1828,6 +1828,23 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertNotIn("account_name", result["phones"][0])
         self.assertNotIn("dept", result["phones"][0])
 
+    def test_phone_lookup_records_holders_for_at(self):
+        # 命中后持卡人记入 executor.phone_holders（装配层透出 meta → 群回复
+        # @ 持卡人，2026-10-26 用户裁决）；phones/bindings 人名并集去重
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "专营店", "actual_user": "张三"},
+             {"phone_no": "13312345690", "channel_category": "视频号",
+              "platform_account": "致中和", "actual_user": "李四"}],
+        ])
+        executor.execute("phone_lookup", {"keyword": "5690"})
+        self.assertEqual(["张三", "李四"], executor.phone_holders)
+        # miss 时不记（不 @ 空气）
+        executor2 = self._executor([[], []])
+        executor2.execute("phone_lookup", {"keyword": "0000"})
+        self.assertEqual([], executor2.phone_holders)
+
     def test_phone_lookup_registered_and_not_narrowed(self):
         # 工具注册 + 系统提示词提及；全员开放（同 product_stats），
         # 不在 Web 业务收窄面内
@@ -2144,6 +2161,43 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         reply, intent, _ = handler._answer(conn, "尾号 5690 是谁")
         self.assertEqual(PHONE_LOOKUP, intent)
         self.assertIn("号码台账", reply)
+
+    def test_phone_lookup_answer_ats_holder_in_group(self):
+        """群回复真实 @ 持卡人（2026-10-26 用户裁决「小易要 @ 对应的人要
+        验证码」）：agent 命中 phone_lookup → meta phone_holders → 姓名解析
+        userId → at_user_ids 含持卡人与提问人。"""
+        client = _FakeReplyClient()
+
+        def runner(conn, text, history, meta=None):
+            meta["phone_holders"] = ["屠秋文"]
+            return "尾号 5579 是 19357625579，屠秋文在用"
+
+        # script：claim=1 → 审计 UPDATE=1 → 姓名解析=[屠秋文行]
+        conn = _FakeConn([1, 1, [{"name": "屠秋文", "user_id": "u-tu"}]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            reply_client=client, robot_code="robot1", agent_runner=runner)
+        asyncio.run(handler.process(_FakeCallback("m-at", "5579")))
+        self.assertEqual(1, len(client.calls))
+        at = client.calls[0][4]
+        self.assertIn("u1", at)      # 提问人
+        self.assertIn("u-tu", at)    # 持卡人
+        # 持卡人姓名解析走 dim_robot_member
+        member_sql = [sql for sql, _ in conn.cursor_instance.executed
+                      if "dim_robot_member" in sql]
+        self.assertEqual(1, len(member_sql))
+        self.assertIn("`is_active` = 1", member_sql[0])
+
+    def test_answer_without_phone_holders_ats_sender_only(self):
+        """非号码问句：@ 列表保持只有提问人（回归钉）。"""
+        client = _FakeReplyClient()
+        conn = _FakeConn([1, [_product_row()], 1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            reply_client=client, robot_code="robot1")
+        asyncio.run(handler.process(_FakeCallback("m-plain", "习酒窖藏1998 箱规")))
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual(["u1"], client.calls[0][4])
 
     def test_chitchat_miss_agent_none_falls_back_to_help(self):
         # 规则完全未命中 + agent 无答案 → HELP_TEXT

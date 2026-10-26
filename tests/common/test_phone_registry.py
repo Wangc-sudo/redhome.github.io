@@ -249,5 +249,36 @@ class SearchRegistryTests(unittest.TestCase):
         self.assertEqual([], conn.executed)
 
 
+class ResolveHolderUserIdsTests(unittest.TestCase):
+    """resolve_holder_user_ids（群回复 @ 持卡人，2026-10-26）。"""
+
+    def test_maps_names_to_user_ids_keeping_order(self):
+        conn = _Conn({"FROM `dim_robot_member`": [
+            {"name": "张三", "user_id": "u-zhang"},
+            {"name": "李四", "user_id": "u-li"},
+        ]})
+        ids = pr.resolve_holder_user_ids(conn, ["李四", "张三"])
+        self.assertEqual(["u-li", "u-zhang"], ids)
+        sql, params = conn.executed[0]
+        self.assertIn("`is_active` = 1", sql)
+        self.assertIn("`name` IN (%s, %s)", sql)
+        self.assertEqual(("李四", "张三"), params)
+
+    def test_ambiguous_same_name_skipped(self):
+        # 同名两个 userId → 不 @（@ 错人比不 @ 更糟）
+        conn = _Conn({"FROM `dim_robot_member`": [
+            {"name": "张伟", "user_id": "u1"},
+            {"name": "张伟", "user_id": "u2"},
+            {"name": "张三", "user_id": "u-zhang"},
+        ]})
+        self.assertEqual(["u-zhang"],
+                         pr.resolve_holder_user_ids(conn, ["张伟", "张三"]))
+
+    def test_empty_names_short_circuit(self):
+        conn = _Conn()
+        self.assertEqual([], pr.resolve_holder_user_ids(conn, ["", "  "]))
+        self.assertEqual([], conn.executed)
+
+
 if __name__ == "__main__":
     unittest.main()

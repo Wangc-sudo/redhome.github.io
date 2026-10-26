@@ -687,3 +687,42 @@ def search_registry(connection, keyword):
     params.append(_AI_BINDING_LIMIT)
     bindings = _fetch_all(connection, sql, tuple(params))
     return {"phones": phones, "bindings": bindings}
+
+
+#: 群消息 @ 持卡人的人数上限（防一人多卡/多账号场景刷屏）。
+_AT_HOLDER_LIMIT = 4
+
+
+def resolve_holder_user_ids(connection, names, limit=_AT_HOLDER_LIMIT):
+    """台账持卡人姓名 → 钉钉 userId（dim_robot_member，is_active=1）。
+
+    供小易群消息真实 @ 持卡人（「要验证码」场景，2026-10-26 用户裁决：
+    回复里「直接找 TA 要」不够，要叮到人）。同名多人/查无此人静默跳过
+    ——@ 错人比不 @ 更糟，宁缺毋滥。返回 user_id 列表，保持入参顺序。
+    """
+    clean = []
+    for name in names or ():
+        name = str(name or "").strip()
+        if name and name not in clean:
+            clean.append(name)
+    if not clean:
+        return []
+    marks = ", ".join(["%s"] * len(clean))
+    rows = _fetch_all(
+        connection,
+        "SELECT `name`, `user_id` FROM `dim_robot_member` "
+        "WHERE `is_active` = 1 AND `name` IN (" + marks + ")",
+        tuple(clean),
+    )
+    by_name = {}
+    for row in rows:
+        name = row["name"] if isinstance(row, dict) else row[0]
+        uid = row["user_id"] if isinstance(row, dict) else row[1]
+        if name and uid:
+            by_name.setdefault(name, set()).add(uid)
+    user_ids = []
+    for name in clean:
+        uids = by_name.get(name) or set()
+        if len(uids) == 1:  # 同名歧义不 @
+            user_ids.append(next(iter(uids)))
+    return user_ids[:int(limit)]
