@@ -159,28 +159,41 @@ describe('buildGraph', () => {
     }));
     const keys = g.regionNodes.map((n) => n.key);
     // 线下组（杭/绍/省外运营中心，2026-10-26 裁决合一）→ 体验馆团购 →
-    // 渠道 → 总部；聚合线下整体随第一桶组（offline）。
+    // 总部；聚合线下整体随第一桶组（offline）。渠道已摘除不进画布。
+    expect(keys).not.toContain('qudao');
     expect(keys.indexOf('hangzhou')).toBeLessThan(keys.indexOf('shaoxing'));
     expect(keys.indexOf('shaoxing')).toBeLessThan(keys.indexOf('province_ops'));
     expect(keys.indexOf('province_ops')).toBeLessThan(keys.indexOf('vanke'));
-    expect(keys.indexOf('vanke')).toBeLessThan(keys.indexOf('qudao'));
-    expect(keys.indexOf('qudao')).toBeLessThan(keys.indexOf('hq'));
+    expect(keys.indexOf('vanke')).toBeLessThan(keys.indexOf('hq'));
   });
 
-  it('徽章口径：总部职能底不警告；渠道店铺级名册视为有目标', () => {
+  it('徽章口径：总部职能底不警告', () => {
+    const g = buildGraph(raw({ regions: [region('hq', '总部')] }));
+    const hq = g.regionNodes.find((n) => n.key === 'hq');
+    expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
+  });
+
+  it('未上线区域不进画布（2026-10-26 裁决：渠道/餐饮/君品/线下额外）', () => {
+    // 渠道店铺级徽章特判保留备用（上线时随 HIDDEN_REGION_KEYS 移除恢复）。
     const g = buildGraph(raw({
-      regions: [region('hq', '总部'), region('qudao', '渠道')],
-      groups: [{ region: 'qudao', services: [svc('channel-missing-check-qudao')] }],
+      regions: [
+        region('qudao', '渠道'),
+        region('dining', '餐饮'),
+        region('junpin', '君品雅院'),
+        region('offline_extra', '线下额外'),
+        region('hangzhou', '杭州'),
+      ],
+      groups: [{ region: 'qudao', services: [svc('channel-missing-check')] }],
       rosterRows: [
         { scope: 'qudao', enabled: 1, entity_type: 'store', entity_key: 'PDD店' },
       ],
       targets: {},
     }));
-    const hq = g.regionNodes.find((n) => n.key === 'hq');
-    expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
-    const qd = g.regionNodes.find((n) => n.key === 'qudao');
-    // scope 级无目标但店铺名册有+有服务 → 已闭环（店铺级目标体系豁免）
-    expect(qd.badge).toEqual({ text: '已闭环', cls: 'ok' });
+    const keys = g.regionNodes.map((n) => n.key);
+    for (const hidden of ['qudao', 'dining', 'junpin', 'offline_extra']) {
+      expect(keys).not.toContain(hidden);
+    }
+    expect(keys).toContain('hangzhou');
   });
 
   it('徽标 warn 或成员 broken 让边标红', () => {

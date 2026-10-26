@@ -27,7 +27,17 @@ export const COMPLEMENT_REGION = 'other';
 //: 不进区域层的注册区域（2026-10-19 用户裁决：测试区改制为通用功能
 //: 模块「播报试投」，与播报日历同级——它只是播报试投出口，不是业务
 //: 区域；改投开关集中在功能模块抽屉，区域节点不再出现）。
-export const HIDDEN_REGION_KEYS = new Set(['test']);
+//: 2026-10-26 用户裁决「没上线的功能从画布去掉」：
+//: * qudao 渠道——日报/榜单/提醒/催办线全停发（用户本意），仅渠道到齐
+//:   检查在跑；渠道 BI 看板在 BI 侧，不属于日报闭环画布；
+//: * dining 餐饮——规划中，零名册零任务线；
+//: * junpin 君品雅院——任务线注册了但群未配，outbox 零产出的空跑；
+//: * offline_extra 线下额外——纯归编补集，无任务线。
+//: 上线时从集合移除即恢复（qudao 的店铺级徽章特判保留备用）。
+//: hq（总部职能底 muted）是有意的只读展示，不在此列。
+export const HIDDEN_REGION_KEYS = new Set([
+  'test', 'qudao', 'dining', 'junpin', 'offline_extra',
+]);
 
 //: 平台线（region=null 的服务组）的虚拟区域键。
 export const PLATFORM_KEY = '__platform__';
