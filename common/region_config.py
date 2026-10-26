@@ -190,6 +190,26 @@ def _to_mapping(cfg):
     }
 
 
+#: 自家榜单页 URL 基址 env（2026-10-26 用户裁决：自家系统 URL 不存 DB——
+#: 基址是部署属性，随备案/端口/域名变，变化频率与业务数据完全不同，
+#: 冻结进 DB 行就是「每次换域名都要批量修数」的根因）。配置后播报里的
+#: 榜单链接恒为 ``{base}/{region}.html`` 派生；库存 leaderboard_url
+#: 仅在 env 未配时兜底（兼容未迁移环境与将来的非标准路径覆盖）。
+PAGES_BASE_ENV = "PUBLIC_PAGES_BASE"
+
+
+def leaderboard_url_for(region, stored_url="", environ=None):
+    """榜单页 URL 派生：env ``PUBLIC_PAGES_BASE`` 已配 → 模板现拼
+    （``{base}/{region}.html``，基址变更 = 改一处 env 全局生效）；
+    未配 → 库存 *stored_url* 原样兜底。两者皆空 → 空串（渲染层省略）。
+    """
+    env = os.environ if environ is None else environ
+    base = (env.get(PAGES_BASE_ENV) or "").strip().rstrip("/")
+    if base:
+        return f"{base}/{region}.html"
+    return stored_url or ""
+
+
 def apply_region_overlay(configs, overlay):
     """用 *overlay*（``dataId -> mapping | None``）逐区域覆盖字段。
 

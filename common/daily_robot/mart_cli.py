@@ -46,6 +46,13 @@ def resolve_service_id(override=None):
     return _resolve(override=override)
 
 
+def resolve_leaderboard_url(region, stored_url=""):
+    """榜单页 URL（2026-10-26 基址 env 化裁决）：PUBLIC_PAGES_BASE 已配 →
+    模板派生；未配 → 库存值兜底。包装为模块级以便测试 patch。"""
+    from common.region_config import leaderboard_url_for
+    return leaderboard_url_for(region, stored_url)
+
+
 def load_region_configs(seed_path, connection=None):
     """读序：seed 文件 → Nacos 覆盖 → DB 覆盖（dim_org_region）。
 
@@ -421,7 +428,7 @@ def _handle_leaderboard(args):
             body = render_bc(
                 view["region"], view["calendar"], now,
                 elapsed_day_numbers(workdays, today=business_date), people,
-                url=cfg.leaderboard_url or None,
+                url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
             )
         else:
             data = mart_collect_data(
@@ -435,7 +442,7 @@ def _handle_leaderboard(args):
             body = render_bc(
                 view["region"], view["calendar"], now,
                 list(data.elapsed), people,
-                url=cfg.leaderboard_url or None,
+                url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
                 dept_overrides=channel_dept_overrides(conn, region, data),
             )
 
@@ -536,7 +543,7 @@ def _handle_channel_daily(args):
         people_body = render_bc(
             view["region"], view["calendar"], now,
             list(data.elapsed), list(data.people),
-            url=cfg.leaderboard_url or None,
+            url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
             dept_overrides=channel_dept_overrides(conn, region, data),
         )
 
@@ -628,9 +635,9 @@ def _handle_offline_summary(args, *, period):
         status = run_offline_daily_task(
             conn, outbox, business_date=reference, now=now,
             dedupe_suffix=dedupe_suffix,
-            # 线下整体 BI 看板链接（offline_all 的 leaderboardUrl，
-            # 2026-10-19 用户裁决附在日报末尾）
-            bi_url=cfg.leaderboard_url or None,
+            # 线下整体 BI 看板链接（2026-10-19 用户裁决附在日报末尾；
+            # 2026-10-26 起基址 env 派生优先，库存值兜底）
+            bi_url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
         )
         conn.commit()
         print(

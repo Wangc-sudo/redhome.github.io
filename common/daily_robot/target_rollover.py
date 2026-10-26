@@ -11,10 +11,16 @@
   核对下月目标（双保险），消息附名册页地址。
 """
 
+import os
+
 from common.public_data import report_roster
 
+#: 运维中心基址（2026-10-26 URL 基址 env 化裁决：部署属性不硬编码进
+#: 代码——换域名/端口/HTTPS 只改 env 一处）。缺省兼容现网。
+OPS_WEB_BASE_URL = os.environ.get(
+    "OPS_WEB_BASE_URL", "http://203.205.91.241:18100").rstrip("/")
 #: 名册页地址（提醒消息里引导运维核对/录入）。
-OPS_WEB_ROSTER_URL = "http://203.205.91.241:18100/roster"
+OPS_WEB_ROSTER_URL = OPS_WEB_BASE_URL + "/roster"
 
 #: scope → 中文名（消息文案；与 ops-web 名册页标签一致）。
 SCOPE_LABELS = {
