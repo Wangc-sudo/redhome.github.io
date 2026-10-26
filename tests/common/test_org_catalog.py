@@ -361,5 +361,89 @@ class RelayTests(unittest.TestCase):
             0, oc.set_region_relay(conn, "ghost", "test", actor="a"))
 
 
+class BroadcastWriteTests(unittest.TestCase):
+    """播报配置写面（2026-10-26 权威源迁 DB 页面入口）。"""
+
+    def test_text_int_json_fields_write_with_audit(self):
+        conn = _Conn()
+        changed = oc.update_region_broadcast(conn, "hangzhou", {
+            "robot_code": "rc-new",
+            "remind_hour": 19,
+            "dept_order": ["杭中", "滨萧"],
+            "monthly_targets": {"万科·零售": 10.0},
+        }, actor="ops")
+        self.assertEqual(
+            ("dept_order", "monthly_targets", "remind_hour", "robot_code"),
+            changed)
+        update_sql, params = next(
+            (s, p) for s, p in conn.executed
+            if s.startswith("UPDATE `dim_org_region`"))
+        self.assertIn("`robot_code`=%s", update_sql)
+        self.assertIn('["杭中", "滨萧"]',
+                      params[params.index("rc-new") + 2])
+        audit = _audit_params(conn)
+        self.assertIn("update_broadcast", str(audit))
+
+    def test_null_clears_column(self):
+        conn = _Conn()
+        oc.update_region_broadcast(conn, "hangzhou",
+                                   {"broadcast_exclude": None}, actor="ops")
+        _, params = next((s, p) for s, p in conn.executed
+                         if s.startswith("UPDATE"))
+        self.assertIn(None, params)
+
+    def test_unknown_field_rejected(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.update_region_broadcast(conn, "hangzhou",
+                                       {"password": "x"}, actor="ops")
+        self.assertEqual(0, conn.commits)
+
+    def test_unregistered_region_rejected(self):
+        conn = _Conn(affected=0)
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.update_region_broadcast(conn, "ghost",
+                                       {"robot_code": "x"}, actor="ops")
+
+    def test_hour_out_of_range_rejected(self):
+        conn = _Conn()
+        with self.assertRaises(oc.OrgCatalogError):
+            oc.update_region_broadcast(conn, "hangzhou",
+                                       {"remind_hour": 25}, actor="ops")
+
+
+class RegionDeptWriteTests(unittest.TestCase):
+    """归属映射写面（2026-10-26）：全量替换 + 增删差集审计。"""
+
+    def test_replace_writes_rows_and_diff_audit(self):
+        conn = _Conn({"FROM `dim_org_region_dept`": [{"dept_id": 1049728636}]})
+        result = oc.replace_region_depts(
+            conn, "hangzhou", [1049728636, 1050062512], actor="ops")
+        self.assertEqual([1050062512], result["added"])
+        self.assertEqual([], result["removed"])
+        sqls = [s for s, _ in conn.executed]
+        self.assertTrue(any(s.startswith("DELETE FROM `dim_org_region_dept`")
+                            for s in sqls))
+        inserts = [p for s, p in conn.executed
+                   if s.startswith("INSERT INTO `dim_org_region_dept`")]
+        self.assertEqual(2, len(inserts))
+        self.assertEqual(("hangzhou", 1049728636, 0), inserts[0][:3])
+        self.assertEqual(("hangzhou", 1050062512, 1), inserts[1][:3])
+        audit = _audit_params(conn)
+        self.assertIn("set_region_depts", str(audit))
+
+    def test_empty_list_clears_region(self):
+        conn = _Conn({"FROM `dim_org_region_dept`": [{"dept_id": 9}]})
+        result = oc.replace_region_depts(conn, "hangzhou", [], actor="ops")
+        self.assertEqual([9], result["removed"])
+
+    def test_bad_ids_rejected(self):
+        conn = _Conn()
+        for bad in ([1, 1], ["x"], [0], [-3]):
+            with self.assertRaises(oc.OrgCatalogError):
+                oc.replace_region_depts(conn, "hangzhou", bad, actor="ops")
+        self.assertEqual(0, conn.commits)
+
+
 if __name__ == "__main__":
     unittest.main()
