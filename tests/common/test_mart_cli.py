@@ -282,9 +282,51 @@ class LeaderboardCliTests(unittest.TestCase):
         self.assertIn("status=enqueued", output.getvalue())
         self.assertIn("people=1", output.getvalue())
 
-        # 榜单链接来自 region 配置的 leaderboardUrl。
+        # 榜单链接来自 region 配置的 leaderboardUrl（env 未配时兜底）。
         self.assertEqual(
             render.call_args.kwargs["url"], _CFG.leaderboard_url
+        )
+
+    def test_leaderboard_url_env_base_overrides_stored(self):
+        """PUBLIC_PAGES_BASE 已配（2026-10-26 基址 env 化裁决）：榜单链接
+        按 ``{base}/{region}.html`` 模板派生，库存旧值被覆盖。"""
+        from common.daily_robot.mart_leaderboard import LeaderboardData
+
+        data = LeaderboardData(
+            business_date=date(2026, 9, 11),
+            elapsed=(1, 2, 3),
+            people=({"name": "李四", "dept": "滨萧", "target": 1000,
+                     "completed": 500.0, "unfilled": 8, "rate": 0.5},),
+            workdays=frozenset({date(2026, 9, 10)}),
+        )
+        output = io.StringIO()
+        with patch("common.daily_robot.mart_cli.load_settings",
+                   return_value=_settings()), \
+             patch("common.daily_robot.mart_cli.require_business_run"), \
+             patch("common.daily_robot.mart_cli.load_region_configs",
+                   return_value={"hangzhou": _CFG}), \
+             patch("common.daily_robot.mart_cli.connect_mart"), \
+             patch("common.daily_robot.mart_cli.mart_collect_data",
+                   return_value=data), \
+             patch("common.daily_robot.mart_cli.build_view",
+                   return_value={"region": {}, "calendar": {}}), \
+             patch("common.daily_robot.mart_cli.render_bc",
+                   return_value="MD") as render, \
+             patch("common.daily_robot.mart_cli.build_outbox") as build_outbox, \
+             patch("common.daily_robot.mart_cli.datetime") as mock_dt, \
+             patch.dict(os.environ,
+                        {"PUBLIC_PAGES_BASE": "https://dt.yyhlzj.com"}):
+            mock_dt.now.return_value = datetime(2026, 9, 11, 8, 30)
+            mock_dt.fromisoformat = date.fromisoformat
+            build_outbox.return_value.enqueue.return_value = True
+            with redirect_stdout(output):
+                main([
+                    "leaderboard", "--confirm-local-test-write",
+                    "--region", "hangzhou",
+                ])
+
+        self.assertEqual(
+            render.call_args.kwargs["url"], "https://dt.yyhlzj.com/hangzhou.html"
         )
 
     def test_leaderboard_offline_all_uses_merged_people(self):
