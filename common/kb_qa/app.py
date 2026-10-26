@@ -334,6 +334,15 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if ctx_key is not None and meta.get("pending_candidates"):
                 self._context_store.set_pending(
                     ctx_key, meta["pending_candidates"])
+            # 号码台账问句命中持卡人（2026-10-26 用户裁决「小易要 @ 对应的
+            # 人要验证码」）：姓名→userId，群回复真实 @ 到 TA——光在文案里
+            # 写「直接找 TA 要」对方收不到任何通知。同名歧义/不在册静默跳过。
+            if meta.get("phone_holders"):
+                from common.public_data.phone_registry import (
+                    resolve_holder_user_ids,
+                )
+                meta["at_user_ids"] = resolve_holder_user_ids(
+                    conn, meta["phone_holders"])
             conn.commit()
         except Exception as exc:
             conn.rollback()
@@ -349,7 +358,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return AckMessage.STATUS_OK, "OK"
 
         if reply:
-            self._safe_reply(incoming, reply)
+            self._safe_reply(incoming, reply,
+                             extra_at=meta.get("at_user_ids") or ())
         return AckMessage.STATUS_OK, "OK"
 
     # ------------------------------------------------------------------
@@ -786,20 +796,25 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: llm doc render failed")
         return _render_doc_excerpt(chunks), DOC_QA, None
 
-    def _safe_reply(self, incoming, text):
+    def _safe_reply(self, incoming, text, extra_at=()):
         conversation_id = getattr(incoming, "conversation_id", "") or ""
         # 单聊（conversationType=2）无群 openConversationId，
         # groupMessages/send 必失败——走 SDK reply_text（sessionWebhook）。
         # 2026-10-22 单聊验证发现：此前单聊回复必走群通道报错。
         is_single = getattr(incoming, "conversation_type", "") == "2"
         sender_uid = incoming.sender_staff_id or ""
+        # @ 列表：提问人 + 额外对象（号码台账持卡人，2026-10-26），去重。
+        at_ids = [sender_uid] if sender_uid else []
+        for uid in extra_at or ():
+            if uid and uid not in at_ids:
+                at_ids.append(uid)
         try:
             if (self._reply_client is not None and conversation_id
                     and not is_single):
                 self._reply_client.send_group_markdown(
                     self._robot_code, conversation_id,
                     _REPLY_TITLE, text,
-                    at_user_ids=[sender_uid] if sender_uid else None,
+                    at_user_ids=at_ids or None,
                 )
             else:
                 self.reply_text(text, incoming)
@@ -866,8 +881,13 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
         def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
                 conn, doc_search=search_docs, vector_search=vector_search)
-            return run_agent(llm, text, executor=executor, history=history,
-                             meta=meta)
+            answer = run_agent(llm, text, executor=executor, history=history,
+                               meta=meta)
+            # phone_lookup 命中持卡人 → 透出 meta，process 据此把群回复
+            # 真实 @ 到持卡人（2026-10-26 用户裁决「小易要 @ 对应的人」）。
+            if meta is not None and executor.phone_holders:
+                meta["phone_holders"] = list(executor.phone_holders)
+            return answer
     else:
         log("kb qa: agent disabled (no LLM)")
 

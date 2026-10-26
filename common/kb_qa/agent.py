@@ -352,6 +352,9 @@ class ToolExecutor:
         self._now = now
         self._scopes = None
         self._channels = None
+        #: phone_lookup 命中后记录持卡人姓名（out-param：装配层据此把群
+        #: 回复 @ 到持卡人，2026-10-26 用户裁决「小易要 @ 对应的人」）。
+        self.phone_holders = []
 
     # ------------------------------------------------------------------
     def execute(self, name, arguments):
@@ -446,6 +449,10 @@ class ToolExecutor:
         if not result["phones"] and not result["bindings"]:
             return {"found": False, "keyword": keyword,
                     "hint": "台账无匹配。请对方到 ops-web 号码台账页核实/补登记"}
+        # 记录持卡人（out-param）：装配层据此把群回复 @ 到持卡人。
+        holders = {row.get("actual_user") for row in result["phones"]}
+        holders |= {row.get("actual_user") for row in result["bindings"]}
+        self.phone_holders = sorted(h for h in holders if h)
         # 结果自压缩：一人多卡（实测 5 卡 10+ 绑定）会超 execute() 的
         # 2000 字截断把 JSON 从中间切断——号码只留关键字段、绑定限量，
         # 保证整体在截断线内是合法 JSON。
