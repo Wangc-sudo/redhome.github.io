@@ -883,6 +883,29 @@ class QrLoginClientTests(unittest.TestCase):
             self.assertNotIn("secret-code", str(exc))
             self.assertNotIn("sk", str(exc))
 
+    def test_failure_logs_step_and_diagcode(self):
+        """分步诊断日志（2026-10-26 排障驱动）：步骤名+异常类型进日志。"""
+        client, _calls = self._client([RuntimeError("boom"),
+                                       RuntimeError("boom")])
+        with self.assertLogs("common.kb_web.qr_login", level="WARNING") as cm:
+            with self.assertRaises(auth.AuthError):
+                client.exchange_qr_code("code-1")
+        self.assertIn("userAccessToken", cm.output[0])
+        self.assertIn("RuntimeError", cm.output[0])
+        self.assertNotIn("code-1", cm.output[0])  # 授权码不进日志
+
+    def test_getbyunionid_errcode_logged(self):
+        client, _calls = self._client([
+            {"accessToken": "user-token"},
+            {"unionId": "union-1"},
+            {"errcode": 60121, "errmsg": "no such user"},
+        ])
+        with self.assertLogs("common.kb_web.qr_login", level="WARNING") as cm:
+            with self.assertRaises(auth.AuthError):
+                client.exchange_qr_code("code-1")
+        self.assertIn("getbyunionid", cm.output[0])
+        self.assertIn("60121", cm.output[0])
+
 
 class OAuthStateStoreTests(unittest.TestCase):
     def test_issue_consume_roundtrip(self):

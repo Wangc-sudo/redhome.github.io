@@ -15,13 +15,18 @@ userid；扫码登录 code 走 OAuth2 用户授权链：
 ``AuthError``（不含 URL、请求体、响应体、secret、userid）。
 """
 
+import json
+import logging
 import secrets
 import time
 import urllib.parse
+import urllib.request
 from collections.abc import Mapping
 
 from common.bi_web.auth import AuthError
 from common.dingtalk.client import _http_json
+
+_log = logging.getLogger(__name__)
 
 #: 钉钉扫码登录统一授权页（新版 OAuth2.0；旧版 qrconnect 已不推荐）。
 LOGIN_AUTHORIZE_URL = "https://login.dingtalk.com/oauth2/auth"
@@ -174,18 +179,20 @@ class DingTalkQrLoginClient:
             "grantType": "authorization_code",
         }
         result = self._call(_API_BASE + _USER_TOKEN_PATH,
-                            method="POST", body=body)
+                            method="POST", body=body, step="userAccessToken")
         token = result.get("accessToken") if isinstance(result, Mapping) else None
         if not isinstance(token, str) or not token:
+            _log.warning("qr login userAccessToken: accessToken missing")
             raise AuthError("dingtalk qr login failed")
         return token
 
     def _user_union_id(self, user_token):
         headers = {"x-acs-dingtalk-access-token": user_token}
         result = self._call(_API_BASE + _USER_ME_PATH,
-                            method="GET", headers=headers)
+                            method="GET", headers=headers, step="usersMe")
         union_id = result.get("unionId") if isinstance(result, Mapping) else None
         if not isinstance(union_id, str) or not union_id:
+            _log.warning("qr login usersMe: unionId missing")
             raise AuthError("dingtalk qr login failed")
         return union_id
 
@@ -195,31 +202,53 @@ class DingTalkQrLoginClient:
             + "?access_token=" + urllib.parse.quote(self._access_token(), safe="")
         )
         result = self._call(url, method="POST", body={"unionid": union_id},
-                            errcode_gate=True)
+                            errcode_gate=True, step="getbyunionid")
         userid = result.get("userid") if isinstance(result, Mapping) else None
         if not isinstance(userid, str) or not userid:
+            _log.warning("qr login getbyunionid: userid missing")
             raise AuthError("dingtalk qr login failed")
         return userid
 
     # ------------------------------------------------------------------
     # Transport（3s 超时 + 1 次重试；errcode_gate 用于 oapi 老接口）
     # ------------------------------------------------------------------
+    @staticmethod
+    def _diagnose(exc):
+        """提取失败诊断码：异常类型 + 钉钉错误码（HTTPError body 的
+        code/errcode 字段；不含 URL/请求体/敏感值）。"""
+        detail = type(exc).__name__
+        if isinstance(exc, urllib.error.HTTPError):
+            try:
+                payload = json.loads(exc.read().decode())
+            except Exception:
+                payload = None
+            if isinstance(payload, Mapping):
+                code = payload.get("code", payload.get("errcode"))
+                if code is not None:
+                    detail = f"{detail}({exc.code},{code})"
+        return detail
+
     def _call(self, url, *, method, body=None, headers=None,
-              errcode_gate=False):
+              errcode_gate=False, step="?"):
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 response = self._request_json(
                     url, method=method, body=body, headers=headers,
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
-            except Exception:
+            except Exception as exc:
                 if attempt + 1 >= _MAX_ATTEMPTS:
+                    _log.warning("qr login %s failed: %s",
+                                 step, self._diagnose(exc))
                     raise AuthError("dingtalk qr login failed") from None
                 continue
             if not isinstance(response, Mapping):
+                _log.warning("qr login %s failed: non-mapping response", step)
                 raise AuthError("dingtalk qr login failed")
             if errcode_gate:
                 if response.get("errcode") != 0:
+                    _log.warning("qr login %s failed: errcode=%s",
+                                 step, response.get("errcode"))
                     raise AuthError("dingtalk qr login failed")
                 return response.get("result")
             return response
@@ -251,8 +280,10 @@ class DingTalkQrLoginClient:
                           "appSecret": self._app_secret},
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
-            except Exception:
+            except Exception as exc:
                 if attempt + 1 >= _MAX_ATTEMPTS:
+                    _log.warning("qr login appAccessToken failed: %s",
+                                 self._diagnose(exc))
                     raise AuthError("dingtalk qr login failed") from None
                 continue
             if not isinstance(response, Mapping):
