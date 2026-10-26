@@ -40,7 +40,9 @@ async def _wait_idem_done(store, userid, sid, content):
 def register_kb_routes(app: FastAPI, *, service, store, session_secret,
                        auth_client=None, record_fetcher=None,
                        member_name_lookup=None, session_secure=False,
-                       guide_config=None, corp_id=None):
+                       guide_config=None, corp_id=None,
+                       qr_client=None, state_store=None,
+                       qr_redirect_uri=None, member_checker=None):
     """注册 /kb/api 路由组。依赖全注入：
 
     service          KbWebService（问答主链路）
@@ -51,6 +53,10 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
     member_name_lookup  userid → 姓名（bootstrap 显示；None 跳过）
     session_secure   cookie Secure 标志（HTTPS 下置 1）
     guide_config     引导配置 dict（常用问题等，前端 bootstrap 直出）
+    qr_client        扫码登录 DingTalkQrLoginClient（None=不开放扫码登录）
+    state_store      OAuthStateStore（state 一次性票据）
+    qr_redirect_uri  回调地址（服务端固定配置，不接受前端传参）
+    member_checker   userid → bool 在册校验（fail-closed；None=扫码登录不可用）
     """
 
     def require_userid(request: Request):
@@ -77,6 +83,52 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         except auth.AuthError:
             raise HTTPException(status_code=401, detail="auth failed")
         response = JSONResponse({"ok": True})
+        response.set_cookie(
+            auth.SESSION_COOKIE,
+            auth.issue_session(userid, session_secret),
+            max_age=auth.SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=session_secure,
+        )
+        return response
+
+    @app.get("/kb/api/auth/dingtalk/login-url")
+    def kb_qr_login_url():
+        """拼装钉钉扫码登录页地址（state 一次性票据，消费即作废）。"""
+        if qr_client is None or state_store is None or not qr_redirect_uri:
+            raise HTTPException(status_code=503, detail="unavailable")
+        from common.kb_web.qr_login import build_login_url
+        state = state_store.issue()
+        return {"login_url": build_login_url(
+            qr_client.app_key, qr_redirect_uri, state)}
+
+    @app.get("/kb/api/auth/dingtalk/callback")
+    def kb_qr_callback(authCode: str = "", state: str = ""):
+        """钉钉扫码授权回调：state 校验 → code 换 userid → 在册 → 落 session。
+
+        失败一律 302 回 /kb/?login_error=<code>（前端映射中文提示），成功
+        302 回 /kb/。本端点是浏览器跳转链的一环，不返回 JSON 错误页。
+        """
+        if (qr_client is None or state_store is None or not qr_redirect_uri
+                or member_checker is None):
+            raise HTTPException(status_code=503, detail="unavailable")
+        if not state_store.consume(state):
+            return RedirectResponse("/kb/?login_error=expired",
+                                    status_code=302)
+        try:
+            userid, _union_id = qr_client.exchange_qr_code(authCode or "")
+        except auth.AuthError:
+            return RedirectResponse("/kb/?login_error=failed",
+                                    status_code=302)
+        try:
+            allowed = member_checker(userid)
+        except Exception:
+            allowed = False
+        if not allowed:
+            return RedirectResponse("/kb/?login_error=denied",
+                                    status_code=302)
+        response = RedirectResponse("/kb/", status_code=302)
         response.set_cookie(
             auth.SESSION_COOKIE,
             auth.issue_session(userid, session_secret),

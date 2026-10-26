@@ -7,6 +7,8 @@
 - KB_PRODUCTS_BASE_ID/SHEET_ID             商品 AI 表定位（附件签名 URL）
 - KB_LLM_* / RAG_EMBED_*                   LLM 与向量召回（缺则降级运行）
 - KB_REDIS_URL / PUBLIC_DATA_REDIS_URL     会话存储（缺则进程内兜底）
+- KB_WEB_PUBLIC_BASE_URL                   扫码登录回调的公网基址
+                                           （缺省 https://dt.yyhlzj.com）
 """
 
 import os
@@ -72,6 +74,28 @@ def build_kb_web_deps(settings, environ=None):
         finally:
             conn.close()
 
+    def member_checker(userid):
+        """扫码登录在册校验（fail-closed：查询异常由路由层按拒绝处理）。"""
+        conn = connection_factory()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT 1 FROM `dim_robot_member` WHERE `user_id`=%s"
+                    " LIMIT 1",
+                    (userid,),
+                )
+                return cursor.fetchone() is not None
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+    from common.kb_web.qr_login import DingTalkQrLoginClient, OAuthStateStore
+
+    public_base = ((env.get("KB_WEB_PUBLIC_BASE_URL") or "").strip()
+                   or "https://dt.yyhlzj.com").rstrip("/")
+
     return {
         "service": KbWebService(
             connection_factory=connection_factory,
@@ -91,4 +115,9 @@ def build_kb_web_deps(settings, environ=None):
         "corp_id": ((env.get("KB_DINGTALK_CORPID") or "").strip()
                     or (env.get("BI_DINGTALK_CORPID") or "").strip()
                     or None),
+        # 扫码登录（2026-10-26）：与免登同凭据，回调路径已在 /kb/ 反代内。
+        "qr_client": DingTalkQrLoginClient(app_key, app_secret),
+        "state_store": OAuthStateStore(redis_url),
+        "qr_redirect_uri": f"{public_base}/kb/api/auth/dingtalk/callback",
+        "member_checker": member_checker,
     }

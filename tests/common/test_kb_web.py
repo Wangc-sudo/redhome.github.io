@@ -9,12 +9,14 @@ history 配对、工具 offering 收窄、service 应答（含附件透出与降
 import json
 import time
 import unittest
+import urllib.parse
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from common.bi_web import auth
 from common.kb_web import acl as acl_module
+from common.kb_web import qr_login as qr_module
 from common.kb_web import routes as kb_routes
 from common.kb_web import service as svc_module
 from common.kb_web import sessions as sess_module
@@ -798,6 +800,247 @@ class IdemRouteTests(unittest.TestCase):
         self.assertEqual(200, resp.status_code)
         self.assertEqual("缓存答案", resp.json()["reply"])
         self.assertEqual(0, len(service.calls))
+
+
+# ---------------------------------------------------------------------------
+# 扫码登录（2026-10-26，钉钉 OAuth2.0 授权链）
+# ---------------------------------------------------------------------------
+class QrLoginClientTests(unittest.TestCase):
+    def _client(self, responses):
+        calls = []
+
+        def fake(url, method="GET", body=None, headers=None, timeout=15):
+            calls.append({"url": url, "method": method,
+                          "body": body, "headers": headers})
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        return (qr_module.DingTalkQrLoginClient("ak", "sk",
+                                                request_json=fake), calls)
+
+    def test_exchange_success(self):
+        client, calls = self._client([
+            {"accessToken": "user-token"},
+            {"unionId": "union-1"},
+            {"errcode": 0, "result": {"userid": "u100"}},
+        ])
+        userid, union_id = client.exchange_qr_code("code-1")
+        self.assertEqual(("u100", "union-1"), (userid, union_id))
+        # 三段外呼形态：用户 token → users/me（个人 token 头）→ getbyunionid
+        self.assertEqual("POST", calls[0]["method"])
+        self.assertIn("/v1.0/oauth2/userAccessToken", calls[0]["url"])
+        self.assertEqual("authorization_code",
+                         calls[0]["body"]["grantType"])
+        self.assertEqual({"x-acs-dingtalk-access-token": "user-token"},
+                         calls[1]["headers"])
+        self.assertIn("/topapi/user/getbyunionid", calls[2]["url"])
+        self.assertIn("access_token=test-access-token", calls[2]["url"])
+
+    def test_blank_code_raises(self):
+        client, calls = self._client([])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("")
+        self.assertEqual([], calls)  # 不外呼
+
+    def test_user_token_missing_raises(self):
+        client, _calls = self._client([{}])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("code-1")
+
+    def test_transport_error_retried_then_raises(self):
+        client, calls = self._client([RuntimeError("boom"),
+                                      RuntimeError("boom")])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("code-1")
+        self.assertEqual(2, len(calls))  # 3s×1 重试纪律
+
+    def test_union_id_missing_raises(self):
+        client, _calls = self._client([
+            {"accessToken": "user-token"},
+            {"nick": "某用户"},
+        ])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("code-1")
+
+    def test_getbyunionid_errcode_raises(self):
+        client, _calls = self._client([
+            {"accessToken": "user-token"},
+            {"unionId": "union-1"},
+            {"errcode": 60121, "errmsg": "no such user"},
+        ])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("code-1")
+
+    def test_error_messages_are_generic(self):
+        client, _calls = self._client([RuntimeError("boom"),
+                                       RuntimeError("boom")])
+        try:
+            client.exchange_qr_code("secret-code")
+            self.fail("expected AuthError")
+        except auth.AuthError as exc:
+            self.assertNotIn("secret-code", str(exc))
+            self.assertNotIn("sk", str(exc))
+
+
+class OAuthStateStoreTests(unittest.TestCase):
+    def test_issue_consume_roundtrip(self):
+        store = qr_module.OAuthStateStore()
+        state = store.issue()
+        self.assertTrue(state)
+        self.assertTrue(store.consume(state))
+        self.assertFalse(store.consume(state))  # 消费即作废
+
+    def test_unknown_or_blank_state_rejected(self):
+        store = qr_module.OAuthStateStore()
+        self.assertFalse(store.consume("never-issued"))
+        self.assertFalse(store.consume(""))
+        self.assertFalse(store.consume(None))
+
+    def test_backend_error_fail_closed_on_consume(self):
+        class _BrokenStore(qr_module.OAuthStateStore):
+            def _kv(self):
+                raise RuntimeError("redis down")
+
+        store = _BrokenStore()
+        state = store.issue()  # 签发 fail-open
+        self.assertTrue(state)
+        self.assertFalse(store.consume(state))  # 消费 fail-closed
+
+    def test_build_login_url_encodes_params(self):
+        url = qr_module.build_login_url(
+            "ak", "https://dt.yyhlzj.com/kb/api/auth/dingtalk/callback",
+            "state-1")
+        self.assertTrue(url.startswith(qr_module.LOGIN_AUTHORIZE_URL + "?"))
+        query = dict(urllib.parse.parse_qsl(
+            urllib.parse.urlparse(url).query))
+        self.assertEqual(
+            "https://dt.yyhlzj.com/kb/api/auth/dingtalk/callback",
+            query["redirect_uri"])
+        self.assertEqual("code", query["response_type"])
+        self.assertEqual("ak", query["client_id"])
+        self.assertEqual("openid", query["scope"])
+        self.assertEqual("state-1", query["state"])
+        self.assertEqual("consent", query["prompt"])
+
+
+class _StubQrClient:
+    def __init__(self, userid="u100", fail=False):
+        self.app_key = "ak"
+        self._userid = userid
+        self._fail = fail
+        self.calls = []
+
+    def exchange_qr_code(self, code):
+        self.calls.append(code)
+        if self._fail:
+            raise auth.AuthError("dingtalk qr login failed")
+        return self._userid, "union-1"
+
+
+class QrLoginRouteTests(unittest.TestCase):
+    _REDIRECT_URI = "https://dt.yyhlzj.com/kb/api/auth/dingtalk/callback"
+
+    def _app(self, *, qr_client=None, state_store=None,
+             qr_redirect_uri=None, member_checker=None):
+        app = FastAPI()
+        kb_routes.register_kb_routes(
+            app,
+            service=_StubService(),
+            store=sess_module.WebSessionStore(),
+            session_secret="test-secret",
+            qr_client=qr_client,
+            state_store=state_store,
+            qr_redirect_uri=qr_redirect_uri,
+            member_checker=member_checker,
+        )
+        return app
+
+    def _enabled(self, qr_client=None, member_checker=None):
+        """装配扫码登录全依赖的 TestClient，返回 (client, state_store)。"""
+        state_store = qr_module.OAuthStateStore()
+        app = self._app(
+            qr_client=qr_client or _StubQrClient(),
+            state_store=state_store,
+            qr_redirect_uri=self._REDIRECT_URI,
+            member_checker=(member_checker
+                            if member_checker is not None
+                            else lambda userid: True),
+        )
+        return TestClient(app), state_store
+
+    def _callback(self, tc, state, code="code-1"):
+        return tc.get(f"/kb/api/auth/dingtalk/callback"
+                      f"?authCode={code}&state={state}",
+                      follow_redirects=False)
+
+    def test_login_url_issued_with_state(self):
+        tc, _store = self._enabled()
+        resp = tc.get("/kb/api/auth/dingtalk/login-url")
+        self.assertEqual(200, resp.status_code)
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(
+            resp.json()["login_url"]).query))
+        self.assertEqual("ak", query["client_id"])
+        self.assertEqual(self._REDIRECT_URI, query["redirect_uri"])
+        self.assertTrue(query["state"])
+
+    def test_login_url_unavailable_without_qr_deps(self):
+        tc = TestClient(self._app())  # 全缺省 None
+        self.assertEqual(
+            503, tc.get("/kb/api/auth/dingtalk/login-url").status_code)
+
+    def test_callback_success_issues_session_and_redirects(self):
+        tc, store = self._enabled(qr_client=_StubQrClient(userid="u100"))
+        resp = self._callback(tc, store.issue())
+        self.assertEqual(302, resp.status_code)
+        self.assertEqual("/kb/", resp.headers["location"])
+        cookie = resp.headers["set-cookie"]
+        self.assertIn(f"{auth.SESSION_COOKIE}=", cookie)
+        token = cookie.split(f"{auth.SESSION_COOKIE}=")[1].split(";")[0]
+        self.assertEqual(
+            "u100", auth.resolve_session_userid(token, "test-secret"))
+
+    def test_callback_unknown_state_redirects_expired(self):
+        tc, _store = self._enabled()
+        resp = self._callback(tc, "nope")
+        self.assertEqual(302, resp.status_code)
+        self.assertEqual("/kb/?login_error=expired", resp.headers["location"])
+
+    def test_callback_state_consumed_once(self):
+        tc, store = self._enabled()
+        state = store.issue()
+        self.assertEqual("/kb/", self._callback(tc, state).headers["location"])
+        # 重放同一 state → expired（防重放）
+        self.assertEqual("/kb/?login_error=expired",
+                         self._callback(tc, state).headers["location"])
+
+    def test_callback_exchange_failure_redirects_failed(self):
+        tc, store = self._enabled(qr_client=_StubQrClient(fail=True))
+        resp = self._callback(tc, store.issue(), code="bad")
+        self.assertEqual("/kb/?login_error=failed", resp.headers["location"])
+
+    def test_callback_non_member_denied(self):
+        tc, store = self._enabled(member_checker=lambda userid: False)
+        resp = self._callback(tc, store.issue())
+        self.assertEqual("/kb/?login_error=denied", resp.headers["location"])
+        self.assertNotIn("set-cookie", resp.headers)
+
+    def test_callback_member_checker_error_fail_closed(self):
+        def broken(userid):
+            raise RuntimeError("db down")
+
+        tc, store = self._enabled(member_checker=broken)
+        resp = self._callback(tc, store.issue())
+        self.assertEqual("/kb/?login_error=denied", resp.headers["location"])
+
+    def test_callback_unavailable_without_member_checker(self):
+        store_state = qr_module.OAuthStateStore()
+        tc = TestClient(self._app(
+            qr_client=_StubQrClient(), state_store=store_state,
+            qr_redirect_uri=self._REDIRECT_URI))
+        self.assertEqual(
+            503, self._callback(tc, store_state.issue()).status_code)
 
 
 if __name__ == "__main__":

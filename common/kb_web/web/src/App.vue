@@ -1,10 +1,14 @@
 <template>
-  <!-- 引导页：钉钉外打开 -->
+  <!-- 引导页：钉钉外打开 → 扫码登录 -->
   <div v-if="phase === 'need-dd'" class="guide-page">
     <div class="guide-card">
       <div class="guide-logo">小易</div>
-      <p>请在钉钉中打开本页面</p>
-      <p class="guide-sub">钉钉 → 工作台 → 小易，或在客服群内点链接进入</p>
+      <p>登录后使用</p>
+      <p class="guide-sub">仅限本企业成员；也可在钉钉 → 工作台 → 小易直接打开</p>
+      <button class="login-btn" :disabled="qrLoading" @click="startQrLogin">
+        {{ qrLoading ? '正在跳转…' : '钉钉扫码登录' }}
+      </button>
+      <p v-if="loginError" class="login-error">{{ loginError }}</p>
     </div>
   </div>
 
@@ -157,6 +161,15 @@ const toast = ref('')
 const suggestions = ref(DEFAULT_SUGGESTIONS)
 const chatEl = ref(null)
 const inputEl = ref(null)
+const qrLoading = ref(false)
+const loginError = ref('')
+
+// 扫码登录回调失败回跳（/kb/?login_error=<code>）→ 中文提示（方案 §5.2）
+const LOGIN_ERROR_TEXT = {
+  expired: '登录已过期，请重新扫码',
+  failed: '登录失败，请稍后再试',
+  denied: '仅限本企业成员使用',
+}
 
 const canShare = computed(() => inDingTalk())
 
@@ -220,25 +233,58 @@ async function scrollBottom() {
   if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight
 }
 
-async function boot() {
-  if (!inDingTalk()) { phase.value = 'need-dd'; return }
+// 登录成功后进主界面（免登与扫码登录共用）：bootstrap + 会话加载
+async function enterApp() {
+  const info = await api.bootstrap()
+  user.value = info
+  if (info.guide && info.guide.suggestions && info.guide.suggestions.length) {
+    suggestions.value = info.guide.suggestions
+  }
+  const { sessions: list } = await api.listSessions()
+  sessions.value = list
+  if (list.length) {
+    await switchSession(list[0].sid)
+  } else {
+    await newSession()
+  }
+  phase.value = 'ready'
+}
+
+// 浏览器扫码登录：取 login_url 整页跳转钉钉授权页（二维码在钉钉域渲染）
+async function startQrLogin() {
+  qrLoading.value = true
+  loginError.value = ''
   try {
-    const { corp_id: corpId } = await api.publicConfig()
-    const code = await requestAuthCode(corpId)
-    await api.authDingtalk(code)
-    const info = await api.bootstrap()
-    user.value = info
-    if (info.guide && info.guide.suggestions && info.guide.suggestions.length) {
-      suggestions.value = info.guide.suggestions
+    const { login_url: url } = await api.qrLoginUrl()
+    window.location.assign(url)
+  } catch (err) {
+    qrLoading.value = false
+    loginError.value = '扫码登录暂不可用，请在钉钉中打开'
+  }
+}
+
+async function boot() {
+  // 扫码登录回调失败回跳的错误提示（清掉 query 避免刷新残留）
+  const errCode = new URLSearchParams(window.location.search).get('login_error')
+  if (errCode) {
+    loginError.value = LOGIN_ERROR_TEXT[errCode] || '登录失败，请稍后再试'
+    window.history.replaceState(null, '', window.location.pathname)
+  }
+  if (inDingTalk()) {
+    // 钉钉容器内：JSAPI 免登（扫码按钮不出现）
+    try {
+      const { corp_id: corpId } = await api.publicConfig()
+      const code = await requestAuthCode(corpId)
+      await api.authDingtalk(code)
+      await enterApp()
+    } catch (err) {
+      phase.value = 'need-dd'
     }
-    const { sessions: list } = await api.listSessions()
-    sessions.value = list
-    if (list.length) {
-      await switchSession(list[0].sid)
-    } else {
-      await newSession()
-    }
-    phase.value = 'ready'
+    return
+  }
+  // 普通浏览器：已有 session 直进，否则展示扫码登录页
+  try {
+    await enterApp()
   } catch (err) {
     phase.value = 'need-dd'
   }
