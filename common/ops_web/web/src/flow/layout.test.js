@@ -8,7 +8,6 @@ import {
   AGG_SIZE,
   DEPT_ROW_H,
   GLOBAL_H,
-  MEMBER_ROW_H,
   REGION_W,
   REGION_X,
   TASK_GAP,
@@ -45,18 +44,15 @@ function taskNode(key, family, services) {
 
 describe('regionH / moduleH', () => {
   it('聚合=圆径；平台=固定 120', () => {
-    expect(regionH(regionNode('a', { isAggregate: true }), NO_EXPAND)).toBe(AGG_SIZE);
-    expect(regionH(regionNode('a', { isPlatform: true }), NO_EXPAND)).toBe(120);
+    expect(regionH(regionNode('a', { isAggregate: true }))).toBe(AGG_SIZE);
+    expect(regionH(regionNode('a', { isPlatform: true }))).toBe(120);
   });
-  it('部门行 + 展开成员行计入高度', () => {
+  it('部门行计入高度（成员展开行 2026-10-26 退役）', () => {
     const node = regionNode('hangzhou', {
       depts: [{}, {}],
-      members: [{}, {}, {}],
+      members: [{}, {}, {}],   // members 不再影响高度
     });
-    const collapsed = regionH(node, NO_EXPAND);
-    expect(collapsed).toBe(34 + 52 + 30 + 10 + 22 + 2 * DEPT_ROW_H);
-    const expanded = regionH(node, new Set([node.id]));
-    expect(expanded).toBe(collapsed + 24 + 3 * MEMBER_ROW_H);
+    expect(regionH(node)).toBe(34 + 52 + 30 + 10 + 22 + 2 * DEPT_ROW_H);
   });
   it('模块折叠 64，展开 44+78n', () => {
     const mod = taskNode('hangzhou', 'robot', [{}, {}]);
@@ -85,7 +81,7 @@ describe('layoutNodes', () => {
     expect(t1).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM });
     expect(t2).toMatchObject({ x: TASK_X, y: STRIP_BOTTOM + 64 + TASK_GAP });
     const stackH = 64 + TASK_GAP + 64;
-    const rh = regionH(region, NO_EXPAND);
+    const rh = regionH(region);
     expect(region.x).toBe(REGION_X);
     expect(region.y).toBe(Math.round(STRIP_BOTTOM + Math.max(0, (stackH - rh) / 2)));
   });
@@ -96,7 +92,7 @@ describe('layoutNodes', () => {
     layoutNodes({
       regionNodes: [r1, r2], taskNodes: [], poolMembers: [], globalNodes: [],
     });
-    const rh = regionH(r1, NO_EXPAND);
+    const rh = regionH(r1);
     expect(r1.y).toBe(STRIP_BOTTOM);
     expect(r2.y).toBe(STRIP_BOTTOM + rh + 26);
   });
@@ -134,8 +130,8 @@ describe('layoutNodes', () => {
       regionNodes: [r1, r2, r3], taskNodes: [], poolMembers: [],
       globalNodes: [],
     });
-    const rh1 = regionH(r1, NO_EXPAND);
-    const rh2 = regionH(r2, NO_EXPAND);
+    const rh1 = regionH(r1);
+    const rh2 = regionH(r2);
     // r1→r2 同组正常间距；r2→r3 组切换多 22
     expect(r2.y).toBe(STRIP_BOTTOM + rh1 + 26);
     expect(r3.y).toBe(STRIP_BOTTOM + rh1 + rh2 + 26 + 22 + 26);
@@ -249,7 +245,7 @@ describe('buildDepEdges', () => {
   mods[1].x = TASK_X; mods[1].y = 300;
 
   it('成员 depends_on 聚合到模块层，源服务 ID 全带上（同列堆叠走垂直）', () => {
-    const rects = nodeRects([], mods, NO_EXPAND, NO_EXPAND);
+    const rects = nodeRects([], mods, NO_EXPAND);
     const [dep] = buildDepEdges(mods, rects);
     expect(dep.id).toBe('module:__platform__:extract-mart→module:hangzhou:pages');
     expect(dep.fromLabel).toBe('extract-mart');
@@ -269,7 +265,7 @@ describe('buildDepEdges', () => {
     ];
     dup[0].x = TASK_X; dup[0].y = 40;
     dup[1].x = TASK_X; dup[1].y = 300;
-    const rects = nodeRects([], dup, NO_EXPAND, NO_EXPAND);
+    const rects = nodeRects([], dup, NO_EXPAND);
     const deps = buildDepEdges(dup, rects);
     expect(deps).toHaveLength(1);   // 自依赖排除 + 重复收敛
   });
@@ -278,7 +274,7 @@ describe('buildDepEdges', () => {
       service_id: 'pages-hangzhou', depends_on: ['ghost'],
     }])];
     orphan[0].x = TASK_X; orphan[0].y = 40;
-    const rects = nodeRects([], orphan, NO_EXPAND, NO_EXPAND);
+    const rects = nodeRects([], orphan, NO_EXPAND);
     expect(buildDepEdges(orphan, rects)).toEqual([]);
   });
 });
@@ -287,9 +283,9 @@ describe('nodeRects / canvasSize', () => {
   it('聚合=正方形，区域高按展开态', () => {
     const agg = regionNode('offline_all', { isAggregate: true });
     const biz = regionNode('hangzhou', { depts: [{}] });
-    const rects = nodeRects([agg, biz], [], NO_EXPAND, NO_EXPAND);
+    const rects = nodeRects([agg, biz], [], NO_EXPAND);
     expect(rects['region:offline_all']).toMatchObject({ w: AGG_SIZE, h: AGG_SIZE });
-    expect(rects['region:hangzhou'].h).toBe(regionH(biz, NO_EXPAND));
+    expect(rects['region:hangzhou'].h).toBe(regionH(biz));
   });
   it('画布尺寸=节点外接+60 余量，下限 1900×480（五泳道）', () => {
     expect(canvasSize({}, [])).toEqual({ w: 1900, h: 480 });

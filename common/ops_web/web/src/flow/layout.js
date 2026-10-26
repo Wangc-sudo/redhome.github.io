@@ -15,7 +15,6 @@ export const TASK_W = 330;
 export const TASK_GAP = 14;
 export const TOP_Y = 40;
 export const DEPT_ROW_H = 26;
-export const MEMBER_ROW_H = 26;
 export const GLOBAL_W = 220;
 export const GLOBAL_H = 64;
 export const AGG_SIZE = 176;   // 聚合节点圆形直径
@@ -70,15 +69,12 @@ export function regionSortKey(regionKey) {
   return `${BUSINESS_GROUPS.indexOf(group)}:${group.regions.indexOf(regionKey)}`;
 }
 
-/** 区域节点动态高度：头+指标+脚 + 部门行 +（展开时）成员行。 */
-export function regionH(node, expandedRegions) {
+/** 区域节点动态高度：头+指标+脚+部门槽（成员展开行 2026-10-26 退役）。 */
+export function regionH(node) {
   if (node.isAggregate) return AGG_SIZE;
   if (node.isPlatform) return 120;
   let h = 34 + 52 + 30 + 10;                     // head+metrics+foot+padding
   h += 22 + (node.depts ? node.depts.length : 0) * DEPT_ROW_H;   // 部门槽
-  if (expandedRegions && expandedRegions.has(node.id)) {
-    h += 24 + (node.members ? node.members.length : 0) * MEMBER_ROW_H;
-  }
   return h;
 }
 
@@ -102,7 +98,6 @@ export function layoutNodes({
   globalNodes,
   sourceNodes = [],
   savedPos = {},
-  expandedRegions,
   expandedModules,
 }) {
   // -- 顶部功能条：池 + 全局节点横排 ------------------------------------
@@ -159,7 +154,7 @@ export function layoutNodes({
       cursorY += moduleH(task, expandedModules) + TASK_GAP;
     }
     const stackH = cursorY - stackTop - TASK_GAP;
-    const rh = regionH(region, expandedRegions);
+    const rh = regionH(region);
     const regionY = stack.length
       ? stackTop + Math.max(0, (stackH - rh) / 2)
       : cursorY;
@@ -182,7 +177,7 @@ export function layoutNodes({
     const group = BUSINESS_GROUPS.find((g) => g.key === gk);
     const top = Math.min(...nodes.map((n) => n.y));
     const bottom = Math.max(
-      ...nodes.map((n) => n.y + regionH(n, expandedRegions)));
+      ...nodes.map((n) => n.y + regionH(n)));
     groupBands.push({
       key: gk,
       label: group ? group.label : '未分组',
@@ -197,15 +192,15 @@ export function layoutNodes({
 
 // -- 连线几何 -------------------------------------------------------------------
 
-/** 节点矩形表（连线端点取位用）：聚合=圆（边长 AGG_SIZE），区域高按展开态。
+/** 节点矩形表（连线端点取位用）：聚合=圆（边长 AGG_SIZE）。
  * extras 可带池/全局节点（日历→提醒/催办的消费连线要锚到日历节点）。 */
-export function nodeRects(regionNodes, taskNodes, expandedRegions, expandedModules,
+export function nodeRects(regionNodes, taskNodes, expandedModules,
                           { poolNode = null, globalNodes = [], sourceNodes = [] } = {}) {
   const map = {};
   for (const n of regionNodes) {
     map[n.id] = n.isAggregate
       ? { ...n, w: AGG_SIZE, h: AGG_SIZE }
-      : { ...n, w: REGION_W, h: regionH(n, expandedRegions) };
+      : { ...n, w: REGION_W, h: regionH(n) };
   }
   for (const n of taskNodes) {
     map[n.id] = { ...n, w: TASK_W, h: moduleH(n, expandedModules) };
