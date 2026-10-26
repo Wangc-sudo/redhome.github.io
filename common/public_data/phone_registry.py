@@ -342,6 +342,76 @@ def replace_phone_bindings(connection, bindings, *, actor):
             cursor.close()
 
 
+def upsert_phone_binding(connection, phone_no, channel_category,
+                         platform_account, note="", *, actor):
+    """新增/更新一条账号绑定（自然键 = 号码+类目+账号），自包事务。"""
+    phone = str(phone_no or "").strip()
+    category = str(channel_category or "").strip()
+    account = str(platform_account or "").strip()
+    if not _PHONE_RE.match(phone):
+        raise PhoneRegistryError("phone_no 非法")
+    if not category or len(category) > 32:
+        raise PhoneRegistryError("channel_category 非法")
+    if not account:
+        raise PhoneRegistryError("platform_account 非法")
+    with transaction(connection):
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                _BINDING_WRITE_SQL,
+                (phone, category, account[:255], (note or "")[:255] or None,
+                 1, actor, _utc_now_text()),
+            )
+        finally:
+            cursor.close()
+        _insert_audit(connection, actor, "binding_save", phone,
+                      detail="%s / %s" % (category, account[:120]))
+
+
+def set_binding_enabled(connection, binding_id, enabled, *, actor):
+    """停用/启用一条绑定（按主键 id）。返回受影响行数（0 = 不存在）。"""
+    with transaction(connection):
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "UPDATE `dim_phone_binding` SET `enabled` = %s, "
+                "`updated_by` = %s, `updated_at` = %s WHERE `id` = %s",
+                (1 if enabled else 0, actor, _utc_now_text(),
+                 int(binding_id)),
+            )
+            changed = max(getattr(cursor, "rowcount", 0), 0)
+        finally:
+            cursor.close()
+        if changed:
+            _insert_audit(connection, actor,
+                          "enable" if enabled else "disable",
+                          "binding#%d" % int(binding_id),
+                          detail="绑定%s" % ("启用" if enabled else "停用"))
+        return changed
+
+
+def set_phone_enabled(connection, phone_no, enabled, *, actor):
+    """停用/启用一个号码（停用的号码不进任何读面）。返回受影响行数。"""
+    with transaction(connection):
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "UPDATE `dim_phone_number` SET `enabled` = %s, "
+                "`updated_by` = %s, `updated_at` = %s WHERE `phone_no` = %s",
+                (1 if enabled else 0, actor, _utc_now_text(),
+                 str(phone_no or "").strip()),
+            )
+            changed = max(getattr(cursor, "rowcount", 0), 0)
+        finally:
+            cursor.close()
+        if changed:
+            _insert_audit(connection, actor,
+                          "enable" if enabled else "disable",
+                          str(phone_no or "").strip(),
+                          detail="号码%s" % ("启用" if enabled else "停用"))
+        return changed
+
+
 def set_phone_user(connection, phone_no, user, *, actor):
     """认领：把号码的实际持卡人改成 ``user``（业务方确认后调用）。
 
@@ -443,6 +513,71 @@ def fetch_unclaimed(connection):
         "`status`, `note` FROM `dim_phone_number` "
         "WHERE `needs_claim` = 1 AND `enabled` = 1 "
         "ORDER BY `dept`, `phone_no`",
+    )
+
+
+def fetch_phone_list(connection, keyword="", unclaimed_only=False):
+    """台账页列表读面：全字段（含 enabled / needs_claim / 更新时间）。
+
+    ``keyword`` 命中号码/持卡人/开户名/归属人/部门/物理手机/备注任一；
+    ``unclaimed_only=True`` 只看待认领手机号。按号码升序。
+    """
+    sql = (
+        "SELECT `phone_no`, `phone_type`, `plan_name`, `account_name`, "
+        "`actual_user`, `owner`, `dept`, `corp_owner`, `physical_device`, "
+        "`status`, `broadband_account`, `broadband_status`, `address`, "
+        "`note`, `needs_claim`, `enabled`, `updated_by`, `updated_at` "
+        "FROM `dim_phone_number`"
+    )
+    clauses, params = [], []
+    kw = str(keyword or "").strip()
+    if kw:
+        like = "%%%s%%" % kw
+        clauses.append(
+            "(`phone_no` LIKE %s OR `actual_user` LIKE %s OR "
+            "`account_name` LIKE %s OR `owner` LIKE %s OR `dept` LIKE %s OR "
+            "`physical_device` LIKE %s OR `note` LIKE %s)")
+        params.extend([like] * 7)
+    if unclaimed_only:
+        clauses.append("`needs_claim` = 1 AND `enabled` = 1")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY `phone_no`"
+    return _fetch_all(connection, sql, tuple(params))
+
+
+def fetch_bindings(connection, keyword=""):
+    """账号绑定列表读面（含主键 id 与持卡人信息，含停用行）。
+
+    ``keyword`` 命中平台账号/渠道类目/号码任一。按类目、账号、号码排序。
+    """
+    sql = (
+        "SELECT b.`id`, b.`phone_no`, b.`channel_category`, "
+        "b.`platform_account`, b.`note`, b.`enabled`, b.`updated_by`, "
+        "b.`updated_at`, p.`actual_user`, p.`physical_device`, p.`status` "
+        "FROM `dim_phone_binding` b "
+        "LEFT JOIN `dim_phone_number` p ON p.`phone_no` = b.`phone_no`"
+    )
+    params = ()
+    kw = str(keyword or "").strip()
+    if kw:
+        like = "%%%s%%" % kw
+        sql += (" WHERE b.`platform_account` LIKE %s OR "
+                "b.`channel_category` LIKE %s OR b.`phone_no` LIKE %s")
+        params = (like, like, like)
+    sql += (" ORDER BY b.`channel_category`, b.`platform_account`, "
+            "b.`phone_no`")
+    return _fetch_all(connection, sql, params)
+
+
+def fetch_phone_audit(connection, limit=200):
+    """号码台账变更流水（操作记录页第八源）。时间倒序。"""
+    return _fetch_all(
+        connection,
+        "SELECT `actor`, `action`, `phone_no`, `detail`, `created_at` "
+        "FROM `dim_phone_number_audit` "
+        "ORDER BY `created_at` DESC, `id` DESC LIMIT %s",
+        (int(limit),),
     )
 
 

@@ -47,6 +47,7 @@ from common.public_data import (
     org_assignment_override,
     org_catalog,
     org_proxy_grant,
+    phone_registry,
     recipient_override,
     report_roster,
 )
@@ -187,11 +188,13 @@ CAPABILITY_PIPELINES = "pipelines"  # 定时任务（注册/开关/立即运行/
 CAPABILITY_AUDIT = "audit"      # 操作记录（聚合审计读面）
 CAPABILITY_CALENDAR = "calendar"  # 播报日历（可编辑的播报日集合）
 CAPABILITY_DATAFIX = "datafix"  # 数据修正（类型化修数：预览/落库，全程审计）
+CAPABILITY_PHONE = "phone"      # 号码台账（号码↔持卡人↔平台账号）
 
 #: 全部能力枚举（/api/me 逐项回报；SPA 菜单与路由守卫据此渲染）。
 ALL_CAPABILITIES = (
     CAPABILITY_ORG, CAPABILITY_ROSTER, CAPABILITY_PIPELINES,
     CAPABILITY_AUDIT, CAPABILITY_CALENDAR, CAPABILITY_DATAFIX,
+    CAPABILITY_PHONE,
 )
 
 
@@ -355,7 +358,14 @@ def _label(mapping, value):
 
 #: 「操作记录」页的来源枚举（顺序即下拉顺序）。
 _RECORD_SOURCES = ("授权", "定时任务", "填报名册", "播报日历", "收件人覆盖",
-                   "定时运行", "数据修正")
+                   "定时运行", "数据修正", "号码台账")
+
+#: 号码台账审计动作中文标签（专用：upsert 在名册语境译「改判」，在此译
+#: 「新增/更新」）。
+_PHONE_ACTION_LABEL = {
+    "upsert": "新增/更新", "seed": "全量重放", "claim": "认领",
+    "enable": "启用", "disable": "停用", "binding_save": "绑定新增/更新",
+}
 
 #: 收件人覆盖 mode / target_type 中文标签（展示层）。
 _MODE_LABEL = {"include": "追加", "exclude": "移除"}
@@ -468,6 +478,22 @@ def _collect_records(connection):
             " ".join(x for x in (
                 _label(_FIX_TYPE_LABEL, get("fix_type")), get("target")) if x),
             get("detail") or "",
+        ))
+
+    # 号码台账审计（第八源，2026-10-26）：fail-soft 同覆盖审计。
+    try:
+        phone_audits = phone_registry.fetch_phone_audit(connection, limit=200)
+    except Exception as exc:
+        _LOGGER.warning("ops-web phone audit load failed: %s",
+                        type(exc).__name__)
+        phone_audits = ()
+    for row in phone_audits:
+        get = _audit_get(row, ("actor", "action", "phone_no", "detail",
+                               "created_at"))
+        records.append((
+            get("created_at"), "号码台账", get("actor") or "",
+            _label(_PHONE_ACTION_LABEL, get("action")),
+            get("phone_no") or "", get("detail") or "",
         ))
 
     for row in ops_control.fetch_run_history(connection):
@@ -4050,6 +4076,196 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             "status": "ok", "deleted": deleted, "inserted": inserted,
             "missing_owners": missing, "extract_request_id": request_id,
         })
+
+    # -- 号码台账（dim_phone_number / dim_phone_binding，2026-10-26）--------
+    # 号码 ↔ 实际持卡人 ↔ 平台账号三键映射：「收验证码该找谁」的唯一真源。
+    # ops-web 是唯一写面（导入脚本全量重放除外），变更全量落
+    # dim_phone_number_audit。
+
+    @app.get("/phones")
+    def phones_page():
+        """号码台账页壳（Router 渲染）。"""
+        return _spa_shell()
+
+    @app.get("/api/phones")
+    def api_phones(request: Request):
+        """号码台账读面：摘要 + 号码列表。
+
+        ``?keyword=`` 命中号码/持卡人/开户名/部门/物理手机/备注任一；
+        ``?unclaimed=1`` 只看待认领。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not capability_allows(viewer, CAPABILITY_PHONE):
+            _forbidden(request)
+        request.state.viewer = viewer
+        keyword = (request.query_params.get("keyword") or "").strip()
+        unclaimed = (request.query_params.get("unclaimed") or "") == "1"
+        try:
+            with db_connector() as connection:
+                phones = phone_registry.fetch_phone_list(
+                    connection, keyword=keyword, unclaimed_only=unclaimed)
+                summary = phone_registry.summarize_registry(connection)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phones load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok",
+            "summary": {
+                "total": summary["total"],
+                "unclaimed": summary["unclaimed"],
+                "dead": summary["dead"],
+            },
+            "phones": [
+                dict(row, updated_at=_fmt_time(row.get("updated_at")))
+                for row in phones
+            ],
+        })
+
+    @app.get("/api/phones/bindings")
+    def api_phone_bindings(request: Request):
+        """账号绑定读面：``?keyword=`` 命中平台账号/渠道类目/号码任一。
+
+        回答「XX 店铺账号的验证码发到哪个号、谁在拿这台手机」。
+        """
+        viewer = _resolve_request_viewer(request)
+        if not capability_allows(viewer, CAPABILITY_PHONE):
+            _forbidden(request)
+        request.state.viewer = viewer
+        keyword = (request.query_params.get("keyword") or "").strip()
+        try:
+            with db_connector() as connection:
+                bindings = phone_registry.fetch_bindings(
+                    connection, keyword=keyword)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone bindings load failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({
+            "status": "ok",
+            "bindings": [
+                dict(row, updated_at=_fmt_time(row.get("updated_at")))
+                for row in bindings
+            ],
+        })
+
+    @app.post("/api/phones/claim")
+    async def phone_claim(request: Request):
+        """认领：确认号码的实际持卡人（needs_claim 归零）。"""
+        viewer = require_capability(request, CAPABILITY_PHONE)
+        payload = await request.json()
+        phone_no = payload.get("phone_no")
+        user = (payload.get("actual_user") or "").strip()
+        if not isinstance(phone_no, str) or not phone_no.strip() or not user:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                changed = phone_registry.set_phone_user(
+                    connection, phone_no.strip(), user, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone claim failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not changed:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/phones/save")
+    async def phone_save(request: Request):
+        """新增/更新一条号码（自然键 = phone_no）。"""
+        viewer = require_capability(request, CAPABILITY_PHONE)
+        payload = await request.json()
+        try:
+            record = phone_registry.validate_phone_record(
+                payload.get("phone_no"),
+                phone_type=payload.get("phone_type") or "未知",
+                plan_name=payload.get("plan_name") or "",
+                account_name=payload.get("account_name") or "",
+                actual_user=(payload.get("actual_user") or "").strip(),
+                owner=payload.get("owner") or "",
+                dept=payload.get("dept") or "",
+                corp_owner=payload.get("corp_owner") or "",
+                physical_device=payload.get("physical_device") or "",
+                status=payload.get("status") or "",
+                note=payload.get("note") or "",
+                needs_claim=not (payload.get("actual_user") or "").strip(),
+            )
+        except phone_registry.PhoneRegistryError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                phone_registry.upsert_phone_number(
+                    connection, record, actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone save failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/phones/toggle")
+    async def phone_toggle(request: Request):
+        """停用/启用一个号码。"""
+        viewer = require_capability(request, CAPABILITY_PHONE)
+        payload = await request.json()
+        phone_no = payload.get("phone_no")
+        if not isinstance(phone_no, str) or not phone_no.strip():
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                changed = phone_registry.set_phone_enabled(
+                    connection, phone_no.strip(),
+                    bool(payload.get("enabled")), actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone toggle failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not changed:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/phones/binding/save")
+    async def phone_binding_save(request: Request):
+        """新增/更新一条账号绑定（号码+类目+账号为自然键）。"""
+        viewer = require_capability(request, CAPABILITY_PHONE)
+        payload = await request.json()
+        try:
+            with db_connector() as connection:
+                phone_registry.upsert_phone_binding(
+                    connection,
+                    payload.get("phone_no"),
+                    payload.get("channel_category"),
+                    payload.get("platform_account"),
+                    note=payload.get("note") or "",
+                    actor=viewer.userid,
+                )
+        except phone_registry.PhoneRegistryError:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone binding save failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/api/phones/binding/toggle")
+    async def phone_binding_toggle(request: Request):
+        """停用/启用一条账号绑定（按主键 id）。"""
+        viewer = require_capability(request, CAPABILITY_PHONE)
+        payload = await request.json()
+        binding_id = payload.get("id")
+        if not isinstance(binding_id, int) or binding_id <= 0:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        try:
+            with db_connector() as connection:
+                changed = phone_registry.set_binding_enabled(
+                    connection, binding_id, bool(payload.get("enabled")),
+                    actor=viewer.userid)
+        except Exception as exc:
+            _LOGGER.warning("ops-web phone binding toggle failed: %s",
+                            type(exc).__name__)
+            raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        if not changed:
+            raise HTTPException(status_code=400, detail=ErrorDetail.BAD_REQUEST)
+        return JSONResponse({"status": "ok"})
 
     # -- 播报日历（dim_calendar_override DB 裁决层，2026-10-16 纯播报口径：
     # 默认每天播报，点日期改 播报/休息，不碰 git/CLI）---------------------
