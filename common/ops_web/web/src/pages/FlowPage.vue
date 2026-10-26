@@ -127,6 +127,7 @@ const deptAssignFilter = ref('');
 function onDeptAssign(node, dept, evt) {
   if (busy.value) return;
   deptAssignFilter.value = '';
+  deptAssignLocalOpen.value = false;
   deptAssign.value = {
     node, dept,
     x: Math.min(evt.clientX, window.innerWidth - 280),
@@ -162,6 +163,11 @@ async function pickDeptAssign(member) {
   await assignToDept(target.node.key, target.dept.dept_id || null,
     target.dept.dept_name || null, member);
 }
+
+//: 本区调部门段默认折叠（2026-10-26 用户反馈「为什么弹出这么多」——
+//: 点部门行的心智是「往里放人」，候选应聚焦未归类池；调部门是次场景，
+//: 收成一行点开）。
+const deptAssignLocalOpen = ref(false);
 const { depDraft, depDraftPath, startDepWire, onDepEdgeClick } = useDepWire({
   busy, panX, panY, zoom, taskNodes,
   canPipelines, reload: reloadSilent,
@@ -634,13 +640,21 @@ watch(() => route.query.region, () => applyAnchor());
             @click="pickDeptAssign(m)"
           >{{ m.name || m.user_id }}</button>
           <template v-if="deptAssignLocal.length">
-            <div class="dap-sec">本区调部门（{{ deptAssignLocal.length }}）</div>
-            <button
-              v-for="m in deptAssignLocal"
-              :key="'l-' + m.user_id"
-              class="dap-item"
-              @click="pickDeptAssign(m)"
-            >{{ m.name || m.user_id }}<span class="dap-dept">{{ m.dept_name }}</span></button>
+            <!-- 调部门段默认折叠（2026-10-26 用户反馈「弹出太多」）；
+                 搜索时自动展开（否则段内人搜不到） -->
+            <div
+              class="dap-sec dap-toggle"
+              @click="deptAssignLocalOpen = !deptAssignLocalOpen"
+            >本区调部门（{{ deptAssignLocal.length }}）
+              {{ deptAssignLocalOpen || deptAssignFilter.trim() ? '▾' : '▸' }}</div>
+            <template v-if="deptAssignLocalOpen || deptAssignFilter.trim()">
+              <button
+                v-for="m in deptAssignLocal"
+                :key="'l-' + m.user_id"
+                class="dap-item"
+                @click="pickDeptAssign(m)"
+              >{{ m.name || m.user_id }}<span class="dap-dept">{{ m.dept_name }}</span></button>
+            </template>
           </template>
           <div
             v-if="!deptAssignPool.length && !deptAssignLocal.length"
@@ -917,6 +931,13 @@ watch(() => route.query.region, () => applyAnchor());
   font-size: 11px;
   color: #9ca3af;
   padding: 4px 2px;
+}
+.dap-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.dap-toggle:hover {
+  color: #2563eb;
 }
 .dap-item {
   display: block;
