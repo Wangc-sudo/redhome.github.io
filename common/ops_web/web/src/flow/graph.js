@@ -9,11 +9,11 @@ import { REGION_X, TASK_X, TOP_Y, groupOf, regionSortKey } from './layout.js';
 //: 聚合区域 → 组成它的区域键。聚合节点指标=成员桶求和，不做名册门禁
 //: （它不填报，只汇总）；形态=圆形（与矩形业务节点视觉分层）。
 export const AGGREGATE_REGIONS = {
-  // 2026-10-24：parts 加 province_ops（省外与运营中心，用户裁决三人同区
-  // ——线下体系的省外+运营中心，业务口径属线下整体）。
+  // 2026-10-26 用户裁决：线下网点整体=杭州+绍兴+省外与运营中心——
+  // parts 摘掉 other（补集桶名册/目标已迁 province_ops，不再参与汇聚）。
   offline_all: {
     label: '线下整体',
-    parts: ['hangzhou', 'shaoxing', 'other', 'province_ops'],
+    parts: ['hangzhou', 'shaoxing', 'province_ops'],
   },
 };
 
