@@ -820,34 +820,23 @@ class QrLoginClientTests(unittest.TestCase):
         return (qr_module.DingTalkQrLoginClient("ak", "sk",
                                                 request_json=fake), calls)
 
-    def test_exchange_success_via_getuserinfo(self):
-        """主通道：免登码直换 userid（与 H5 免登同接口同权限面）。"""
+    def test_exchange_success(self):
         client, calls = self._client([
-            {"errcode": 0, "result": {"userid": "u100"}},
-        ])
-        userid, union_id = client.exchange_qr_code("code-1")
-        self.assertEqual(("u100", None), (userid, union_id))
-        self.assertEqual(1, len(calls))  # 一次外呼即成，不走 OAuth 链
-        self.assertIn("/topapi/v2/user/getuserinfo", calls[0]["url"])
-        self.assertIn("access_token=test-access-token", calls[0]["url"])
-        self.assertEqual({"code": "code-1"}, calls[0]["body"])
-
-    def test_exchange_fallback_oauth_chain(self):
-        """免登码语义不命中 → 兜底 OAuth 用户授权链（可拿 unionId）。"""
-        client, calls = self._client([
-            {"errcode": 40014, "errmsg": "invalid code"},
             {"accessToken": "user-token"},
             {"unionId": "union-1"},
             {"errcode": 0, "result": {"userid": "u100"}},
         ])
         userid, union_id = client.exchange_qr_code("code-1")
         self.assertEqual(("u100", "union-1"), (userid, union_id))
-        self.assertEqual(4, len(calls))
-        self.assertIn("/v1.0/oauth2/userAccessToken", calls[1]["url"])
-        self.assertEqual("authorization_code", calls[1]["body"]["grantType"])
+        # 三段外呼形态：用户 token → users/me（个人 token 头）→ getbyunionid
+        self.assertEqual("POST", calls[0]["method"])
+        self.assertIn("/v1.0/oauth2/userAccessToken", calls[0]["url"])
+        self.assertEqual("authorization_code",
+                         calls[0]["body"]["grantType"])
         self.assertEqual({"x-acs-dingtalk-access-token": "user-token"},
-                         calls[2]["headers"])
-        self.assertIn("/topapi/user/getbyunionid", calls[3]["url"])
+                         calls[1]["headers"])
+        self.assertIn("/topapi/user/getbyunionid", calls[2]["url"])
+        self.assertIn("access_token=test-access-token", calls[2]["url"])
 
     def test_blank_code_raises(self):
         client, calls = self._client([])
@@ -855,15 +844,20 @@ class QrLoginClientTests(unittest.TestCase):
             client.exchange_qr_code("")
         self.assertEqual([], calls)  # 不外呼
 
-    def test_transport_error_retried_then_raises(self):
-        client, calls = self._client([RuntimeError("boom")] * 4)
+    def test_user_token_missing_raises(self):
+        client, _calls = self._client([{}])
         with self.assertRaises(auth.AuthError):
             client.exchange_qr_code("code-1")
-        self.assertEqual(4, len(calls))  # 两通道各 3s×1 重试纪律
+
+    def test_transport_error_retried_then_raises(self):
+        client, calls = self._client([RuntimeError("boom"),
+                                      RuntimeError("boom")])
+        with self.assertRaises(auth.AuthError):
+            client.exchange_qr_code("code-1")
+        self.assertEqual(2, len(calls))  # 3s×1 重试纪律
 
     def test_union_id_missing_raises(self):
         client, _calls = self._client([
-            {"errcode": 40014, "errmsg": "invalid code"},
             {"accessToken": "user-token"},
             {"nick": "某用户"},
         ])
@@ -872,7 +866,6 @@ class QrLoginClientTests(unittest.TestCase):
 
     def test_getbyunionid_errcode_raises(self):
         client, _calls = self._client([
-            {"errcode": 40014, "errmsg": "invalid code"},
             {"accessToken": "user-token"},
             {"unionId": "union-1"},
             {"errcode": 60121, "errmsg": "no such user"},
@@ -881,7 +874,8 @@ class QrLoginClientTests(unittest.TestCase):
             client.exchange_qr_code("code-1")
 
     def test_error_messages_are_generic(self):
-        client, _calls = self._client([RuntimeError("boom")] * 4)
+        client, _calls = self._client([RuntimeError("boom"),
+                                       RuntimeError("boom")])
         try:
             client.exchange_qr_code("secret-code")
             self.fail("expected AuthError")
@@ -891,19 +885,17 @@ class QrLoginClientTests(unittest.TestCase):
 
     def test_failure_logs_step_and_diagcode(self):
         """分步诊断日志（2026-10-26 排障驱动）：步骤名+异常类型进日志。"""
-        client, _calls = self._client([RuntimeError("boom")] * 4)
+        client, _calls = self._client([RuntimeError("boom"),
+                                       RuntimeError("boom")])
         with self.assertLogs("common.kb_web.qr_login", level="WARNING") as cm:
             with self.assertRaises(auth.AuthError):
                 client.exchange_qr_code("code-1")
-        joined = "\n".join(cm.output)
-        self.assertIn("getuserinfo", joined)      # 通道一步骤名
-        self.assertIn("userAccessToken", joined)  # 通道二步骤名
-        self.assertIn("RuntimeError", joined)
-        self.assertNotIn("code-1", joined)  # 授权码不进日志
+        self.assertIn("userAccessToken", cm.output[0])
+        self.assertIn("RuntimeError", cm.output[0])
+        self.assertNotIn("code-1", cm.output[0])  # 授权码不进日志
 
     def test_getbyunionid_errcode_logged(self):
         client, _calls = self._client([
-            {"errcode": 40014, "errmsg": "invalid code"},
             {"accessToken": "user-token"},
             {"unionId": "union-1"},
             {"errcode": 60121, "errmsg": "no such user"},
@@ -911,9 +903,8 @@ class QrLoginClientTests(unittest.TestCase):
         with self.assertLogs("common.kb_web.qr_login", level="WARNING") as cm:
             with self.assertRaises(auth.AuthError):
                 client.exchange_qr_code("code-1")
-        joined = "\n".join(cm.output)
-        self.assertIn("getbyunionid", joined)
-        self.assertIn("60121", joined)
+        self.assertIn("getbyunionid", cm.output[0])
+        self.assertIn("60121", cm.output[0])
 
 
 class OAuthStateStoreTests(unittest.TestCase):
