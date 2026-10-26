@@ -9,7 +9,6 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -76,18 +75,6 @@ def load_calendar_seed(path):
 def load_org_seed(path):
     """Parse the version-controlled region->dept org seed at *path*."""
     from common.public_data.org_read import load_org_seed as _load
-    return _load(path)
-
-
-def load_multi_org_seed(path):
-    """Parse the multi-organization variant of the org seed at *path*.
-
-    Each entry names a DingTalk enterprise (corp), the source-credentials
-    section holding that corp's app key/secret, and its region->dept ids.
-    A single internal app can only read *its own* corp's directory, so a
-    second corp needs its own credentials section.
-    """
-    from common.public_data.org_read import load_multi_org_seed as _load
     return _load(path)
 
 
@@ -254,36 +241,6 @@ def build_org_gateway(credentials):
     )
 
 
-def build_org_gateways(credentials, org_seeds):
-    """Build one directory gateway per declared DingTalk enterprise.
-
-    Returns ``((OrgSeedEntry, gateway), ...)`` in *org_seeds* order.  Entries
-    sharing a credentials section reuse a single gateway (identical app
-    credentials, same corp).  The credential *values* are never included in
-    error messages — only the section name, and even that is kept generic.
-    """
-    from common.public_data.org_read import OrgReadGateway
-
-    gateways = {}
-    result = []
-    for entry in org_seeds:
-        creds = credentials.get(entry.credential)
-        if not isinstance(creds, Mapping):
-            raise ValueError("invalid source credentials")
-        gateway = gateways.get(entry.credential)
-        if gateway is None:
-            try:
-                gateway = OrgReadGateway(
-                    app_key=creds["app_key"],
-                    app_secret=creds["app_secret"],
-                )
-            except (KeyError, TypeError):
-                raise ValueError("invalid source credentials") from None
-            gateways[entry.credential] = gateway
-        result.append((entry, gateway))
-    return tuple(result)
-
-
 def _build_wdt_call(wdt_creds):
     """Return a WdtClient.call-compatible callable, or a stub if creds are placeholders."""
     sid = wdt_creds.get("sid", "")
@@ -301,15 +258,12 @@ def _build_wdt_call(wdt_creds):
     return client.call
 
 
-def build_service(settings, credentials, manifest, org_regions=(),
-                  org_seeds=()):
+def build_service(settings, credentials, manifest, org_regions=()):
     """Open connections, run migrations, build gateways, return a ``LiveSyncService``.
 
-    *org_regions* / *org_seeds* come from the version-controlled org seed
-    (region -> top-level dept ids, priority-ordered); they are only consulted
-    when the manifest declares the contact-directory dataset.  *org_seeds* is
-    the multi-enterprise form (each entry also names its credentials section)
-    and takes precedence over the legacy *org_regions* tuple.
+    *org_regions* comes from the version-controlled org seed (region ->
+    top-level dept ids, priority-ordered); it is only consulted when the
+    manifest declares the contact-directory dataset.
     """
     from common.public_data.db import connect
     from common.public_data.live_migrations import apply_live_migrations
@@ -343,14 +297,8 @@ def build_service(settings, credentials, manifest, org_regions=(),
 
     org_gateway = None
     org_repo = None
-    org_gateways = ()
     if manifest.dingtalk_org is not None:
-        if org_seeds:
-            org_gateways = build_org_gateways(credentials, org_seeds)
-            # 旧入参仍保留给单企业调用方，取第一个网关即可。
-            org_gateway = org_gateways[0][1] if org_gateways else None
-        else:
-            org_gateway = build_org_gateway(credentials)
+        org_gateway = build_org_gateway(credentials)
         org_repo = OrgRawRepository(dingtalk_conn)
 
     from datetime import datetime, timezone
@@ -366,8 +314,6 @@ def build_service(settings, credentials, manifest, org_regions=(),
         org_gateway=org_gateway,
         org_repository=org_repo,
         org_regions=org_regions,
-        org_gateways=org_gateways,
-        org_seeds=org_seeds,
     )
 
 
@@ -514,12 +460,11 @@ def _handle_live_sync(args):
         credentials = load_source_credentials(
             args.source_credentials, source=args.source
         )
-        org_seeds = ()
+        org_regions = ()
         org_seed_path = getattr(settings, "org_seed_path", None)
         if manifest.dingtalk_org is not None and isinstance(org_seed_path, Path):
-            org_seeds = load_multi_org_seed(org_seed_path)
-        service = build_service(settings, credentials, manifest,
-                                org_seeds=org_seeds)
+            org_regions = load_org_seed(org_seed_path)
+        service = build_service(settings, credentials, manifest, org_regions)
         result = service.sync(
             manifest, source=args.source, datasets=args.dataset
         )
@@ -915,19 +860,23 @@ def _handle_backfill_region_targets(args):
             _print_failure(code="region_seed_required")
             sys.exit(1)
         from common.region_config import (
+            apply_db_overlay,
             apply_region_overlay,
             build_nacos_region_overlay,
             load_region_seed,
         )
+        mart_conn = connect(settings.mart_database)
         configs = apply_region_overlay(
             load_region_seed(settings.region_seed_path),
             build_nacos_region_overlay(),
         )
+        # DB 覆盖层（2026-10-26 权威源迁 DB）：dim_org_region 非空字段
+        # 为最终口径。
+        configs = apply_db_overlay(configs, mart_conn)
         from common.public_data.report_roster import (
             ReportRosterError,
             backfill_targets_from_region_config,
         )
-        mart_conn = connect(settings.mart_database)
         try:
             summary = backfill_targets_from_region_config(
                 mart_conn, configs, args.month, actor=args.actor,

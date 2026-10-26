@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from common.region_config import (
     RegionConfig,
     RegionConfigError,
+    apply_db_overlay,
     apply_region_overlay,
     build_nacos_region_overlay,
     load_region_seed,
@@ -227,6 +228,101 @@ class RegionOverlayTests(unittest.TestCase):
     def test_build_overlay_is_none_without_a_server(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(build_nacos_region_overlay())
+
+
+class _DbCursor:
+    """dim_org_region 行源替身（query 记录 + 脚本行）。"""
+
+    def __init__(self, rows=(), error=None):
+        self._rows = list(rows)
+        self._error = error
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        if self._error is not None:
+            raise self._error
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _DbConn:
+    def __init__(self, rows=(), error=None):
+        self._cursor = _DbCursor(rows, error)
+
+    def cursor(self):
+        return self._cursor
+
+
+class DbOverlayTests(unittest.TestCase):
+    """DB 覆盖层（2026-10-26 权威源迁 DB）：dim_org_region 非空字段优先。"""
+
+    def _configs(self):
+        return {
+            "hangzhou": RegionConfig(
+                region="hangzhou", display="杭州",
+                table_url="https://seed/table", robot_code="rc-seed",
+                open_conversation_id="conv-seed", aliases={}, cc_user_ids=(),
+            ),
+        }
+
+    def _row(self, **fields):
+        base = {"region_key": "hangzhou", "display": None,
+                "table_url": None, "robot_code": None,
+                "open_conversation_id": None, "remind_hour": None,
+                "check_hour": None, "leaderboard_url": None,
+                "dept_order": None, "store_exclude": None, "aliases": None,
+                "cc_user_ids": None, "dept_label": None,
+                "broadcast_exclude": None, "monthly_targets": None}
+        base.update(fields)
+        return base
+
+    def test_non_null_fields_override_and_nulls_keep_prior(self):
+        conn = _DbConn([self._row(
+            robot_code="rc-db", remind_hour=19,
+            dept_order=json.dumps(["杭中", "滨萧"]),
+            broadcast_exclude=json.dumps(["余发兴"]),
+        )])
+        merged = apply_db_overlay(self._configs(), conn)
+        cfg = merged["hangzhou"]
+        self.assertEqual(cfg.robot_code, "rc-db")          # DB 覆盖
+        self.assertEqual(cfg.remind_hour, 19)
+        self.assertEqual(cfg.dept_order, ("杭中", "滨萧"))  # JSON 解析
+        self.assertEqual(cfg.broadcast_exclude, ("余发兴",))
+        self.assertEqual(cfg.open_conversation_id, "conv-seed")  # NULL 保留
+
+    def test_db_down_is_fail_open(self):
+        conn = _DbConn(error=RuntimeError("table missing"))
+        merged = apply_db_overlay(self._configs(), conn)
+        self.assertEqual(merged["hangzhou"].robot_code, "rc-seed")
+
+    def test_db_registers_new_region_with_complete_core_fields(self):
+        conn = _DbConn([self._row(
+            region_key="province_ops", display="省外与运营中心",
+            table_url="https://t", robot_code="rc", open_conversation_id="c",
+        )])
+        merged = apply_db_overlay(self._configs(), conn)
+        self.assertIn("province_ops", merged)
+        self.assertEqual(merged["province_ops"].display, "省外与运营中心")
+
+    def test_db_new_region_with_incomplete_fields_is_skipped(self):
+        conn = _DbConn([self._row(region_key="ghost", display="幽灵")])
+        merged = apply_db_overlay(self._configs(), conn)
+        self.assertNotIn("ghost", merged)
+
+    def test_invalid_json_field_is_skipped_not_fatal(self):
+        conn = _DbConn([self._row(robot_code="rc-db",
+                                  dept_order="{not json")])
+        merged = apply_db_overlay(self._configs(), conn)
+        self.assertEqual(merged["hangzhou"].robot_code, "rc-db")
+        self.assertEqual(merged["hangzhou"].dept_order, ())  # 坏 JSON 跳过
 
 
 class PublishRegionConfigsTests(unittest.TestCase):
