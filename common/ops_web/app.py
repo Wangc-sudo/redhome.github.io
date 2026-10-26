@@ -30,6 +30,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -2504,11 +2505,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web regions load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
-        return JSONResponse({
+        # jsonable_encoder（2026-10-26）：播报列/归属映射入库后 catalog 行
+        # 带 datetime（updated_at）——直交 JSONResponse 的 json.dumps 会 500
+        # （实测）。编码器统一处理 datetime/Decimal。
+        return JSONResponse(jsonable_encoder({
             "status": "ok",
             "regions": catalog.get("regions") or [],
             "depts": catalog.get("depts") or [],
-        })
+            "region_depts": catalog.get("region_depts") or {},
+        }))
 
     # 「授权现状」页已停用（2026-10-13）：授权管理不再通过本页自助操作。
     # 路由保留防书签 404，页面引导联系管理员。
