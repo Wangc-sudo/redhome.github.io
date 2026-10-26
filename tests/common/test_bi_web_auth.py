@@ -662,6 +662,51 @@ class PublicDashboardTests(unittest.TestCase):
         response = client.get("/d/not-a-dashboard", follow_redirects=False)
         self.assertEqual(302, response.status_code)
 
+    def test_db_granted_dashboard_opens_without_login(self):
+        """DB 增量通道（2026-10-26 权威源迁 DB）：bi_authz_grant 里
+        grant_type='public_dashboard' 的看板免登录。"""
+        from common.bi_web.app import _public_dashboard_resolver
+
+        class _GrantCursor:
+            def execute(self, sql, params=None):
+                pass
+
+            def fetchall(self):
+                return [{"grant_key": "ops-health"}]
+
+            def close(self):
+                pass
+
+        class _GrantConn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def cursor(self):
+                return _GrantCursor()
+
+        resolver = _public_dashboard_resolver(lambda: _GrantConn())
+        ids = resolver()
+        # 常量保底 ∪ DB 增量
+        self.assertIn("hz-offline-sales", ids)
+        self.assertIn("ops-health", ids)
+
+    def test_resolver_db_failure_falls_back_to_baseline(self):
+        from common.bi_web.app import _public_dashboard_resolver
+
+        class _Broken:
+            def __enter__(self):
+                raise RuntimeError("db down")
+
+            def __exit__(self, *args):
+                return False
+
+        resolver = _public_dashboard_resolver(lambda: _Broken())
+        self.assertEqual({"hz-offline-sales", "sx-offline-sales",
+                          "offline-all-sales"}, set(resolver()))
+
 
 class LegacyModeTests(unittest.TestCase):
     """session 未启用 = 旧行为逐字保留（T0 基准自证的补充）。"""

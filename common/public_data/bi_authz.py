@@ -208,6 +208,26 @@ def fetch_audit_rows(connection, *, limit=200):
         cursor.close()
 
 
+def fetch_public_dashboards(connection):
+    """公开看板集合（grant_type='public_dashboard'，grant_key=dashboard_id）。
+
+    2026-10-26 用户裁决配套：公网榜单页免登录名单迁 DB（bi_authz_grant
+    复用，user_id='*' 通配=全员可见）。bi-web 身份闸按 30s TTL 缓存读。
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT `grant_key` FROM `bi_authz_grant` "
+            "WHERE `grant_type`='public_dashboard'")
+        rows = cursor.fetchall() if hasattr(cursor, "fetchall") else ()
+        return frozenset(
+            (row["grant_key"] if isinstance(row, dict) else row[0])
+            for row in rows
+        )
+    finally:
+        cursor.close()
+
+
 def fetch_member_status(connection, user_id):
     """返回 ``(name, is_active)``；``dim_robot_member`` 无此人 → ``None``。
 
