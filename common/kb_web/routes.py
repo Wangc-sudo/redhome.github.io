@@ -9,6 +9,7 @@
 authCode 就必须用哪个应用的 key/secret 换。
 """
 
+import asyncio
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -16,9 +17,24 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from common.bi_web import auth
 
+#: 在飞重复请求的等待上限/轮询间隔（秒）；测试可 monkeypatch 调 0。
+IDEM_WAIT_SECONDS = 90
+IDEM_WAIT_INTERVAL = 1.0
+
 
 def _now_text():
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _wait_idem_done(store, userid, sid, content):
+    """在飞重复请求：短轮询等首个请求的答案落结果窗（拿不到返回 None）。"""
+    deadline = time.monotonic() + IDEM_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(IDEM_WAIT_INTERVAL)
+        done = store.get_idem_done(userid, sid, content)
+        if done is not None:
+            return done
+    return None
 
 
 def register_kb_routes(app: FastAPI, *, service, store, session_secret,
@@ -149,20 +165,39 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         if history is None:
             raise HTTPException(status_code=404, detail="not found")
 
-        # clarify 闭环（2026-10-23）：先 pop 上一轮候选（消费即作废），
-        # 本轮再发反问则把新候选存回。
-        pending = store.pop_pending(userid, sid)
-        result = service.answer(userid, content, history_messages=history,
-                                pending=pending)
-        pending_candidates = result.pop("pending_candidates", None)
-        if pending_candidates:
-            store.set_pending(userid, sid, pending_candidates)
-        now = _now_text()
-        store.append(userid, sid, [
-            {"role": "user", "content": content, "ts": now},
-            {"role": "assistant", "content": result["reply"], "ts": now,
-             "meta": result["meta"], "attachments": result["attachments"]},
-        ], title_hint=content)
+        # 发送幂等（2026-10-26）：前端超时/断连后服务端仍会答完落库，
+        # 「重发/双击/弱网重试」的同内容请求直接取结果窗，不重跑 agent、
+        # 不重复写会话（否则历史里重复用户消息 + 双倍 LLM 成本）。
+        done = store.get_idem_done(userid, sid, content)
+        if done is not None:
+            return done
+        if not store.acquire_idem(userid, sid, content):
+            done = await _wait_idem_done(store, userid, sid, content)
+            if done is not None:
+                return done
+            raise HTTPException(
+                status_code=409,
+                detail="同内容提问正在处理中，请稍后刷新会话查看")
+        try:
+            # clarify 闭环（2026-10-23）：先 pop 上一轮候选（消费即作废），
+            # 本轮再发反问则把新候选存回。
+            pending = store.pop_pending(userid, sid)
+            result = service.answer(userid, content,
+                                    history_messages=history,
+                                    pending=pending)
+            pending_candidates = result.pop("pending_candidates", None)
+            if pending_candidates:
+                store.set_pending(userid, sid, pending_candidates)
+            now = _now_text()
+            store.append(userid, sid, [
+                {"role": "user", "content": content, "ts": now},
+                {"role": "assistant", "content": result["reply"], "ts": now,
+                 "meta": result["meta"], "attachments": result["attachments"]},
+            ], title_hint=content)
+        except Exception:
+            store.release_idem(userid, sid, content)
+            raise
+        store.complete_idem(userid, sid, content, result)
         return result
 
     @app.post("/kb/api/sessions/{sid}/regenerate")
