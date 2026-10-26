@@ -218,6 +218,94 @@ def apply_region_overlay(configs, overlay):
     return merged
 
 
+#: DB 覆盖层（2026-10-26 权威源迁 DB）：dim_org_region 列 → RegionConfig
+#: 字段的映射。JSON 文本列（dept_order 等）在合并前解析回 list/dict。
+_DB_TEXT_FIELDS = ("display", "table_url", "robot_code",
+                   "open_conversation_id", "remind_hour", "check_hour",
+                   "leaderboard_url")
+_DB_JSON_FIELDS = ("dept_order", "store_exclude", "aliases", "cc_user_ids",
+                   "dept_label", "broadcast_exclude", "monthly_targets")
+#: dim_org_region 列名 → seed/Nacos 键名（_parse_region 的入参形态）。
+_DB_KEY_MAP = {
+    "display": "display",
+    "table_url": "tableUrl",
+    "robot_code": "robotCode",
+    "open_conversation_id": "openConversationId",
+    "remind_hour": "remindHour",
+    "check_hour": "checkHour",
+    "leaderboard_url": "leaderboardUrl",
+    "dept_order": "deptOrder",
+    "store_exclude": "storeExclude",
+    "aliases": "aliases",
+    "cc_user_ids": "ccUserIds",
+    "dept_label": "deptLabel",
+    "broadcast_exclude": "broadcastExclude",
+    "monthly_targets": "monthlyTargets",
+}
+
+
+def apply_db_overlay(configs, connection):
+    """用 ``dim_org_region``（enabled=1）覆盖区域配置——DB 优先层。
+
+    读序总链：seed 文件 → Nacos 覆盖 → **DB 覆盖（本层）**。非空字段
+    覆盖；未登记的字段（NULL）保留前层值。configs 之外的区域键：核心
+    字段（display/tableUrl/robotCode/openConversationId）齐全才新建，
+    不齐跳过并告警。DB 不可读（迁移未跑/连接失败）→ fail-open 原样
+    返回，打 WARNING（不静默）。
+    """
+    try:
+        cols = ", ".join(f"`{c}`" for c in ("region_key",) + _DB_TEXT_FIELDS
+                         + _DB_JSON_FIELDS)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {cols} FROM `dim_org_region` WHERE `enabled`=1")
+            rows = cursor.fetchall()
+    except Exception as exc:
+        logger.warning(
+            "region db overlay fetch failed: %s -- keeping seed/nacos",
+            type(exc).__name__)
+        return dict(configs)
+
+    merged = dict(configs)
+    for row in rows:
+        region = row.get("region_key")
+        if not region:
+            continue
+        overlay = {}
+        for col in _DB_TEXT_FIELDS:
+            value = row.get(col)
+            if value is not None:
+                overlay[_DB_KEY_MAP[col]] = value
+        for col in _DB_JSON_FIELDS:
+            value = row.get(col)
+            if value is None:
+                continue
+            try:
+                overlay[_DB_KEY_MAP[col]] = json.loads(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "region db overlay: %s.%s is not valid JSON -- skipped",
+                    region, col)
+        if not overlay:
+            continue
+        if region in merged:
+            base = _to_mapping(merged[region])
+            merged[region] = _parse_region(
+                region, {**base, **overlay}, f"db overlay region-{region}")
+        else:
+            # 纯 DB 注册的新区域：核心字段齐全才建（缺则跳过+告警）。
+            required = ("display", "tableUrl", "robotCode",
+                        "openConversationId")
+            if all(overlay.get(k) for k in required):
+                merged[region] = _parse_region(
+                    region, overlay, f"db region-{region}")
+            else:
+                logger.warning(
+                    "region db overlay: %s not in seed and core fields "
+                    "incomplete -- skipped", region)
+    return merged
+
+
 def build_nacos_region_overlay(environ=None):
     """构造 Nacos 覆盖（group=``REGIONS``）。未配置服务器时返回 ``None``。"""
     env = os.environ if environ is None else environ

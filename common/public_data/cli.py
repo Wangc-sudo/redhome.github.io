@@ -915,19 +915,23 @@ def _handle_backfill_region_targets(args):
             _print_failure(code="region_seed_required")
             sys.exit(1)
         from common.region_config import (
+            apply_db_overlay,
             apply_region_overlay,
             build_nacos_region_overlay,
             load_region_seed,
         )
+        mart_conn = connect(settings.mart_database)
         configs = apply_region_overlay(
             load_region_seed(settings.region_seed_path),
             build_nacos_region_overlay(),
         )
+        # DB 覆盖层（2026-10-26 权威源迁 DB）：dim_org_region 非空字段
+        # 为最终口径。
+        configs = apply_db_overlay(configs, mart_conn)
         from common.public_data.report_roster import (
             ReportRosterError,
             backfill_targets_from_region_config,
         )
-        mart_conn = connect(settings.mart_database)
         try:
             summary = backfill_targets_from_region_config(
                 mart_conn, configs, args.month, actor=args.actor,

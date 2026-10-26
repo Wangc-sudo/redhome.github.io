@@ -70,15 +70,37 @@ def resolve_service_id(override=None):
     return _resolve(override=override)
 
 
-def load_region_configs(seed_path):
+def load_region_configs(seed_path, connection=None):
+    """读序：seed 文件 → Nacos 覆盖 → DB 覆盖（dim_org_region）。
+
+    2026-10-26 权威源迁 DB：页面编辑即生效。connection=None 时自建短
+    连接读一层；DB 不可达 fail-open 保留 seed/Nacos 口径（不阻断网关）。
+    """
     from common.region_config import (
+        apply_db_overlay,
         apply_region_overlay,
         build_nacos_region_overlay,
         load_region_seed,
     )
-    return apply_region_overlay(
+    configs = apply_region_overlay(
         load_region_seed(seed_path), build_nacos_region_overlay()
     )
+    own = False
+    if connection is None:
+        try:
+            from common.public_data.settings import Settings
+            settings = Settings.from_environment()
+            connection = connect_mart(settings)
+            own = True
+        except Exception:
+            connection = None
+    if connection is not None:
+        try:
+            configs = apply_db_overlay(configs, connection)
+        finally:
+            if own:
+                connection.close()
+    return configs
 
 
 def load_source_credentials(path, source=None):

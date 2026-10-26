@@ -67,6 +67,7 @@ from common.public_data.org_assignment_override import (
     org_assignment_baseline_statements,
 )
 from common.public_data.org_catalog import (
+    org_catalog_broadcast_v1_statements,
     org_catalog_ddl_statements,
     org_catalog_region_run_v1_statements,
     org_catalog_relay_v1_statements,
@@ -710,6 +711,14 @@ _MIGRATIONS = (
         "mart-ops-org-catalog-relay-v1",
         "mart",
         org_catalog_relay_v1_statements(),
+    ),
+    (
+        # 播报扩展列（2026-10-26 权威源迁 DB）：aliases/cc_user_ids/
+        # dept_label/broadcast_exclude/monthly_targets 五个 JSON 文本列。
+        # 顺序纪律同上：须在 relay 版本（表存在）之后。
+        "mart-ops-region-broadcast-v1",
+        "mart",
+        org_catalog_broadcast_v1_statements(),
     ),
     (
         # 权威归属基线（2026-10-14 D2）：dim_robot_member 快照灌入

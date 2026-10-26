@@ -204,6 +204,29 @@ def org_catalog_relay_v1_statements() -> tuple:
     return (_REGION_RELAY_ALTER, _REGION_RELAY_REGISTER)
 
 
+# ---------------------------------------------------------------------------
+# v4（2026-10-26，权威源迁 DB）：播报扩展列
+# ---------------------------------------------------------------------------
+
+#: 播报扩展列（JSON 文本）：aliases/ccUserIds/deptLabel/broadcastExclude/
+#: monthlyTargets——region_config 的全部剩余运行字段入库（权威源迁 DB
+#: 的第一步：Nacos regions.values.json 的真值灌进 dim_org_region，读序改
+#: 为 DB 优先）。JSON 文本列而非 JSON 类型：与既有列风格一致（dept_order
+#: 等已是文本 JSON）。
+_REGION_BROADCAST_ALTERS = tuple(
+    f"ALTER TABLE `dim_org_region`\n  ADD COLUMN `{col}` TEXT DEFAULT NULL"
+    for col in (
+        "aliases", "cc_user_ids", "dept_label", "broadcast_exclude",
+        "monthly_targets",
+    )
+)
+
+
+def org_catalog_broadcast_v1_statements() -> tuple:
+    """迁移 ``mart-ops-region-broadcast-v1``：播报扩展列（JSON 文本）。"""
+    return _REGION_BROADCAST_ALTERS
+
+
 class OrgCatalogError(ValueError):
     """目录写面数据无效（消息只含字段名，不含值）。"""
 
