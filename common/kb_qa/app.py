@@ -48,6 +48,7 @@ from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
     Intent,
+    PHONE_LOOKUP,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
@@ -65,6 +66,12 @@ _DOC_FALLBACK = (
 #: 不能落 render_not_found（那句话术是按商品语境写的，会误导）。
 _SALES_FALLBACK = (
     "业务数据查询暂时不可用，请稍后再试。商品参数、素材、手册问答不受影响。"
+)
+
+#: 号码台账问句（PHONE_LOOKUP）同上的诚实兜底。
+_PHONE_FALLBACK = (
+    "号码台账查询暂时不可用，请稍后再试；也可以直接到 ops-web 的"
+    "「号码台账」页查询。"
 )
 
 #: clarify 选择形态：序号词映射与正则（「1」「第2个」「第一款」「3.」）。
@@ -503,14 +510,16 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return ("好的，那你想问的是哪一款？发我品名或编码。"
                     ), PRODUCT_PARAM, None
         intent = classify(text)
-        if intent.category == SALES_QUERY:
-            # 业务数据问句（销售额/完成率/排名…）直接进工具调用 agent——
-            # 不先走商品直查：商品表对它必然全 miss，白烧一次 LLM 改写 +
-            # 一次检索才轮到 agent（2026-10-23 实测「看下拼多多昨天销售
-            # 金额」链路）。
+        if intent.category in (SALES_QUERY, PHONE_LOOKUP):
+            # 业务数据问句（销售额/完成率/排名…）与号码台账问句（尾号/验证
+            # 码找谁）直接进工具调用 agent——不先走商品直查：商品表对它必然
+            # 全 miss 或被模糊误伤（2026-10-26 实测纯尾号「5579」命中 7 款
+            # 579ml 商品进 clarify），白烧 LLM 改写+检索才轮到 agent。
             agent_answer = self._try_agent(conn, text, history, meta=meta)
             if agent_answer:
                 return agent_answer, "agent", None
+            if intent.category == PHONE_LOOKUP:
+                return _PHONE_FALLBACK, PHONE_LOOKUP, None
             return _SALES_FALLBACK, SALES_QUERY, None
         if intent.category in (PRODUCT_PARAM, PRODUCT_FILTER):
             rows = find_products(conn, intent.keyword)

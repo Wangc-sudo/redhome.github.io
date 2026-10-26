@@ -39,6 +39,7 @@ from common.kb_qa.products import (
 from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
+    PHONE_LOOKUP,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
@@ -144,6 +145,24 @@ class RouterTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(SALES_QUERY, classify(text).category)
+
+    def test_phone_lookup_intent(self):
+        """号码台账问句 → PHONE_LOOKUP（2026-10-26「5579」事故修复：
+        纯尾号曾被商品 bigram 容错误命中 7 款 579ml 商品进 clarify）。"""
+        for text in ("5690", "5579", "18969031215", "尾号 5690",
+                     "这个尾号是谁的", "平澜路店账号验证码找谁要",
+                     "发我吴昱洁的手机号"):
+            with self.subTest(text=text):
+                self.assertEqual(PHONE_LOOKUP, classify(text).category)
+
+    def test_phone_lookup_does_not_swallow_product_intents(self):
+        """号码意图不伤商品语境：含数字的商品名/参数/附件问句原路。"""
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1998").category)
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1988 箱规").category)
+        self.assertEqual(PRODUCT_ASSET,
+                         classify("习酒窖藏1988 质检报告").category)
+        # 3 位及以下纯数字不按尾号拦（太短，更像数量/闲聊）
+        self.assertNotEqual(PHONE_LOOKUP, classify("123").category)
 
     def test_sales_words_do_not_swallow_product_intents(self):
         """商品语境优先：附件/参数词仍先于业务数据词。"""
@@ -2094,6 +2113,37 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         reply, intent, _ = handler._answer(conn, "杭州今天销售额")
         self.assertEqual(SALES_QUERY, intent)
         self.assertIn("暂时不可用", reply)
+
+    def test_phone_lookup_goes_to_agent_without_product_lookup(self):
+        """纯尾号直通 agent：全程不碰商品表（「5579」事故回归钉）。"""
+        seen = []
+
+        def runner(conn, text, history, meta=None):
+            seen.append(text)
+            return "尾号 5579：153xxxx5579，陈典潮在用（序号① 蓝色手机）"
+
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=runner)
+        reply, intent, _ = handler._answer(conn, "5579")
+        self.assertEqual("agent", intent)
+        self.assertIn("陈典潮", reply)
+        self.assertEqual(["5579"], seen)
+        # 没有任何商品表查询（PRODUCT_PARAM 路径会 SELECT kb_products）
+        product_sql = [sql for sql, _ in conn.cursor_instance.executed
+                       if "kb_products" in sql]
+        self.assertEqual([], product_sql)
+
+    def test_phone_lookup_agent_none_falls_back_honestly(self):
+        """agent 不可用 → 号码台账专用兜底（不落商品「没有找到」）。"""
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history, meta=None: None)
+        reply, intent, _ = handler._answer(conn, "尾号 5690 是谁")
+        self.assertEqual(PHONE_LOOKUP, intent)
+        self.assertIn("号码台账", reply)
 
     def test_chitchat_miss_agent_none_falls_back_to_help(self):
         # 规则完全未命中 + agent 无答案 → HELP_TEXT
