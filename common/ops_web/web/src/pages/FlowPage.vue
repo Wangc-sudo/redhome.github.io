@@ -252,8 +252,9 @@ async function onRunOnce(service) {
 // -- 数据派生 -------------------------------------------------------------------
 const lastRaw = ref(null);
 
-//: 聚合节点/补集桶常量与建图纯函数在 flow/graph.js（AGGREGATE_REGIONS、
-//: COMPLEMENT_REGION、regionBadge、taskBroken、familyOf、familyLabel、fmt）。
+//: 聚合节点常量与建图纯函数在 flow/graph.js（AGGREGATE_REGIONS、
+//: regionBadge、taskBroken、familyOf、familyLabel、fmt；补集桶机制
+//: 2026-10-26 随「其他」卡摘除退役）。
 
 /** raw → 图模型（纯函数在 flow/graph.js）；此处只灌状态并重排。 */
 function buildGraph(raw) {

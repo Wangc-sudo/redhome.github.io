@@ -44,8 +44,8 @@ export const TASK_X = LANE_X.app;
 //: 未列入的注册区域落「未分组」段尾部。muted 组（总部职能）不报数，
 //: 只展示不亮警告徽章。放 layout.js 保持 graph→layout 单向依赖。
 //: 2026-10-26 用户裁决：线下网点=杭州+绍兴+省外与运营中心（province_ops
-//: 独立组撤销并入）；other 补集桶出组（名册/目标已迁 province_ops，若
-//: 再现数据落「未分组」段尾部）。
+//: 独立组撤销并入）；other 当日再裁决摘出画布（HIDDEN_REGION_KEYS，
+//: 96 人归编兜底区，归属查看改去 /org 页）。
 //: 2026-10-26：qudao（线上渠道）/dining（餐饮，含 junpin）两组随区域
 //: 从画布摘除而下线（graph.js HIDDEN_REGION_KEYS）；上线时组与区域
 //: 一并恢复。

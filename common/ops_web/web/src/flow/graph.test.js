@@ -4,7 +4,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  COMPLEMENT_REGION,
   PLATFORM_KEY,
   buildGraph,
   familyLabel,
@@ -173,7 +172,7 @@ describe('buildGraph', () => {
     expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
   });
 
-  it('未上线区域不进画布（2026-10-26 裁决：渠道/餐饮/君品/线下额外）', () => {
+  it('未上线区域不进画布（2026-10-26 裁决：渠道/餐饮/君品/线下额外/其他）', () => {
     // 渠道店铺级徽章特判保留备用（上线时随 HIDDEN_REGION_KEYS 移除恢复）。
     const g = buildGraph(raw({
       regions: [
@@ -181,6 +180,7 @@ describe('buildGraph', () => {
         region('dining', '餐饮'),
         region('junpin', '君品雅院'),
         region('offline_extra', '线下额外'),
+        region('other', '其他'),
         region('hangzhou', '杭州'),
       ],
       groups: [{ region: 'qudao', services: [svc('channel-missing-check')] }],
@@ -190,7 +190,7 @@ describe('buildGraph', () => {
       targets: {},
     }));
     const keys = g.regionNodes.map((n) => n.key);
-    for (const hidden of ['qudao', 'dining', 'junpin', 'offline_extra']) {
+    for (const hidden of ['qudao', 'dining', 'junpin', 'offline_extra', 'other']) {
       expect(keys).not.toContain(hidden);
     }
     expect(keys).toContain('hangzhou');
@@ -248,25 +248,17 @@ describe('buildGraph', () => {
       .toBe('daily-report');
   });
 
-  it('补集桶虚拟节点：名册有启用行即补出', () => {
+  it('补集桶机制已退役（2026-10-26）：other 注册行被 HIDDEN 过滤', () => {
+    // other 已是 dim_org_region 注册区域（96 人归编兜底），用户裁决摘除；
+    // 即使名册/目标再现 other 行也不再补出虚拟节点。
     const g = buildGraph(raw({
-      regions: [region('hangzhou', '杭州')],
-      rosterRows: [{ scope: COMPLEMENT_REGION, enabled: 1, person_name: '余云涛' }],
+      regions: [region('hangzhou', '杭州'), region('other', '其他')],
+      rosterRows: [{ scope: 'other', enabled: 1, person_name: '某人' }],
+      targets: { other: { 某人: 1 } },
     }));
-    const other = g.regionNodes.find((n) => n.key === COMPLEMENT_REGION);
-    expect(other).toBeTruthy();
-    expect(other.label).toBe('其他（补集）');
-    expect(other.badge).toEqual({ text: '补集', cls: 'plain' });
-    expect(other.rosterCount).toBe(1);
-  });
-
-  it('补集桶：组织树已含该区域则不虚拟补出', () => {
-    const g = buildGraph(raw({
-      regions: [region(COMPLEMENT_REGION, '其他区')],
-    }));
-    const nodes = g.regionNodes.filter((n) => n.key === COMPLEMENT_REGION);
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].label).toBe('其他区');
+    const keys = g.regionNodes.map((n) => n.key);
+    expect(keys).not.toContain('other');
+    expect(keys).toContain('hangzhou');
   });
 
   it('测试区不进区域层（2026-10-19 改制为「播报试投」功能模块）', () => {
