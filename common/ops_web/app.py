@@ -2556,12 +2556,24 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web regions load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 榜单页派生生效值（2026-10-26 URL 基址 env 化配套）：库存列清空后
+        # 播报链接由 PUBLIC_PAGES_BASE 派生——读面透出实际生效值
+        # （leaderboard_url_derived），抽屉编辑块据此标注「留空=自动
+        # 派生」，避免空字段被误读为链接丢失。
+        from common.region_config import leaderboard_url_for
+        regions = catalog.get("regions") or []
+        for row in regions:
+            broadcast = row.get("broadcast")
+            if isinstance(broadcast, dict):
+                broadcast["leaderboard_url_derived"] = leaderboard_url_for(
+                    row.get("region_key") or "",
+                    broadcast.get("leaderboard_url") or "")
         # jsonable_encoder（2026-10-26）：播报列/归属映射入库后 catalog 行
         # 带 datetime（updated_at）——直交 JSONResponse 的 json.dumps 会 500
         # （实测）。编码器统一处理 datetime/Decimal。
         return JSONResponse(jsonable_encoder({
             "status": "ok",
-            "regions": catalog.get("regions") or [],
+            "regions": regions,
             "depts": catalog.get("depts") or [],
             "region_depts": catalog.get("region_depts") or {},
         }))

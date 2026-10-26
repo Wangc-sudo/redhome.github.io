@@ -31,7 +31,7 @@ from common.ops_web.app import (
 )
 from common.public_data import (
     bi_authz, calendar_store, channel_target, fleet_audit, ops_control,
-    recipient_override, report_roster,
+    org_catalog, recipient_override, report_roster,
 )
 from common.public_data.pipeline_config import StaticConfigSource
 
@@ -4157,6 +4157,38 @@ class RegionsApiTests(unittest.TestCase):
         self.assertEqual("ok", data["status"])
         self.assertIn("regions", data)
         self.assertIn("depts", data)
+
+    def test_regions_carry_derived_leaderboard_url(self):
+        """榜单页派生生效值透出（2026-10-26 URL 基址 env 化配套）：
+        库存列为空时 broadcast 带 leaderboard_url_derived（基址模板派生），
+        抽屉编辑块据此标注「留空=自动派生」，空字段不再被误读为丢失。"""
+        catalog = {
+            "regions": [
+                {"region_key": "hangzhou",
+                 "broadcast": {"leaderboard_url": None}},
+                {"region_key": "junpin",
+                 "broadcast": {"leaderboard_url": "http://custom/lb"}},
+                {"region_key": "nobc"},   # 无 broadcast 子对象不炸
+            ],
+            "depts": [], "region_depts": {},
+        }
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                org_catalog, "fetch_catalog", lambda conn: catalog), \
+                mock.patch.dict(
+                    "os.environ",
+                    {"PUBLIC_PAGES_BASE": "https://dt.yyhlzj.com"}):
+            data = client.get("/api/regions").json()
+        by_key = {r["region_key"]: r for r in data["regions"]}
+        self.assertEqual(
+            "https://dt.yyhlzj.com/hangzhou.html",
+            by_key["hangzhou"]["broadcast"]["leaderboard_url_derived"])
+        # env 已配时派生恒赢（库存自定义值不再生效，derived 如实透出）
+        self.assertEqual(
+            "https://dt.yyhlzj.com/junpin.html",
+            by_key["junpin"]["broadcast"]["leaderboard_url_derived"])
+        self.assertNotIn("broadcast", by_key["nobc"])
 
 
 class RecordsApiTests(unittest.TestCase):

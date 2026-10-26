@@ -266,8 +266,15 @@ async function onSaveDepts() {
     </div>
     <div class="target-row">
       <span class="roster-name">榜单页</span>
-      <input v-model="broadcast.leaderboard_url" class="roster-input">
+      <input v-model="broadcast.leaderboard_url" class="roster-input"
+             :placeholder="broadcast.leaderboard_url_derived || '留空 = 按基址自动派生'">
     </div>
+    <!-- 2026-10-26 URL 基址 env 化：榜单链接由 PUBLIC_PAGES_BASE 派生
+         （{base}/{region}.html），库存列仅作非标准路径覆盖 -->
+    <p class="drawer-line muted" v-if="broadcast.leaderboard_url_derived">
+      当前生效：{{ broadcast.leaderboard_url_derived }}（自动派生）；
+      填入=自定义覆盖，留空=恢复派生。
+    </p>
     <div class="target-row">
       <span class="roster-name">提醒时点</span>
       <input v-model="broadcast.remind_hour" type="number" min="0" max="23"
