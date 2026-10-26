@@ -43,9 +43,11 @@ export const TASK_X = LANE_X.app;
 //: 画布区域层按权威源 Excel 的 sheet 目录分组展示，顺序即 sheet 顺序。
 //: 未列入的注册区域落「未分组」段尾部。muted 组（总部职能）不报数，
 //: 只展示不亮警告徽章。放 layout.js 保持 graph→layout 单向依赖。
+//: 2026-10-26 用户裁决：线下网点=杭州+绍兴+省外与运营中心（province_ops
+//: 独立组撤销并入）；other 补集桶出组（名册/目标已迁 province_ops，若
+//: 再现数据落「未分组」段尾部）。
 export const BUSINESS_GROUPS = [
-  { key: 'offline', label: '线下网点', regions: ['hangzhou', 'shaoxing', 'other'] },
-  { key: 'province_ops', label: '省外与运营中心', regions: ['province_ops'] },
+  { key: 'offline', label: '线下网点', regions: ['hangzhou', 'shaoxing', 'province_ops'] },
   { key: 'vanke', label: '体验馆与团购', regions: ['vanke'] },
   { key: 'qudao', label: '线上渠道', regions: ['qudao'] },
   { key: 'dining', label: '餐饮', regions: ['dining', 'junpin'] },

@@ -158,8 +158,8 @@ describe('buildGraph', () => {
       targets: { hangzhou: { a: 1 }, shaoxing: { b: 1 } },
     }));
     const keys = g.regionNodes.map((n) => n.key);
-    // 线下组（杭/绍）→ 省外运营 → 体验馆团购 → 渠道 → 总部；聚合线下整体
-    // 随第一桶组（offline）；其他（补集）在线下组内第三。
+    // 线下组（杭/绍/省外运营中心，2026-10-26 裁决合一）→ 体验馆团购 →
+    // 渠道 → 总部；聚合线下整体随第一桶组（offline）。
     expect(keys.indexOf('hangzhou')).toBeLessThan(keys.indexOf('shaoxing'));
     expect(keys.indexOf('shaoxing')).toBeLessThan(keys.indexOf('province_ops'));
     expect(keys.indexOf('province_ops')).toBeLessThan(keys.indexOf('vanke'));
@@ -195,10 +195,13 @@ describe('buildGraph', () => {
   });
 
   it('聚合节点=组成桶求和 + 汇聚边', () => {
+    // 2026-10-26 裁决口径：线下整体=杭/绍/省外运营中心三桶；其他（补集）
+    // 即使在册也不再参与汇聚。
     const g = buildGraph(raw({
       regions: [
         region('hangzhou', '杭州'),
         region('shaoxing', '绍兴'),
+        region('province_ops', '省外与运营中心'),
         region('other', '其他区'),
       ],
       groups: [{ region: 'offline_all', services: [svc('leaderboard-offline_all')] }],
@@ -206,18 +209,22 @@ describe('buildGraph', () => {
         { scope: 'hangzhou', enabled: 1, person_name: 'a' },
         { scope: 'shaoxing', enabled: 1, person_name: 'b' },
         { scope: 'shaoxing', enabled: 0, person_name: '停用不计' },
+        { scope: 'province_ops', enabled: 1, person_name: 'c' },
+        { scope: 'other', enabled: 1, person_name: '补集不计入' },
       ],
-      targets: { hangzhou: { a: 100 }, shaoxing: { b: 50 } },
+      targets: {
+        hangzhou: { a: 100 }, shaoxing: { b: 50 }, province_ops: { c: 25 },
+      },
     }));
     const agg = g.regionNodes.find((n) => n.key === 'offline_all');
     expect(agg.isAggregate).toBe(true);
     expect(agg.label).toBe('线下整体');
-    expect(agg.rosterCount).toBe(2);      // 杭1+绍1（停用不计）
-    expect(agg.targetSum).toBe(150);
-    // 汇聚边：parts 中有节点的桶 → 聚合（杭/绍/其他三桶都在）
+    expect(agg.rosterCount).toBe(3);      // 杭1+绍1+省外1（停用与补集不计）
+    expect(agg.targetSum).toBe(175);
+    // 汇聚边：parts 中有节点的桶 → 聚合（杭/绍/省外三桶；其他不再汇聚）
     const cv = g.edges.filter((e) => e.converge);
     expect(cv.map((e) => e.id).sort()).toEqual([
-      'cv:hangzhou:offline_all', 'cv:other:offline_all', 'cv:shaoxing:offline_all',
+      'cv:hangzhou:offline_all', 'cv:province_ops:offline_all', 'cv:shaoxing:offline_all',
     ]);
     expect(cv.every((e) => e.broken === false)).toBe(true);
     // 聚合下游照常成模块（播报收拢后为 daily-report 主卡），边 broken
