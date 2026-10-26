@@ -178,6 +178,42 @@ class FactoryTests(unittest.TestCase):
                        viewer_resolver=_StaticViewerResolver())
 
 
+class AuthDisabledTests(unittest.TestCase):
+    """认证总开关（2026-10-26 用户裁决「认证系统全部关闭。目前」）：
+    auth_disabled=True 时所有闸直通（内网信任；SG 白名单兜底）。"""
+
+    def _open_app(self):
+        return create_app(
+            settings=_fake_settings(),
+            session_secret=SECRET,
+            db_connector=_connector(),
+            viewer_resolver=_StaticViewerResolver(),
+            auth_disabled=True,
+        )
+
+    def test_no_session_passes_api_without_login(self):
+        client = TestClient(self._open_app())
+        response = client.get("/api/me")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("anon-ops", response.json()["userid"])
+
+    def test_no_session_passes_admin_gate(self):
+        # 区域写面（CAPABILITY_ORG）无会话也直通——admin 级。
+        client = TestClient(self._open_app())
+        response = client.post(
+            "/api/org/region/broadcast",
+            json={"region_key": "hangzhou", "fields": {}},
+        )
+        # 过闸到达参数校验（400 bad_request），不是 401/302
+        self.assertEqual(400, response.status_code)
+
+    def test_default_keeps_gates(self):
+        # 缺省（auth_disabled=False）行为不变：未登录 401。
+        client = TestClient(_app())
+        response = client.get("/api/me")
+        self.assertEqual(401, response.status_code)
+
+
 class AdminGateTests(unittest.TestCase):
     """应用层闸（铁律 8 的第二闸）：session + admin 缺一不可。"""
 

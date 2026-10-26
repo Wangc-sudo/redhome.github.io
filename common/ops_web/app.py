@@ -1258,12 +1258,22 @@ def _schedule_cell(schedule):
 # ---------------------------------------------------------------------------
 
 
+#: 认证关闭时的直通 Viewer（2026-10-26 用户裁决「认证系统全部关闭」：
+#: ops-web 锁办公网（SG 白名单），网内信任——admin 级全能力，审计
+#: actor 统一记 anon-ops。回开 = 摘掉 OPS_WEB_AUTH_DISABLED 环境变量。
+_OPEN_VIEWER = authz.Viewer(
+    userid="anon-ops", name="内网直通",
+    scopes=frozenset(), allowed_regions=frozenset(),
+    is_admin=True, admitted=True,
+)
+
+
 def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                viewer_resolver=None, session_secure=False,
                browser_login_token=None,
                fleet_source=None, config_source=None,
                config_publisher=None, config_deleter=None,
-               corp_id=None, agent_id=None) -> FastAPI:
+               corp_id=None, agent_id=None, auth_disabled=False) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -1273,6 +1283,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
     ``config_publisher``（注册表写，None = 写 API 降级 503）。
     ``browser_login_token`` 非空时开放浏览器登录通道（2026-10-14，
     为无钉钉环境的运维/验收提供入口），缺省关闭。
+
+    ``auth_disabled=True``（2026-10-26 用户裁决）：所有闸直通
+    （_OPEN_VIEWER）——登录页仍在但任意路径不再拦截；回开即摘掉
+    环境变量，无代码改动。
     """
     if not session_secret:
         raise ValueError("ops-web requires a session secret")
@@ -1290,6 +1304,10 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
 
     def _resolve_request_viewer(request: Request) -> authz.Viewer:
         """session → Viewer（各闸共用的解析段；未登录 401/302，解析异常 403）。"""
+        if auth_disabled:
+            # 认证关闭（2026-10-26 用户裁决）：网内直通，审计记 anon-ops。
+            request.state.viewer = _OPEN_VIEWER
+            return _OPEN_VIEWER
         raw = request.cookies.get(auth.SESSION_COOKIE)
         userid = (
             auth.resolve_session_userid(raw, session_secret) if raw else None
@@ -4327,6 +4345,12 @@ def main():
             # 舰队清单地基（seed）缺失不拖垮权限管理面：定时任务页 503。
             _LOGGER.warning("ops-web fleet source unavailable at startup")
             fleet_source = None
+        # 认证总开关（2026-10-26 用户裁决「认证系统全部关闭。目前」）：
+        # **缺省直通**（网内信任；SG 白名单兜底办公网来源）；回开认证 =
+        # 设 OPS_WEB_AUTH_DISABLED=0（宿主机 ops-web.env），无需改代码。
+        auth_disabled = os.environ.get(
+            "OPS_WEB_AUTH_DISABLED", "1"
+        ).strip().lower() not in ("0", "false", "no")
         application = create_app(
             settings=settings,
             session_secret=session_secret,
@@ -4338,6 +4362,7 @@ def main():
             config_publisher=build_config_publisher(),
             config_deleter=build_config_deleter(),
             corp_id=corp_id,
+            auth_disabled=auth_disabled,
             agent_id=agent_id,
         )
     except Exception as exc:
