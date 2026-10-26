@@ -3,12 +3,107 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#3b5bff" />
   <title>小易 · 智能助手</title>
+  <style>
+    /* 首屏启动画面：纯 CSS，JS 下载/执行期间即呈现，Vue 挂载后被整体替换 */
+    html, body { height: 100%; margin: 0; background: #f5f6f8; }
+    #app:empty { display: none; }
+    #kb-splash {
+      position: fixed; inset: 0; z-index: 999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: radial-gradient(120% 90% at 50% 0%, #1c2333 0%, #0f1219 62%);
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    /* 倒酒场景：酒瓶倾斜 → 酒线流出 → 杯中液面上升 → 回正循环 */
+    #kb-splash .pour-scene { position: relative; width: 200px; height: 200px; }
+    #kb-splash .pour-bottle {
+      position: absolute; right: 26px; top: 0; width: 68px;
+      transform-origin: 50% 92%;
+      filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.55))
+              drop-shadow(0 0 14px rgba(230, 233, 242, 0.14));
+      animation: kb-tilt 4.2s ease-in-out infinite;
+    }
+    #kb-splash .pour-stream {
+      position: absolute; left: 49px; top: 132px; width: 4px; height: 26px;
+      border-radius: 2px; opacity: 0;
+      background: linear-gradient(#ffffff, #dfe8f5);
+      animation: kb-stream 4.2s ease-in-out infinite;
+    }
+    #kb-splash .pour-glass { position: absolute; left: 24px; top: 138px; width: 56px; }
+    #kb-splash .pour-liquid { animation: kb-liquid 4.2s ease-in-out infinite; }
+    @keyframes kb-tilt {
+      0%, 8% { transform: rotate(0deg); }
+      20%, 68% { transform: rotate(-112deg); }
+      80%, 100% { transform: rotate(0deg); }
+    }
+    @keyframes kb-stream {
+      0%, 19% { opacity: 0; }
+      24%, 66% { opacity: 1; }
+      72%, 100% { opacity: 0; }
+    }
+    @keyframes kb-liquid {
+      0%, 22% { transform: translateY(36px); opacity: 1; }
+      68% { transform: translateY(17px); opacity: 1; }
+      82% { transform: translateY(17px); opacity: 0; }
+      83% { transform: translateY(36px); opacity: 0; }
+      92%, 100% { transform: translateY(36px); opacity: 1; }
+    }
+    #kb-splash .splash-text {
+      margin-top: 26px; font-size: 14px; color: #7f8798; letter-spacing: 1px;
+    }
+    #kb-splash .splash-bar {
+      margin-top: 22px; width: 120px; height: 3px; border-radius: 2px;
+      background: #262c3a; overflow: hidden; position: relative;
+    }
+    #kb-splash .splash-bar::after {
+      content: ""; position: absolute; left: -40%; top: 0; bottom: 0; width: 40%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, transparent, #3b5bff, transparent);
+      animation: kb-slide 1.2s ease-in-out infinite;
+    }
+    @keyframes kb-slide {
+      0% { left: -40%; } 100% { left: 100%; }
+    }
+  </style>
   <script src="https://g.alicdn.com/dingding/dingtalk-jsapi/3.1.0/dingtalk.open.js"></script>
-  <script type="module" crossorigin src="/kb/assets/index-BkhmJvHE.js"></script>
-  <link rel="stylesheet" crossorigin href="/kb/assets/index-C_bUHX1U.css">
+  <script type="module" crossorigin src="/kb/assets/index-Df5VJ-53.js"></script>
+  <link rel="stylesheet" crossorigin href="/kb/assets/index-DAAT42v6.css">
 </head>
 <body>
-  <div id="app"></div>
+  <div id="kb-splash" aria-hidden="true">
+    <div class="pour-scene">
+      <img class="pour-bottle" src="bottle.png" alt="">
+      <div class="pour-stream"></div>
+      <svg class="pour-glass" viewBox="0 0 60 64" fill="none">
+        <defs>
+          <clipPath id="kbGlassClip"><path d="M16 14 h28 c0 12 -5 22 -14 22 c-9 0 -14 -10 -14 -22 z"/></clipPath>
+          <linearGradient id="kbWine" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#ffffff" stop-opacity="0.96"/>
+            <stop offset="1" stop-color="#dfe8f5" stop-opacity="0.82"/>
+          </linearGradient>
+        </defs>
+        <path d="M16 14 h28 c0 12 -5 22 -14 22 c-9 0 -14 -10 -14 -22 z" fill="#ffffff" fill-opacity="0.08" stroke="#e6e9f2" stroke-width="2" stroke-linejoin="round"/>
+        <ellipse cx="30" cy="14" rx="14" ry="2.6" stroke="#e6e9f2" stroke-width="1.6"/>
+        <g clip-path="url(#kbGlassClip)">
+          <rect class="pour-liquid" x="14" y="0" width="32" height="36" fill="url(#kbWine)"/>
+        </g>
+        <path d="M30 36 v8 M20 48 h20" stroke="#e6e9f2" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="splash-text">小易 · 正在启动</div>
+    <div class="splash-bar"></div>
+  </div>
+  <div id="app"></div>
+  <script>
+    /* Vue 挂载完成后移除启动画面（main.js 里 app.mount 同步替换 #app 内容） */
+    new MutationObserver(function (mo, obs) {
+      if (document.getElementById('app').childElementCount > 0) {
+        var s = document.getElementById('kb-splash');
+        if (s) s.remove();
+        obs.disconnect();
+      }
+    }).observe(document.getElementById('app'), { childList: true });
+  </script>
 </body>
 </html>

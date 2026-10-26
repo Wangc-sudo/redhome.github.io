@@ -1,10 +1,9 @@
 <template>
   <!-- 引导页：钉钉外打开 → 扫码登录 -->
-  <div v-if="phase === 'need-dd'" class="guide-page">
+  <div v-if="phase === 'need-dd'" class="guide-page dark">
     <div class="guide-card">
-      <div class="guide-logo">小易</div>
-      <p>登录后使用</p>
-      <p class="guide-sub">仅限本企业成员；也可在钉钉 → 工作台 → 小易直接打开</p>
+      <PourScene :bottle-url="bottleUrl" />
+      <p class="brand-word">小易</p>
       <button class="login-btn" :disabled="qrLoading" @click="startQrLogin">
         {{ qrLoading ? '正在跳转…' : '钉钉扫码登录' }}
       </button>
@@ -12,9 +11,13 @@
     </div>
   </div>
 
-  <!-- 启动中 -->
-  <div v-else-if="phase === 'boot'" class="guide-page">
-    <div class="guide-card"><div class="guide-logo">小易</div><p>正在进入…</p></div>
+  <!-- 启动中（分阶段文案 + 进度条） -->
+  <div v-else-if="phase === 'boot'" class="guide-page dark">
+    <div class="guide-card">
+      <PourScene :bottle-url="bottleUrl" />
+      <p class="boot-text">{{ bootText }}</p>
+      <div class="boot-bar"><div class="boot-bar-fill"></div></div>
+    </div>
   </div>
 
   <!-- 主界面 -->
@@ -30,22 +33,35 @@
       <aside class="sidebar" :class="{ open: sidebarOpen }">
         <button class="new-chat" @click="newSession">＋ 新对话</button>
         <div class="session-list">
-          <div v-for="s in sessions" :key="s.sid"
-               class="session-item" :class="{ active: s.sid === currentSid }"
-               @click="switchSession(s.sid)">
-            <span class="session-title">{{ s.title || '新对话' }}</span>
-            <button class="session-del" @click.stop="removeSession(s.sid)" aria-label="删除">×</button>
+          <div v-if="sessionsLoading" class="session-skel" aria-hidden="true">
+            <div v-for="n in 5" :key="n" class="skel-row"></div>
           </div>
-          <div v-if="!sessions.length" class="session-empty">暂无历史对话</div>
+          <template v-else>
+            <div v-for="s in sessions" :key="s.sid"
+                 class="session-item" :class="{ active: s.sid === currentSid }"
+                 @click="switchSession(s.sid)">
+              <span class="session-title">{{ s.title || '新对话' }}</span>
+              <button class="session-del" @click.stop="removeSession(s.sid)" aria-label="删除">×</button>
+            </div>
+            <div v-if="!sessions.length" class="session-empty">暂无历史对话</div>
+          </template>
         </div>
       </aside>
       <div v-if="sidebarOpen" class="sidebar-mask" @click="sidebarOpen = false"></div>
 
       <!-- 对话区 -->
       <main class="chat" ref="chatEl">
+        <!-- 消息骨架屏（首次进入/切换会话加载中） -->
+        <div v-if="messagesLoading" class="chat-skel" aria-hidden="true">
+          <div class="skel-bubble skel-right"></div>
+          <div class="skel-bubble skel-left skel-wide"></div>
+          <div class="skel-bubble skel-right skel-short"></div>
+          <div class="skel-bubble skel-left"></div>
+        </div>
+
         <!-- 空会话引导 -->
-        <div v-if="!messages.length && !sending" class="welcome">
-          <div class="guide-logo large">小易</div>
+        <div v-else-if="!messages.length && !sending" class="welcome">
+          <PourScene :bottle-url="bottleUrl" small dark />
           <p class="welcome-title">你好，我是小易</p>
           <p class="welcome-sub">商品资料、产品手册、业务数据，随时问我</p>
           <div class="suggest-cards">
@@ -138,6 +154,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
 import { inDingTalk, requestAuthCode, shareToChat } from './dd'
 import { renderMarkdown } from './md'
+import PourScene from './PourScene.vue'
 
 const DEFAULT_SUGGESTIONS = [
   '习酒窖藏1988 箱规是多少',
@@ -146,11 +163,17 @@ const DEFAULT_SUGGESTIONS = [
   '今天杭州区域销售情况',
 ]
 
+// 官方产品图（public 目录，base 感知）
+const bottleUrl = `${import.meta.env.BASE_URL}bottle.png`
+
 const phase = ref('boot')
+const bootText = ref('正在验证身份…')
 const user = ref({})
 const sessions = ref([])
 const currentSid = ref('')
 const messages = ref([])
+const sessionsLoading = ref(false)
+const messagesLoading = ref(false)
 const draft = ref('')
 const sending = ref(false)
 const elapsed = ref(0)
@@ -233,6 +256,30 @@ async function scrollBottom() {
   if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight
 }
 
+// 本地秒开缓存：会话列表 + 最近一个会话的消息（仅在登录态校验通过后渲染，
+// 网络真值到达后静默替换；容量满等异常一律忽略，缓存只是体验优化）
+const CACHE_KEY = 'kbweb:boot-cache'
+
+function readCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw)
+    if (!c || !Array.isArray(c.sessions)) return null
+    return c
+  } catch { return null }
+}
+
+function writeCache() {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      sid: currentSid.value,
+      sessions: sessions.value.slice(0, 20),
+      messages: messages.value.slice(-30),
+    }))
+  } catch { /* 忽略 */ }
+}
+
 // 登录成功后进主界面（免登与扫码登录共用）：bootstrap + 会话加载
 async function enterApp() {
   const info = await api.bootstrap()
@@ -240,14 +287,30 @@ async function enterApp() {
   if (info.guide && info.guide.suggestions && info.guide.suggestions.length) {
     suggestions.value = info.guide.suggestions
   }
-  const { sessions: list } = await api.listSessions()
-  sessions.value = list
-  if (list.length) {
-    await switchSession(list[0].sid)
+  bootText.value = '正在拉取会话…'
+  // 缓存秒开：先渲上次的会话列表与最近消息，再拉真值静默替换
+  const cache = readCache()
+  if (cache && cache.sessions.length) {
+    sessions.value = cache.sessions
+    currentSid.value = cache.sid || cache.sessions[0].sid
+    messages.value = cache.messages || []
   } else {
-    await newSession()
+    sessionsLoading.value = true
+    messagesLoading.value = true
   }
   phase.value = 'ready'
+  scrollBottom()
+  const { sessions: list } = await api.listSessions()
+  sessions.value = list
+  sessionsLoading.value = false
+  if (list.length) {
+    const keepSid = currentSid.value && list.some(s => s.sid === currentSid.value)
+    await switchSession(keepSid ? currentSid.value : list[0].sid)
+  } else {
+    messagesLoading.value = false
+    await newSession()
+  }
+  writeCache()
 }
 
 // 浏览器扫码登录：取 login_url 整页跳转钉钉授权页（二维码在钉钉域渲染）
@@ -274,6 +337,7 @@ async function boot() {
     // 钉钉容器内：JSAPI 免登（扫码按钮不出现）
     try {
       const { corp_id: corpId } = await api.publicConfig()
+      bootText.value = '正在免密登录…'
       const code = await requestAuthCode(corpId)
       await api.authDingtalk(code)
       await enterApp()
@@ -300,15 +364,20 @@ async function newSession() {
   await refreshSessions()
   currentSid.value = sid
   messages.value = []
+  messagesLoading.value = false
   sidebarOpen.value = false
+  writeCache()
 }
 
 async function switchSession(sid) {
+  if (sid !== currentSid.value || !messages.value.length) messagesLoading.value = true
   const detail = await api.getSession(sid)
   currentSid.value = sid
   messages.value = detail.messages
+  messagesLoading.value = false
   sidebarOpen.value = false
   scrollBottom()
+  writeCache()
 }
 
 async function removeSession(sid) {
@@ -317,6 +386,8 @@ async function removeSession(sid) {
   if (sid === currentSid.value) {
     if (sessions.value.length) await switchSession(sessions.value[0].sid)
     else await newSession()
+  } else {
+    writeCache()
   }
 }
 
@@ -350,6 +421,7 @@ async function send() {
       meta: result.meta, attachments: result.attachments,
     })
     refreshSessions()
+    writeCache()
   } catch (err) {
     // 先拉后发（2026-10-26）：服务端不受客户端断连/超时影响，答案可能
     // 已答完落库——先拉会话核对，末尾已是本轮问答（同内容用户消息 + 紧
@@ -365,6 +437,7 @@ async function send() {
         messages.value = msgs
         sendError.value = false
         refreshSessions()
+        writeCache()
         return
       }
     } catch (e2) { /* 拉取失败则按发送失败处理 */ }
@@ -397,6 +470,7 @@ async function regenerate() {
       role: 'assistant', content: result.reply, ts: '',
       meta: result.meta, attachments: result.attachments, regenerated: true,
     })
+    writeCache()
   } catch (err) {
     showToast('重新生成失败，请稍后再试')
   } finally {
