@@ -3680,6 +3680,30 @@ class OrgAssignmentApiTests(unittest.TestCase):
         self.assertIn("杭州销售部", hangzhou)
         self.assertEqual([], hangzhou["杭州销售部"]["members"])
 
+    def test_overview_merges_same_name_dept_split_by_id_key(self):
+        """裂行修复（2026-10-26）：覆盖成员的组带 dept_id、无覆盖成员的组
+        只有部门名——同一部门不得裂成两行；合并归带 id 的组。"""
+        conn = self._members_conn({
+            "dim_robot_member": [
+                ("u-zhang", "张三", "hangzhou", "门店一部"),
+                ("u-chen", "陈六", "hangzhou", "门店一部"),   # 无覆盖→名字键
+            ],
+            "dim_org_assignment_override": [
+                dict(_ORG_OVERRIDE_ROW, user_id="u-zhang", region="hangzhou",
+                     dept_id="d1", dept_name="门店一部"),
+            ],
+        })
+        data = self._admin_client(conn).get("/api/org/overview").json()
+        regions = {r["key"]: r for r in data["regions"]}
+        hz = regions["hangzhou"]["depts"]
+
+        names = [d["dept_name"] for d in hz]
+        self.assertEqual(1, names.count("门店一部"))          # 不裂行
+        dept = next(d for d in hz if d["dept_name"] == "门店一部")
+        self.assertEqual("d1", dept["dept_id"])             # 保留 id 组
+        self.assertEqual({"u-zhang", "u-chen"},
+                         {m["user_id"] for m in dept["members"]})
+
     def test_overview_catalog_read_fails_soft(self):
         conn = self._members_conn(fail={"dim_org_region"})
         response = self._admin_client(conn).get("/api/org/overview")

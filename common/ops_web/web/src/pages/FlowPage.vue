@@ -115,9 +115,53 @@ const poolNode = ref({ id: 'pool', x: 40, y: TOP_Y });
 
 // -- 拉线（实现在 flow/useMemberWire.js / useDepWire.js）-------------------------
 const canWire = computed(() => canPipelines.value || canRoster.value);
-const { wireDraft, wireDraftPath, startWire } = useMemberWire({
+const { wireDraft, wireDraftPath, startWire, assignToDept } = useMemberWire({
   busy, panX, panY, zoom, regionNodes, canWire, reload: reloadSilent,
 });
+
+// -- 部门归口下拉（2026-10-26 用户裁决：点击部门行弹列表选人归口，
+// 替代部门行拉线圆点——低频管理动作不占常态视觉）--------------------------
+const deptAssign = ref(null);        // {node, dept, x, y}（fixed 视口坐标）
+const deptAssignFilter = ref('');
+
+function onDeptAssign(node, dept, evt) {
+  if (busy.value) return;
+  deptAssignFilter.value = '';
+  deptAssign.value = {
+    node, dept,
+    x: Math.min(evt.clientX, window.innerWidth - 280),
+    y: Math.min(evt.clientY, window.innerHeight - 340),
+  };
+}
+
+const deptAssignPool = computed(() => {
+  // 未归类池成员（归口主场景），姓名/账号过滤
+  const kw = deptAssignFilter.value.trim();
+  const list = poolMembers.value || [];
+  if (!kw) return list;
+  return list.filter((m) => (m.name || '').includes(kw)
+    || (m.user_id || '').includes(kw));
+});
+
+const deptAssignLocal = computed(() => {
+  // 本区其他部门的成员（区内调部门场景）
+  if (!deptAssign.value) return [];
+  const { node, dept } = deptAssign.value;
+  const kw = deptAssignFilter.value.trim();
+  const list = (node.members || [])
+    .filter((m) => m.dept_name !== (dept.dept_name || ''));
+  if (!kw) return list;
+  return list.filter((m) => (m.name || '').includes(kw));
+});
+
+async function pickDeptAssign(member) {
+  const target = deptAssign.value;
+  if (!target) return;
+  deptAssign.value = null;
+  // assignToDept 内自带确认/写库/静默刷新（与拉线落点同链）
+  await assignToDept(target.node.key, target.dept.dept_id || null,
+    target.dept.dept_name || null, member);
+}
 const { depDraft, depDraftPath, startDepWire, onDepEdgeClick } = useDepWire({
   busy, panX, panY, zoom, taskNodes,
   canPipelines, reload: reloadSilent,
@@ -528,6 +572,7 @@ watch(() => route.query.region, () => applyAnchor());
             @toggle-members="toggleRegionMembers"
             @toggle-tasks="toggleRegionTasks"
             @open-drawer="(n) => openDrawer('region', n)"
+            @dept-assign="onDeptAssign"
           />
 
           <!-- 全局节点（播报日历 / 操作记录 / 授权 / 数据修正） -->
@@ -565,6 +610,44 @@ watch(() => route.query.region, () => applyAnchor());
         <span class="lg">泳道＝流水线分层 · 圆形＝聚合节点 · 顶部条带＝功能区</span>
       </div>
     </div>
+
+    <!-- 部门归口下拉（2026-10-26：点击部门行弹列表选人；写操作走
+         assignToDept 同一确认链，未登录被 401 引导到登录页） -->
+    <template v-if="deptAssign">
+      <div class="dap-mask" @click="deptAssign = null" />
+      <div class="dap-pop" :style="{ left: deptAssign.x + 'px', top: deptAssign.y + 'px' }">
+        <div class="dap-head">
+          归入 <b>{{ deptAssign.node.label }} · {{ deptAssign.dept.dept_name || '（无 ID 部门）' }}</b>
+        </div>
+        <input
+          v-model="deptAssignFilter"
+          class="dap-filter"
+          placeholder="搜索姓名…"
+        />
+        <div class="dap-list">
+          <div class="dap-sec">未归类池（{{ deptAssignPool.length }}）</div>
+          <button
+            v-for="m in deptAssignPool"
+            :key="'p-' + m.user_id"
+            class="dap-item"
+            @click="pickDeptAssign(m)"
+          >{{ m.name || m.user_id }}</button>
+          <template v-if="deptAssignLocal.length">
+            <div class="dap-sec">本区调部门（{{ deptAssignLocal.length }}）</div>
+            <button
+              v-for="m in deptAssignLocal"
+              :key="'l-' + m.user_id"
+              class="dap-item"
+              @click="pickDeptAssign(m)"
+            >{{ m.name || m.user_id }}<span class="dap-dept">{{ m.dept_name }}</span></button>
+          </template>
+          <div
+            v-if="!deptAssignPool.length && !deptAssignLocal.length"
+            class="dap-empty"
+          >没有可归口的成员</div>
+        </div>
+      </div>
+    </template>
 
     <!-- 节点抽屉（F2：宿主 + 按 kind 动态分发到 drawers/ 组件） -->
     <DrawerHost
@@ -794,6 +877,72 @@ watch(() => route.query.region, () => applyAnchor());
 }
 
 /* 节点样式已随 F3 组件化迁往 components/flow/{PoolNode,RegionNode,ModuleNode,GlobalNodes}.vue */
+
+/* 部门归口下拉（2026-10-26 点击部门行选人） */
+.dap-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+.dap-pop {
+  position: fixed;
+  z-index: 81;
+  width: 264px;
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.16);
+  padding: 10px;
+}
+.dap-head {
+  font-size: 12px;
+  color: #4b5563;
+  margin-bottom: 6px;
+}
+.dap-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.dap-list {
+  max-height: 300px;
+  overflow: auto;
+}
+.dap-sec {
+  font-size: 11px;
+  color: #9ca3af;
+  padding: 4px 2px;
+}
+.dap-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dap-item:hover {
+  background: #f1f5ff;
+}
+.dap-dept {
+  color: #9ca3af;
+  font-size: 11px;
+  margin-left: 6px;
+}
+.dap-empty {
+  padding: 12px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
 .edge.drafting {
   stroke: #2563eb;
   stroke-dasharray: 4 4;

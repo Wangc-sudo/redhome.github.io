@@ -1,10 +1,11 @@
 /**
  * 成员拉线（2026-10-17 F3 从 FlowPage.vue 抽出，行为零变化）。
  * 语义配对：成员口 → 区域口＝归口该区（部门取通讯录原值）；
- * 成员口 → 部门口＝归口该区该部门；区域成员口 → 他区部门/区域口＝搬迁
- * （moveMember，confirm+双侧名册同步）；区域成员口 → 本区部门口＝区内调部门。
+ * 区域成员口 → 他区区域口＝搬迁（moveMember，confirm+双侧名册同步）。
  * 起点=被按下的端口圆心（DOM 实测画布坐标），落点=elementFromPoint 命中
- * data-region-in / data-dept-in 端口（方向无关）。
+ * data-region-in 端口。
+ * 2026-10-26 用户裁决：部门口拉线圆点退役——「归口到部门」改为部门行
+ * 点击弹下拉列表选人（assignToDept 与拉线共用同一确认+写库+刷新链）。
  */
 import { computed, ref } from 'vue';
 import { assignMember, moveMember } from '../api.js';
@@ -51,23 +52,23 @@ export function useMemberWire({
       wireDraft.value = null;
       const hit = document.elementFromPoint(upEvt.clientX, upEvt.clientY);
       if (!hit || !hit.closest) return;
-      const deptPort = hit.closest('[data-dept-in]');
-      if (deptPort) {
-        dropWire(deptPort.getAttribute('data-dept-in'), draft.member);
-        return;
-      }
       const regionPort = hit.closest('[data-region-in]');
       if (regionPort) {
-        dropWire(regionPort.getAttribute('data-region-in'), draft.member);
+        assignToDept(regionPort.getAttribute('data-region-in'), null, null,
+                     draft.member);
       }
     }
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   }
 
-  /** 落点解析："regionKey"（区域口）或 "regionKey|deptId|deptName"（部门口）。 */
-  async function dropWire(target, member) {
-    const [regionKey, deptId, deptName] = target.split('|');
+  /**
+   * 归口/搬迁确认+写库+刷新链（拉线落点与部门行下拉共用，
+   * 2026-10-26 抽出）。deptId/deptName 为空 = 归口到区域（部门取通讯录
+   * 原值）；带上 = 归口到该部门。搬迁（member.region 跨区）走 moveMember
+   * 原子复合写（confirm 提示名册影响），其余走 assignMember。
+   */
+  async function assignToDept(regionKey, deptId, deptName, member) {
     const region = regionNodes.value.find((n) => n.key === regionKey);
     if (!region) return;
     const fromRegion = member.region || null;   // 区域成员卡带 region 标记
@@ -117,5 +118,5 @@ export function useMemberWire({
     return w ? draftPath(w.x1, w.y1, w.x2, w.y2) : '';
   });
 
-  return { wireDraft, wireDraftPath, startWire };
+  return { wireDraft, wireDraftPath, startWire, assignToDept };
 }
