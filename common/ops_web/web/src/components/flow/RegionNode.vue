@@ -1,21 +1,21 @@
 <script setup>
 /**
  * 区域节点（2026-10-17 F3 从 FlowPage.vue 抽出）：聚合=圆形、业务=矩形。
- * 部门槽（2026-10-26 用户裁决：拉线圆点退役，改为点击部门行弹下拉列表
- * 选人归口——归口是低频管理动作，界面不为它付常态视觉税）+ 成员行展开
- * （每人绿色输出端口：拉他区区域口＝搬迁）。纯展示+事件上抛。
+ * 部门槽（点击部门行弹下拉选人归口/调部门，2026-10-26）+ 任务方块
+ * （指标格同款，点击折叠/展开该区域任务模块）。纯展示+事件上抛。
+ * 2026-10-26 用户裁决：成员展开行退役（「毫无作用」）——成员明细与
+ * 搬迁去 /org 组织编排页，画布不再内嵌。
  */
 import { fmt } from '../../flow/graph.js';
 import { AGG_SIZE, REGION_W } from '../../flow/layout.js';
 
 defineProps({
   node: { type: Object, required: true },
-  expanded: { type: Boolean, default: false },
   anchorHit: { type: Boolean, default: false },
   tasksCollapsed: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
 });
-const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks',
+const emit = defineEmits(['drag', 'wire-start', 'toggle-tasks',
   'open-drawer', 'dept-assign']);
 </script>
 
@@ -77,37 +77,17 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
           <span class="dept-caret">▾</span>
         </div>
       </div>
-      <!-- 成员行（展开后每人一个输出端口：拉到他区=搬迁、本区部门=调部门） -->
-      <div class="member-slot">
-        <button class="btn mini ghost expand-members" @click="emit('toggle-members', node)">
-          {{ expanded ? '收起成员 ⌃' : `成员 ${node.memberCount} ⌄` }}
-        </button>
-        <template v-if="expanded">
-          <div
-            v-for="member in node.members"
-            :key="member.user_id"
-            class="member-row-wire"
-          >
-            <span class="member-name">{{ member.name || member.user_id }}</span>
-            <span class="member-dept">{{ member.dept_name }}</span>
-            <span
-              class="port out member-port"
-              :class="{ busy }"
-              title="拉到他区/部门口＝搬迁；本区部门口＝调部门"
-              @mousedown="emit('wire-start', $event, member)"
-            />
-          </div>
-        </template>
-      </div>
       <div class="node-foot">
+        <!-- 任务方块（2026-10-26 用户裁决「把任务做成方块」）：与指标格
+             同款视觉，点击=折叠/展开该区域任务模块 -->
         <button
           v-if="node.taskCount"
-          class="btn mini ghost task-toggle"
+          class="metric task-metric"
           :title="tasksCollapsed ? '展开该区域的任务模块' : '折叠该区域的任务模块（组内连线收起）'"
           @mousedown.stop
           @click="emit('toggle-tasks', node.key)"
         >
-          {{ tasksCollapsed ? `任务 ${node.taskCount} ▸` : `任务 ${node.taskCount} ▾` }}
+          <b>{{ node.taskCount }}</b><span>任务 {{ tasksCollapsed ? '▸' : '▾' }}</span>
         </button>
         <span v-else class="task-count">下游任务 0</span>
         <button class="btn mini ghost" @click="emit('open-drawer', node)">详情</button>
@@ -289,39 +269,19 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
   font-size: 10px;
 }
 
-/* 成员行（输出端口） */
-.member-slot {
-  padding: 0 10px 4px;
+/* 2026-10-26：成员展开行（member-slot/member-row-wire/member-port）
+   随「毫无作用」裁决退役——成员明细与搬迁去 /org 组织编排页 */
+
+/* 任务方块（foot 行，与指标格同款视觉） */
+.task-metric {
+  cursor: pointer;
 }
-.expand-members {
-  margin: 2px 0;
+.task-metric:hover {
+  border-color: #c7d2fe;
+  background: #eef2ff;
 }
-.member-row-wire {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 26px;
-  font-size: 12px;
-}
-.member-name {
-  font-weight: 600;
-}
-.member-dept {
-  color: #9ca3af;
-  font-size: 11px;
-}
-.member-row-wire .member-port {
-  right: -6px;
-  top: 8px;
-  margin-top: 0;
-}
-.member-port {
-  cursor: crosshair;
-}
-.member-port.busy {
-  opacity: 0.4;
-  pointer-events: none;
+.task-metric span {
+  color: #6b7280;
 }
 
 /* 端口 */

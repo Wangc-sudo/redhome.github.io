@@ -96,16 +96,8 @@ function startNodeDrag(evt, node) {
   });
 }
 
-//: 成员行展开状态（区域节点默认收起成员列表，保持画布清爽）
-const expandedRegions = ref(new Set());
-
-function toggleRegionMembers(node) {
-  const next = new Set(expandedRegions.value);
-  if (next.has(node.id)) next.delete(node.id);
-  else next.add(node.id);
-  expandedRegions.value = next;
-  layout();   // 高度变化影响连线端点与层距
-}
+//: 成员展开行已退役（2026-10-26 用户裁决「毫无作用」）——成员明细与
+//: 搬迁去 /org 组织编排页；区域卡只剩指标/部门槽/任务方块。
 
 //: 写操作后的静默刷新（F4：调用方带 parts 按域局部拉取；load 声明在下方，
 //: 函数提升兜底）
@@ -142,6 +134,15 @@ const deptAssignPool = computed(() => {
   if (!kw) return list;
   return list.filter((m) => (m.name || '').includes(kw)
     || (m.user_id || '').includes(kw));
+});
+
+const deptAssignCurrent = computed(() => {
+  // 本部门现有成员（2026-10-26 用户裁决：点开列表应先看到该部门现有
+  // 所有人——纯展示段，管理现状；调整入口在下方候选段）
+  if (!deptAssign.value) return [];
+  const { node, dept } = deptAssign.value;
+  return (node.members || [])
+    .filter((m) => m.dept_name === (dept.dept_name || ''));
 });
 
 const deptAssignLocal = computed(() => {
@@ -342,7 +343,6 @@ function layout() {
     globalNodes: globalNodes.value,
     sourceNodes: sourceNodes.value,
     savedPos: nodePos.value,
-    expandedRegions: expandedRegions.value,
     expandedModules: expandedModules.value,
   });
   poolNode.value = laid.poolNode;
@@ -352,7 +352,7 @@ function layout() {
 // -- 连线几何（纯函数在 flow/layout.js，此处注入当前图状态）---------------------
 const nodeById = computed(() => nodeRects(
   regionNodes.value, visibleTaskNodes.value,
-  expandedRegions.value, expandedModules.value,
+  expandedModules.value,
   { poolNode: poolNode.value, globalNodes: globalNodes.value,
     sourceNodes: sourceNodes.value },
 ));
@@ -570,13 +570,11 @@ watch(() => route.query.region, () => applyAnchor());
             v-for="node in regionNodes"
             :key="node.id"
             :node="node"
-            :expanded="expandedRegions.has(node.id)"
             :anchor-hit="anchorRegion === node.key"
             :tasks-collapsed="collapsedTaskRegions.has(node.key)"
             :busy="busy"
             @drag="startNodeDrag"
             @wire-start="startWire"
-            @toggle-members="toggleRegionMembers"
             @toggle-tasks="toggleRegionTasks"
             @open-drawer="(n) => openDrawer('region', n)"
             @dept-assign="onDeptAssign"
@@ -632,6 +630,15 @@ watch(() => route.query.region, () => applyAnchor());
           placeholder="搜索姓名…"
         />
         <div class="dap-list">
+          <!-- 本部门现有成员（纯展示，2026-10-26 用户裁决「应显示该列表
+               下的所有人」）；调整候选在下方 -->
+          <div class="dap-sec">本部门现有（{{ deptAssignCurrent.length }}）</div>
+          <div
+            v-for="m in deptAssignCurrent"
+            :key="'c-' + m.user_id"
+            class="dap-item static"
+          >{{ m.name || m.user_id }}</div>
+          <div v-if="!deptAssignCurrent.length" class="dap-empty-inline">（暂无成员）</div>
           <div class="dap-sec">未归类池（{{ deptAssignPool.length }}）</div>
           <button
             v-for="m in deptAssignPool"
@@ -957,6 +964,18 @@ watch(() => route.query.region, () => applyAnchor());
   color: #9ca3af;
   font-size: 11px;
   margin-left: 6px;
+}
+.dap-item.static {
+  cursor: default;
+  color: #374151;
+}
+.dap-item.static:hover {
+  background: none;
+}
+.dap-empty-inline {
+  font-size: 11px;
+  color: #c4cad2;
+  padding: 2px 8px 6px;
 }
 .dap-empty {
   padding: 12px;
