@@ -101,8 +101,16 @@ class KbWebService:
         started = self._now()
         meta = {}
         history = web_history_from_messages(history_messages)
+        # 截断判定：全量配对数 > 实际带入轮数（上限 DEFAULT_MAX_TURNS）——
+        # 前端据此提示「仅参考最近 N 轮」（2026-10-26 上下文可见性）。
+        total_turns = len(web_history_from_messages(
+            history_messages, max_turns=len(history_messages or []) or 1))
         handler = self._build_handler(userid)
         conn = self._connection_factory()
+        # token 归账（同 kb_qa.app 模式）：usage_snapshot 前后差值归本条
+        # 消息（遥测口径非计费真源）；llm 缺省/替身无此方法则为 None。
+        usage_snap = getattr(self._llm, "usage_snapshot", None)
+        usage_before = usage_snap() if callable(usage_snap) else None
         try:
             reply, intent, _matched = handler._answer(
                 conn, content, history=history, conversation_id=None,
@@ -115,6 +123,19 @@ class KbWebService:
         finally:
             conn.close()
         latency_ms = int((self._now() - started) * 1000)
+
+        tokens = None
+        if usage_before is not None:
+            try:
+                usage_after = usage_snap()
+                tokens = {
+                    "prompt": max(0, usage_after["prompt_tokens"]
+                                  - usage_before["prompt_tokens"]),
+                    "completion": max(0, usage_after["completion_tokens"]
+                                      - usage_before["completion_tokens"]),
+                }
+            except Exception:
+                tokens = None
 
         attachments = []
         asset = meta.get("asset")
@@ -132,6 +153,9 @@ class KbWebService:
                 "tools": meta.get("tools") or [],
                 "rounds": meta.get("rounds"),
                 "latency_ms": latency_ms,
+                "history_rounds": len(history),
+                "history_truncated": total_turns > len(history),
+                "tokens": tokens,
             },
             "attachments": attachments,
             # clarify 闭环状态（路由层消费，不透给前端）。

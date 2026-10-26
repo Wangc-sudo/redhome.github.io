@@ -359,6 +359,49 @@ class KbWebServiceTests(unittest.TestCase):
         result = service.answer("u1", "习酒窖藏1998 箱规", history_messages=[])
         self.assertIn("箱规：6", result["reply"])
 
+    def test_meta_tokens_and_history_rounds(self):
+        """2026-10-26 上下文/token 可见性：meta 带 tokens 差值与轮数。"""
+        class _UsageLlm:
+            def __init__(self):
+                self._usage = {"prompt_tokens": 100, "completion_tokens": 10}
+
+            def usage_snapshot(self):
+                return dict(self._usage)
+
+            def chat(self, messages, **kw):
+                self._usage["prompt_tokens"] += 60
+                self._usage["completion_tokens"] += 20
+                return "箱规 6 瓶/箱。【商品资料】"
+
+        conn = _SvcConn([[self._row()]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, llm=_UsageLlm(), log=lambda _: None)
+        history = [{"role": "user", "content": "摘要酒 箱规"},
+                   {"role": "assistant", "content": "4 瓶/箱"}]
+        result = service.answer("u1", "习酒窖藏1998 箱规",
+                                history_messages=history)
+        self.assertEqual({"prompt": 60, "completion": 20},
+                         result["meta"]["tokens"])
+        self.assertEqual(1, result["meta"]["history_rounds"])
+        self.assertFalse(result["meta"]["history_truncated"])
+
+    def test_meta_history_truncated_over_max_turns(self):
+        """历史超过上限：history_truncated=True、轮数封顶、无 llm 时
+        tokens=None。"""
+        conn = _SvcConn([[self._row()]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, log=lambda _: None)
+        history = []
+        for i in range(8):
+            history.append({"role": "user", "content": f"问{i}"})
+            history.append({"role": "assistant", "content": f"答{i}"})
+        result = service.answer("u1", "习酒窖藏1998 箱规",
+                                history_messages=history)
+        self.assertEqual(svc_module.DEFAULT_MAX_TURNS,
+                         result["meta"]["history_rounds"])
+        self.assertTrue(result["meta"]["history_truncated"])
+        self.assertIsNone(result["meta"]["tokens"])
+
 
 # ---------------------------------------------------------------------------
 # 路由

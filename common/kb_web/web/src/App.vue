@@ -68,6 +68,13 @@
                     · {{ m.meta.tools.length }} 次查询
                   </template>
                 </span>
+                <span v-if="m.meta && m.meta.tokens" class="meta-dim"
+                      :title="`本条消耗 token：输入 ${m.meta.tokens.prompt} · 输出 ${m.meta.tokens.completion}（遥测口径）`">
+                  · {{ fmtTokens(m.meta.tokens) }}
+                </span>
+                <span v-if="m.meta && m.meta.history_truncated" class="meta-dim">
+                  · 仅参考最近 {{ m.meta.history_rounds }} 轮对话
+                </span>
               </div>
               <div class="msg-actions">
                 <button @click="copyText(m.content)">复制</button>
@@ -100,6 +107,13 @@
       <div v-if="quote" class="quote-bar">
         <span class="quote-text">{{ quote.slice(0, 60) }}</span>
         <button @click="quote = ''" aria-label="取消引用">×</button>
+      </div>
+      <!-- 会话状态区（低调图标，悬停看明细） -->
+      <div v-if="sessionStats.show" class="status-bar">
+        <span class="stat"
+              :title="`小易会参考最近 ${sessionStats.rounds} 轮对话，更早的内容不在记忆中`">◔ {{ sessionStats.rounds }} 轮上下文</span>
+        <span v-if="sessionStats.hasTokens" class="stat"
+              :title="`本会话累计 token：输入 ${sessionStats.prompt} · 输出 ${sessionStats.completion}（遥测口径）`">⚡ {{ sessionStats.totalText }}</span>
       </div>
       <div class="input-row">
         <textarea ref="inputEl" v-model="draft" rows="1"
@@ -145,6 +159,40 @@ const chatEl = ref(null)
 const inputEl = ref(null)
 
 const canShare = computed(() => inDingTalk())
+
+// 会话状态区：上下文轮数 + 累计 token（数据来自各消息 meta，纯前端聚合）
+const sessionStats = computed(() => {
+  let prompt = 0
+  let completion = 0
+  let pairs = 0
+  let pendingUser = null
+  let lastRounds = null
+  let hasTokens = false
+  for (const m of messages.value) {
+    if (m.role === 'user') { pendingUser = m; continue }
+    if (m.role !== 'assistant') continue
+    if (pendingUser) { pairs += 1; pendingUser = null }
+    const t = m.meta && m.meta.tokens
+    if (t) {
+      prompt += t.prompt || 0
+      completion += t.completion || 0
+      hasTokens = true
+    }
+    if (m.meta && m.meta.history_rounds != null) lastRounds = m.meta.history_rounds
+  }
+  const total = prompt + completion
+  return {
+    show: pairs > 0 || hasTokens,
+    rounds: lastRounds != null ? lastRounds : Math.min(pairs, 6),
+    prompt, completion, hasTokens,
+    totalText: total >= 1000 ? `${(total / 1000).toFixed(1)}k` : `${total}`,
+  }
+})
+
+function fmtTokens(t) {
+  const total = (t.prompt || 0) + (t.completion || 0)
+  return total >= 1000 ? `${(total / 1000).toFixed(1)}k tokens` : `${total} tokens`
+}
 const lastAssistantIndex = computed(() => {
   for (let i = messages.value.length - 1; i >= 0; i -= 1) {
     if (messages.value[i].role === 'assistant') return i
