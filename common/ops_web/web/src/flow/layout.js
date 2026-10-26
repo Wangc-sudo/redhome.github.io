@@ -46,11 +46,12 @@ export const TASK_X = LANE_X.app;
 //: 2026-10-26 用户裁决：线下网点=杭州+绍兴+省外与运营中心（province_ops
 //: 独立组撤销并入）；other 补集桶出组（名册/目标已迁 province_ops，若
 //: 再现数据落「未分组」段尾部）。
+//: 2026-10-26：qudao（线上渠道）/dining（餐饮，含 junpin）两组随区域
+//: 从画布摘除而下线（graph.js HIDDEN_REGION_KEYS）；上线时组与区域
+//: 一并恢复。
 export const BUSINESS_GROUPS = [
   { key: 'offline', label: '线下网点', regions: ['hangzhou', 'shaoxing', 'province_ops'] },
   { key: 'vanke', label: '体验馆与团购', regions: ['vanke'] },
-  { key: 'qudao', label: '线上渠道', regions: ['qudao'] },
-  { key: 'dining', label: '餐饮', regions: ['dining', 'junpin'] },
   { key: 'hq', label: '总部职能', regions: ['hq'], muted: true },
 ];
 
