@@ -135,24 +135,28 @@ def from_environment(environ=None):
 # 调用点 1：查询理解（规则未命中时的二次解析，治「不准确」）
 # ---------------------------------------------------------------------------
 
-_QUERY_PROMPT = """你是商品知识库机器人的查询理解器。
+_QUERY_PROMPT = """你是公司客服机器人的查询理解器。
 
 # 任务
-从客服的原始提问中提取查询意图和商品关键词。
+从客服的原始提问中提取查询意图和检索关键词。
 
 # 可选类别
 - PRODUCT_PARAM   查商品参数（箱规/尺寸/重量/材质/69码/品牌等）
 - PRODUCT_FILTER  按条件筛选商品列表
 - PRODUCT_ASSET   索取图片或文件（细节图/素材/质检报告）
 - DOC_QA          产品卖点/品牌故事/工艺/对客话术
+- PHONE_LOOKUP    查手机号/尾号/持卡人/物理手机/平台账号验证码
+- SALES_QUERY     查销售额/销量/完成率/排名等业务统计
+- ORDER_QUERY     查具体订单/交易/发货/物流/退款
 - CHITCHAT        问候闲聊与知识库无关
 
 # 输出（严格 JSON，不要任何其他内容）
-{"category": "<类别>", "keyword": "<商品名或检索关键词，没有就给空串>"}
+{"category": "<类别>", "keyword": "<检索关键词，没有就给空串>"}
 
 # 规则
-- keyword 只留有助于检索商品的词：去掉问句、语气词、「验收/测试」等无关词
-- 问题里有具体商品名 → keyword 必须是商品名（可保留度数/规格等区分词）
+- keyword 只留有助于检索的词：去掉问句、语气词、「验收/测试」等无关词
+- 商品问题保留完整商品名（可保留度数/规格等区分词）
+- 号码问题保留手机号/尾号/姓名/平台账号；订单问题保留完整订单号或物流号
 - 问题里有「它/那/这款/价格呢」这类指代追问 → 按对话历史补全成完整
   商品名或检索词（如「价格呢」+ 上文习酒 → keyword=「习酒」）
 - 历史末尾若有「上文涉及商品：X」，指代追问优先指向 X
@@ -286,5 +290,70 @@ def render_doc_answer(client, question, chunks, history=None):
                        format_history(history) if history else "")
               .replace("{{question}}", question))
     # max_tokens=2048：同 render_product_answer 的推理版预算坑。
+    return client.chat([{"role": "user", "content": prompt}],
+                       max_tokens=2048, temperature=0.3)
+
+
+_ORDER_PROMPT = """你是订单与物流查询助手，服务对象是公司客服人员。
+
+# 任务
+只根据下面的交易明细回答客服关于具体订单、发货或物流的问题。
+
+# 交易明细
+{{chunks}}
+
+# 回答要求
+1. 只使用交易明细中的信息，不得推测或编造
+2. 信息不足时明确说缺少哪项，不要编造物流状态
+3. 直接给订单号、状态、实付、发货与物流等已有结论，简洁口语化
+4. 末尾标注来源，格式：【引自《交易明细》】
+{{history}}
+
+# 客服的问题
+{{question}}"""
+
+
+def render_order_answer(client, question, chunks, history=None):
+    """WDT 交易块 → 订单答案；失败抛 LlmError，由调用方降摘录。"""
+    blocks = "\n\n".join(
+        f"【{chunk.get('doc_title') or '交易明细'}】{chunk.get('content') or ''}"
+        for chunk in chunks
+    )
+    prompt = (_ORDER_PROMPT
+              .replace("{{chunks}}", blocks)
+              .replace("{{history}}",
+                       format_history(history) if history else "")
+              .replace("{{question}}", question))
+    return client.chat([{"role": "user", "content": prompt}],
+                       max_tokens=2048, temperature=0.3)
+
+
+_MULTI_PROMPT = """你是公司客服助手。下面是同一复合问题各分支已经查到的分段答案。
+
+# 分段答案
+{{sections}}
+
+# 合成要求
+1. 保留每个分段的结论与来源，不得补充分段里没有的信息
+2. 用【商品】【订单】【号码】【业务数据】【手册】等短标题分段，直接可读
+3. 某分段写明未查到就如实保留，不要用其他分段的内容填补
+4. 不要提及并行、分支、工具或系统过程
+{{history}}
+
+# 原始问题
+{{question}}"""
+
+
+def render_multi_answer(client, question, sections, history=None):
+    """复合问答分段 → 自然合并；失败抛 LlmError，由调用方直接拼接。"""
+    blocks = "\n\n".join(
+        f"【{section.get('title') or '结果'}】{section.get('content') or ''}"
+        for section in sections
+    )
+    prompt = (_MULTI_PROMPT
+              .replace("{{sections}}", blocks)
+              .replace("{{history}}",
+                       format_history(history) if history else "")
+              .replace("{{question}}", question))
     return client.chat([{"role": "user", "content": prompt}],
                        max_tokens=2048, temperature=0.3)

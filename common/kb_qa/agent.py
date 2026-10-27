@@ -41,10 +41,12 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
 4. 各渠道销售额汇总对比 → channel_sales
 5. 商品库统计（总数、按品牌/大类分布）→ product_stats
-6. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup
-7. 上述工具答不了的业务数据问题（订单/出库/退款/库存/人员目标等）→
-   query_sql 写一条 SELECT（只能用白名单表，大表必须带日期过滤，
-   结果超 100 行用 GROUP BY 聚合）
+6. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup；
+   结果 requires_clarification=true 时列出候选请用户选择，不得猜属主
+7. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
+   与 fact_stockout_line（trade_no/logistics_no），不要只做聚合；其他业务
+   数据问题（出库/退款/库存/人员目标等）也走 query_sql（只用白名单表，
+   大表必须带日期过滤，结果超 100 行用 GROUP BY 聚合）
 8. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
@@ -198,13 +200,17 @@ _SQL_TABLES = {
         " MAX(business_date) 锚点会落在未来的空行上（2026-10-21 实测"
         " 裸 MAX=10-31 而真实最新=10-20）**",
     "fact_order_line":
-        "订单行（约10万行，必须带 trade_time 日期过滤）：trade_time 下单时间,"
-        " shop_name 店铺, channel_name 渠道, goods_name 商品, brand_name 品牌,"
-        " quantity 数量, paid_amount 实付(元), trade_status 状态",
+        "订单行（约10万行，必须带 trade_time 日期过滤；按单号精确查询时用"
+        " trade_no=%s 并保留合理日期范围）：trade_no 交易单号, trade_time 下单"
+        "时间, buyer_nick 买家, shop_name 店铺, channel_name 渠道, goods_name"
+        " 商品, brand_name 品牌, quantity 数量, paid_amount 实付(元),"
+        " trade_status 状态",
     "fact_stockout_line":
-        "出库行（约10万行，必须带 consign_time 日期过滤）：consign_time 发货"
-        "时间, warehouse_name 仓, shop_name 店铺, channel_name 渠道,"
-        " goods_name 商品, quantity 数量, sell_price 售价(元)",
+        "出库行（约10万行，必须带 consign_time 日期过滤；可按 trade_no 或"
+        " logistics_no 精确查询）：trade_no 交易单号, logistics_no 物流单号,"
+        " logistics_name 物流公司, consign_time 发货时间, warehouse_name 仓,"
+        " shop_name 店铺, channel_name 渠道, goods_name 商品, quantity 数量,"
+        " sell_price 售价(元)",
     "fact_refund_line":
         "退款行：check_time 审核时间, process_status 状态, shop_name 店铺,"
         " channel_name 渠道, reason 退款原因, goods_name 商品, quantity 数量,"
@@ -355,6 +361,9 @@ class ToolExecutor:
         #: phone_lookup 命中后记录持卡人姓名（out-param：装配层据此把群
         #: 回复 @ 到持卡人，2026-10-26 用户裁决「小易要 @ 对应的人」）。
         self.phone_holders = []
+        self.phone_candidates = []
+        self.phone_query = ""
+        self.phone_not_found = False
 
     # ------------------------------------------------------------------
     def execute(self, name, arguments):
@@ -443,16 +452,39 @@ class ToolExecutor:
         from common.public_data.phone_registry import search_registry
 
         keyword = str(args.get("keyword") or "").strip()
+        self.phone_query = keyword
+        self.phone_candidates = []
+        self.phone_holders = []
+        self.phone_not_found = False
         if not keyword:
             return {"error": "keyword required"}
         result = search_registry(self._conn, keyword)
         if not result["phones"] and not result["bindings"]:
+            self.phone_not_found = True
             return {"found": False, "keyword": keyword,
                     "hint": "台账无匹配。请对方到 ops-web 号码台账页核实/补登记"}
-        # 记录持卡人（out-param）：装配层据此把群回复 @ 到持卡人。
-        holders = {row.get("actual_user") for row in result["phones"]}
-        holders |= {row.get("actual_user") for row in result["bindings"]}
-        self.phone_holders = sorted(h for h in holders if h)
+        # 优先按号码主体判断属主；绑定只用于补充账号，避免把同号下其他
+        # 账号的持卡人全部 @ 出来。多个不同属主必须先 clarify，不猜也不 @。
+        owner_rows = result["phones"] or result["bindings"]
+        owners = {row.get("actual_user") or "" for row in owner_rows}
+        ambiguous = len(owner_rows) > 1 and (len(owners) > 1 or owners == {""})
+        if ambiguous:
+            self.phone_candidates = [
+                {
+                    "kind": "phone",
+                    "record_id": row.get("phone_no") or "",
+                    "code": row.get("phone_no") or "",
+                    "name": row.get("actual_user") or row.get("phone_no") or "",
+                    "phone_no": row.get("phone_no") or "",
+                    "actual_user": row.get("actual_user") or "",
+                    "phone_type": row.get("phone_type") or "",
+                    "physical_device": row.get("physical_device") or "",
+                    "status": row.get("status") or "",
+                }
+                for row in owner_rows
+            ]
+        else:
+            self.phone_holders = sorted(h for h in owners if h)
         # 结果自压缩：一人多卡（实测 5 卡 10+ 绑定）会超 execute() 的
         # 2000 字截断把 JSON 从中间切断——号码只留关键字段、绑定限量，
         # 保证整体在截断线内是合法 JSON。
@@ -472,6 +504,9 @@ class ToolExecutor:
         }
         if len(result["bindings"]) > len(bindings):
             payload["bindings_more"] = len(result["bindings"]) - len(bindings)
+        if self.phone_candidates:
+            payload["requires_clarification"] = True
+            payload["hint"] = "命中多个不同持卡人，必须先让用户按序号确认，不能猜"
         return payload
 
     def _tool_daily_sales(self, args):
@@ -616,6 +651,32 @@ class ToolExecutor:
         return self._channels
 
 
+def _sync_phone_meta(executor, meta):
+    """工具执行后立即透出号码状态，覆盖群与 Web 两条 agent 调用链。"""
+    if meta is None or not hasattr(executor, "phone_candidates"):
+        return
+    candidates = executor.phone_candidates or []
+    holders = executor.phone_holders or []
+    if candidates:
+        meta["phone_candidates"] = list(candidates)
+    else:
+        # 同一 agent loop 可能连续查多个号码，旧候选不能污染后一次查询。
+        meta.pop("phone_candidates", None)
+    if holders and not candidates:
+        meta["phone_holders"] = list(holders)
+    else:
+        meta.pop("phone_holders", None)
+    query = executor.phone_query
+    if query:
+        meta["phone_query"] = query
+    else:
+        meta.pop("phone_query", None)
+    if executor.phone_not_found:
+        meta["phone_not_found"] = True
+    else:
+        meta.pop("phone_not_found", None)
+
+
 def run_agent(llm, question, *, executor, history=None,
               max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None, meta=None,
               tools=None):
@@ -688,6 +749,7 @@ def run_agent(llm, question, *, executor, history=None,
             except Exception:
                 result = json.dumps({"error": "tool execution failed"},
                                     ensure_ascii=False)
+            _sync_phone_meta(executor, meta)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_info.get("id") or "",

@@ -13,6 +13,9 @@ from common.rag import embed
 #: 每次召回条数（与 BM25 k=3 合并去重后截断，见 app._merge_doc_hits）。
 VECTOR_K = 3
 
+#: 文本向量命中下限（COSINE），低于此值的切片不进入答案上下文。
+MIN_TEXT_SCORE = 0.5
+
 
 def from_environment(environ=None):
     """env 齐备返回 search callable，缺失返回 None（纯 BM25 运行）。
@@ -48,14 +51,14 @@ def search_vector(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
     from common.rag import store
 
     milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
-    model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
-             or embed.default_model(provider))
-    dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
-    vector = embed.embed_text(
-        question, api_key, model=model,
-        dimensions=int(dim_text) if dim_text else None,
-        provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
     try:
+        model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
+                 or embed.default_model(provider))
+        dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
+        vector = embed.embed_text(
+            question, api_key, model=model,
+            dimensions=int(dim_text) if dim_text else None,
+            provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
         hits = store.search(milvus, vector, limit=limit, kind="text")
     finally:
         # Milvus Lite 的 LOCK 是排他 flock：kb-gateway 与 scheduler（灌库）
@@ -73,7 +76,62 @@ def search_vector(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
             "score": hit.get("score"),
         }
         for hit in hits
+        if (hit.get("score") or 0) >= MIN_TEXT_SCORE
     ]
+
+
+def search_wdt(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
+               environ=None, limit=VECTOR_K):
+    """订单问题 → kind="wdt" 交易明细块；低分命中与手册文本同样过滤。"""
+    values = os.environ if environ is None else environ
+    from common.rag import store
+
+    milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
+    try:
+        model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
+                 or embed.default_model(provider))
+        dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
+        vector = embed.embed_text(
+            question, api_key, model=model,
+            dimensions=int(dim_text) if dim_text else None,
+            provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
+        hits = store.search(milvus, vector, limit=limit, kind="wdt")
+    finally:
+        try:
+            milvus.close()
+        except Exception:
+            pass
+    return [
+        {
+            "id": hit.get("id") or "",
+            "name": hit.get("name") or "",
+            "doc_title": hit.get("name") or "交易明细",
+            "content": hit.get("text") or "",
+            "score": hit.get("score"),
+        }
+        for hit in hits
+        if (hit.get("score") or 0) >= MIN_TEXT_SCORE
+    ]
+
+
+def wdt_search_from_environment(environ=None):
+    """env 齐备返回 WDT 检索 callable，缺失返回 None（走 agent 兜底）。"""
+    values = os.environ if environ is None else environ
+    provider = values.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
+    api_key = values.get("RAG_EMBED_API_KEY") or values.get("JINA_API_KEY")
+    if not api_key:
+        return None
+    if provider == embed.PROVIDER_OPENAI and not values.get("RAG_EMBED_BASE_URL"):
+        return None
+    if provider not in (embed.PROVIDER_JINA, embed.PROVIDER_OPENAI,
+                        embed.PROVIDER_CTAIGW):
+        return None
+
+    def _search(question):
+        return search_wdt(question, provider=provider, api_key=api_key,
+                          environ=values)
+
+    return _search
 
 
 #: 文字搜图命中下限（COSINE）。2026-10-21 实测「习酒 包装 礼盒」真实
@@ -96,14 +154,14 @@ def search_images(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
     from common.rag import store
 
     milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
-    model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
-             or embed.default_model(provider))
-    dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
-    vector = embed.embed_text(
-        question, api_key, model=model,
-        dimensions=int(dim_text) if dim_text else None,
-        provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
     try:
+        model = (values.get("RAG_EMBED_MODEL") or values.get("JINA_CLIP_MODEL")
+                 or embed.default_model(provider))
+        dim_text = values.get("RAG_EMBED_DIM") or values.get("JINA_CLIP_DIM")
+        vector = embed.embed_text(
+            question, api_key, model=model,
+            dimensions=int(dim_text) if dim_text else None,
+            provider=provider, base_url=values.get("RAG_EMBED_BASE_URL"))
         hits = store.search(milvus, vector, limit=limit, kind="image")
     finally:
         # 与 search_vector 同款：排他 flock 即用即放（防与凌晨灌库冲突）。

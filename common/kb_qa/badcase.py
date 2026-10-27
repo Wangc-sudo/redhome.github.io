@@ -15,11 +15,16 @@ import argparse
 from collections import Counter
 
 from common.kb_qa.products import HELP_TEXT
+from common.kb_qa.router import classify
 
 #: 未命中分类：answer_excerpt 前缀 → 类别。顺序即优先级。
 _MISS_PREFIXES = (
     ("product_miss", "知识库里暂时没有找到"),
     ("doc_fallback", "产品手册问答还在接入中"),
+    ("sales_fallback", "业务数据查询暂时不可用"),
+    ("phone_fallback", "号码台账查询暂时不可用"),
+    ("phone_miss", "号码台账里没有查到匹配记录"),
+    ("order_miss", "暂时没查到这笔订单"),
     ("unmatched_help", HELP_TEXT[:12]),
 )
 
@@ -28,6 +33,10 @@ CATEGORY_LABELS = {
     "failed": "处理失败",
     "product_miss": "商品未找到",
     "doc_fallback": "手册无召回",
+    "sales_fallback": "业务数据不可用",
+    "phone_fallback": "号码台账不可用",
+    "phone_miss": "号码未找到",
+    "order_miss": "订单未找到",
     "unmatched_help": "规则未命中(回 HELP)",
 }
 
@@ -75,6 +84,8 @@ def collect_badcases(conn, days=7):
         cursor.close()
 
     intents = Counter()
+    confidence = Counter()
+    multi_intents = Counter()
     tools = Counter()
     recall_sources = Counter()
     latencies = []
@@ -87,7 +98,14 @@ def collect_badcases(conn, days=7):
     token_rows = 0
 
     for row in rows:
-        intents[row.get("intent") or "(未回填)"] += 1
+        intent = row.get("intent") or "(未回填)"
+        intents[intent] += 1
+        confidence[f"{classify(row.get('question')).confidence:.1f}"] += 1
+        recall_source = row.get("recall_source") or ""
+        if intent == "multi":
+            combination = (recall_source.split(":", 1)[1]
+                           if recall_source.startswith("multi:") else "(未标注)")
+            multi_intents[combination or "(未标注)"] += 1
         if row.get("reply_kind") == "text":
             answered += 1
         # token 成本统计（2026-10-22 v3 列；NULL=无 LLM 调用或旧行）
@@ -120,6 +138,8 @@ def collect_badcases(conn, days=7):
         "answered": answered,
         "failed": len(failed_rows),
         "intents": intents,
+        "confidence": confidence,
+        "multi_intents": multi_intents,
         "tools": tools,
         "recall_sources": recall_sources,
         "latency_avg": (sum(latencies) // size) if size else None,
@@ -166,6 +186,15 @@ def render_markdown(report):
         dist = "、".join(f"{name} {count}"
                          for name, count in report["intents"].most_common())
         lines.append(f"- 意图分布：{dist}")
+    if report["confidence"]:
+        dist = "、".join(f"{name} {count}"
+                         for name, count in sorted(report["confidence"].items(),
+                                                   reverse=True))
+        lines.append(f"- 置信度分布：{dist}")
+    if report["multi_intents"]:
+        dist = "、".join(f"{name} {count}"
+                         for name, count in report["multi_intents"].most_common())
+        lines.append(f"- 复合问答：{dist}")
     if report["recall_sources"]:
         dist = "、".join(
             f"{name} {count}"

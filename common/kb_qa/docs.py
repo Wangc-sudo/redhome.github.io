@@ -26,15 +26,16 @@ def _load(conn):
 
 
 def _index_for(conn, *, now=None):
+    global _cache
     now = time.time() if now is None else now
-    if now - _cache["loaded_at"] > _CACHE_TTL_SECONDS:
+    cache = _cache
+    if now - cache["loaded_at"] > _CACHE_TTL_SECONDS:
         chunks = _load(conn)
-        _cache["chunks"] = chunks
-        _cache["index"] = (
-            Bm25Index([chunk["content"] for chunk in chunks]) if chunks else None
-        )
-        _cache["loaded_at"] = now
-    return _cache["chunks"], _cache["index"]
+        index = Bm25Index([chunk["content"] for chunk in chunks]) if chunks else None
+        # 整块替换，读者只会看到旧缓存或新缓存，不会看到 chunks/index 错配。
+        cache = {"loaded_at": now, "chunks": chunks, "index": index}
+        _cache = cache
+    return cache["chunks"], cache["index"]
 
 
 def search_docs(conn, query, *, k=3, now=None):
@@ -47,6 +48,5 @@ def search_docs(conn, query, *, k=3, now=None):
 
 def reset_cache():
     """测试/重导后强制失效。"""
-    _cache["loaded_at"] = 0.0
-    _cache["chunks"] = []
-    _cache["index"] = None
+    global _cache
+    _cache = {"loaded_at": 0.0, "chunks": [], "index": None}

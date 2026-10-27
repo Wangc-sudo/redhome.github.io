@@ -5,6 +5,7 @@ import asyncio
 import io
 import json
 import sys
+import threading
 import time
 import types
 import unittest
@@ -20,9 +21,11 @@ from common.kb_qa import agent as agent_module
 from common.kb_qa import assets as assets_module
 from common.kb_qa import context as ctx_module
 from common.kb_qa import rag_docs, sync_wiki
+from common.kb_qa import router as router_module
 from common.kb_qa.app import (
     KbStreamHandler,
     _merge_doc_hits,
+    _multi_plan,
     _parse_choice,
     _parse_correction,
     callback_message_id,
@@ -39,12 +42,14 @@ from common.kb_qa.products import (
 from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
+    ORDER_QUERY,
     PHONE_LOOKUP,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
     SALES_QUERY,
     classify,
+    classify_all,
     extract_keyword,
 )
 from common.kb_qa.sync_products import normalize_record, upsert_products
@@ -188,6 +193,35 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(
             "习酒窖藏1998 验收", extract_keyword("「习酒窖藏1998 箱规」验收")
         )
+
+    def test_rule_table_priority_and_confidence(self):
+        priorities = [rule.priority for rule in router_module._RULES]
+        self.assertEqual(sorted(priorities), priorities)
+        categories = {rule.category for rule in router_module._RULES} | {CHITCHAT}
+        self.assertEqual(8, len(categories))
+        self.assertEqual(1.0, classify("订单JY202501010120").confidence)
+        self.assertEqual(0.8, classify("习酒箱规").confidence)
+        self.assertEqual(0.3, classify("习酒").confidence)
+
+    def test_order_query_words_and_number_pattern(self):
+        for text in ("这单实付多少", "这个快递到哪了", "JY202501010120",
+                     "SF3138605335446 签收了吗"):
+            with self.subTest(text=text):
+                self.assertEqual(ORDER_QUERY, classify(text).category)
+
+    def test_phone_lookup_colloquial_words(self):
+        for text in ("这个号谁的", "手机是谁的", "验证码找谁", "哪台手机",
+                     "登录账号找谁", "平台账号谁管", "店铺账号谁在用"):
+            with self.subTest(text=text):
+                self.assertEqual(PHONE_LOOKUP, classify(text).category)
+
+    def test_classify_all_uses_rule_priority(self):
+        intents = classify_all("手机是谁的，订单JY202501010120发货没")
+        self.assertEqual([PHONE_LOOKUP, ORDER_QUERY],
+                         [intent.category for intent in intents])
+
+    def test_keyword_preserves_noise_substring_inside_product_name(self):
+        self.assertEqual("爱看酒", extract_keyword("请问爱看酒的箱规多少"))
 
 
 class ProductQueryTests(unittest.TestCase):
@@ -410,7 +444,7 @@ class HandlerAnswerTests(unittest.TestCase):
             handler._connection_factory(), "你好"
         )
         self.assertEqual(CHITCHAT, intent2)
-        self.assertIn("产品资料助手", reply2)
+        self.assertIn("我是小易", reply2)
 
     def test_asset_lists_attachments(self):
         row = _product_row(attachments={"细节图": [{"name": "a.jpg"}]})
@@ -522,6 +556,18 @@ class ProcessEndToEndTests(unittest.TestCase):
         # 只有占位插入，无后续查询
         self.assertEqual(1, len(conn.cursor_instance.executed))
 
+    def test_process_moves_blocking_work_off_event_loop(self):
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None)
+        handler._process_blocking = mock.Mock()
+        callback = _FakeCallback("m-async", "你好")
+        with mock.patch("common.kb_qa.app.asyncio.to_thread",
+                        new_callable=mock.AsyncMock) as to_thread:
+            to_thread.return_value = (AckMessage.STATUS_OK, "OK")
+            result = asyncio.run(handler.process(callback))
+        self.assertEqual((AckMessage.STATUS_OK, "OK"), result)
+        to_thread.assert_awaited_once_with(handler._process_blocking, callback)
+
 
 class _FakeReplyClient:
     def __init__(self, fail=False):
@@ -552,7 +598,7 @@ class ReplyChannelTests(unittest.TestCase):
         )
         handler._safe_reply(_FakeIncoming(), "答案")
         self.assertEqual(
-            [("robot1", "cidX==", "产品资料助手", "答案", ["u1"])],
+            [("robot1", "cidX==", "小易", "答案", ["u1"])],
             client.calls,
         )
         self.assertIn("reply sent", " ".join(logs))
@@ -707,6 +753,27 @@ class DocSearchTests(unittest.TestCase):
         docs.search_docs(conn, "c", now=2000.0)     # TTL 过期：重载
         self.assertEqual(2, len(conn.cursor_instance.executed))
 
+    def test_cache_rebuild_swaps_chunks_and_index_atomically(self):
+        old_chunks = [self._chunk("old", "旧手册", "旧内容")]
+        old_cache = {"loaded_at": 0.0, "chunks": old_chunks, "index": "old"}
+        docs._cache = old_cache
+        new_chunks = [self._chunk("new", "新手册", "新内容")]
+        observed = []
+
+        def build_index(_contents):
+            # 构造新索引期间，读者看到的仍是完整的旧快照。
+            observed.append(docs._cache)
+            return "new-index"
+
+        with mock.patch.object(docs, "_load", return_value=new_chunks), \
+             mock.patch.object(docs, "Bm25Index", side_effect=build_index):
+            chunks, index = docs._index_for(_FakeConn(), now=1000.0)
+        self.assertEqual([old_cache], observed)
+        self.assertIs(new_chunks, chunks)
+        self.assertEqual("new-index", index)
+        self.assertIs(new_chunks, docs._cache["chunks"])
+        self.assertEqual("new-index", docs._cache["index"])
+
 
 class ChunkTextTests(unittest.TestCase):
     """手册正文按字切片：固定窗口 + 重叠，末窗保留。"""
@@ -860,6 +927,27 @@ class LlmCallPointTests(unittest.TestCase):
             "答案", llm_module.render_doc_answer(client, "问题", chunks)
         )
         self.assertIn("习酒产品手册", prompts[0])
+
+    def test_order_and_multi_render_use_reasoning_token_budget(self):
+        client = mock.Mock()
+        client.chat.return_value = "答案"
+        chunks = [{"doc_title": "交易明细", "content": "订单 JY001 已发货"}]
+        sections = [{"title": "商品", "content": "箱规 6"},
+                    {"title": "订单", "content": "已发货"}]
+        self.assertEqual("答案", llm_module.render_order_answer(
+            client, "发货没", chunks))
+        self.assertEqual("答案", llm_module.render_multi_answer(
+            client, "复合问题", sections))
+        for call in client.chat.call_args_list:
+            self.assertEqual(2048, call.kwargs["max_tokens"])
+        self.assertIn("订单 JY001 已发货",
+                      client.chat.call_args_list[0].args[0][0]["content"])
+        self.assertIn("【商品】箱规 6",
+                      client.chat.call_args_list[1].args[0][0]["content"])
+
+    def test_query_prompt_covers_new_routing_categories(self):
+        for category in ("PHONE_LOOKUP", "SALES_QUERY", "ORDER_QUERY"):
+            self.assertIn(category, llm_module._QUERY_PROMPT)
 
 
 class _ScriptedLlm:
@@ -1108,6 +1196,59 @@ class VectorRecallTests(unittest.TestCase):
                     environ={"RAG_EMBED_PROVIDER": "ctaigw",
                              "RAG_EMBED_API_KEY": "k"})
         milvus.close.assert_called_once()
+
+    def test_search_vector_filters_low_text_scores(self):
+        milvus = mock.Mock()
+        hits = [
+            {"id": "doc:a:0000", "score": 0.49, "name": "低分", "text": "噪声"},
+            {"id": "doc:a:0001", "score": 0.5, "name": "阈值", "text": "保留"},
+            {"id": "doc:a:0002", "score": 0.8, "name": "高分", "text": "答案"},
+        ]
+        with self._fake_store(milvus, hits=hits), \
+             mock.patch.object(rag_docs.embed, "embed_text", return_value=[0.1]):
+            result = rag_docs.search_vector(
+                "q", api_key="k", environ={"RAG_EMBED_PROVIDER": "ctaigw"})
+            fake_store = sys.modules["common.rag.store"]
+        self.assertEqual(["阈值", "高分"], [hit["doc_title"] for hit in result])
+        self.assertEqual("text", fake_store.search.call_args.kwargs["kind"])
+        milvus.close.assert_called_once()
+
+    def test_search_wdt_filters_scores_returns_chunks_and_closes(self):
+        milvus = mock.Mock()
+        hits = [
+            {"id": "wdt:1", "score": 0.9, "name": "2025-01",
+             "text": "订单 JY001 已发货"},
+            {"id": "wdt:2", "score": 0.2, "name": "低分", "text": "噪声"},
+        ]
+        with self._fake_store(milvus, hits=hits), \
+             mock.patch.object(rag_docs.embed, "embed_text", return_value=[0.1]):
+            result = rag_docs.search_wdt(
+                "订单JY001", api_key="k", environ={"RAG_EMBED_PROVIDER": "ctaigw"})
+            fake_store = sys.modules["common.rag.store"]
+        self.assertEqual("wdt", fake_store.search.call_args.kwargs["kind"])
+        self.assertEqual(1, len(result))
+        self.assertEqual("订单 JY001 已发货", result[0]["content"])
+        self.assertEqual("2025-01", result[0]["doc_title"])
+        self.assertEqual("wdt:1", result[0]["id"])
+        milvus.close.assert_called_once()
+
+    def test_wdt_search_from_environment(self):
+        self.assertIsNone(rag_docs.wdt_search_from_environment({}))
+        search = rag_docs.wdt_search_from_environment(
+            {"RAG_EMBED_PROVIDER": "ctaigw", "RAG_EMBED_API_KEY": "k"})
+        self.assertTrue(callable(search))
+
+    def test_all_recall_paths_close_when_embedding_raises(self):
+        for search in (rag_docs.search_vector, rag_docs.search_wdt,
+                       rag_docs.search_images):
+            with self.subTest(search=search.__name__):
+                milvus = mock.Mock()
+                with self._fake_store(milvus), \
+                     mock.patch.object(rag_docs.embed, "embed_text",
+                                       side_effect=RuntimeError("embed down")):
+                    with self.assertRaises(RuntimeError):
+                        search("q", api_key="k", environ={})
+                milvus.close.assert_called_once()
 
     def test_answer_failure_logs_exception_type(self):
         # 2026-10-21 时段性故障无类型信息无法回溯：except 必须记类型
@@ -1829,8 +1970,8 @@ class AgentToolExecutorTests(unittest.TestCase):
         self.assertNotIn("dept", result["phones"][0])
 
     def test_phone_lookup_records_holders_for_at(self):
-        # 命中后持卡人记入 executor.phone_holders（装配层透出 meta → 群回复
-        # @ 持卡人，2026-10-26 用户裁决）；phones/bindings 人名并集去重
+        # 只按号码主体记录实际持卡人（装配层透出 meta → 群回复 @ 持卡人）；
+        # 同号绑定账号的其他持卡人不能被一并 @。
         executor = self._executor([
             [{"phone_no": "13312345690", "actual_user": "张三"}],
             [{"phone_no": "13312345690", "channel_category": "快手",
@@ -1839,11 +1980,52 @@ class AgentToolExecutorTests(unittest.TestCase):
               "platform_account": "致中和", "actual_user": "李四"}],
         ])
         executor.execute("phone_lookup", {"keyword": "5690"})
-        self.assertEqual(["张三", "李四"], executor.phone_holders)
+        self.assertEqual(["张三"], executor.phone_holders)
         # miss 时不记（不 @ 空气）
         executor2 = self._executor([[], []])
         executor2.execute("phone_lookup", {"keyword": "0000"})
         self.assertEqual([], executor2.phone_holders)
+
+    def test_phone_lookup_multiple_owners_requires_clarification(self):
+        executor = self._executor([
+            [{"phone_no": "13312345579", "actual_user": "张三",
+              "phone_type": "主卡", "status": "正常",
+              "physical_device": "红色手机"},
+             {"phone_no": "13312345580", "actual_user": "李四",
+              "phone_type": "副卡", "status": "停机"}],
+            [],
+        ])
+        result = json.loads(executor.execute(
+            "phone_lookup", {"keyword": "5579"}))
+        self.assertTrue(result["requires_clarification"])
+        self.assertEqual(2, len(executor.phone_candidates))
+        self.assertEqual("phone", executor.phone_candidates[0]["kind"])
+        self.assertEqual("红色手机",
+                         executor.phone_candidates[0]["physical_device"])
+        self.assertEqual([], executor.phone_holders)
+
+    def test_phone_meta_does_not_retain_previous_lookup_state(self):
+        executor = self._executor([
+            [{"phone_no": "13300005579", "actual_user": "张三"},
+             {"phone_no": "13300005580", "actual_user": "李四"}], [],
+            [], [],
+            [{"phone_no": "13300001111", "actual_user": "王五"}], [],
+        ])
+        meta = {}
+        executor.execute("phone_lookup", {"keyword": "5579"})
+        agent_module._sync_phone_meta(executor, meta)
+        self.assertEqual(2, len(meta["phone_candidates"]))
+
+        executor.execute("phone_lookup", {"keyword": "0000"})
+        agent_module._sync_phone_meta(executor, meta)
+        self.assertNotIn("phone_candidates", meta)
+        self.assertNotIn("phone_holders", meta)
+        self.assertTrue(meta["phone_not_found"])
+
+        executor.execute("phone_lookup", {"keyword": "1111"})
+        agent_module._sync_phone_meta(executor, meta)
+        self.assertNotIn("phone_not_found", meta)
+        self.assertEqual(["王五"], meta["phone_holders"])
 
     def test_phone_lookup_registered_and_not_narrowed(self):
         # 工具注册 + 系统提示词提及；全员开放（同 product_stats），
@@ -2162,6 +2344,49 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         self.assertEqual(PHONE_LOOKUP, intent)
         self.assertIn("号码台账", reply)
 
+    def test_phone_multiple_owners_clarify_without_guessing(self):
+        seen_meta = []
+
+        def runner(conn, text, history, meta=None):
+            meta["phone_query"] = "5579"
+            meta["phone_candidates"] = [
+                {"phone_no": "13300005579", "actual_user": "张三",
+                 "phone_type": "主卡", "status": "正常",
+                 "physical_device": "红色手机"},
+                {"phone_no": "13300005580", "actual_user": "李四",
+                 "phone_type": "副卡", "status": "停机"},
+            ]
+            meta["phone_holders"] = ["不应保留"]
+            seen_meta.append(meta)
+            return "这段自然语言不能绕过 clarify"
+
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            agent_runner=runner)
+        reply, intent, matched = handler._answer(_FakeConn(), "5579")
+        self.assertEqual(PHONE_LOOKUP, intent)
+        self.assertIsNone(matched)
+        self.assertIn("有 2 条号码记录", reply)
+        self.assertIn("红色手机", reply)
+        self.assertNotIn("不能绕过", reply)
+        self.assertEqual("phone", seen_meta[0]["pending_candidates"][0]["kind"])
+        self.assertNotIn("phone_holders", seen_meta[0])
+
+    def test_phone_not_found_includes_registry_link(self):
+        def runner(conn, text, history, meta=None):
+            meta["phone_not_found"] = True
+            return None
+
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            agent_runner=runner)
+        with mock.patch.dict("os.environ",
+                             {"OPS_WEB_BASE_URL": "https://ops.example/"}):
+            reply, intent, _ = handler._answer(_FakeConn(), "尾号0000谁在用")
+        self.assertEqual(PHONE_LOOKUP, intent)
+        self.assertIn("没有查到", reply)
+        self.assertIn("https://ops.example/phones", reply)
+
     def test_phone_lookup_answer_ats_holder_in_group(self):
         """群回复真实 @ 持卡人（2026-10-26 用户裁决「小易要 @ 对应的人要
         验证码」）：agent 命中 phone_lookup → meta phone_holders → 姓名解析
@@ -2207,6 +2432,244 @@ class AgentAnswerRoutingTests(unittest.TestCase):
             agent_runner=lambda conn, text, history, meta=None: None)
         reply, intent, _ = handler._answer(conn, "嗯")
         self.assertEqual(CHITCHAT, intent)
+
+
+class OrderAnswerTests(unittest.TestCase):
+    QUESTION = "订单JY202501010120发货没"
+
+    def _handler(self, *, wdt_search=None, agent_runner=None, logs=None):
+        conn = _FakeConn()
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn,
+            log=(logs if logs is not None else []).append,
+            wdt_search=wdt_search, agent_runner=agent_runner)
+        return handler, conn
+
+    def test_wdt_hit_answers_before_agent(self):
+        agent = mock.Mock()
+        handler, conn = self._handler(
+            wdt_search=lambda q: [{"doc_title": "交易明细",
+                                   "content": "JY202501010120 已发货，顺丰 SF001"}],
+            agent_runner=agent)
+        meta = {}
+        reply, intent, _ = handler._answer(conn, self.QUESTION, meta=meta)
+        self.assertEqual(ORDER_QUERY, intent)
+        self.assertIn("已发货", reply)
+        self.assertEqual("wdt_vector", meta["recall_source"])
+        agent.assert_not_called()
+
+    def test_wdt_miss_uses_exact_agent_fallback(self):
+        handler, conn = self._handler(
+            wdt_search=lambda q: [],
+            agent_runner=lambda conn, text, history, meta=None: "SQL 精确查到已签收")
+        meta = {}
+        reply, intent, _ = handler._answer(conn, self.QUESTION, meta=meta)
+        self.assertEqual("agent", intent)
+        self.assertIn("已签收", reply)
+        self.assertEqual("agent", meta["recall_source"])
+
+    def test_wdt_and_agent_both_miss_return_order_fallback(self):
+        handler, conn = self._handler(
+            wdt_search=lambda q: [],
+            agent_runner=lambda conn, text, history, meta=None: None)
+        reply, intent, _ = handler._answer(conn, self.QUESTION)
+        self.assertEqual(ORDER_QUERY, intent)
+        self.assertIn("暂时没查到这笔订单", reply)
+
+    def test_wdt_failure_fails_open_to_agent(self):
+        logs = []
+
+        def broken(_question):
+            raise RuntimeError("milvus down")
+
+        handler, conn = self._handler(
+            wdt_search=broken,
+            agent_runner=lambda conn, text, history, meta=None: "SQL 兜底答案",
+            logs=logs)
+        reply, intent, _ = handler._answer(conn, self.QUESTION)
+        self.assertEqual("agent", intent)
+        self.assertEqual("SQL 兜底答案", reply)
+        self.assertIn("kb qa: wdt recall failed", logs)
+
+
+class MultiIntentTests(unittest.TestCase):
+    def test_plan_assigns_clauses_to_independent_intents(self):
+        plan, truncated = _multi_plan(
+            "习酒1988箱规多少，订单JY202501010120发货没")
+        self.assertFalse(truncated)
+        self.assertEqual([PRODUCT_PARAM, ORDER_QUERY],
+                         [intent.category for _, intent in plan])
+        self.assertIn("箱规", plan[0][0])
+        self.assertIn("订单", plan[1][0])
+
+    def test_weak_triggers_do_not_create_false_multi_questions(self):
+        for text in ("发我吴昱洁的手机号", "箱规是什么", "订单销售额"):
+            with self.subTest(text=text):
+                self.assertEqual(([], False), _multi_plan(text))
+
+    def test_more_than_two_intents_selects_two_and_marks_truncated(self):
+        plan, truncated = _multi_plan(
+            "尾号5579谁在用，订单JY202501010120发货没，习酒1988箱规多少")
+        self.assertTrue(truncated)
+        self.assertEqual(2, len(plan))
+        self.assertEqual([PHONE_LOOKUP, ORDER_QUERY],
+                         [intent.category for _, intent in plan])
+
+    def test_answer_multi_runs_concurrently_with_independent_connections(self):
+        connections = []
+
+        def factory():
+            conn = mock.Mock()
+            connections.append(conn)
+            return conn
+
+        handler = KbStreamHandler(connection_factory=factory, log=lambda _: None)
+        barrier = threading.Barrier(2)
+        parallel_errors = []
+
+        def answer(conn, clause, **kwargs):
+            intent = kwargs["_forced_intent"]
+            try:
+                barrier.wait(timeout=2)
+            except Exception as exc:
+                parallel_errors.append(exc)
+            meta = kwargs["meta"]
+            meta["recall_source"] = ("wdt_vector"
+                                     if intent.category == ORDER_QUERY else "products")
+            return f"{intent.category}答案", intent.category, None
+
+        handler._answer = answer
+        plan = [
+            ("习酒1988箱规", router_module.Intent(PRODUCT_PARAM, "习酒1988", "测试")),
+            ("订单JY202501010120", router_module.Intent(ORDER_QUERY, "JY202501010120", "测试")),
+        ]
+        meta = {}
+        reply, intent, _ = handler._answer_multi(
+            "复合问题", plan, meta=meta, truncated=True)
+        self.assertEqual([], parallel_errors)
+        self.assertEqual("multi", intent)
+        self.assertIn("【商品】", reply)
+        self.assertIn("【订单】", reply)
+        self.assertIn("本次先回答前两类", reply)
+        self.assertEqual("multi:param+wdt", meta["recall_source"])
+        self.assertEqual(2, len(connections))
+        self.assertIsNot(connections[0], connections[1])
+        for conn in connections:
+            conn.close.assert_called_once()
+
+    def test_answer_multi_branch_failure_is_fail_soft(self):
+        handler = KbStreamHandler(
+            connection_factory=mock.Mock, log=lambda _: None)
+
+        def answer(conn, clause, **kwargs):
+            intent = kwargs["_forced_intent"]
+            if intent.category == ORDER_QUERY:
+                raise RuntimeError("order down")
+            return "箱规 6 瓶", intent.category, "r1"
+
+        handler._answer = answer
+        plan = [
+            ("习酒1988箱规", router_module.Intent(PRODUCT_PARAM, "习酒1988", "测试")),
+            ("订单JY202501010120", router_module.Intent(ORDER_QUERY, "JY202501010120", "测试")),
+        ]
+        meta = {}
+        reply, intent, _ = handler._answer_multi("复合问题", plan, meta=meta)
+        self.assertEqual("multi", intent)
+        self.assertIn("箱规 6 瓶", reply)
+        self.assertIn("暂时没查到这笔订单", reply)
+        self.assertEqual("multi:param+none", meta["recall_source"])
+
+    def test_answer_multi_connection_creation_failure_is_fail_soft(self):
+        good_conn = mock.Mock()
+        factory = mock.Mock(side_effect=[RuntimeError("db down"), good_conn])
+        handler = KbStreamHandler(connection_factory=factory, log=lambda _: None)
+        handler._answer = lambda conn, clause, **kwargs: (
+            "branch ok", kwargs["_forced_intent"].category, None)
+        plan = [
+            ("习酒1988箱规", router_module.Intent(PRODUCT_PARAM, "习酒1988", "测试")),
+            ("订单JY202501010120", router_module.Intent(ORDER_QUERY, "JY202501010120", "测试")),
+        ]
+        reply, intent, _ = handler._answer_multi("复合问题", plan)
+        self.assertEqual("multi", intent)
+        self.assertIn("branch ok", reply)
+        good_conn.close.assert_called_once()
+
+
+class IntentReparseTests(unittest.TestCase):
+    def test_product_miss_can_reparse_to_phone(self):
+        llm = _ScriptedLlm(
+            '{"category":"PHONE_LOOKUP","keyword":"5579"}')
+        seen = []
+
+        def runner(conn, text, history, meta=None):
+            seen.append(text)
+            return "尾号 5579 是张三在用"
+
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            llm=llm, agent_runner=runner)
+        with mock.patch("common.kb_qa.app.find_products", return_value=[]):
+            reply, intent, _ = handler._answer(_FakeConn(), "习洒1998箱规")
+        self.assertEqual("agent", intent)
+        self.assertIn("张三", reply)
+        self.assertEqual(["习洒1998箱规"], seen)
+
+    def test_product_miss_can_reparse_to_order(self):
+        llm = _ScriptedLlm(
+            '{"category":"ORDER_QUERY","keyword":"JY202501010120"}',
+            "WDT 显示订单已发货")
+        wdt = mock.Mock(return_value=[{"doc_title": "交易明细",
+                                       "content": "订单已发货"}])
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            llm=llm, wdt_search=wdt)
+        with mock.patch("common.kb_qa.app.find_products", return_value=[]):
+            reply, intent, _ = handler._answer(_FakeConn(), "习洒1998箱规")
+        self.assertEqual(ORDER_QUERY, intent)
+        self.assertEqual("WDT 显示订单已发货", reply)
+        wdt.assert_called_once_with("习洒1998箱规")
+
+    def test_asset_miss_reparses_product_name(self):
+        row = _product_row(attachments={"细节图": [{"name": "a.jpg"}]})
+        llm = _ScriptedLlm(
+            '{"category":"PRODUCT_ASSET","keyword":"习酒窖藏1998"}')
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None, llm=llm)
+        with mock.patch("common.kb_qa.app.find_products",
+                        side_effect=[[], [row]]) as find:
+            reply, intent, matched = handler._answer(
+                _FakeConn(), "习洒1998细节图")
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertEqual("rec1", matched)
+        self.assertIn("细节图：1 个文件", reply)
+        self.assertEqual("习酒窖藏1998", find.call_args_list[1].args[1])
+
+    def test_asset_product_miss_falls_through_reparse_to_image_recall(self):
+        class Sender:
+            def __init__(self):
+                self.refs = None
+
+            def send_image_refs(self, conn, *, refs, conversation_id, robot_code):
+                self.refs = refs
+                return 1
+
+        llm = _ScriptedLlm(
+            '{"category":"PRODUCT_ASSET","keyword":"习洒1998"}')
+        sender = Sender()
+        handler = KbStreamHandler(
+            connection_factory=lambda: _FakeConn(), log=lambda _: None,
+            llm=llm, image_search=lambda q: [
+                {"score": 0.8, "name": "习酒窖藏1998",
+                 "image_ref": "r1/细节图/0"}],
+            asset_sender=sender, robot_code="robot")
+        meta = {}
+        with mock.patch("common.kb_qa.app.find_products", return_value=[]):
+            reply, intent, _ = handler._answer(
+                _FakeConn(), "习洒1998包装图片", conversation_id="cid", meta=meta)
+        self.assertEqual(PRODUCT_ASSET, intent)
+        self.assertIn("习酒窖藏1998", reply)
+        self.assertEqual([("r1", "细节图", 0)], sender.refs)
+        self.assertEqual("image_vector", meta["recall_source"])
 
 
 class PickAssetTests(unittest.TestCase):
@@ -2744,6 +3207,38 @@ class ClarifyPendingTests(unittest.TestCase):
         self.assertIn("你要问的是哪一个", reply)
         self.assertEqual(2, len(meta["pending_candidates"]))
         self.assertEqual("rec1", meta["pending_candidates"][0]["record_id"])
+        self.assertEqual("product", meta["pending_candidates"][0]["kind"])
+
+    def test_phone_pending_choice_uses_exact_phone_not_product_search(self):
+        pending = [
+            {"kind": "phone", "phone_no": "13300005579", "actual_user": "张三"},
+            {"kind": "phone", "phone_no": "13300005580", "actual_user": "李四",
+             "phone_type": "副卡", "status": "正常",
+             "physical_device": "序号② 黑色手机"},
+        ]
+        registry_result = {
+            "phones": [dict(pending[1], account_name="开户名")],
+            "bindings": [{"phone_no": "13300005580",
+                          "platform_account": "习酒旗舰店"}],
+        }
+        conn = _FakeConn()
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None)
+        meta = {}
+        with mock.patch(
+                "common.public_data.phone_registry.search_registry",
+                return_value=registry_result) as search:
+            reply, intent, matched = handler._answer(
+                conn, "第二个", pending=pending, meta=meta)
+        search.assert_called_once_with(conn, "13300005580")
+        self.assertEqual(PHONE_LOOKUP, intent)
+        self.assertEqual("13300005580", matched)
+        self.assertIn("实际持卡人：李四", reply)
+        self.assertIn("号码类型：副卡", reply)
+        self.assertIn("物理设备：序号② 黑色手机", reply)
+        self.assertIn("绑定账号：习酒旗舰店", reply)
+        self.assertEqual(["李四"], meta["phone_holders"])
+        self.assertEqual([], conn.cursor_instance.executed)
 
     def test_pending_store_in_process_backend(self):
         store = ctx_module.ConversationStore()
@@ -3006,6 +3501,20 @@ class BadcaseReportTests(unittest.TestCase):
         self.assertIsNone(badcase.classify_row(self._row(reply_kind="none",
                                                          answer_excerpt=None)))
 
+    def test_classify_new_fallback_prefixes(self):
+        from common.kb_qa import badcase
+
+        cases = (
+            ("业务数据查询暂时不可用，请稍后再试。", "sales_fallback"),
+            ("号码台账查询暂时不可用，请稍后再试。", "phone_fallback"),
+            ("号码台账里没有查到匹配记录，请核对。", "phone_miss"),
+            ("暂时没查到这笔订单。请发完整单号。", "order_miss"),
+        )
+        for excerpt, category in cases:
+            with self.subTest(category=category):
+                self.assertEqual(category, badcase.classify_row(
+                    self._row(answer_excerpt=excerpt)))
+
     def test_collect_and_render(self):
         from common.kb_qa import badcase
 
@@ -3063,6 +3572,24 @@ class BadcaseReportTests(unittest.TestCase):
         self.assertIn("token 消耗", markdown)
         self.assertIn("输入合计 1500", markdown)
         self.assertIn("条均 750/75", markdown)
+
+    def test_confidence_distribution_and_multi_statistics(self):
+        from common.kb_qa import badcase
+
+        rows = [
+            self._row(msg_id="m1",
+                      question="习酒1988箱规，订单JY202501010120发货没",
+                      intent="multi", recall_source="multi:param+wdt"),
+            self._row(msg_id="m2", question="杭州销售额", intent=SALES_QUERY),
+            self._row(msg_id="m3", question="习酒", intent=PRODUCT_PARAM),
+        ]
+        report = badcase.collect_badcases(_FakeConn([rows]), days=7)
+        self.assertEqual({"1.0": 1, "0.8": 1, "0.3": 1},
+                         dict(report["confidence"]))
+        self.assertEqual({"param+wdt": 1}, dict(report["multi_intents"]))
+        markdown = badcase.render_markdown(report)
+        self.assertIn("置信度分布", markdown)
+        self.assertIn("复合问答：param+wdt 1", markdown)
 
 
 class LongImageTests(unittest.TestCase):
@@ -3135,11 +3662,13 @@ class ImageRecallTests(unittest.TestCase):
                  "image_ref": "r2/细节图/0"},
             ],
             asset_sender=sender)
+        meta = {}
         reply, intent, _ = handler._answer(conn, "发我习酒窖藏1998 的细节图",
-                                           conversation_id="cid")
+                                           conversation_id="cid", meta=meta)
         self.assertEqual(PRODUCT_ASSET, intent)
         self.assertIn("相关图片", reply)
         self.assertIn("习酒窖藏1988", reply)
+        self.assertEqual("image_vector", meta["recall_source"])
         self.assertEqual([("r1", "细节图", 0)], sender.refs)  # 低分被滤
 
     def test_no_hit_keeps_text_fallback(self):

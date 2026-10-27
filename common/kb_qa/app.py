@@ -19,9 +19,11 @@ P2 fail-open 铁律：LLM 未配置/不可达/超时/返回畸形时全部降级
 """
 
 import argparse
+import asyncio
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import dingtalk_stream
@@ -34,6 +36,8 @@ from common.kb_qa.llm import (
     extract_query,
     from_environment,
     render_doc_answer,
+    render_multi_answer,
+    render_order_answer,
     render_product_answer,
 )
 from common.kb_qa.products import (
@@ -48,12 +52,14 @@ from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
     Intent,
+    ORDER_QUERY,
     PHONE_LOOKUP,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
     SALES_QUERY,
     classify,
+    classify_all,
 )
 
 #: 手册无召回切片（未导入/问得偏）时的诚实兜底。
@@ -73,6 +79,15 @@ _PHONE_FALLBACK = (
     "号码台账查询暂时不可用，请稍后再试；也可以直接到 ops-web 的"
     "「号码台账」页查询。"
 )
+_PHONE_NOT_FOUND = "号码台账里没有查到匹配记录，请核对号码、姓名或平台账号。"
+_ORDER_FALLBACK = (
+    "暂时没查到这笔订单。请发完整交易单号或物流单号，我再精确查一次。"
+)
+
+
+def _with_phone_link(text):
+    base = (os.environ.get("OPS_WEB_BASE_URL") or "").strip().rstrip("/")
+    return text + (f"\n号码台账：{base}/phones" if base else "")
 
 #: clarify 选择形态：序号词映射与正则（「1」「第2个」「第一款」「3.」）。
 _ORDINALS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -156,7 +171,7 @@ def _parse_correction(text):
 _ASSET_PENDING = "文件直发功能接入中，请先到 AI 表「产品资料」对应行下载："
 
 #: 群回复 markdown 卡片标题。
-_REPLY_TITLE = "产品资料助手"
+_REPLY_TITLE = "小易"
 
 #: 手册切片摘录兜底：无 LLM 时直接回切片标题 + 前 200 字（带出处）。
 _DOC_EXCERPT_CHARS = 200
@@ -170,6 +185,126 @@ def _render_doc_excerpt(chunks):
         excerpt = (chunk.get("content") or "").strip()[:_DOC_EXCERPT_CHARS]
         lines.append(f"【{title}】{excerpt}")
     return "\n".join(lines)
+
+
+def _render_order_excerpt(chunks):
+    lines = []
+    for chunk in chunks[:3]:
+        content = (chunk.get("content") or "").strip()[:300]
+        if content:
+            lines.append(f"【交易明细】{content}")
+    return "\n".join(lines)
+
+
+def _render_phone_clarify(keyword, candidates):
+    lines = [f"「{keyword or '号码'}」有 {len(candidates)} 条号码记录："]
+    for index, row in enumerate(candidates, 1):
+        details = [row.get("actual_user") or "待认领"]
+        details.extend(value for value in (
+            row.get("phone_no"), row.get("phone_type"), row.get("status"),
+            row.get("physical_device"),
+        ) if value)
+        lines.append(f"{index}. " + "｜".join(details))
+    lines.append("回复序号或完整手机号确认您找哪一条。")
+    return "\n".join(lines)
+
+
+def _render_phone_record(row, bindings=()):
+    lines = [f"号码：{row.get('phone_no') or ''}"]
+    for label, key in (
+        ("实际持卡人", "actual_user"), ("号码类型", "phone_type"),
+        ("状态", "status"), ("物理设备", "physical_device"),
+    ):
+        if row.get(key):
+            lines.append(f"{label}：{row[key]}")
+    accounts = [b.get("platform_account") for b in bindings
+                if b.get("platform_account")]
+    if accounts:
+        lines.append("绑定账号：" + "、".join(accounts[:6]))
+    if row.get("actual_user"):
+        lines.append(f"需要验证码请直接找 {row['actual_user']}。")
+    return "\n".join(lines)
+
+
+_CATEGORY_TITLES = {
+    PRODUCT_PARAM: "商品", PRODUCT_FILTER: "商品", PRODUCT_ASSET: "商品素材",
+    ORDER_QUERY: "订单", PHONE_LOOKUP: "号码", SALES_QUERY: "业务数据",
+    DOC_QA: "手册", CHITCHAT: "回复",
+}
+
+
+def _category_fallback(category):
+    return {
+        ORDER_QUERY: _ORDER_FALLBACK,
+        PHONE_LOOKUP: _with_phone_link(_PHONE_FALLBACK),
+        SALES_QUERY: _SALES_FALLBACK,
+        DOC_QA: _DOC_FALLBACK,
+        PRODUCT_ASSET: "商品素材暂时没查到，请发完整品名后再试。",
+    }.get(category, "这一类问题暂时没查到，请换个说法再试。")
+
+
+def _eligible_multi_intent(text, intent, *, single_clause):
+    """过滤只在复合编排里成立的弱触发词，单意图 classify 行为不变。"""
+    if intent.confidence < 0.8:
+        return False
+    if intent.category == PRODUCT_ASSET:
+        return any(word in text for word in (
+            "细节图", "质检", "素材", "礼袋图", "照片", "图片", "发票",
+            "报告", "附件", "文件", "视频",
+        ))
+    if intent.category == DOC_QA:
+        return any(word in text for word in (
+            "怎么介绍", "介绍", "卖点", "工艺", "话术", "品牌故事", "三同两不同",
+        ))
+    if intent.category == PRODUCT_FILTER:
+        return any(word in text for word in ("有哪些", "所有", "全部", "列表", "几款"))
+    if single_clause and intent.category == SALES_QUERY:
+        return any(word in text for word in (
+            "销售额", "销售金额", "销量", "卖了多少", "卖了", "出货", "出了多少",
+            "完成率", "达成率", "达成", "营业额", "流水", "排名", "排行",
+            "环比", "同比",
+        ))
+    return True
+
+
+def _multi_plan(text):
+    """返回 ([(子句, Intent)...], 是否截断)；不足两个独立意图返回空计划。"""
+    clauses = [part.strip() for part in re.split(r"[，,；;、]", text)
+               if part.strip()]
+    single_clause = len(clauses) <= 1
+    if single_clause:
+        clauses = [text]
+    entries = []
+    for index, clause in enumerate(clauses):
+        for intent in classify_all(clause):
+            if _eligible_multi_intent(clause, intent, single_clause=single_clause):
+                entries.append((index, clause, intent))
+    if single_clause and {ORDER_QUERY, SALES_QUERY}.issubset(
+            {intent.category for _, _, intent in entries}):
+        entries = [entry for entry in entries
+                   if entry[2].category != SALES_QUERY]
+    categories = {intent.category for _, _, intent in entries}
+    if len(categories) < 2:
+        return [], False
+    if not single_clause and len({index for index, _, _ in entries}) < 2:
+        return [], False
+    priority = {intent.category: index
+                for index, intent in enumerate(classify_all(text))}
+    allowed = categories
+    if len(categories) > 2:
+        allowed = set(sorted(categories,
+                             key=lambda category: priority.get(category, 99))[:2])
+    selected = []
+    seen = set()
+    # 筛选超限时看 priority；最终回答顺序始终跟随用户的原始子句顺序。
+    for _, clause, intent in entries:
+        if intent.category not in allowed or intent.category in seen:
+            continue
+        seen.add(intent.category)
+        selected.append((clause, intent))
+        if len(selected) == 2:
+            break
+    return selected, len(categories) > 2
 
 
 #: 合并后送给渲染层（LLM/摘录）的切片上限。
@@ -250,7 +385,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     def __init__(self, *, connection_factory, conversation_ids=(), now=None,
                  log=print, reply_client=None, robot_code=None, llm=None,
                  doc_search=None, vector_search=None, context_store=None,
-                 agent_runner=None, asset_sender=None, image_search=None):
+                 agent_runner=None, asset_sender=None, image_search=None,
+                 wdt_search=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -265,8 +401,13 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._agent_runner = agent_runner
         self._asset_sender = asset_sender
         self._image_search = image_search
+        self._wdt_search = wdt_search
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
+        # DB/LLM/向量均为同步客户端，整体移出 Stream 事件循环。
+        return await asyncio.to_thread(self._process_blocking, callback)
+
+    def _process_blocking(self, callback):
         try:
             incoming = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
         except Exception:
@@ -453,7 +594,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     # ------------------------------------------------------------------
 
     def _answer(self, conn, text, history=None, conversation_id=None,
-                meta=None, pending=None):
+                meta=None, pending=None, _allow_multi=True,
+                _forced_intent=None, _allow_reparse=True):
         """返回 (reply, intent, matched_record_id)。reply=None 表示静默。
 
         history（对话层）：同人同群最近几轮问答，透传给 LLM 二次解析与
@@ -470,6 +612,9 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         if pending:
             choice = _parse_choice(text, pending)
             if choice is not None:
+                if choice.get("kind", "product") == "phone":
+                    return self._answer_phone_choice(
+                        conn, choice, meta=meta, pending=pending)
                 rows = find_products(conn, choice["name"])
                 if rows:
                     if meta is not None:
@@ -494,13 +639,16 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 if pending:
                     re_choice = _parse_choice(correction, pending)
                     if re_choice is not None:
+                        if re_choice.get("kind", "product") == "phone":
+                            return self._answer_phone_choice(
+                                conn, re_choice, meta=meta, pending=pending)
                         correction = re_choice["name"]
                 rows = find_products(conn, correction)
                 if rows:
                     if len(rows) > 1:
                         if meta is not None:
                             meta["pending_candidates"] = [
-                                {"record_id": row["record_id"],
+                                {"kind": "product", "record_id": row["record_id"],
                                  "name": row.get("name") or "",
                                  "code": row.get("code") or ""}
                                 for row in rows
@@ -519,25 +667,41 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                         "我精确查一下。"), PRODUCT_PARAM, None
             return ("好的，那你想问的是哪一款？发我品名或编码。"
                     ), PRODUCT_PARAM, None
-        intent = classify(text)
-        if intent.category in (SALES_QUERY, PHONE_LOOKUP):
-            # 业务数据问句（销售额/完成率/排名…）与号码台账问句（尾号/验证
-            # 码找谁）直接进工具调用 agent——不先走商品直查：商品表对它必然
-            # 全 miss 或被模糊误伤（2026-10-26 实测纯尾号「5579」命中 7 款
-            # 579ml 商品进 clarify），白烧 LLM 改写+检索才轮到 agent。
+        if _allow_multi and _forced_intent is None:
+            plan, truncated = _multi_plan(text)
+            if plan:
+                return self._answer_multi(
+                    text, plan, history=history,
+                    conversation_id=conversation_id, meta=meta,
+                    truncated=truncated)
+        intent = _forced_intent or classify(text)
+        if intent.category == PHONE_LOOKUP:
+            return self._answer_phone(conn, text, history, meta=meta)
+        if intent.category == ORDER_QUERY:
+            return self._answer_orders(conn, text, history, meta=meta)
+        if intent.category == SALES_QUERY:
+            # 业务数据问句直通工具 agent，不先走必然 miss 的商品检索。
             agent_answer = self._try_agent(conn, text, history, meta=meta)
             if agent_answer:
                 return agent_answer, "agent", None
-            if intent.category == PHONE_LOOKUP:
-                return _PHONE_FALLBACK, PHONE_LOOKUP, None
             return _SALES_FALLBACK, SALES_QUERY, None
         if intent.category in (PRODUCT_PARAM, PRODUCT_FILTER):
             rows = find_products(conn, intent.keyword)
-            if not rows:
-                # 规则层关键词整词/分词全 miss：有 LLM 时二次解析换关键词重查一次。
-                rows = self._reparse_products(conn, text, history)
-                if rows and meta is not None:
-                    meta["recall_source"] = "products_reparse"
+            if not rows and _allow_reparse:
+                parsed = self._reparse_intent(text, history)
+                if parsed:
+                    category, keyword = parsed
+                    if category == intent.category and keyword:
+                        rows = find_products(conn, keyword)
+                        if rows and meta is not None:
+                            meta["recall_source"] = "products_reparse"
+                    elif category != intent.category:
+                        return self._answer(
+                            conn, text, history=history,
+                            conversation_id=conversation_id, meta=meta,
+                            _allow_multi=False, _allow_reparse=False,
+                            _forced_intent=Intent(
+                                category, keyword, "LLM 二次解析", 0.8))
             if not rows:
                 # 商品全 miss：可能是业务数据问句（「今天杭州出了多少货」
                 # 会被兜底成疑似商品名直查）——给 agent 一次机会，它查
@@ -553,7 +717,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 # 新商品名直查。
                 if meta is not None:
                     meta["pending_candidates"] = [
-                        {"record_id": row["record_id"],
+                        {"kind": "product", "record_id": row["record_id"],
                          "name": row.get("name") or "",
                          "code": row.get("code") or ""}
                         for row in rows
@@ -568,7 +732,29 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return reply, intent.category, rows[0]["record_id"]
         if intent.category == PRODUCT_ASSET:
             rows = find_products(conn, intent.keyword)
+            if not rows and _allow_reparse:
+                parsed = self._reparse_intent(text, history)
+                if parsed:
+                    category, keyword = parsed
+                    if category == PRODUCT_ASSET and keyword:
+                        rows = find_products(conn, keyword)
+                    elif category != PRODUCT_ASSET:
+                        return self._answer(
+                            conn, text, history=history,
+                            conversation_id=conversation_id, meta=meta,
+                            _allow_multi=False, _allow_reparse=False,
+                            _forced_intent=Intent(
+                                category, keyword, "LLM 二次解析", 0.8))
             if not rows:
+                recalled = None
+                if not is_strong_asset_question(text):
+                    recalled = self._try_send_recalled_images(
+                        conn, text, conversation_id)
+                if recalled:
+                    if meta is not None:
+                        meta["recall_source"] = "image_vector"
+                    return ("给你找到这些商品的相关图片："
+                            + "、".join(recalled)), intent.category, None
                 return render_not_found(intent.keyword), intent.category, None
             if meta is not None:
                 meta["recall_source"] = "products"
@@ -599,6 +785,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     recalled = self._try_send_recalled_images(
                         conn, text, conversation_id)
                 if recalled:
+                    if meta is not None:
+                        meta["recall_source"] = "image_vector"
                     return (
                         "给你找到这些商品的相关图片："
                         + "、".join(recalled),
@@ -651,6 +839,170 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if agent_answer:
                 return agent_answer, "agent", None
         return HELP_TEXT, CHITCHAT, None
+
+    def _answer_phone(self, conn, question, history=None, meta=None):
+        # clarify 是正确性要求，不能因调用方没传审计 meta 而退化成猜属主。
+        phone_meta = {} if meta is None else meta
+        answer = self._try_agent(conn, question, history, meta=phone_meta)
+        candidates = phone_meta.get("phone_candidates") or []
+        if candidates:
+            pending = [dict(candidate, kind="phone") for candidate in candidates]
+            phone_meta["pending_candidates"] = pending
+            phone_meta.pop("phone_holders", None)
+            phone_meta["recall_source"] = "phone_registry"
+            return (_render_phone_clarify(phone_meta.get("phone_query"), pending),
+                    PHONE_LOOKUP, None)
+        if answer:
+            return answer, "agent", None
+        if phone_meta.get("phone_not_found"):
+            return _with_phone_link(_PHONE_NOT_FOUND), PHONE_LOOKUP, None
+        return _with_phone_link(_PHONE_FALLBACK), PHONE_LOOKUP, None
+
+    def _answer_phone_choice(self, conn, choice, *, meta=None, pending=None):
+        """pending 中的号码候选按完整号码精确重查，确认后才设置 @ 对象。"""
+        from common.public_data.phone_registry import search_registry
+
+        phone_no = choice.get("phone_no") or choice.get("code") or ""
+        try:
+            result = search_registry(conn, phone_no)
+        except Exception:
+            self._log("kb qa: phone selection failed")
+            return _with_phone_link(_PHONE_FALLBACK), PHONE_LOOKUP, None
+        row = next((item for item in result["phones"]
+                    if item.get("phone_no") == phone_no), None)
+        if row is None:
+            return _with_phone_link(_PHONE_NOT_FOUND), PHONE_LOOKUP, None
+        bindings = [item for item in result["bindings"]
+                    if item.get("phone_no") == phone_no]
+        if meta is not None:
+            meta["recall_source"] = "phone_registry"
+            meta["pending_candidates"] = pending or [choice]
+            meta["phone_holders"] = ([row["actual_user"]]
+                                     if row.get("actual_user") else [])
+        return (_render_phone_record(row, bindings), PHONE_LOOKUP, phone_no)
+
+    def _answer_orders(self, conn, question, history=None, meta=None):
+        """订单三态：WDT 命中作答 / 向量 miss 走 agent / 双 miss 诚实兜底。"""
+        chunks = []
+        if self._wdt_search is not None:
+            try:
+                chunks = self._wdt_search(question) or []
+            except Exception:
+                self._log("kb qa: wdt recall failed")
+        if chunks:
+            if meta is not None:
+                meta["recall_source"] = "wdt_vector"
+            if self._llm is not None:
+                try:
+                    answer = render_order_answer(
+                        self._llm, question, chunks, history=history)
+                    if answer and "DSML" not in answer:
+                        return answer, ORDER_QUERY, None
+                    self._log("kb qa: llm order render empty")
+                except LlmError:
+                    self._log("kb qa: llm order render failed")
+            excerpt = _render_order_excerpt(chunks)
+            if excerpt:
+                return excerpt, ORDER_QUERY, None
+        agent_answer = self._try_agent(conn, question, history, meta=meta)
+        if agent_answer:
+            return agent_answer, "agent", None
+        return _ORDER_FALLBACK, ORDER_QUERY, None
+
+    def _answer_multi(self, question, plan, *, history=None,
+                      conversation_id=None, meta=None, truncated=False):
+        """最多两路真并行；每个 worker 使用独立连接与独立 meta。"""
+        def run_branch(clause, intent):
+            branch_meta = {}
+            branch_conn = None
+            try:
+                branch_conn = self._connection_factory()
+                reply, actual_intent, matched = self._answer(
+                    branch_conn, clause, history=history,
+                    conversation_id=conversation_id, meta=branch_meta,
+                    _allow_multi=False, _forced_intent=intent)
+                return (reply or _category_fallback(intent.category),
+                        actual_intent, matched, branch_meta)
+            except Exception as exc:
+                self._log(f"kb qa: multi branch failed: {type(exc).__name__}")
+                branch_meta["recall_source"] = "none"
+                return _category_fallback(intent.category), intent.category, None, branch_meta
+            finally:
+                if branch_conn is not None:
+                    try:
+                        branch_conn.close()
+                    except Exception:
+                        self._log("kb qa: multi branch connection close failed")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run_branch, clause, intent)
+                       for clause, intent in plan]
+            results = [future.result() for future in futures]
+
+        labels = {
+            PRODUCT_PARAM: "param", PRODUCT_FILTER: "filter",
+            PRODUCT_ASSET: "asset", ORDER_QUERY: "order",
+            PHONE_LOOKUP: "phone", SALES_QUERY: "sales", DOC_QA: "doc",
+        }
+        sections = []
+        sources = []
+        pending = []
+        holders = []
+        tools = []
+        rounds = 0
+        for (_, intent), (reply, _, _, branch_meta) in zip(plan, results):
+            sections.append({
+                "title": _CATEGORY_TITLES.get(intent.category, "结果"),
+                "content": reply,
+            })
+            recall = branch_meta.get("recall_source")
+            if recall == "wdt_vector":
+                sources.append("wdt")
+            elif recall == "agent":
+                sources.append("agent")
+            elif recall == "none":
+                sources.append("none")
+            else:
+                sources.append(labels.get(intent.category, "other"))
+            pending.extend(branch_meta.get("pending_candidates") or [])
+            for holder in branch_meta.get("phone_holders") or []:
+                if holder not in holders:
+                    holders.append(holder)
+            tools.extend(branch_meta.get("tools") or [])
+            rounds += branch_meta.get("rounds") or 0
+            if meta is not None:
+                for key in ("subject", "asset"):
+                    if key not in meta and branch_meta.get(key) is not None:
+                        meta[key] = branch_meta[key]
+
+        fallback = "\n\n".join(
+            f"【{section['title']}】\n{section['content']}"
+            for section in sections
+        )
+        reply = fallback
+        if self._llm is not None:
+            try:
+                answer = render_multi_answer(
+                    self._llm, question, sections, history=history)
+                if answer and "DSML" not in answer:
+                    reply = answer
+                else:
+                    self._log("kb qa: llm multi render empty")
+            except LlmError:
+                self._log("kb qa: llm multi render failed")
+        if truncated:
+            reply += "\n\n还有其他问题，请分开发问；本次先回答前两类。"
+        if meta is not None:
+            meta["recall_source"] = "multi:" + "+".join(sources)
+            if pending:
+                meta["pending_candidates"] = pending
+            if holders:
+                meta["phone_holders"] = holders
+            if tools:
+                meta["tools"] = tools
+            if rounds:
+                meta["rounds"] = rounds
+        return reply, "multi", None
 
     def _try_agent(self, conn, text, history, meta=None):
         """agent loop 入口（fail-open：异常/无答案返回 None 由调用方降级）。"""
@@ -735,24 +1087,25 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return render_filter_answer(rows, intent.keyword)
         return render_param_answer(rows[0])
 
-    def _reparse_products(self, conn, question, history=None):
-        """检索全 miss 时的 LLM 二次解析：换关键词重查一次商品。
-
-        history 在场时 LLM 能把「价格呢/那款呢」按上文补全成完整商品名
-        （对话层主战场：指代追问的规则 miss → 历史改写 → 命中）。
-        """
+    def _reparse_intent(self, question, history=None):
+        """规则检索 miss 后用 LLM 重写类别与关键词；仅返回受支持类别。"""
         if self._llm is None:
-            return []
+            return None
         try:
-            _category, keyword = extract_query(self._llm, question,
+            category, keyword = extract_query(self._llm, question,
                                                history=history)
         except LlmError:
             self._log("kb qa: llm query extract failed")
-            return []
+            return None
+        category = (category or "").strip()
         keyword = (keyword or "").strip()
-        if not keyword:
-            return []
-        return find_products(conn, keyword)
+        if category not in {
+                PRODUCT_PARAM, PRODUCT_FILTER, PRODUCT_ASSET, DOC_QA,
+                PHONE_LOOKUP, SALES_QUERY, ORDER_QUERY, CHITCHAT}:
+            return None
+        if not keyword and category != CHITCHAT:
+            return None
+        return category, keyword
 
     def _answer_docs(self, conn, question, history=None, meta=None):
         """手册问答三态：有切片+有 LLM 带出处答案；有切片无 LLM 摘录；无切片兜底。
@@ -862,6 +1215,9 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
     image_search = rag_docs.image_search_from_environment()
     if image_search is None:
         log("kb qa: image recall not configured")
+    wdt_search = rag_docs.wdt_search_from_environment()
+    if wdt_search is None:
+        log("kb qa: wdt recall not configured, orders use agent fallback")
     # 对话层（2026-10-21）：会话上下文（同人同群最近 6 轮 / TTL 10
     # 分钟）。2026-10-22 Redis 化：app.env 有 KB_REDIS_URL /
     # PUBLIC_DATA_REDIS_URL 时走 Redis（原生 TTL 自动过期、键不残留、
@@ -910,6 +1266,7 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
         agent_runner=agent_runner,
         asset_sender=asset_sender,
         image_search=image_search,
+        wdt_search=wdt_search,
     )
 
 
