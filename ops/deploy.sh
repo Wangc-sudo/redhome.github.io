@@ -137,8 +137,9 @@ health_gate() {
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
       # 榜单页发布链探针（@static 静态兜底使 pages-web 故障时仍 200，
-      # 不误伤部署门）。
-      if curl -fsS --max-time 5 http://127.0.0.1:8300/hangzhou.html >/dev/null 2>&1; then
+      # 不误伤部署门）。2026-10-26：8300 软下线为 301 跳域名，探针改走
+      # 80（榜单页本体端口）。
+      if curl -fsS --max-time 5 http://127.0.0.1:80/hangzhou.html >/dev/null 2>&1; then
         # 关键长驻容器均在 Up（bi-web/ops-web/pages-web 另看各自的 healthz）
         if [ -z "$(docker ps \
             --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
