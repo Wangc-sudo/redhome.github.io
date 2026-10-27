@@ -17,6 +17,7 @@ _STRIP_CHARS_RE = re.compile(r"[「」【】《》〈〉\"'“”‘’()（）\
 PRODUCT_PARAM = "PRODUCT_PARAM"
 PRODUCT_FILTER = "PRODUCT_FILTER"
 PRODUCT_ASSET = "PRODUCT_ASSET"
+PHONE_LOOKUP = "PHONE_LOOKUP"
 SALES_QUERY = "SALES_QUERY"
 DOC_QA = "DOC_QA"
 CHITCHAT = "CHITCHAT"
@@ -43,6 +44,13 @@ _SALES_WORDS = (
     "完成率", "达成率", "达成", "营业额", "流水", "排名", "排行",
     "环比", "同比", "店铺", "门店",
 )
+#: 号码台账问句 → 直通 agent 的 phone_lookup 工具（2026-10-26）。
+#: 实测事故：群里发纯尾号「5579」被「疑似商品名直查」兜底 + bigram 容错
+#: 误命中 7 款 579ml 商品进了 clarify——纯数字 4-11 位一律按号码/尾号查；
+#: 商品短名纯数字（如「1988」）会被本规则拦截，但 agent 内 phone_lookup
+#: 无命中后仍可自行调 search_products 挽回，代价只是一轮工具调用。
+_PURE_DIGITS_RE = re.compile(r"^\d{4,11}$")
+_PHONE_WORDS = ("尾号", "验证码", "手机号", "手机号码", "电话号", "号码")
 #: 按条件筛选商品列表。
 _FILTER_WORDS = ("有哪些", "哪些", "所有", "全部", "列表", "几款")
 #: 手册类（卖点/工艺/话术）——P2 接 RAG，P1 给兜底文案。
@@ -98,6 +106,15 @@ def classify(text):
     if normalized.lower() in _CHITCHAT_EXACT:
         return Intent(CHITCHAT, normalized, "闲聊/问候")
     keyword = extract_keyword(normalized)
+    # 纯数字 4-11 位（号码/尾号）最优先拦——晚于附件/参数词就会被商品
+    # 模糊匹配误吞（「5579」→ 579ml 七款事故，见 _PHONE_WORDS 注释）。
+    if _PURE_DIGITS_RE.match(normalized):
+        return Intent(PHONE_LOOKUP, normalized, "纯数字（号码/尾号）")
+    # 号码词先于附件/参数词：「发我 XX 的手机号」里的「发我」是附件词，
+    # 后置会被吞进商品资源分支。
+    for word in _PHONE_WORDS:
+        if word in normalized:
+            return Intent(PHONE_LOOKUP, keyword, f"命中号码词「{word}」")
     for word in _ASSET_WORDS:
         if word in normalized:
             return Intent(PRODUCT_ASSET, keyword, f"命中附件词「{word}」")

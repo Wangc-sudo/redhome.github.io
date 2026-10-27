@@ -39,6 +39,7 @@ from common.kb_qa.products import (
 from common.kb_qa.router import (
     CHITCHAT,
     DOC_QA,
+    PHONE_LOOKUP,
     PRODUCT_ASSET,
     PRODUCT_FILTER,
     PRODUCT_PARAM,
@@ -144,6 +145,24 @@ class RouterTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(SALES_QUERY, classify(text).category)
+
+    def test_phone_lookup_intent(self):
+        """号码台账问句 → PHONE_LOOKUP（2026-10-26「5579」事故修复：
+        纯尾号曾被商品 bigram 容错误命中 7 款 579ml 商品进 clarify）。"""
+        for text in ("5690", "5579", "18969031215", "尾号 5690",
+                     "这个尾号是谁的", "平澜路店账号验证码找谁要",
+                     "发我吴昱洁的手机号"):
+            with self.subTest(text=text):
+                self.assertEqual(PHONE_LOOKUP, classify(text).category)
+
+    def test_phone_lookup_does_not_swallow_product_intents(self):
+        """号码意图不伤商品语境：含数字的商品名/参数/附件问句原路。"""
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1998").category)
+        self.assertEqual(PRODUCT_PARAM, classify("习酒窖藏1988 箱规").category)
+        self.assertEqual(PRODUCT_ASSET,
+                         classify("习酒窖藏1988 质检报告").category)
+        # 3 位及以下纯数字不按尾号拦（太短，更像数量/闲聊）
+        self.assertNotEqual(PHONE_LOOKUP, classify("123").category)
 
     def test_sales_words_do_not_swallow_product_intents(self):
         """商品语境优先：附件/参数词仍先于业务数据词。"""
@@ -1742,6 +1761,100 @@ class AgentToolExecutorTests(unittest.TestCase):
         narrow = {t["function"]["name"] for t in tools_for(False)}
         self.assertIn("product_stats", narrow)
 
+    def test_phone_lookup_suffix_match(self):
+        # 「5690」尾号 → 号码片段 LIKE，只回启用行；绑定带出持卡人
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三",
+              "phone_type": "主卡", "physical_device": "序号② 红色手机"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "习水村酒类专营店", "actual_user": "张三"}],
+        ])
+        result = json.loads(executor.execute(
+            "phone_lookup", {"keyword": "5690"}))
+        self.assertTrue(result["found"])
+        self.assertEqual("张三", result["phones"][0]["actual_user"])
+        self.assertEqual("习水村酒类专营店",
+                         result["bindings"][0]["platform_account"])
+        sql, params = executor._conn.cursor_instance.executed[0]
+        self.assertIn("`phone_no` LIKE %s", sql)
+        self.assertIn("`enabled` = 1", sql)
+        self.assertEqual("%5690%", params[0])
+
+    def test_phone_lookup_name_match_expands_bindings(self):
+        # 人名 → 命中号码的全部绑定 IN 展开（答「张三管哪些账号」）
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "专营店", "actual_user": "张三"}],
+        ])
+        result = json.loads(executor.execute(
+            "phone_lookup", {"keyword": "张三"}))
+        self.assertTrue(result["found"])
+        cur = executor._conn.cursor_instance
+        self.assertIn("`actual_user` LIKE %s", cur.executed[0][0])
+        sql1, params1 = cur.executed[1]
+        self.assertIn("b.`platform_account` LIKE %s", sql1)
+        self.assertIn("b.`phone_no` IN (%s)", sql1)
+        self.assertIn("13312345690", list(params1))
+
+    def test_phone_lookup_empty_keyword_and_no_match(self):
+        executor = self._executor([])
+        result = json.loads(executor.execute("phone_lookup", {"keyword": "  "}))
+        self.assertIn("error", result)
+        executor2 = self._executor([[], []])
+        result = json.loads(executor2.execute(
+            "phone_lookup", {"keyword": "查无此人"}))
+        self.assertFalse(result["found"])
+        self.assertIn("台账无匹配", result["hint"])
+
+    def test_phone_lookup_trims_to_valid_json_under_limit(self):
+        # 一人多卡场景（云上实测 5 卡 10+ 绑定超 2000 字被 execute()
+        # 从 JSON 中间切断）：绑定截 6 + more 计数，号码裁掉开户名/部门，
+        # 保证结果在截断线内仍是合法 JSON
+        phones = [{"phone_no": f"1330000111{i}", "actual_user": "张三",
+                   "phone_type": "主卡", "physical_device": "序号①",
+                   "account_name": "电信开户名", "dept": "店铺组"}
+                  for i in range(5)]
+        bindings = [{"phone_no": "13300001110",
+                     "channel_category": "抖音店铺登入主账号",
+                     "platform_account": "某很长很长的平台账号名称旗舰店专营店",
+                     "actual_user": "张三"} for _ in range(10)]
+        executor = self._executor([phones, bindings])
+        raw = executor.execute("phone_lookup", {"keyword": "张三"})
+        self.assertLessEqual(len(raw), 2000)
+        result = json.loads(raw)
+        self.assertEqual(6, len(result["bindings"]))
+        self.assertEqual(4, result["bindings_more"])
+        self.assertNotIn("account_name", result["phones"][0])
+        self.assertNotIn("dept", result["phones"][0])
+
+    def test_phone_lookup_records_holders_for_at(self):
+        # 命中后持卡人记入 executor.phone_holders（装配层透出 meta → 群回复
+        # @ 持卡人，2026-10-26 用户裁决）；phones/bindings 人名并集去重
+        executor = self._executor([
+            [{"phone_no": "13312345690", "actual_user": "张三"}],
+            [{"phone_no": "13312345690", "channel_category": "快手",
+              "platform_account": "专营店", "actual_user": "张三"},
+             {"phone_no": "13312345690", "channel_category": "视频号",
+              "platform_account": "致中和", "actual_user": "李四"}],
+        ])
+        executor.execute("phone_lookup", {"keyword": "5690"})
+        self.assertEqual(["张三", "李四"], executor.phone_holders)
+        # miss 时不记（不 @ 空气）
+        executor2 = self._executor([[], []])
+        executor2.execute("phone_lookup", {"keyword": "0000"})
+        self.assertEqual([], executor2.phone_holders)
+
+    def test_phone_lookup_registered_and_not_narrowed(self):
+        # 工具注册 + 系统提示词提及；全员开放（同 product_stats），
+        # 不在 Web 业务收窄面内
+        names = {t["function"]["name"] for t in agent_module.TOOLS}
+        self.assertIn("phone_lookup", names)
+        self.assertIn("phone_lookup", agent_module._SYSTEM_PROMPT)
+        from common.kb_web.service import tools_for
+        narrow = {t["function"]["name"] for t in tools_for(False)}
+        self.assertIn("phone_lookup", narrow)
+
     def test_search_docs_merges_bm25_and_vector(self):
         executor = self._executor(
             [],
@@ -2017,6 +2130,74 @@ class AgentAnswerRoutingTests(unittest.TestCase):
         reply, intent, _ = handler._answer(conn, "杭州今天销售额")
         self.assertEqual(SALES_QUERY, intent)
         self.assertIn("暂时不可用", reply)
+
+    def test_phone_lookup_goes_to_agent_without_product_lookup(self):
+        """纯尾号直通 agent：全程不碰商品表（「5579」事故回归钉）。"""
+        seen = []
+
+        def runner(conn, text, history, meta=None):
+            seen.append(text)
+            return "尾号 5579：153xxxx5579，陈典潮在用（序号① 蓝色手机）"
+
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=runner)
+        reply, intent, _ = handler._answer(conn, "5579")
+        self.assertEqual("agent", intent)
+        self.assertIn("陈典潮", reply)
+        self.assertEqual(["5579"], seen)
+        # 没有任何商品表查询（PRODUCT_PARAM 路径会 SELECT kb_products）
+        product_sql = [sql for sql, _ in conn.cursor_instance.executed
+                       if "kb_products" in sql]
+        self.assertEqual([], product_sql)
+
+    def test_phone_lookup_agent_none_falls_back_honestly(self):
+        """agent 不可用 → 号码台账专用兜底（不落商品「没有找到」）。"""
+        conn = _FakeConn([])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            agent_runner=lambda conn, text, history, meta=None: None)
+        reply, intent, _ = handler._answer(conn, "尾号 5690 是谁")
+        self.assertEqual(PHONE_LOOKUP, intent)
+        self.assertIn("号码台账", reply)
+
+    def test_phone_lookup_answer_ats_holder_in_group(self):
+        """群回复真实 @ 持卡人（2026-10-26 用户裁决「小易要 @ 对应的人要
+        验证码」）：agent 命中 phone_lookup → meta phone_holders → 姓名解析
+        userId → at_user_ids 含持卡人与提问人。"""
+        client = _FakeReplyClient()
+
+        def runner(conn, text, history, meta=None):
+            meta["phone_holders"] = ["屠秋文"]
+            return "尾号 5579 是 19357625579，屠秋文在用"
+
+        # script：claim=1 → 审计 UPDATE=1 → 姓名解析=[屠秋文行]
+        conn = _FakeConn([1, 1, [{"name": "屠秋文", "user_id": "u-tu"}]])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            reply_client=client, robot_code="robot1", agent_runner=runner)
+        asyncio.run(handler.process(_FakeCallback("m-at", "5579")))
+        self.assertEqual(1, len(client.calls))
+        at = client.calls[0][4]
+        self.assertIn("u1", at)      # 提问人
+        self.assertIn("u-tu", at)    # 持卡人
+        # 持卡人姓名解析走 dim_robot_member
+        member_sql = [sql for sql, _ in conn.cursor_instance.executed
+                      if "dim_robot_member" in sql]
+        self.assertEqual(1, len(member_sql))
+        self.assertIn("`is_active` = 1", member_sql[0])
+
+    def test_answer_without_phone_holders_ats_sender_only(self):
+        """非号码问句：@ 列表保持只有提问人（回归钉）。"""
+        client = _FakeReplyClient()
+        conn = _FakeConn([1, [_product_row()], 1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            reply_client=client, robot_code="robot1")
+        asyncio.run(handler.process(_FakeCallback("m-plain", "习酒窖藏1998 箱规")))
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual(["u1"], client.calls[0][4])
 
     def test_chitchat_miss_agent_none_falls_back_to_help(self):
         # 规则完全未命中 + agent 无答案 → HELP_TEXT
