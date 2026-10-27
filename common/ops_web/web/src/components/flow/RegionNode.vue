@@ -1,8 +1,9 @@
 <script setup>
 /**
  * 区域节点（2026-10-17 F3 从 FlowPage.vue 抽出）：聚合=圆形、业务=矩形。
- * 部门槽（蓝色输入端口：成员拉线至此＝归口到部门）+ 成员行展开（每人绿色
- * 输出端口：拉他区＝搬迁、本区部门口＝区内调部门）。纯展示+事件上抛。
+ * 部门槽（2026-10-26 用户裁决：拉线圆点退役，改为点击部门行弹下拉列表
+ * 选人归口——归口是低频管理动作，界面不为它付常态视觉税）+ 成员行展开
+ * （每人绿色输出端口：拉他区区域口＝搬迁）。纯展示+事件上抛。
  */
 import { fmt } from '../../flow/graph.js';
 import { AGG_SIZE, REGION_W } from '../../flow/layout.js';
@@ -14,7 +15,8 @@ defineProps({
   tasksCollapsed: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
 });
-const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks', 'open-drawer']);
+const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks',
+  'open-drawer', 'dept-assign']);
 </script>
 
 <template>
@@ -36,6 +38,9 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
         <div class="agg-metrics">
           <b>{{ node.rosterCount }}</b><span>名册</span>
           <b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span>
+          <b v-if="node.completionRate != null">
+            {{ (node.completionRate * 100).toFixed(1) }}%
+          </b><span v-if="node.completionRate != null">完成率</span>
         </div>
         <button class="btn mini ghost" @mousedown.stop @click="emit('open-drawer', node)">详情</button>
       </div>
@@ -49,22 +54,27 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
         <span class="metric"><b>{{ node.rosterCount }}</b><span>名册</span></span>
         <span class="metric"><b>{{ node.targetCount }}</b><span>目标人</span></span>
         <span class="metric"><b>{{ fmt(node.targetSum) }}</b><span>Σ 万元</span></span>
+        <!-- 完成率（2026-10-26 用户裁决「播报回显完成百分比添加到面板」）：
+             本月累计/月目标，与播报回执同口径；目标 0/无 →「—」；
+             hq 职能底不报数不显示 -->
+        <span class="metric" v-if="node.group !== 'hq'">
+          <b>{{ node.completionRate == null ? '—' : (node.completionRate * 100).toFixed(1) + '%' }}</b>
+          <span>完成</span>
+        </span>
         <span class="metric"><b>{{ node.memberCount }}</b><span>成员</span></span>
       </div>
-      <!-- 部门槽（部门输入端口：成员拉线至此=归口到该部门） -->
+      <!-- 部门槽（2026-10-26：点击部门行弹下拉列表选人归口，替代拉线圆点） -->
       <div v-if="node.depts && node.depts.length" class="dept-slot">
         <div
           v-for="dept in node.depts"
           :key="dept.dept_id || dept.dept_name"
-          class="dept-row"
+          class="dept-row clickable"
+          :title="`点击选择要归入「${dept.dept_name}」的成员`"
+          @click.stop="emit('dept-assign', node, dept, $event)"
         >
-          <span
-            class="port in-dept"
-            :data-dept-in="`${node.key}|${dept.dept_id}|${dept.dept_name}`"
-            title="成员拉线至此＝归口到该部门"
-          />
           <span class="dept-name">{{ dept.dept_name || '（无 ID 部门）' }}</span>
           <span class="dept-count">{{ dept.memberCount }}</span>
+          <span class="dept-caret">▾</span>
         </div>
       </div>
       <!-- 成员行（展开后每人一个输出端口：拉到他区=搬迁、本区部门=调部门） -->
@@ -194,8 +204,8 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 52px;
-  padding: 3px 6px;
+  min-width: 46px;   /* 2026-10-26 完成率格加入后五格并排收窄 */
+  padding: 3px 4px;
   border: 1px solid #eef0f3;
   border-radius: 6px;
   background: #f9fafb;
@@ -256,6 +266,16 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
   padding-left: 14px;
   font-size: 12px;
 }
+.dept-row.clickable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+.dept-row.clickable:hover {
+  background: #f1f5ff;
+}
+.dept-row.clickable:hover .dept-caret {
+  color: #2563eb;
+}
 .dept-name {
   color: #374151;
 }
@@ -263,6 +283,10 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
   margin-left: auto;
   color: #9ca3af;
   font-size: 11px;
+}
+.dept-caret {
+  color: #d1d5db;
+  font-size: 10px;
 }
 
 /* 成员行（输出端口） */
@@ -325,12 +349,5 @@ const emit = defineEmits(['drag', 'wire-start', 'toggle-members', 'toggle-tasks'
 .port.agg-in {
   background: #6366f1;
 }
-.port.in-dept {
-  left: 0;
-  top: 8px;
-  width: 8px;
-  height: 8px;
-  background: #2563eb;
-  cursor: crosshair;
-}
+/* 2026-10-26：.port.in-dept（部门拉线圆点）随点击下拉归口上线退役 */
 </style>

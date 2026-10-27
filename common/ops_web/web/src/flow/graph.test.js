@@ -4,7 +4,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  COMPLEMENT_REGION,
   PLATFORM_KEY,
   buildGraph,
   familyLabel,
@@ -35,11 +34,12 @@ function raw({
   pool = [],
   rosterRows = [],
   targets = {},
+  completed = {},
   groups = [],
 } = {}) {
   return {
     overview: { regions, pool },
-    roster: { roster: rosterRows, targets },
+    roster: { roster: rosterRows, targets, completed },
     groups,
   };
 }
@@ -159,28 +159,42 @@ describe('buildGraph', () => {
     }));
     const keys = g.regionNodes.map((n) => n.key);
     // 线下组（杭/绍/省外运营中心，2026-10-26 裁决合一）→ 体验馆团购 →
-    // 渠道 → 总部；聚合线下整体随第一桶组（offline）。
+    // 总部；聚合线下整体随第一桶组（offline）。渠道已摘除不进画布。
+    expect(keys).not.toContain('qudao');
     expect(keys.indexOf('hangzhou')).toBeLessThan(keys.indexOf('shaoxing'));
     expect(keys.indexOf('shaoxing')).toBeLessThan(keys.indexOf('province_ops'));
     expect(keys.indexOf('province_ops')).toBeLessThan(keys.indexOf('vanke'));
-    expect(keys.indexOf('vanke')).toBeLessThan(keys.indexOf('qudao'));
-    expect(keys.indexOf('qudao')).toBeLessThan(keys.indexOf('hq'));
+    expect(keys.indexOf('vanke')).toBeLessThan(keys.indexOf('hq'));
   });
 
-  it('徽章口径：总部职能底不警告；渠道店铺级名册视为有目标', () => {
+  it('徽章口径：总部职能底不警告', () => {
+    const g = buildGraph(raw({ regions: [region('hq', '总部')] }));
+    const hq = g.regionNodes.find((n) => n.key === 'hq');
+    expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
+  });
+
+  it('未上线区域不进画布（2026-10-26 裁决：渠道/餐饮/君品/线下额外/其他）', () => {
+    // 渠道店铺级徽章特判保留备用（上线时随 HIDDEN_REGION_KEYS 移除恢复）。
     const g = buildGraph(raw({
-      regions: [region('hq', '总部'), region('qudao', '渠道')],
-      groups: [{ region: 'qudao', services: [svc('channel-missing-check-qudao')] }],
+      regions: [
+        region('qudao', '渠道'),
+        region('dining', '餐饮'),
+        region('junpin', '君品雅院'),
+        region('offline_extra', '线下额外'),
+        region('other', '其他'),
+        region('hangzhou', '杭州'),
+      ],
+      groups: [{ region: 'qudao', services: [svc('channel-missing-check')] }],
       rosterRows: [
         { scope: 'qudao', enabled: 1, entity_type: 'store', entity_key: 'PDD店' },
       ],
       targets: {},
     }));
-    const hq = g.regionNodes.find((n) => n.key === 'hq');
-    expect(hq.badge).toEqual({ text: '职能底', cls: 'plain' });
-    const qd = g.regionNodes.find((n) => n.key === 'qudao');
-    // scope 级无目标但店铺名册有+有服务 → 已闭环（店铺级目标体系豁免）
-    expect(qd.badge).toEqual({ text: '已闭环', cls: 'ok' });
+    const keys = g.regionNodes.map((n) => n.key);
+    for (const hidden of ['qudao', 'dining', 'junpin', 'offline_extra', 'other']) {
+      expect(keys).not.toContain(hidden);
+    }
+    expect(keys).toContain('hangzhou');
   });
 
   it('徽标 warn 或成员 broken 让边标红', () => {
@@ -235,25 +249,36 @@ describe('buildGraph', () => {
       .toBe('daily-report');
   });
 
-  it('补集桶虚拟节点：名册有启用行即补出', () => {
+  it('完成率=当月完成额(元)/目标(万元)，目标 0 → null；聚合按桶求和换算', () => {
+    // 2026-10-26「播报回显完成百分比上面板」：与播报回执同口径。
     const g = buildGraph(raw({
-      regions: [region('hangzhou', '杭州')],
-      rosterRows: [{ scope: COMPLEMENT_REGION, enabled: 1, person_name: '余云涛' }],
+      regions: [region('hangzhou', '杭州'), region('shaoxing', '绍兴')],
+      targets: { hangzhou: { a: 100 }, shaoxing: {} },  // 万元
+      completed: { hangzhou: 500000 },                  // 元 → 50 万 → 50%
     }));
-    const other = g.regionNodes.find((n) => n.key === COMPLEMENT_REGION);
-    expect(other).toBeTruthy();
-    expect(other.label).toBe('其他（补集）');
-    expect(other.badge).toEqual({ text: '补集', cls: 'plain' });
-    expect(other.rosterCount).toBe(1);
+    const hz = g.regionNodes.find((n) => n.key === 'hangzhou');
+    expect(hz.completedSum).toBe(500000);
+    expect(hz.completionRate).toBeCloseTo(0.5);
+    // 目标 0/无 → null（显示「—」，与榜单「目标 0 不参与」同语义）
+    expect(g.regionNodes.find((n) => n.key === 'shaoxing').completionRate)
+      .toBeNull();
+    // 聚合（offline_all parts=hangzhou/shaoxing/province_ops）：求和后换算
+    const agg = g.regionNodes.find((n) => n.key === 'offline_all');
+    expect(agg.completedSum).toBe(500000);
+    expect(agg.completionRate).toBeCloseTo(0.5);
   });
 
-  it('补集桶：组织树已含该区域则不虚拟补出', () => {
+  it('补集桶机制已退役（2026-10-26）：other 注册行被 HIDDEN 过滤', () => {
+    // other 已是 dim_org_region 注册区域（96 人归编兜底），用户裁决摘除；
+    // 即使名册/目标再现 other 行也不再补出虚拟节点。
     const g = buildGraph(raw({
-      regions: [region(COMPLEMENT_REGION, '其他区')],
+      regions: [region('hangzhou', '杭州'), region('other', '其他')],
+      rosterRows: [{ scope: 'other', enabled: 1, person_name: '某人' }],
+      targets: { other: { 某人: 1 } },
     }));
-    const nodes = g.regionNodes.filter((n) => n.key === COMPLEMENT_REGION);
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].label).toBe('其他区');
+    const keys = g.regionNodes.map((n) => n.key);
+    expect(keys).not.toContain('other');
+    expect(keys).toContain('hangzhou');
   });
 
   it('测试区不进区域层（2026-10-19 改制为「播报试投」功能模块）', () => {

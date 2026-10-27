@@ -31,7 +31,7 @@ from common.ops_web.app import (
 )
 from common.public_data import (
     bi_authz, calendar_store, channel_target, fleet_audit, ops_control,
-    recipient_override, report_roster,
+    org_catalog, recipient_override, report_roster,
 )
 from common.public_data.pipeline_config import StaticConfigSource
 
@@ -2212,6 +2212,46 @@ class RosterRegionTemplateTests(unittest.TestCase):
         self.assertEqual("绍兴", rows["潘良峰"]["scope_label"])
         self.assertEqual("person", rows["潘良峰"]["entity_type"])
 
+    def test_roster_api_reports_completed_by_scope(self):
+        """画布完成率分子（2026-10-26「播报回显完成百分比上面板」）：
+        当月完成额按名册**在册 person 型**人名归集到 scope（代填落群区域
+        也归本人——人名匹配）；停用行与店铺型不计；读失败 fail-soft。"""
+        store = _RosterStore()
+        store.rows = [
+            _roster_row(id=11, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="潘良峰",
+                        aliases=None, note=""),
+            _roster_row(id=12, scope="shaoxing", entity_type="person",
+                        entity_key="绍兴项目部", person_name="洪强",
+                        aliases=None, note="", enabled=0),      # 停用不计
+            _roster_row(id=13, scope="qudao", entity_type="store",
+                        entity_key="PDD店", person_name="饶佳君",
+                        aliases=None, note=""),                  # 店铺型不计
+        ]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with store.patch_fetch(), store.patch_audit(), mock.patch.object(
+                report_roster, "fetch_month_completed_by_person",
+                lambda conn, ym: {"潘良峰": 120000.0, "洪强": 999.0}):
+            data = client.get("/api/roster").json()
+        self.assertEqual({"shaoxing": 120000.0}, data["completed"])
+
+    def test_roster_api_completed_read_fails_soft(self):
+        """完成额读面异常（表未迁移等）→ completed={} 兜底，名册读面不拖垮。"""
+        store = _RosterStore()
+        store.rows = [_roster_row()]
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+
+        def _boom(conn, ym):
+            raise RuntimeError("table missing")
+
+        with store.patch_fetch(), store.patch_audit(), mock.patch.object(
+                report_roster, "fetch_month_completed_by_person", _boom):
+            data = client.get("/api/roster").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual({}, data["completed"])
+
 
 class RegionTargetsApiTests(unittest.TestCase):
     """区域月目标保存 API（dim_report_target 入库，2026-10-07）。"""
@@ -3647,6 +3687,30 @@ class OrgAssignmentApiTests(unittest.TestCase):
         self.assertIn("杭州销售部", hangzhou)
         self.assertEqual([], hangzhou["杭州销售部"]["members"])
 
+    def test_overview_merges_same_name_dept_split_by_id_key(self):
+        """裂行修复（2026-10-26）：覆盖成员的组带 dept_id、无覆盖成员的组
+        只有部门名——同一部门不得裂成两行；合并归带 id 的组。"""
+        conn = self._members_conn({
+            "dim_robot_member": [
+                ("u-zhang", "张三", "hangzhou", "门店一部"),
+                ("u-chen", "陈六", "hangzhou", "门店一部"),   # 无覆盖→名字键
+            ],
+            "dim_org_assignment_override": [
+                dict(_ORG_OVERRIDE_ROW, user_id="u-zhang", region="hangzhou",
+                     dept_id="d1", dept_name="门店一部"),
+            ],
+        })
+        data = self._admin_client(conn).get("/api/org/overview").json()
+        regions = {r["key"]: r for r in data["regions"]}
+        hz = regions["hangzhou"]["depts"]
+
+        names = [d["dept_name"] for d in hz]
+        self.assertEqual(1, names.count("门店一部"))          # 不裂行
+        dept = next(d for d in hz if d["dept_name"] == "门店一部")
+        self.assertEqual("d1", dept["dept_id"])             # 保留 id 组
+        self.assertEqual({"u-zhang", "u-chen"},
+                         {m["user_id"] for m in dept["members"]})
+
     def test_overview_catalog_read_fails_soft(self):
         conn = self._members_conn(fail={"dim_org_region"})
         response = self._admin_client(conn).get("/api/org/overview")
@@ -4060,6 +4124,38 @@ class RegionsApiTests(unittest.TestCase):
         self.assertEqual("ok", data["status"])
         self.assertIn("regions", data)
         self.assertIn("depts", data)
+
+    def test_regions_carry_derived_leaderboard_url(self):
+        """榜单页派生生效值透出（2026-10-26 URL 基址 env 化配套）：
+        库存列为空时 broadcast 带 leaderboard_url_derived（基址模板派生），
+        抽屉编辑块据此标注「留空=自动派生」，空字段不再被误读为丢失。"""
+        catalog = {
+            "regions": [
+                {"region_key": "hangzhou",
+                 "broadcast": {"leaderboard_url": None}},
+                {"region_key": "junpin",
+                 "broadcast": {"leaderboard_url": "http://custom/lb"}},
+                {"region_key": "nobc"},   # 无 broadcast 子对象不炸
+            ],
+            "depts": [], "region_depts": {},
+        }
+        client = TestClient(_app(viewer=_admin_viewer()))
+        _login(client)
+        with mock.patch.object(
+                org_catalog, "fetch_catalog", lambda conn: catalog), \
+                mock.patch.dict(
+                    "os.environ",
+                    {"PUBLIC_PAGES_BASE": "https://dt.yyhlzj.com"}):
+            data = client.get("/api/regions").json()
+        by_key = {r["region_key"]: r for r in data["regions"]}
+        self.assertEqual(
+            "https://dt.yyhlzj.com/hangzhou.html",
+            by_key["hangzhou"]["broadcast"]["leaderboard_url_derived"])
+        # env 已配时派生恒赢（库存自定义值不再生效，derived 如实透出）
+        self.assertEqual(
+            "https://dt.yyhlzj.com/junpin.html",
+            by_key["junpin"]["broadcast"]["leaderboard_url_derived"])
+        self.assertNotIn("broadcast", by_key["nobc"])
 
 
 class RecordsApiTests(unittest.TestCase):

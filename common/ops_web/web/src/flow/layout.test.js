@@ -124,10 +124,10 @@ describe('layoutNodes', () => {
   });
 
   it('业务线分组（2026-10-24 面板按 sheet 切割）：组带 + 组间距', () => {
-    // 线下组（hangzhou+other）与总部组（hq）之间插额外间距；
+    // 线下组（hangzhou+province_ops）与总部组（hq）之间插额外间距；
     // 组带=各组节点外接矩形，muted 组标 muted。
     const r1 = regionNode('hangzhou');
-    const r2 = regionNode('other');
+    const r2 = regionNode('province_ops');
     const r3 = regionNode('hq');
     r1.group = 'offline'; r2.group = 'offline'; r3.group = 'hq';
     const { groupBands } = layoutNodes({

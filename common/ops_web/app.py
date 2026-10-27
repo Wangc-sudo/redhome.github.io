@@ -623,6 +623,34 @@ def _build_org_overview(members, overrides, catalog=None):
         if dept_name and not group["dept_name"]:
             group["dept_name"] = dept_name
 
+    # 同名部门归并（2026-10-26 裂行修复）：覆盖成员的组带 dept_id、
+    # 基名单成员的组只有名字——「分组键取 dept_id or dept_name」会让同
+    # 一个部门裂成两行（id 键一行、名字键一行，画布出现两个同名部门）。
+    # 按 dept_name 把同名组合并：优先保留带 dept_id 的组（id 与目录
+    # sort_order 随之保留）；两组同带 id = 登记脏数据，同样合并（同区域
+    # 同名两行本身即误导，展示归一）。
+    for region_key, depts in grouped.items():
+        if not isinstance(depts, dict):
+            continue
+        by_name = {}
+        for key in list(depts):
+            group = depts[key]
+            name = group["dept_name"]
+            if not name:
+                continue
+            hit = by_name.get(name)
+            if hit is None:
+                by_name[name] = key
+                continue
+            keep_key = hit if depts[hit]["dept_id"] else key
+            drop_key = key if keep_key == hit else hit
+            keep, drop = depts[keep_key], depts[drop_key]
+            keep["members"].extend(drop["members"])
+            if not keep["dept_id"] and drop["dept_id"]:
+                keep["dept_id"] = drop["dept_id"]
+            del depts[drop_key]
+            by_name[name] = keep_key
+
     pool = grouped.pop(None, [])
     pool.sort(key=lambda item: (item["name"], item["user_id"]))
 
@@ -2523,12 +2551,24 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web regions load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 榜单页派生生效值（2026-10-26 URL 基址 env 化配套）：库存列清空后
+        # 播报链接由 PUBLIC_PAGES_BASE 派生——读面透出实际生效值
+        # （leaderboard_url_derived），抽屉编辑块据此标注「留空=自动
+        # 派生」，避免空字段被误读为链接丢失。
+        from common.region_config import leaderboard_url_for
+        regions = catalog.get("regions") or []
+        for row in regions:
+            broadcast = row.get("broadcast")
+            if isinstance(broadcast, dict):
+                broadcast["leaderboard_url_derived"] = leaderboard_url_for(
+                    row.get("region_key") or "",
+                    broadcast.get("leaderboard_url") or "")
         # jsonable_encoder（2026-10-26）：播报列/归属映射入库后 catalog 行
         # 带 datetime（updated_at）——直交 JSONResponse 的 json.dumps 会 500
         # （实测）。编码器统一处理 datetime/Decimal。
         return JSONResponse(jsonable_encoder({
             "status": "ok",
-            "regions": catalog.get("regions") or [],
+            "regions": regions,
             "depts": catalog.get("depts") or [],
             "region_depts": catalog.get("region_depts") or {},
         }))
@@ -3677,8 +3717,34 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         except Exception as exc:
             _LOGGER.warning("ops-web roster load failed: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
+        # 画布区域卡「完成率」分子（2026-10-26 用户裁决「播报回显完成
+        # 百分比添加到面板」）：当月完成额按名册在册人名归集到 scope
+        # （人名匹配而非 region——代填落群区域也能归到本人，与播报回执
+        # 「本月累计/目标，完成 X%」同口径）。恒为当月（current_month），
+        # 不随名册页翻月。读失败 fail-soft 略过（完成率格显示「—」，
+        # 不拖垮名册读面）。
+        completed_person = {}
+        try:
+            with db_connector() as connection:
+                completed_person = report_roster.fetch_month_completed_by_person(
+                    connection, current_month)
+        except Exception as exc:
+            _LOGGER.warning("ops-web roster completed read failed: %s",
+                            type(exc).__name__)
         labels = dict(scope_pairs)
         allowed = set(visible_scopes)
+        completed = {}
+        for row in entries:
+            if (row.get("scope") not in allowed
+                    or row.get("entity_type") != "person"
+                    or not row.get("enabled")):
+                continue
+            name = row.get("person_name")
+            if not name:
+                continue
+            scope = row["scope"]
+            completed[scope] = completed.get(scope, 0.0) \
+                + completed_person.get(name, 0.0)
         # updated_at / created_at 是 DB DATETIME（pymysql 返回 datetime 对象），
         # 不经 _fmt_time 归一直接进 JSONResponse 会 json.dumps 失败 → 整接口
         # 500、/roster 页数据面全挂（2026-10-14 带会话线上实测）。出口统一为
@@ -3702,6 +3768,7 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             ],
             "roster": roster,
             "targets": targets,
+            "completed": completed,
             "audits": audits,
         })
 

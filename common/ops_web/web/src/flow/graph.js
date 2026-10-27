@@ -17,9 +17,9 @@ export const AGGREGATE_REGIONS = {
   },
 };
 
-//: 补集桶虚拟节点（「其他」：名册有余云涛/谢坚钰/李树军但组织树无成员，
-//: overview.regions 不含它——从名册/目标数据派生）。
-export const COMPLEMENT_REGION = 'other';
+//: 补集桶虚拟节点机制已退役（2026-10-26 用户裁决摘「其他」卡）：
+//: other 已是 dim_org_region 注册区域（组织完整化后挂 96 人归编兜底），
+//: 注册行被 HIDDEN_REGION_KEYS 过滤后补集分支本就恒不可达，一并清除。
 
 //: 业务线分组（2026-10-24 用户裁决「面板按 sheet 切割」）：分组定义在
 //: layout.js（展示层概念，保持 graph→layout 单向依赖）。
@@ -27,7 +27,19 @@ export const COMPLEMENT_REGION = 'other';
 //: 不进区域层的注册区域（2026-10-19 用户裁决：测试区改制为通用功能
 //: 模块「播报试投」，与播报日历同级——它只是播报试投出口，不是业务
 //: 区域；改投开关集中在功能模块抽屉，区域节点不再出现）。
-export const HIDDEN_REGION_KEYS = new Set(['test']);
+//: 2026-10-26 用户裁决「没上线的功能从画布去掉」：
+//: * qudao 渠道——日报/榜单/提醒/催办线全停发（用户本意），仅渠道到齐
+//:   检查在跑；渠道 BI 看板在 BI 侧，不属于日报闭环画布；
+//: * dining 餐饮——规划中，零名册零任务线；
+//: * junpin 君品雅院——任务线注册了但群未配，outbox 零产出的空跑；
+//: * offline_extra 线下额外——纯归编补集，无任务线。
+//: 2026-10-26 用户裁决追加 other（「其他」归编兜底区，96 人部门树挂
+//: 「缺名册」警告是噪音；归属查看改去 /org 组织编排页）。
+//: 上线时从集合移除即恢复（qudao 的店铺级徽章特判保留备用）。
+//: hq（总部职能底 muted）是有意的只读展示，不在此列。
+export const HIDDEN_REGION_KEYS = new Set([
+  'test', 'qudao', 'dining', 'junpin', 'offline_extra', 'other',
+]);
 
 //: 平台线（region=null 的服务组）的虚拟区域键。
 export const PLATFORM_KEY = '__platform__';
@@ -180,6 +192,14 @@ export function buildGraph(raw) {
   const { overview, roster, groups } = raw;
   const rosterRows = (roster && roster.roster) || [];
   const targets = (roster && roster.targets) || {};
+  //: 当月完成额（元，{scope: amount}，2026-10-26「播报回显完成百分比」
+  //: 上面板）。完成率口径=播报回执「本月累计/目标」：completed 元 ÷10000
+  //: 与 targets 万元（dim_report_target 原值）换算后相比；目标 0/无 →
+  //: null（显示「—」，与榜单「目标 0 不参与排序」同语义）。
+  const completed = (roster && roster.completed) || {};
+  const rateOf = (completedSum, targetSum) => (
+    targetSum > 0 ? completedSum / 10000 / targetSum : null
+  );
   const regions = (overview && overview.regions) || [];
 
   const poolMembers = ((overview && overview.pool) || []).slice(0, POOL_LIMIT);
@@ -201,18 +221,10 @@ export function buildGraph(raw) {
   // 平台线（region=null）不再是区域节点（2026-10-17 流水线分层）：其服务
   // 按 stageOf 散落 采集/加工 泳道成模块，源→采集→加工画数据流边。
   const platform = servicesByRegion[PLATFORM_KEY] || [];
-  // 补集桶虚拟节点（组织树无成员但名册/目标存在时补出）
-  if (!regions.some((r) => r.key === COMPLEMENT_REGION)
-      && (rosterRows.some((row) => row.scope === COMPLEMENT_REGION
-                                    && Number(row.enabled) === 1)
-          || (targets[COMPLEMENT_REGION]))) {
-    regionSpecs.push({ key: COMPLEMENT_REGION, region: null });
-  }
 
   for (const spec of regionSpecs) {
     const key = spec.key;
     const isPlatform = key === PLATFORM_KEY;
-    const isComplement = key === COMPLEMENT_REGION && !spec.region;
     // 部门/成员随节点携带（部门输入端口 + 成员输出口拉线的数据底）
     const depts = isPlatform || !spec.region ? [] : (spec.region.depts || [])
       .map((dept) => ({
@@ -236,6 +248,8 @@ export function buildGraph(raw) {
     const targetCount = Object.keys(targetMap).length;
     const targetSum = Object.values(targetMap)
       .reduce((sum, value) => sum + (Number(value) || 0), 0);
+    const completedSum = Number(completed[key]) || 0;
+    const completionRate = rateOf(completedSum, targetSum);
     const services = servicesByRegion[key] || [];
     // 徽章口径（2026-10-24 用户裁决配套）：
     // * 总部（hq）：不报数的职能底——只展示，永不亮警告；
@@ -243,11 +257,9 @@ export function buildGraph(raw) {
     //   无月目标不算缺口——有店铺名册+有服务即闭环。
     const badge = isPlatform
       ? { text: '平台线', cls: 'plain' }
-      : isComplement
-        ? { text: '补集', cls: 'plain' }
-        : key === 'hq'
-          ? { text: '职能底', cls: 'plain' }
-          : key === 'qudao' && rosterCount > 0
+      : key === 'hq'
+        ? { text: '职能底', cls: 'plain' }
+        : key === 'qudao' && rosterCount > 0
             ? (services.length
               ? { text: '已闭环', cls: 'ok' }
               : { text: '待下游', cls: 'warn' })
@@ -256,13 +268,14 @@ export function buildGraph(raw) {
       id: `region:${key}`,
       key,
       label: isPlatform ? '平台 / 无群'
-        : isComplement ? '其他（补集）'
         : (spec.region.label || key),
       group: groupOf(key)?.key || null,
       badge,
       rosterCount,
       targetCount,
       targetSum,
+      completedSum,
+      completionRate,
       memberCount,
       depts,
       members,
@@ -301,6 +314,9 @@ export function buildGraph(raw) {
       x: REGION_X,
       y: TOP_Y,
     };
+    // 完成额/完成率=组成桶求和后换算（口径同区域节点）。
+    agg.completedSum = partNodes.reduce((s, n) => s + (n.completedSum || 0), 0);
+    agg.completionRate = rateOf(agg.completedSum, agg.targetSum);
     nextRegions.push(agg);
     for (const part of partNodes) {
       nextEdges.push({
