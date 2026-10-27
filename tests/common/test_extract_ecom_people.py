@@ -71,21 +71,29 @@ def _store_meta(mapping):
 class _Cursor:
     def __init__(self, conn):
         self._conn = conn
-        self._one = None
+        self._rows = []
 
     def execute(self, sql, params=None):
         self._conn.executed.append((sql, params))
+        if sql.lstrip().upper().startswith("SELECT"):
+            start_day, end_day = (str(value)[:10] for value in params)
+            self._rows = [
+                dict(row) for row in self._conn.table.values()
+                if start_day <= str(row["business_date"])[:10] <= end_day
+            ]
+            self._rows.sort(key=lambda row: row["monthly_target"] is None)
+        else:
+            self._apply(sql, params)
+
+    def executemany(self, sql, params):
+        params = list(params)
+        self._conn.executed.append((sql, params))
+        for item in params:
+            self._apply(sql, item)
+
+    def _apply(self, sql, params):
         head = sql.lstrip().upper()
-        if head.startswith("SELECT"):
-            region, owner, day = params
-            self._one = None
-            for row in self._conn.table.values():
-                if (row["region"] == region
-                        and row["responsible_person"] == owner
-                        and row["business_date"] == day):
-                    self._one = dict(row)
-                    return
-        elif head.startswith("UPDATE"):
+        if head.startswith("UPDATE"):
             sales, target, synced, source_record_id = params
             row = self._conn.table[source_record_id]
             row["sales_amount"] = sales
@@ -108,8 +116,8 @@ class _Cursor:
                 "sync_run_id": run_id,
             }
 
-    def fetchone(self):
-        return self._one
+    def fetchall(self):
+        return self._rows
 
     def close(self):
         pass
@@ -498,6 +506,10 @@ class UpsertRowsTests(unittest.TestCase):
         stats = upsert_rows(conn, self._rows(), _NOW)
         self.assertEqual(stats, {"inserted": 2, "updated": 0})
         self.assertEqual(len(conn.table), 2)
+        self.assertEqual(conn.insert_count(), 1)  # 两行合并为一次批量 INSERT
+        self.assertEqual(conn.update_count(), 0)
+        self.assertEqual(len(conn.executed), 2)   # 一次预载 + 一次批量插入
+        self.assertEqual(len(conn.executed[1][1]), 2)
         row = conn.table["ecom:张三:2026-09-10"]
         self.assertEqual(row["region"], "qudao")
         self.assertEqual(row["department"], "天猫")
@@ -507,6 +519,30 @@ class UpsertRowsTests(unittest.TestCase):
         self.assertNotEqual(row["sync_run_id"],
                             "00000000-0000-0000-0000-000000000000")
 
+    def test_preloads_business_date_window_once(self):
+        rows = build_fact_rows(
+            [
+                _detail_row("旗舰店", ["张三"], 120, "2026-09-12"),
+                _detail_row("旗舰店", ["张三"], 100, "2026-09-10"),
+                _detail_row("旗舰店", ["张三"], 110, "2026-09-11"),
+            ],
+            _store_meta({"旗舰店": (300000.0, ["张三"])}),
+        )
+        conn = _FakeConnection()
+        stats = upsert_rows(conn, rows, _NOW)
+        self.assertEqual(stats, {"inserted": 3, "updated": 0})
+        selects = [
+            (sql, params) for sql, params in conn.executed
+            if sql.lstrip().upper().startswith("SELECT")
+        ]
+        self.assertEqual(len(selects), 1)
+        select_sql, select_params = selects[0]
+        self.assertIn("`business_date` BETWEEN %s AND %s", select_sql)
+        self.assertIn("ORDER BY (`monthly_target` IS NULL)", select_sql)
+        self.assertNotIn("LIMIT 1", select_sql)
+        self.assertEqual(select_params, ("2026-09-10", "2026-09-12"))
+        self.assertEqual(len(conn.executed), 2)  # 三行仍只需预载 + 批量插入
+
     def test_replay_is_idempotent_and_updates_values(self):
         """同 (region, owner, day) 二次执行：行数不变、值更新、走 UPDATE。"""
         conn = _FakeConnection()
@@ -514,8 +550,10 @@ class UpsertRowsTests(unittest.TestCase):
         stats = upsert_rows(conn, self._rows(sales=20000), _NOW)
         self.assertEqual(stats, {"inserted": 0, "updated": 2})
         self.assertEqual(len(conn.table), 2)
-        self.assertEqual(conn.insert_count(), 2)   # 仅第一轮
-        self.assertEqual(conn.update_count(), 2)   # 第二轮全部 UPDATE
+        self.assertEqual(conn.insert_count(), 1)   # 仅第一轮，一次批量 INSERT
+        self.assertEqual(conn.update_count(), 1)   # 第二轮两行一次批量 UPDATE
+        self.assertEqual(len(conn.executed), 4)    # 每轮预载 + 一种批量写
+        self.assertEqual(len(conn.executed[-1][1]), 2)
         self.assertEqual(
             conn.table["ecom:张三:2026-09-10"]["sales_amount"], 20000.0
         )
@@ -527,7 +565,7 @@ class UpsertRowsTests(unittest.TestCase):
                 "source_record_id": "stream:qudao:u-zhangsan:2026-09-10",
                 "region": "qudao",
                 "responsible_person": "张三",
-                "business_date": "2026-09-10",
+                "business_date": datetime(2026, 9, 10).date(),
                 "sales_amount": 1.0,
                 "monthly_target": None,
             },
@@ -535,9 +573,47 @@ class UpsertRowsTests(unittest.TestCase):
         stats = upsert_rows(conn, self._rows(), _NOW)
         self.assertEqual(stats, {"inserted": 1, "updated": 1})
         self.assertEqual(len(conn.table), 2)  # 李四新插，张三就地更新
+        self.assertEqual(conn.insert_count(), 1)
+        self.assertEqual(conn.update_count(), 1)
+        self.assertEqual(len(conn.executed), 3)  # 预载 + 批量更新 + 批量插入
         row = conn.table["stream:qudao:u-zhangsan:2026-09-10"]
         self.assertEqual(row["sales_amount"], 12800.0)
         self.assertEqual(row["monthly_target"], 300000.0)
+
+    def test_historical_duplicates_keep_ordered_first_row(self):
+        """历史重复行业务键相同：非 NULL 目标优先，同组仍取结果首行。"""
+        conn = _FakeConnection(table={
+            "legacy:null-target": {
+                "source_record_id": "legacy:null-target",
+                "region": "qudao",
+                "responsible_person": "张三",
+                "business_date": "2026-09-10",
+                "sales_amount": 1.0,
+                "monthly_target": None,
+            },
+            "legacy:preferred": {
+                "source_record_id": "legacy:preferred",
+                "region": "qudao",
+                "responsible_person": "张三",
+                "business_date": "2026-09-10",
+                "sales_amount": 2.0,
+                "monthly_target": 100.0,
+            },
+            "legacy:other-target": {
+                "source_record_id": "legacy:other-target",
+                "region": "qudao",
+                "responsible_person": "张三",
+                "business_date": "2026-09-10",
+                "sales_amount": 3.0,
+                "monthly_target": 200.0,
+            },
+        })
+        stats = upsert_rows(conn, self._rows(), _NOW)
+        self.assertEqual(stats, {"inserted": 1, "updated": 1})
+        self.assertEqual(conn.table["legacy:preferred"]["sales_amount"], 12800.0)
+        self.assertEqual(conn.table["legacy:preferred"]["monthly_target"], 300000.0)
+        self.assertEqual(conn.table["legacy:null-target"]["sales_amount"], 1.0)
+        self.assertEqual(conn.table["legacy:other-target"]["sales_amount"], 3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +682,15 @@ class _StoreCursor:
 
     def execute(self, sql, params=None):
         self._conn.executed.append((sql, params))
+        self._apply(sql, params)
+
+    def executemany(self, sql, params):
+        params = list(params)
+        self._conn.executed.append((sql, params))
+        for item in params:
+            self._apply(sql, item)
+
+    def _apply(self, sql, params):
         head = sql.lstrip().upper()
         if head.startswith("DELETE"):
             self._conn.deleted = True
@@ -648,12 +733,27 @@ class ReplaceStoreTargetsTests(unittest.TestCase):
         )
         self.assertEqual(written, 2)
         self.assertTrue(conn.deleted)
+        self.assertEqual(len(conn.executed), 2)  # DELETE + 一次批量 INSERT
+        self.assertEqual(len(conn.executed[1][1]), 2)
         self.assertNotIn("已下线店", conn.rows)  # 全量替换，下线店消失
         row = conn.rows["旗舰店"]
         self.assertEqual(row["monthly_target"], 300000.0)
         self.assertEqual(row["sync_run_id"], ECOM_RUN_ID)
         self.assertIsNone(conn.rows["专营店"]["monthly_target"])  # 归属与目标解耦
         self.assertEqual(json.loads(conn.rows["旗舰店"]["owners_json"])[0]["name"], "张三")
+
+    def test_empty_valid_set_deletes_without_insert(self):
+        conn = _StoreConnection(initial={"已下线店": {"store_name": "已下线店"}})
+        written = replace_store_targets(
+            conn,
+            [_target_row("  ", 100, owners=["张三"])],
+            sync_run_id=ECOM_RUN_ID, synced_at=_NOW,
+        )
+        self.assertEqual(written, 0)
+        self.assertTrue(conn.deleted)
+        self.assertEqual(conn.rows, {})
+        self.assertEqual(len(conn.executed), 1)
+        self.assertTrue(conn.executed[0][0].lstrip().upper().startswith("DELETE"))
 
 
 if __name__ == "__main__":

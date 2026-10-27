@@ -65,6 +65,7 @@ CATEGORY_FAMILY = (
     ("robot-", "催办"),
     ("pages-", "页面"),
     ("leaderboard-", "播报"),
+    ("dq-", "加工"),
 )
 
 

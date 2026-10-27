@@ -26,6 +26,7 @@ watch(flash, (value) => {
     <nav>
       <router-link v-if="hasCapability('org')" to="/flow">闭环画布</router-link>
       <router-link v-if="hasCapability('pipelines')" to="/broadcast">播报编排</router-link>
+      <router-link to="/data-quality">数据质量</router-link>
       <span v-if="showLegacy" class="nav-group legacy">
         <router-link v-if="hasCapability('roster')" to="/roster">名册</router-link>
         <router-link v-if="hasAnyCapability('org')" to="/org">组织</router-link>

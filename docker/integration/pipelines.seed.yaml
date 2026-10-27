@@ -53,6 +53,13 @@ extract-mart:
   sla: "17:45"
   reads: [raw_dingtalk, mart_ops]
   description: "raw_dingtalk -> mart_ops extraction (facts + dim_calendar)"
+dq-rerun-worker:
+  kind: apps
+  category: 加工
+  enabled: true
+  schedule: "* * * * *"
+  reads: [raw_dingtalk, raw_wdt, mart_ops]
+  description: "consumes one pending frozen data-quality rerun per tick (dry-run or formal publish)"
 # robot 一拆二（2026-10-07 裁决）：robot-<区域>=填报提醒(18:00)，
 # robot-check-<区域>=催办未填人+DING(20:00)，独立注册/调度/可手动运行，
 # 手动触发不再受 mart_cli once 的小时分流限制。
@@ -161,6 +168,22 @@ extract-channel:
   reads: [raw_dingtalk, mart_ops]
   depends_on: [sync-channel-sales]
   description: "渠道日销 T+1 提取（fact_channel_daily_sales + fact_channel_store_target，点名册依赖）"
+dq-check-channel:
+  kind: apps
+  category: 加工
+  enabled: true
+  schedule: "50 10 * * *"
+  reads: [raw_dingtalk, mart_ops]
+  depends_on: [extract-channel]
+  description: "渠道日销只读质量检查（规则、异常与运行摘要落 dq_* 控制表）"
+dq-check-wdt:
+  kind: apps
+  category: 加工
+  enabled: true
+  schedule: "30 18 * * *"
+  reads: [raw_wdt, mart_ops]
+  depends_on: [extract-mart]
+  description: "WDT 订单行只读质量检查（解析、必填、重复与拉空）"
 # 渠道日销·订单口径（2026-10-23 第 3 步）：不读 AI 表，直接把 fact_order_line
 # 按 dim_channel_map 聚合成 fact_channel_order_daily。与上面的人工填报口径
 # 双轨并存（对账期），退役人工口径是第 4 步、需运维裁决。

@@ -108,6 +108,15 @@ def _extract_entry(*extra):
     }
 
 
+def _data_quality_entry(dataset):
+    return {
+        "argv": [
+            "common.public_data.cli", "data-quality-check",
+            "--confirm-local-test-write", "--dataset", dataset,
+        ],
+    }
+
+
 def _pages_entry(region, *extra):
     return _mart_cli_entry(
         "leaderboard-html",
@@ -182,6 +191,14 @@ _COMMAND_TABLE = {
         ],
     },
     "extract-mart": _extract_entry(),
+    "dq-rerun-worker": {
+        "argv": [
+            "common.public_data.cli", "data-quality-rerun",
+            "--confirm-local-test-write",
+        ],
+    },
+    "dq-check-channel": _data_quality_entry("channel_daily_sales"),
+    "dq-check-wdt": _data_quality_entry("wdt_order_line_fact"),
     # 渠道日销 T+1 采集窗口（10:31 补采 → 10:35 提取 → 10:40 到齐校验 →
     # 10:45 页面重算；方案 docs/渠道日销T+1采集与门店到齐催办方案-2026-09-28.md）。
     "sync-channel-sales": _sync_entry(

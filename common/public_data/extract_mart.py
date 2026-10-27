@@ -21,8 +21,10 @@ import json
 import logging
 import re
 import textwrap
+import time
+import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from common.calendar_utils import month_days
 from common.public_data.dataset_filter import matches_any
@@ -63,6 +65,8 @@ def _normalize_region_keys(dataset, rows):
 
 def _coerce_date(value):
     """业务日期列值 → ``date``；不可解析（None/空/异常形态）→ ``None``。"""
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     text = str(value or "").strip()[:10]
@@ -272,6 +276,73 @@ class ExtractResult:
     datasets: list = field(default_factory=list)
 
 
+def iterate_wdt_trades(connection, source_method, *, batch_size=1000,
+                       max_batch_bytes=32 * 1024 * 1024, metrics=None):
+    """Yield bounded raw WDT batches using the primary-key keyset.
+
+    A non-buffered cursor keeps the database driver from materializing the whole
+    JSON result set.  One oversized record forms a single-row batch so progress
+    is always possible; its size remains visible to the caller's batch metrics.
+    """
+    if not source_method:
+        raise MartExtractError("missing wdt source method")
+    if int(batch_size) < 1 or int(max_batch_bytes) < 1:
+        raise MartExtractError("invalid wdt batch limits")
+    from pymysql.cursors import SSDictCursor
+
+    batch_size = int(batch_size)
+    max_batch_bytes = int(max_batch_bytes)
+    cursor_id = ""
+    pending = None
+    exhausted = False
+    while not exhausted or pending is not None:
+        rows = []
+        batch_bytes = 0
+        if pending is not None:
+            rows.append(pending)
+            batch_bytes = _wdt_row_size(pending)
+            cursor_id = str(pending["source_record_id"])
+            pending = None
+        if not exhausted:
+            sql = (
+                "SELECT `source_record_id`, `payload_json` FROM `wdt_records` "
+                "WHERE `source_method` = %s AND `source_record_id` > %s "
+                "ORDER BY `source_record_id` LIMIT %s"
+            )
+            with contextlib.closing(connection.cursor(SSDictCursor)) as cursor:
+                started = time.perf_counter()
+                try:
+                    cursor.execute(sql, (source_method, cursor_id, batch_size))
+                finally:
+                    if metrics is not None:
+                        metrics.sql_count += 1
+                        metrics.db_ms += int((time.perf_counter() - started) * 1000)
+                while len(rows) < batch_size:
+                    row = cursor.fetchone()
+                    if row is None:
+                        exhausted = True
+                        break
+                    row = dict(row)
+                    row_size = _wdt_row_size(row)
+                    if rows and batch_bytes + row_size > max_batch_bytes:
+                        pending = row
+                        break
+                    rows.append(row)
+                    batch_bytes += row_size
+                    cursor_id = str(row["source_record_id"])
+        if rows:
+            yield rows
+
+
+def _wdt_row_size(row):
+    payload = row.get("payload_json")
+    if not isinstance(payload, str):
+        payload = json.dumps(payload, ensure_ascii=False, default=str)
+    return len(str(row.get("source_record_id") or "").encode("utf-8")) + len(
+        payload.encode("utf-8")
+    )
+
+
 class MartExtractRepository:
     """读取 raw 表，并把事实投影与维度写入 mart。"""
 
@@ -332,18 +403,12 @@ class MartExtractRepository:
             cursor.execute(f"SELECT * FROM `{table}`")
             return [dict(row) for row in cursor.fetchall()]
 
-    def read_wdt_trades(self, source_method):
-        """按接口方法读取 raw_wdt.wdt_records 的全部 payload。"""
-
-        if not source_method:
-            raise MartExtractError("missing wdt source method")
-        sql = (
-            "SELECT `source_record_id`, `payload_json` FROM `wdt_records` "
-            "WHERE `source_method` = %s"
+    def read_wdt_trade_batches(self, source_method, *, batch_size=1000,
+                               max_batch_bytes=32 * 1024 * 1024):
+        return iterate_wdt_trades(
+            self.wdt_connection, source_method, batch_size=batch_size,
+            max_batch_bytes=max_batch_bytes,
         )
-        with contextlib.closing(self.wdt_connection.cursor()) as cursor:
-            cursor.execute(sql, (source_method,))
-            return [dict(row) for row in cursor.fetchall()]
 
     def read_mart_table(self, table, columns=None):
         """读取 mart 侧已注册的镜像目标表（当前仅 dim_product，供品牌反查）。
@@ -366,7 +431,7 @@ class MartExtractRepository:
             cursor.execute(f"SELECT {projection} FROM `{table}`")
             return [dict(row) for row in cursor.fetchall()]
 
-    def replace_table(self, target_table, columns, rows):
+    def _validate_replace_columns(self, target_table, columns):
         dataset = next((d for d in EXTRACT_DATASETS if d.target_table == target_table), None)
         replace_kinds = (
             "snapshot", "melt_store_funds", "melt_store_expense", "dim_mirror",
@@ -397,6 +462,10 @@ class MartExtractRepository:
             allowed |= set(dataset_columns(dataset))
         if not columns or len(set(columns)) != len(columns) or set(columns) != allowed:
             raise MartExtractError("invalid snapshot columns")
+        return dataset
+
+    def replace_table(self, target_table, columns, rows):
+        self._validate_replace_columns(target_table, columns)
         params = [tuple(row.get(name) for name in columns) for row in rows]
         with transaction(self._mart):
             with contextlib.closing(self._mart.cursor()) as cursor:
@@ -408,6 +477,189 @@ class MartExtractRepository:
                         f"INSERT INTO `{target_table}` ({col_sql}) VALUES ({placeholders})", params,
                     )
         return len(rows)
+
+    def replace_table_batches(self, target_table, columns, batches):
+        """Build a full-replay fact in staging, then atomically publish it.
+
+        The current table remains available while raw batches are expanded and
+        appended.  A row-count reconciliation must pass before the atomic
+        RENAME; any earlier failure removes only staging and preserves the old
+        table.
+        """
+        dataset = self._validate_replace_columns(target_table, columns)
+        if dataset.kind not in {
+            "order_line_expand", "order_cancel_expand",
+            "stockout_line_expand", "refund_line_expand",
+        }:
+            raise MartExtractError("unsupported streaming replacement table")
+        token = uuid.uuid4().hex
+        staging = f"__extract_s_{token}"
+        backup = f"__extract_b_{token}"
+        col_sql = ", ".join(f"`{name}`" for name in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        insert_sql = f"INSERT INTO `{staging}` ({col_sql}) VALUES ({placeholders})"
+        created = False
+        published = False
+        written = 0
+        try:
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"CREATE TABLE `{staging}` LIKE `{target_table}`")
+            created = True
+            for rows in batches:
+                params = [tuple(row.get(name) for name in columns) for row in rows]
+                if not params:
+                    continue
+                with transaction(self._mart):
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.executemany(insert_sql, params)
+                written += len(params)
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"SELECT COUNT(*) AS `row_count` FROM `{staging}`")
+                count_row = cursor.fetchone()
+            actual = count_row["row_count"] if isinstance(count_row, dict) else count_row[0]
+            if int(actual) != written:
+                raise MartExtractError("staging row count mismatch")
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(
+                    f"RENAME TABLE `{target_table}` TO `{backup}`, "
+                    f"`{staging}` TO `{target_table}`"
+                )
+            published = True
+            return written
+        finally:
+            if published:
+                try:
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.execute(f"DROP TABLE `{backup}`")
+                except Exception:
+                    logger.warning("failed to drop published extract backup %s", backup)
+            elif created:
+                try:
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.execute(f"DROP TABLE IF EXISTS `{staging}`")
+                except Exception:
+                    logger.warning("failed to clean extract staging table %s", staging)
+
+    def _validate_window_replay(self, target_table, columns=None):
+        replay_tables = {
+            "fact_channel_daily_sales": "business_date",
+            "fact_order_line": "trade_time",
+        }
+        date_column = replay_tables.get(target_table)
+        if date_column is None:
+            raise MartExtractError("unsupported window replay table")
+        if columns is not None:
+            if target_table == "fact_channel_daily_sales":
+                dataset = next(
+                    d for d in EXTRACT_DATASETS if d.target_table == target_table
+                )
+                allowed = {
+                    "source_record_id", *dataset.target_columns,
+                    "synced_at", "sync_run_id",
+                }
+                if (not columns or len(set(columns)) != len(columns)
+                        or set(columns) != allowed):
+                    raise MartExtractError("invalid window replay columns")
+            else:
+                self._validate_replace_columns(target_table, columns)
+        return date_column
+
+    def window_row_counts(self, target_table, window_start, window_end):
+        """Return total and bounded-window row counts without writing any table."""
+        date_column = self._validate_window_replay(target_table)
+        end_exclusive = window_end + timedelta(days=1)
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(
+                f"SELECT COUNT(*) AS `row_count`, "
+                f"COALESCE(SUM(CASE WHEN `{date_column}` >= %s "
+                f"AND `{date_column}` < %s THEN 1 ELSE 0 END), 0) AS `window_count` "
+                f"FROM `{target_table}`",
+                (window_start, end_exclusive),
+            )
+            row = cursor.fetchone()
+        if isinstance(row, dict):
+            total, window = row["row_count"], row["window_count"]
+        else:
+            total, window = row
+        return {"before_count": int(total), "window_before": int(window)}
+
+    def replace_table_window_batches(
+        self, target_table, columns, batches, *, window_start, window_end,
+    ):
+        """Replace one business window through staging and an atomic RENAME.
+
+        Rows outside the half-open timestamp range, including NULL business
+        timestamps, are copied unchanged.  No target-table write occurs until
+        the staged row count reconciles with the pre-publish counts.
+        """
+        date_column = self._validate_window_replay(target_table, columns)
+        end_exclusive = window_end + timedelta(days=1)
+        counts = self.window_row_counts(target_table, window_start, window_end)
+        token = uuid.uuid4().hex
+        staging = f"__extract_s_{token}"
+        backup = f"__extract_b_{token}"
+        col_sql = ", ".join(f"`{name}`" for name in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        insert_sql = f"INSERT INTO `{staging}` ({col_sql}) VALUES ({placeholders})"
+        created = False
+        published = False
+        written = 0
+        try:
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"CREATE TABLE `{staging}` LIKE `{target_table}`")
+            created = True
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(
+                    f"INSERT INTO `{staging}` ({col_sql}) SELECT {col_sql} "
+                    f"FROM `{target_table}` WHERE `{date_column}` < %s "
+                    f"OR `{date_column}` >= %s OR `{date_column}` IS NULL",
+                    (window_start, end_exclusive),
+                )
+            for rows in batches:
+                params = [
+                    tuple(
+                        (row.get("_sync_run_id") or row.get(name))
+                        if name == "sync_run_id" else row.get(name)
+                        for name in columns
+                    )
+                    for row in rows
+                ]
+                if not params:
+                    continue
+                with transaction(self._mart):
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.executemany(insert_sql, params)
+                written += len(params)
+            expected = counts["before_count"] - counts["window_before"] + written
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(f"SELECT COUNT(*) AS `row_count` FROM `{staging}`")
+                count_row = cursor.fetchone()
+            actual = count_row["row_count"] if isinstance(count_row, dict) else count_row[0]
+            if int(actual) != expected:
+                raise MartExtractError("staging row count mismatch")
+            with contextlib.closing(self._mart.cursor()) as cursor:
+                cursor.execute(
+                    f"RENAME TABLE `{target_table}` TO `{backup}`, "
+                    f"`{staging}` TO `{target_table}`"
+                )
+            published = True
+            return {
+                **counts, "window_after": written, "after_count": expected,
+                "records_written": written,
+            }
+        finally:
+            if published:
+                try:
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.execute(f"DROP TABLE `{backup}`")
+                except Exception:
+                    logger.warning("failed to drop published extract backup %s", backup)
+            elif created:
+                try:
+                    with contextlib.closing(self._mart.cursor()) as cursor:
+                        cursor.execute(f"DROP TABLE IF EXISTS `{staging}`")
+                except Exception:
+                    logger.warning("failed to clean extract staging table %s", staging)
 
     # ------------------------------------------------------------------
     # Channel-ops projections（2026-09-23 渠道播报 DB 化）
@@ -1117,6 +1369,181 @@ class MartExtractService:
 
         return ExtractResult(run_id=run_id, datasets=datasets_summary)
 
+    def replay_dataset(self, dataset_name, *, window_start, window_end,
+                       dry_run, rules, overrides):
+        """Replay a DQ snapshot into one bounded business window.
+
+        Dry-run consumes the same raw projection and cleaning path but creates
+        neither sync-run records nor business writes.  Formal replay publishes
+        through the extract repository and records its own ``sync_run_id``.
+        """
+        dataset = next(
+            (item for item in self._datasets if item.dataset == dataset_name), None,
+        )
+        if dataset is None or dataset_name not in {
+            "channel_daily_sales", "wdt_order_line_fact",
+        }:
+            raise MartExtractError("unsupported quality replay dataset")
+        window_start = _coerce_date(window_start)
+        window_end = _coerce_date(window_end)
+        if window_start is None or window_end is None or window_start > window_end:
+            raise MartExtractError("invalid business window")
+        if dry_run:
+            with named_lock(
+                self._mart_connection, f"public-data:extract:{dataset.dataset}"
+            ):
+                result = self._replay_projection(
+                    dataset, None, None, window_start, window_end,
+                    dry_run=True, rules=rules, overrides=overrides,
+                )
+            return self._replay_result(dataset, None, result)
+
+        sync_run_id = self._new_run_id()
+        synced_at = self._now()
+        snapshot_digest = hashlib.sha256(json.dumps({
+            "plan": self._plan_digest(),
+            "window": [str(window_start), str(window_end)],
+            "rules": rules,
+            "overrides": sorted(
+                [list(key) + [value] for key, value in overrides.items()]
+            ),
+        }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        self._mart_repository.start_run(
+            sync_run_id=sync_run_id, manifest_sha256=snapshot_digest,
+            started_at=synced_at,
+        )
+        self._mart_connection.commit()
+        try:
+            with named_lock(
+                self._mart_connection, f"public-data:extract:{dataset.dataset}"
+            ):
+                result = self._replay_projection(
+                    dataset, sync_run_id, synced_at, window_start, window_end,
+                    dry_run=False, rules=rules, overrides=overrides,
+                )
+            self._mart_repository.mark_raw_committed(sync_run_id)
+            try:
+                self._save_summary(
+                    dataset=dataset.dataset,
+                    record_ids=result.get("_record_ids", ()),
+                    records_read=result["records_read"],
+                    records_written=result["records_new"],
+                    run_id=sync_run_id,
+                    digest=result.get("_record_id_digest"),
+                )
+            except Exception as exc:
+                raise _ProjectionFailure() from exc
+            self._mart_repository.mark_completed(
+                sync_run_id=sync_run_id, finished_at=self._now(),
+            )
+            self._mart_connection.commit()
+        except _ProjectionFailure as exc:
+            self._mart_repository.mark_projection_pending(
+                sync_run_id=sync_run_id, failure_code="projection_failed",
+                finished_at=self._now(),
+            )
+            self._mart_connection.commit()
+            raise exc.__cause__ from None
+        except Exception as exc:
+            self._mart_connection.rollback()
+            self._mart_repository.mark_failed(
+                sync_run_id=sync_run_id, failure_code=self._failure_code(exc),
+                finished_at=self._now(),
+            )
+            self._mart_connection.commit()
+            raise
+        return self._replay_result(dataset, sync_run_id, result)
+
+    def _replay_projection(self, dataset, run_id, synced_at, window_start,
+                           window_end, *, dry_run, rules, overrides):
+        if dataset.dataset == "wdt_order_line_fact":
+            from common.public_data.extract_order_line import project_order_lines
+            return project_order_lines(
+                self._repository, dataset, run_id, synced_at,
+                window_start=window_start, window_end=window_end,
+                dry_run=dry_run, rules=rules, overrides=overrides,
+            )
+
+        rows = self._repository.read_dataset(dataset)
+        rows = _normalize_region_keys(dataset, rows)
+        rows = _resolve_other_member_rows(dataset, rows, self._mart_connection)
+        rows = _drop_placeholder_channel_rows(dataset, rows)
+        from common.public_data.channel_robot_inbox import (
+            fetch_latest_inbox,
+            fetch_raw_business_keys,
+            merge_channel_rows,
+        )
+        inbox_latest = fetch_latest_inbox(self._mart_connection)
+        if inbox_latest:
+            rows = merge_channel_rows(
+                rows, inbox_latest,
+                fetch_raw_business_keys(self._repository.raw_connection),
+            )
+        rows = [
+            row for row in rows
+            if (business_date := _coerce_date(row.get("business_date"))) is not None
+            and window_start <= business_date <= window_end
+        ]
+        records_read = len(rows)
+        business_dates = {
+            _coerce_date(row.get("business_date")) for row in rows
+        }
+        business_dates.discard(None)
+        from common.public_data.cleaning import evaluate_rows
+        from common.public_data.extract_order_line import (
+            _replay_check_dataset_rules,
+        )
+        cleaned = evaluate_rows(
+            dataset.dataset, rows, rules, overrides=overrides,
+            keep_quarantined=False, state={},
+        )
+        if any(issue.severity in {"critical", "error"} for issue in cleaned.issues):
+            raise MartExtractError("quality_gate_blocked")
+        _replay_check_dataset_rules(
+            dataset, rules, records_read, window_start, window_end,
+            channel_business_dates=business_dates,
+        )
+        rows = cleaned.rows
+        for row in rows:
+            row["synced_at"] = synced_at
+            row["sync_run_id"] = run_id
+        record_ids = [row.get("source_record_id") for row in rows]
+        columns = [
+            "source_record_id", *dataset.target_columns, "synced_at", "sync_run_id",
+        ]
+        if dry_run:
+            counts = self._repository.window_row_counts(
+                dataset.target_table, window_start, window_end,
+            )
+            would_write = len(rows)
+            replay_diff = {
+                **counts, "window_after": would_write,
+                "after_count": (
+                    counts["before_count"] - counts["window_before"] + would_write
+                ),
+                "records_written": 0,
+            }
+            written = 0
+        else:
+            replay_diff = self._repository.replace_table_window_batches(
+                dataset.target_table, columns, [rows],
+                window_start=window_start, window_end=window_end,
+            )
+            written = replay_diff["records_written"]
+        return {
+            "records_read": records_read, "records_new": written,
+            "_record_ids": record_ids, "_replay_diff": replay_diff,
+        }
+
+    @staticmethod
+    def _replay_result(dataset, sync_run_id, result):
+        return {
+            "sync_run_id": sync_run_id, "dataset": dataset.dataset,
+            "records_read": result["records_read"],
+            "records_written": result["records_new"],
+            "diff": result.get("_replay_diff"),
+        }
+
     # ------------------------------------------------------------------
     # Per-output helpers
     # ------------------------------------------------------------------
@@ -1231,9 +1658,12 @@ class MartExtractService:
         try:
             self._mart_repository.mark_raw_committed(run_id)
             summary = self._save_summary(
-                dataset=dataset.dataset, record_ids=result.pop("_record_ids"),
-                records_read=result["records_read"], records_written=result["records_new"],
+                dataset=dataset.dataset,
+                record_ids=result.pop("_record_ids", ()),
+                records_read=result["records_read"],
+                records_written=result["records_new"],
                 run_id=run_id,
+                digest=result.pop("_record_id_digest", None),
             )
         except Exception as exc:
             raise _ProjectionFailure() from exc

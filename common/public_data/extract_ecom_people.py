@@ -359,69 +359,87 @@ def fetch_source_rows(connection, month=None, day=None, *,
 # IO：事实表 upsert（业务键优先，照 report_intake._write_report 语义）
 # ---------------------------------------------------------------------------
 
-def _fetch_one(connection, sql, params):
-    with contextlib.closing(connection.cursor()) as cursor:
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-    if row is None:
-        return None
-    return dict(row) if isinstance(row, dict) else row
-
-
 def upsert_rows(connection, rows, now):
     """把 :func:`build_fact_rows` 的行幂等写入事实表。
 
-    业务键 ``(region, responsible_person, business_date)`` 查既有行——存在
-    则 UPDATE ``sales_amount``/``monthly_target``/``synced_at``（保留其
-    PK），不存在才 INSERT 全列（``sync_run_id`` 用 :data:`ECOM_RUN_ID`）。
-    不写 commit（调用方在 ``transaction()`` 里统一提交）。返回统计 dict。
+    按本次 ``business_date`` 窗口一次预载既有行，以业务键
+    ``(region, responsible_person, business_date)`` 选择首行（月目标非 NULL
+    优先）：存在则 UPDATE ``sales_amount``/``monthly_target``/``synced_at``
+    （保留其 PK），不存在才 INSERT 全列（``sync_run_id`` 用
+    :data:`ECOM_RUN_ID`）。更新与插入分别批量执行；不写 commit（调用方在
+    ``transaction()`` 里统一提交）。返回统计 dict。
     """
-    inserted = updated = 0
-    for row in rows:
-        existing = _fetch_one(
-            connection,
-            "SELECT `source_record_id`, `sales_amount` "
+    rows = list(rows)
+    if not rows:
+        return {"inserted": 0, "updated": 0}
+
+    business_dates = [row["business_date"] for row in rows]
+    existing_by_key = {}
+    updates = []
+    inserts = []
+    with contextlib.closing(connection.cursor()) as cursor:
+        cursor.execute(
+            "SELECT `source_record_id`, `region`, `responsible_person`, "
+            "`business_date`, `sales_amount`, `monthly_target` "
             f"FROM `{FACT_TABLE}` "
-            "WHERE `region` = %s AND `responsible_person` = %s "
-            "AND `business_date` = %s "
-            "ORDER BY (`monthly_target` IS NULL) LIMIT 1",
-            (row["region"], row["responsible_person"], row["business_date"]),
+            "WHERE `business_date` BETWEEN %s AND %s "
+            "ORDER BY (`monthly_target` IS NULL)",
+            (min(business_dates), max(business_dates)),
         )
-        with contextlib.closing(connection.cursor()) as cursor:
+        for existing in cursor.fetchall():
+            key = (
+                existing["region"],
+                existing["responsible_person"],
+                _day_str(existing["business_date"]),
+            )
+            existing_by_key.setdefault(key, existing)
+
+        for row in rows:
+            key = (
+                row["region"],
+                row["responsible_person"],
+                _day_str(row["business_date"]),
+            )
+            existing = existing_by_key.get(key)
             if existing is not None:
-                cursor.execute(
-                    f"UPDATE `{FACT_TABLE}` "
-                    "SET `sales_amount` = %s, `monthly_target` = %s, "
-                    "`synced_at` = %s "
-                    "WHERE `source_record_id` = %s",
-                    (row["sales_amount"], row["monthly_target"], now,
-                     existing["source_record_id"]),
-                )
-                updated += 1
+                updates.append((
+                    row["sales_amount"], row["monthly_target"], now,
+                    existing["source_record_id"],
+                ))
             else:
-                cursor.execute(
-                    f"INSERT INTO `{FACT_TABLE}` "
-                    "(`source_record_id`, `region`, `responsible_person`, "
-                    "`department`, `business_date`, `sales_amount`, "
-                    "`daily_target`, `monthly_target`, `note`, "
-                    "`synced_at`, `sync_run_id`) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (
-                        row["source_record_id"],
-                        row["region"],
-                        row["responsible_person"],
-                        row["department"],
-                        row["business_date"],
-                        row["sales_amount"],
-                        row["daily_target"],
-                        row["monthly_target"],
-                        row["note"],
-                        now,
-                        ECOM_RUN_ID,
-                    ),
-                )
-                inserted += 1
-    return {"inserted": inserted, "updated": updated}
+                inserts.append((
+                    row["source_record_id"],
+                    row["region"],
+                    row["responsible_person"],
+                    row["department"],
+                    row["business_date"],
+                    row["sales_amount"],
+                    row["daily_target"],
+                    row["monthly_target"],
+                    row["note"],
+                    now,
+                    ECOM_RUN_ID,
+                ))
+
+        if updates:
+            cursor.executemany(
+                f"UPDATE `{FACT_TABLE}` "
+                "SET `sales_amount` = %s, `monthly_target` = %s, "
+                "`synced_at` = %s "
+                "WHERE `source_record_id` = %s",
+                updates,
+            )
+        if inserts:
+            cursor.executemany(
+                f"INSERT INTO `{FACT_TABLE}` "
+                "(`source_record_id`, `region`, `responsible_person`, "
+                "`department`, `business_date`, `sales_amount`, "
+                "`daily_target`, `monthly_target`, `note`, "
+                "`synced_at`, `sync_run_id`) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                inserts,
+            )
+    return {"inserted": len(inserts), "updated": len(updates)}
 
 
 # ---------------------------------------------------------------------------
@@ -431,13 +449,13 @@ def upsert_rows(connection, rows, now):
 def replace_store_targets(connection, target_rows, *, sync_run_id, synced_at):
     """把 ``channel_monthly_target`` 全量投影进 ``fact_channel_store_target``。
 
-    DELETE + INSERT（源表是月维度全量表，店铺下线随之消失）；不写 commit
-    （调用方在 ``transaction()`` 里统一提交）。``owners_json`` 保留 raw 的
-    responsible_person JSON 原文（供读侧审计归属集合），返回写入行数。
+    DELETE + 批量 INSERT（源表是月维度全量表，店铺下线随之消失）；不写
+    commit（调用方在 ``transaction()`` 里统一提交）。``owners_json`` 保留
+    raw 的 responsible_person JSON 原文（供读侧审计归属集合），返回写入行数。
     """
     with contextlib.closing(connection.cursor()) as cursor:
         cursor.execute(f"DELETE FROM `{STORE_TARGET_TABLE}`")
-        written = 0
+        inserts = []
         for row in target_rows:
             store = str(row.get("store_name") or "").strip()
             if not store:
@@ -448,22 +466,23 @@ def replace_store_targets(connection, target_rows, *, sync_run_id, synced_at):
                     owners, ensure_ascii=False, default=str
                 )
             ) if owners is not None else None
-            cursor.execute(
+            inserts.append((
+                store,
+                str(row.get("channel") or "").strip() or None,
+                _to_float(row.get("monthly_target")),
+                owners_json,
+                synced_at,
+                sync_run_id,
+            ))
+        if inserts:
+            cursor.executemany(
                 f"INSERT INTO `{STORE_TARGET_TABLE}` "
                 "(`store_name`, `channel`, `monthly_target`, `owners_json`, "
                 "`synced_at`, `sync_run_id`) "
                 "VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    store,
-                    str(row.get("channel") or "").strip() or None,
-                    _to_float(row.get("monthly_target")),
-                    owners_json,
-                    synced_at,
-                    sync_run_id,
-                ),
+                inserts,
             )
-            written += 1
-    return written
+    return len(inserts)
 
 
 # ---------------------------------------------------------------------------

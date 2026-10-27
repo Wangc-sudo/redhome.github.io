@@ -546,3 +546,55 @@ export function deleteGrant(payload) {
 export function regionGrant(payload) {
   return post('/api/grants/region', payload);
 }
+
+// -- 数据质量闭环 ------------------------------------------------------------
+
+export function getDataQualityOverview() {
+  return request('/api/data-quality/overview');
+}
+
+export function getDataQualityRules(dataset) {
+  return request(`/api/data-quality/rules${queryString({ dataset })}`);
+}
+
+export function createDataQualityRule(payload) {
+  return post('/api/data-quality/rules', payload);
+}
+
+export function updateDataQualityRule(id, payload) {
+  return request(`/api/data-quality/rules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function previewDataQuality(payload) {
+  return post('/api/data-quality/preview', payload);
+}
+
+export function getDataQualityIssues(dataset, params = {}) {
+  return request(
+    `/api/data-quality/datasets/${encodeURIComponent(dataset)}/issues`
+    + queryString(params),
+  );
+}
+
+export function resolveDataQualityIssue(id, payload) {
+  return post(`/api/data-quality/issues/${encodeURIComponent(id)}/resolution`, payload);
+}
+
+export function putDataQualityOverride(payload) {
+  return post('/api/data-quality/overrides', payload);
+}
+
+export function getDataQualityReruns(params = {}) {
+  return request(`/api/data-quality/reruns${queryString(params)}`);
+}
+
+export function createDataQualityRerun(payload) {
+  return post('/api/data-quality/reruns', payload);
+}
+
+export function getDataQualityRerun(runId) {
+  return request(`/api/data-quality/reruns/${encodeURIComponent(runId)}`);
+}

@@ -52,6 +52,7 @@ from common.public_data import (
     report_roster,
 )
 from common.daily_robot.inspection_alert import ALERT_SERVICES
+from common.ops_web.data_quality import register_data_quality_routes
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.pipeline_taxonomy import (
@@ -70,6 +71,7 @@ class ErrorDetail:
     UNAVAILABLE = "unavailable"
     BAD_REQUEST = "bad_request"
     CONFLICT = "conflict"
+    NOT_FOUND = "not_found"
 
 
 def load_settings():
@@ -1328,7 +1330,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                browser_login_token=None,
                fleet_source=None, config_source=None,
                config_publisher=None, config_deleter=None,
-               corp_id=None, agent_id=None, auth_disabled=False) -> FastAPI:
+               corp_id=None, agent_id=None, auth_disabled=False,
+               data_quality_source_connector=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -1410,6 +1413,17 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
             _forbidden(request)
         request.state.viewer = viewer
         return viewer
+
+    def require_viewer(request: Request) -> authz.Viewer:
+        """已准入 viewer 的只读闸；写面另走 capability，不能仅靠菜单隐藏。"""
+        viewer = _resolve_request_viewer(request)
+        if not viewer.admitted:
+            _forbidden(request)
+        request.state.viewer = viewer
+        return viewer
+
+    def require_data_quality_write(request: Request) -> authz.Viewer:
+        return require_capability(request, CAPABILITY_DATAFIX)
 
     # -- 认证路由（与 bi-web 同一套实现，铁律 7）----------------------------
     @app.post("/auth/dingtalk")
@@ -4571,6 +4585,15 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                 type(exc).__name__)
             raise HTTPException(status_code=503, detail=ErrorDetail.UNAVAILABLE)
         return JSONResponse({"status": "ok", "deleted": deleted})
+
+    # -- 数据质量闭环：viewer 只读，datafix/admin 写；重跑仅创建 pending 请求。
+    register_data_quality_routes(
+        app, settings=settings, db_connector=db_connector,
+        require_viewer=require_viewer,
+        require_write=require_data_quality_write,
+        source_connector=data_quality_source_connector,
+        connect=connect, logger=_LOGGER, error_detail=ErrorDetail,
+    )
 
     # -- SPA 单壳 catch-all（注册在最后：未匹配 GET 返回壳；API 等前缀 404）-
     @app.get("/{path:path}")

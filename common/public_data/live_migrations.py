@@ -18,6 +18,11 @@ from common.public_data.channel_order_daily import (
     channel_order_daily_ddl_statements,
 )
 from common.public_data.data_fix import data_fix_ddl_statements
+from common.public_data.data_quality import (
+    data_quality_ddl_statements,
+    data_quality_snapshot_ddl_statements,
+)
+from common.rag.index_state import ddl_statements as rag_index_state_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
     table_definition,
@@ -803,6 +808,25 @@ _MIGRATIONS = (
         "mart-ops-phone-registry-v1",
         "mart",
         _build_mart_phone_registry_ddl(),
+    ),
+    (
+        # 数据质量闭环（2026-10-27）：规则/运行/异常/单值覆盖/审计均落 mart，
+        # raw 不改写；独立版本，不触碰任何已应用迁移校验和。
+        "mart-ops-data-quality-v1",
+        "mart",
+        data_quality_ddl_statements(),
+    ),
+    (
+        # 重跑提交时冻结规则与有效覆盖值；独立追加，v1 校验和保持不变。
+        "mart-ops-data-quality-v2",
+        "mart",
+        data_quality_snapshot_ddl_statements(),
+    ),
+    (
+        # 商品向量增量索引状态：内容/模型/维度指纹与失效条目对账。
+        "mart-ops-rag-index-state-v1",
+        "mart",
+        rag_index_state_ddl_statements(),
     ),
 )
 

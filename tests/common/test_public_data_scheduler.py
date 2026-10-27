@@ -216,6 +216,37 @@ def test_fires_once_per_window_and_reschedules():
     assert len(scheduler._runner.calls) == 2
 
 
+def test_dq_rerun_seed_is_enabled_and_fires_once_per_minute():
+    from pathlib import Path
+
+    from common.public_data.pipeline_config import load_seed
+
+    seed_path = (
+        Path(__file__).resolve().parents[2]
+        / "docker" / "integration" / "pipelines.seed.yaml"
+    )
+    raw = load_seed(seed_path)["dq-rerun-worker"]
+    config = StaticConfigSource(
+        {"dq-rerun-worker": raw}
+    ).get_pipeline("dq-rerun-worker")
+    assert config.enabled is True
+    assert config.schedule == "* * * * *"
+
+    scheduler, clock = due_scheduler({"dq-rerun-worker": raw})
+    scheduler.tick()
+    scheduler.tick()  # 同一 cron 分钟重复轮询不能重复消费
+    assert [sid for sid, _ in scheduler._runner.calls] == ["dq-rerun-worker"]
+    assert scheduler._runner.calls[0][1][3:] == [
+        "data-quality-rerun", "--confirm-local-test-write",
+    ]
+
+    clock.advance(minutes=1)
+    scheduler.tick()
+    assert [sid for sid, _ in scheduler._runner.calls] == [
+        "dq-rerun-worker", "dq-rerun-worker",
+    ]
+
+
 def test_disabled_line_never_fires():
     scheduler, _ = due_scheduler(
         {"sync-wdt": {"schedule": "0 2 * * *", "enabled": False}}
@@ -276,6 +307,47 @@ def test_lock_factory_failure_skips_run():
     scheduler.tick()
     assert scheduler._runner.calls == []
     assert "sync-wdt" not in scheduler._running
+
+
+def test_dq_rerun_worker_has_an_independent_scheduler_lock(monkeypatch):
+    from common.public_data.scheduler import build_mysql_lock_factory
+
+    class Connection:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    connections = []
+    lock_names = []
+
+    def connect(_settings):
+        connection = Connection()
+        connections.append(connection)
+        return connection
+
+    def fake_named_lock(_connection, name, timeout_seconds):
+        assert timeout_seconds == 0
+        lock_names.append(name)
+        return NullLock()
+
+    monkeypatch.setattr("common.public_data.db.named_lock", fake_named_lock)
+    factory = build_mysql_lock_factory(connect, object())
+    service_ids = (
+        "extract-mart", "dq-check-channel", "dq-check-wdt",
+        "dq-rerun-worker",
+    )
+    for service_id in service_ids:
+        with factory(service_id):
+            pass
+
+    assert lock_names == [
+        f"public-data-scheduler:{service_id}" for service_id in service_ids
+    ]
+    assert len(set(lock_names)) == len(service_ids)
+    assert "public-data:data-quality:rerun" not in lock_names
+    assert all(connection.closed for connection in connections)
 
 
 def test_nonzero_exit_does_not_block_future_windows():
@@ -380,6 +452,27 @@ def test_build_argv_extract_channel():
         "extract-mart", "--confirm-local-test-write",
         "--dataset", "channel_daily_sales",
         "--dataset", "channel_monthly_target",
+    ]
+
+
+def test_build_argv_data_quality_checks():
+    for service_id, dataset in (
+        ("dq-check-channel", "channel_daily_sales"),
+        ("dq-check-wdt", "wdt_order_line_fact"),
+    ):
+        argv = build_argv(service_id, SETTINGS)
+        assert argv[1:3] == ["-m", "common.public_data.cli"]
+        assert argv[3:] == [
+            "data-quality-check", "--confirm-local-test-write",
+            "--dataset", dataset,
+        ]
+
+
+def test_build_argv_data_quality_rerun_worker():
+    argv = build_argv("dq-rerun-worker", SETTINGS)
+    assert argv[1:3] == ["-m", "common.public_data.cli"]
+    assert argv[3:] == [
+        "data-quality-rerun", "--confirm-local-test-write",
     ]
 
 

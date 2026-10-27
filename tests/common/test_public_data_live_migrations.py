@@ -158,6 +158,31 @@ class LiveMigrationTests(unittest.TestCase):
         self.assertIn("sync_runs", mart_sql)
 
 
+class DataQualitySnapshotMigrationTests(unittest.TestCase):
+    def test_v2_is_appended_without_changing_frozen_v1(self):
+        from common.public_data.live_migrations import _MIGRATIONS, _combined_checksum
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertLess(
+            versions.index("mart-ops-data-quality-v1"),
+            versions.index("mart-ops-data-quality-v2"),
+        )
+        v1 = next(sql for version, _, sql in _MIGRATIONS
+                  if version == "mart-ops-data-quality-v1")
+        self.assertEqual(
+            "44c73630393061ebbe63c5cf2b85cfa86041ad0eab2367567d7247fa7f0f1db4",
+            _combined_checksum(v1),
+        )
+
+    def test_fresh_database_creates_snapshot_table(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+        apply_live_migrations(dingtalk, wdt, mart)
+        mart_sql = "\n".join(q for q, _ in mart.cursor_instance.executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS `dq_run_snapshot`", mart_sql)
+        recorded = [params[0] for _, params in mart.cursor_instance.executed if params]
+        self.assertIn("mart-ops-data-quality-v2", recorded)
+
+
 class StoreExpenseMigrationTests(unittest.TestCase):
     """费用窄表 fact_fin_store_expense（2026-10-12 渠道BI费用面板，
     mart-extract-finance-expense-v1）。
