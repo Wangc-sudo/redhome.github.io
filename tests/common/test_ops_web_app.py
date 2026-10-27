@@ -31,7 +31,7 @@ from common.ops_web.app import (
 )
 from common.public_data import (
     bi_authz, calendar_store, channel_target, fleet_audit, ops_control,
-    recipient_override, report_roster,
+    org_catalog, phone_registry, recipient_override, report_roster,
 )
 from common.public_data.pipeline_config import StaticConfigSource
 
@@ -179,15 +179,16 @@ class FactoryTests(unittest.TestCase):
 
 
 class AuthDisabledTests(unittest.TestCase):
-    """认证总开关（2026-10-26 用户裁决「认证系统全部关闭。目前」）：
-    auth_disabled=True 时所有闸直通（内网信任；SG 白名单兜底）。"""
+    """认证总开关·读写分离（2026-10-26 用户裁决，同日从「全直通」升级为
+    「读开放、写要登录」——SG 全放行现实下写面不能裸奔）：
+    auth_disabled=True 时读方法匿名直通，写方法仍走会话+授权闸。"""
 
-    def _open_app(self):
+    def _open_app(self, viewer=None):
         return create_app(
             settings=_fake_settings(),
             session_secret=SECRET,
             db_connector=_connector(),
-            viewer_resolver=_StaticViewerResolver(),
+            viewer_resolver=_StaticViewerResolver(viewer),
             auth_disabled=True,
         )
 
@@ -197,15 +198,47 @@ class AuthDisabledTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("anon-ops", response.json()["userid"])
 
-    def test_no_session_passes_admin_gate(self):
-        # 区域写面（CAPABILITY_ORG）无会话也直通——admin 级。
+    def test_write_without_session_is_401(self):
+        # 读写分离核心：写面（POST /api/**）无会话不再直通——401。
         client = TestClient(self._open_app())
         response = client.post(
             "/api/org/region/broadcast",
             json={"region_key": "hangzhou", "fields": {}},
         )
-        # 过闸到达参数校验（400 bad_request），不是 401/302
+        self.assertEqual(401, response.status_code)
+
+    def test_write_with_admin_session_passes_gate(self):
+        # 登录 admin 写：过闸到达参数校验（400 bad_request），不是 401/403。
+        client = TestClient(self._open_app(viewer=_admin_viewer()))
+        _login(client)
+        response = client.post(
+            "/api/org/region/broadcast",
+            json={"region_key": "hangzhou", "fields": {}},
+        )
         self.assertEqual(400, response.status_code)
+
+    def test_write_with_plain_session_is_403(self):
+        # 登录但无能力授权：写面 fail-closed 403（授权判定照常生效）。
+        viewer = authz.Viewer(
+            userid="u-plain", name="路人", scopes=frozenset(),
+            allowed_regions=frozenset(), is_admin=False, admitted=True,
+        )
+        client = TestClient(self._open_app(viewer=viewer))
+        _login(client, "u-plain")
+        response = client.post(
+            "/api/org/region/broadcast",
+            json={"region_key": "hangzhou", "fields": {}},
+        )
+        self.assertEqual(403, response.status_code)
+
+    def test_login_endpoints_stay_anonymous(self):
+        # 登录端点不调闸：未配 browser_login_token → 503 业务码
+        #（若被写面闸拦会是 401）。
+        client = TestClient(self._open_app())
+        response = client.post(
+            "/auth/browser-login", json={"user_id": "x", "token": "y"},
+        )
+        self.assertEqual(503, response.status_code)
 
     def test_default_keeps_gates(self):
         # 缺省（auth_disabled=False）行为不变：未登录 401。
@@ -2596,6 +2629,11 @@ class RecordsPageTests(unittest.TestCase):
         "mode": "include", "target_type": "user_id", "target_value": "u9",
         "detail": "", "created_at": "2026-09-21 15:00:00.000000",
     }]
+    _PHONE = [{
+        "actor": ADMIN_USERID, "action": "claim", "phone_no": "13300001111",
+        "detail": "认领持卡人：张三",
+        "created_at": "2026-09-21 16:00:00.000000",
+    }]
 
     @contextmanager
     def _patched(self):
@@ -2607,6 +2645,8 @@ class RecordsPageTests(unittest.TestCase):
                                lambda conn, limit=200: list(self._ROSTER)), \
              mock.patch.object(calendar_store, "fetch_recent_audits",
                                lambda conn, limit=200: list(self._CALENDAR)), \
+             mock.patch.object(phone_registry, "fetch_phone_audit",
+                               lambda conn, limit=200: list(self._PHONE)), \
              mock.patch.object(ops_control, "fetch_run_history",
                                lambda conn, limit=200, service_id=None:
                                list(self._HISTORY)):
@@ -2623,9 +2663,11 @@ class RecordsPageTests(unittest.TestCase):
             data = self._client().get("/api/records").json()
         self.assertEqual("ok", data["status"])
         self.assertEqual(["授权", "定时任务", "填报名册", "播报日历",
-                          "收件人覆盖", "定时运行", "数据修正"], data["sources"])
+                          "收件人覆盖", "定时运行", "数据修正", "号码台账"],
+                         data["sources"])
         sources = {r["source"] for r in data["records"]}
-        for source in ("授权", "定时任务", "填报名册", "播报日历", "定时运行"):
+        for source in ("授权", "定时任务", "填报名册", "播报日历", "定时运行",
+                       "号码台账"):
             self.assertIn(source, sources)
         targets = [r["target"] for r in data["records"]]
         self.assertIn("fin", targets)          # 授权对象（grant_key）
@@ -4133,7 +4175,7 @@ class SpaJsonApiContractTests(unittest.TestCase):
     _SHELL_PAGES = (
         "/", "/org", "/members", "/member-grants", "/grants", "/audit",
         "/records", "/pipelines", "/pipelines/audit", "/pipelines/history",
-        "/roster", "/recipients", "/calendar",
+        "/roster", "/recipients", "/calendar", "/phones",
     )
 
     #: 数据面 GET 读面（无会话一律 fail-closed）。
@@ -4143,6 +4185,7 @@ class SpaJsonApiContractTests(unittest.TestCase):
         "/api/pipelines", "/api/pipelines/audit", "/api/pipelines/history",
         "/api/recipients", "/api/roster", "/api/roster/targets",
         "/api/roster/qudao", "/api/calendar",
+        "/api/phones", "/api/phones/bindings",
         "/api/pipelines/recipient-override?service_id=robot-hangzhou",
     )
 
@@ -4178,6 +4221,8 @@ class SpaJsonApiContractTests(unittest.TestCase):
             ("/api/pipelines/audit", "rows"),
             ("/api/pipelines/history", "rows"),
             ("/api/calendar", "days"),
+            ("/api/phones", "phones"),
+            ("/api/phones/bindings", "bindings"),
         ):
             with self.subTest(path=path):
                 data = admin.get(path).json()
@@ -4187,7 +4232,7 @@ class SpaJsonApiContractTests(unittest.TestCase):
         with mock.patch("common.ops_web.app._collect_records", lambda conn: []):
             records = admin.get("/api/records").json()
         self.assertEqual("ok", records["status"])
-        self.assertEqual(7, len(records["sources"]))
+        self.assertEqual(8, len(records["sources"]))
 
         pipelines = TestClient(_pipeline_app(viewer=_admin_viewer()))
         _login(pipelines)
@@ -4207,6 +4252,133 @@ class SpaJsonApiContractTests(unittest.TestCase):
                 resp = client.get(path)
                 self.assertEqual(404, resp.status_code)
                 self.assertEqual("not_found", resp.json()["detail"])
+
+
+
+class PhoneRegistryApiTests(unittest.TestCase):
+    """号码台账端点（2026-10-26 收尾）：读面 capability 闸 + 五个写面。
+
+    模块函数一律 mock（真源 SQL 形态由 test_phone_registry.py 钉住），
+    这里只钉端点的闸、载荷校验与 actor 透传。
+    """
+
+    def _client(self, viewer=None):
+        v = viewer or _admin_viewer()
+        client = TestClient(_app(viewer=v))
+        _login(client, v.userid)
+        return client
+
+    def test_reads_require_phone_capability(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        self.assertEqual(403, client.get("/api/phones").status_code)
+        self.assertEqual(403, client.get("/api/phones/bindings").status_code)
+
+    def test_list_returns_summary_and_rows(self):
+        client = self._client()
+        with mock.patch.object(
+                phone_registry, "fetch_phone_list",
+                lambda conn, keyword="", unclaimed_only=False: [
+                    {"phone_no": "13300001111", "phone_type": "主卡",
+                     "actual_user": "张三", "needs_claim": 0, "enabled": 1,
+                     "updated_at": None},
+                ]), mock.patch.object(
+                phone_registry, "summarize_registry",
+                lambda conn: {"total": 71, "unclaimed": 8, "dead": 2,
+                              "by_user": [("张三", 3)]}):
+            data = client.get("/api/phones").json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual({"total": 71, "unclaimed": 8, "dead": 2},
+                         data["summary"])
+        self.assertEqual("13300001111", data["phones"][0]["phone_no"])
+
+    def test_bindings_returns_rows(self):
+        client = self._client()
+        with mock.patch.object(
+                phone_registry, "fetch_bindings",
+                lambda conn, keyword="": [
+                    {"id": 5, "phone_no": "13300001111",
+                     "channel_category": "快手",
+                     "platform_account": "习水村酒类专营店",
+                     "note": None, "enabled": 1, "updated_by": "ops",
+                     "updated_at": None, "actual_user": "张三",
+                     "physical_device": "序号① 蓝色手机", "status": "正常"},
+                ]):
+            data = client.get(
+                "/api/phones/bindings", params={"keyword": "习水村"}).json()
+        self.assertEqual("ok", data["status"])
+        self.assertEqual("习水村酒类专营店",
+                         data["bindings"][0]["platform_account"])
+
+    def test_claim_ok_and_audit_actor(self):
+        client = self._client()
+        with mock.patch.object(
+                phone_registry, "set_phone_user", return_value=1) as patched:
+            response = client.post("/api/phones/claim", json={
+                "phone_no": "13300001111", "actual_user": "张三"})
+        self.assertEqual(200, response.status_code)
+        args, kwargs = patched.call_args
+        self.assertEqual("13300001111", args[1])
+        self.assertEqual("张三", args[2])
+        self.assertEqual(ADMIN_USERID, kwargs["actor"])
+
+    def test_claim_rejects_bad_payload_and_unknown_phone(self):
+        client = self._client()
+        self.assertEqual(400, client.post(
+            "/api/phones/claim", json={"phone_no": "13300001111"}).status_code)
+        with mock.patch.object(phone_registry, "set_phone_user",
+                               lambda conn, phone, user, *, actor: 0):
+            self.assertEqual(400, client.post("/api/phones/claim", json={
+                "phone_no": "13300001111", "actual_user": "张三"}).status_code)
+
+    def test_save_validates_and_writes(self):
+        client = self._client()
+        with mock.patch.object(phone_registry, "upsert_phone_number",
+                               lambda conn, record, *, actor: None):
+            ok = client.post("/api/phones/save", json={
+                "phone_no": "13300001111", "phone_type": "主卡",
+                "actual_user": "张三"})
+            bad = client.post("/api/phones/save", json={"phone_no": "  "})
+        self.assertEqual(200, ok.status_code)
+        self.assertEqual(400, bad.status_code)
+
+    def test_toggle_and_binding_guards(self):
+        client = self._client()
+        with mock.patch.object(phone_registry, "set_phone_enabled",
+                               lambda conn, phone, enabled, *, actor: 1):
+            self.assertEqual(200, client.post("/api/phones/toggle", json={
+                "phone_no": "13300001111", "enabled": False}).status_code)
+        with mock.patch.object(phone_registry, "set_binding_enabled",
+                               lambda conn, bid, enabled, *, actor: 1):
+            self.assertEqual(200, client.post(
+                "/api/phones/binding/toggle",
+                json={"id": 5, "enabled": False}).status_code)
+            # 非法主键（0 / 负 / 非整）一律 400
+            self.assertEqual(400, client.post(
+                "/api/phones/binding/toggle",
+                json={"id": 0, "enabled": True}).status_code)
+        with mock.patch.object(phone_registry, "upsert_phone_binding",
+                               lambda conn, *a, **k: None):
+            self.assertEqual(200, client.post(
+                "/api/phones/binding/save", json={
+                    "phone_no": "13300001111", "channel_category": "快手",
+                    "platform_account": "习水村酒类专营店"}).status_code)
+
+    def test_writes_require_phone_capability(self):
+        client = TestClient(_app(viewer=_plain_member_viewer()))
+        _login(client, "u-plain")
+        for path, payload in (
+            ("/api/phones/claim",
+             {"phone_no": "13300001111", "actual_user": "张三"}),
+            ("/api/phones/save", {"phone_no": "13300001111"}),
+            ("/api/phones/toggle",
+             {"phone_no": "13300001111", "enabled": False}),
+            ("/api/phones/binding/save", {"phone_no": "13300001111"}),
+            ("/api/phones/binding/toggle", {"id": 1, "enabled": False}),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(403, client.post(path, json=payload)
+                                 .status_code)
 
 
 if __name__ == "__main__":

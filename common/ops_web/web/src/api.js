@@ -46,6 +46,13 @@ async function request(path, options = {}) {
   }
 
   if (!resp.ok) {
+    // 读写分离（2026-10-26）：查看面匿名开放，写操作要登录会话——
+    // 写方法拿到 401 = 未登录/会话过期，直接带去登录入口（登录后回来
+    // 重试）；读方法的 401/403 维持抛错，由 router 守卫处理。
+    const method = (options.method || 'GET').toUpperCase();
+    if (resp.status === 401 && method !== 'GET' && method !== 'HEAD') {
+      window.location.assign('/auth/entry?reason=write-login');
+    }
     const err = new Error(
       resp.status === 401 || resp.status === 403
         ? '登录已过期或无权限，请重新登录'
@@ -473,6 +480,44 @@ export function deleteRecipientOverride(payload) {
 /** 清空某条服务线全部覆盖。payload: {service_id}。 */
 export function resetRecipientOverride(payload) {
   return post('/api/pipelines/recipient-override/reset', payload);
+}
+
+// -- 号码台账（dim_phone_number / dim_phone_binding，2026-10-26）------------
+
+/** 号码台账读面。params: {keyword?, unclaimed?}（unclaimed=1 只看待认领）。 */
+export function getPhones(params = {}) {
+  return request(`/api/phones${queryString(params)}`, { method: 'GET' });
+}
+
+/** 账号绑定读面。params: {keyword?}（命中账号/类目/号码任一）。 */
+export function getPhoneBindings(params = {}) {
+  return request(`/api/phones/bindings${queryString(params)}`, { method: 'GET' });
+}
+
+/** 认领号码持卡人。payload: {phone_no, actual_user}。 */
+export function claimPhone(payload) {
+  return post('/api/phones/claim', payload);
+}
+
+/** 新增/更新一条号码。payload: {phone_no, phone_type?, actual_user?, ...}。 */
+export function savePhone(payload) {
+  return post('/api/phones/save', payload);
+}
+
+/** 停用/启用一个号码。payload: {phone_no, enabled}。 */
+export function togglePhone(payload) {
+  return post('/api/phones/toggle', payload);
+}
+
+/** 新增/更新一条账号绑定。payload: {phone_no, channel_category,
+ *  platform_account, note?}。 */
+export function savePhoneBinding(payload) {
+  return post('/api/phones/binding/save', payload);
+}
+
+/** 停用/启用一条绑定。payload: {id, enabled}。 */
+export function togglePhoneBinding(payload) {
+  return post('/api/phones/binding/toggle', payload);
 }
 
 /** 点日期改播报/休息。payload: {date:'YYYY-MM-DD', is_workday, note?}。 */

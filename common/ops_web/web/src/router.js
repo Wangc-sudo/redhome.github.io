@@ -11,6 +11,7 @@ import OrgPage from './pages/OrgPage.vue';
 import RosterPage from './pages/RosterPage.vue';
 import RecipientsPage from './pages/RecipientsPage.vue';
 import CalendarPage from './pages/CalendarPage.vue';
+import PhonesPage from './pages/PhonesPage.vue';
 import PipelinesPage from './pages/PipelinesPage.vue';
 import PipelinesAuditPage from './pages/PipelinesAuditPage.vue';
 import PipelinesHistoryPage from './pages/PipelinesHistoryPage.vue';
@@ -36,6 +37,7 @@ const routes = [
   { path: '/flow', name: 'flow', component: FlowPage, meta: { capability: 'org' } },
   { path: '/recipients', name: 'recipients', component: RecipientsPage, meta: { capability: 'admin' } },
   { path: '/calendar', name: 'calendar', component: CalendarPage, meta: { capability: 'calendar' } },
+  { path: '/phones', name: 'phones', component: PhonesPage, meta: { capability: 'phone' } },
   { path: '/pipelines', name: 'pipelines', component: PipelinesPage, meta: { capability: 'pipelines' } },
   // 播报编排（2026-10-21 播报编排大模块）：任务×区域拉线板
   { path: '/broadcast', name: 'broadcast', component: BroadcastBoardPage, meta: { capability: 'pipelines' } },
