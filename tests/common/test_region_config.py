@@ -13,6 +13,7 @@ from common.region_config import (
     apply_db_overlay,
     apply_region_overlay,
     build_nacos_region_overlay,
+    leaderboard_url_for,
     load_region_seed,
 )
 
@@ -366,6 +367,29 @@ class PublishRegionConfigsTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(RegionConfigError):
                 publish_regions_from_env("/ops/regions.json")
+
+
+class LeaderboardUrlForTests(unittest.TestCase):
+    """榜单页 URL 派生（2026-10-26 基址 env 化裁决）：env 模板优先、
+    库存值兜底、皆空返空串。"""
+
+    def test_env_base_wins_with_template(self):
+        self.assertEqual(
+            leaderboard_url_for(
+                "hangzhou", "http://203.205.91.241:8300/hangzhou.html",
+                environ={"PUBLIC_PAGES_BASE": "https://dt.yyhlzj.com/"},
+            ),
+            "https://dt.yyhlzj.com/hangzhou.html",
+        )
+
+    def test_fallback_to_stored_when_env_absent(self):
+        self.assertEqual(
+            leaderboard_url_for("hangzhou", "http://x/lb", environ={}),
+            "http://x/lb",
+        )
+
+    def test_empty_when_neither(self):
+        self.assertEqual(leaderboard_url_for("hangzhou", "", environ={}), "")
 
 
 if __name__ == "__main__":

@@ -770,6 +770,34 @@ def fetch_person_targets(connection, scope, year_month):
     return result
 
 
+def fetch_month_completed_by_person(connection, year_month):
+    """当月各人完成额合计（元）——画布区域卡「完成率」分子（2026-10-26
+    用户裁决「播报回显完成百分比添加到面板」，口径=播报回执的
+    「本月累计/目标，完成 X%」）。
+
+    按**人名**归集而非 region：代填落群区域但 fact 行人名是本名
+    （province_ops 无任务线、靠代填，按 region 聚合恒 0 的假阴性）。
+    返回 ``{person_name: amount}``；表未迁移/读失败由调用方兜底。
+    """
+    year, month = int(year_month[:4]), int(year_month[5:7])
+    next_month = f"{year + 1}-01" if month == 12 else f"{year}-{month + 1:02d}"
+    rows = _fetch_all(
+        connection,
+        "SELECT `responsible_person`, COALESCE(SUM(`sales_amount`), 0) AS amt "
+        "FROM `fact_daily_report_offline` "
+        "WHERE `business_date` >= %s AND `business_date` < %s "
+        "GROUP BY `responsible_person`",
+        (f"{year_month}-01", f"{next_month}-01"),
+    )
+    result = {}
+    for row in rows:
+        name = row.get("responsible_person") if isinstance(row, dict) else row[0]
+        value = row.get("amt") if isinstance(row, dict) else row[1]
+        if name:
+            result[name] = float(value or 0)
+    return result
+
+
 def fetch_intake_target(connection, scope, person_name, year_month):
     """机器人报数快照源：该人该月目标（无记录 → ``None``，调用方兜底）。
 
