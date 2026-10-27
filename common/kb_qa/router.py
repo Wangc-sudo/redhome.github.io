@@ -1,80 +1,71 @@
 # -*- coding: utf-8 -*-
-"""意图路由（P1 纯规则；客服场景问题高度集中，规则先覆盖约 80%）。
+"""小易意图路由：规则表 + 置信度 + 多意图识别。
 
-分类优先级：PRODUCT_ASSET > PRODUCT_PARAM > SALES_QUERY > PRODUCT_FILTER
-> DOC_QA > CHITCHAT。
-P2 接入 LLM 时本模块输出作为规则层，未命中再走 qwen/DeepSeek 分类兜底。
-
-2026-10-10 运维裁决「全数据非敏感」：无 BLOCKED 类别，无角色门禁。
+规则命中置信度为 0.8，单号/纯数字等正则命中为 1.0，疑似商品与
+未命中兜底为 0.3。新增意图只需增加一条 IntentRule，不改控制流。
 """
 
 import re
 from dataclasses import dataclass
 
-#: 关键词剥离的括号/引号字符（中英全套）。
 _STRIP_CHARS_RE = re.compile(r"[「」【】《》〈〉\"'“”‘’()（）\[\]{}]")
 
 PRODUCT_PARAM = "PRODUCT_PARAM"
 PRODUCT_FILTER = "PRODUCT_FILTER"
 PRODUCT_ASSET = "PRODUCT_ASSET"
 PHONE_LOOKUP = "PHONE_LOOKUP"
+ORDER_QUERY = "ORDER_QUERY"
 SALES_QUERY = "SALES_QUERY"
 DOC_QA = "DOC_QA"
 CHITCHAT = "CHITCHAT"
 
-#: 索取图片/文件 → 返回资源分支。
 _ASSET_WORDS = (
     "细节图", "质检", "素材", "礼袋图", "照片", "图片", "发票",
     "报告", "附件", "文件", "视频", "发我", "来张", "发张",
 )
-#: 商品具体参数查询。
 _PARAM_WORDS = (
     "箱规", "盒规", "尺寸", "重量", "材质", "69码", "条码",
     "规格", "编码", "礼袋", "多重", "多大", "几瓶装", "几件",
 )
-#: 业务/台账问句 → 直接进工具调用 agent。
-#: 不设此意图时这类问句会落到「疑似商品名直查」兜底——商品表必然全 miss，
-#: 白烧一次 LLM 改写 + 一次商品检索才轮到 agent（2026-10-23 实测「看下
-#: 拼多多昨天销售金额」链路），规则层先拦最省。
-#: 「店铺/门店」台账问句同理会空转商品表（「拼多多店铺习酒习水村专卖店
-#: 标题是那个」2026-10-23 实测：绕三圈后 agent 用 query_sql 才答出正式
-#: 店铺名），故并入——本意图的实际语义是「非商品的业务问句直通 agent」。
+_ORDER_WORDS = (
+    "快递到哪了", "物流查询", "什么时候到", "哪天发的", "这笔单子",
+    "发到哪了", "签收了吗", "哪个客户", "谁买的", "到哪了",
+    "订单", "单号", "交易", "发货", "物流", "快递", "运单",
+    "顺丰", "德邦", "退货", "退款", "这单",
+)
 _SALES_WORDS = (
     "销售额", "销售金额", "销量", "卖了多少", "卖了", "出货", "出了多少",
     "完成率", "达成率", "达成", "营业额", "流水", "排名", "排行",
     "环比", "同比", "店铺", "门店",
 )
-#: 号码台账问句 → 直通 agent 的 phone_lookup 工具（2026-10-26）。
-#: 实测事故：群里发纯尾号「5579」被「疑似商品名直查」兜底 + bigram 容错
-#: 误命中 7 款 579ml 商品进了 clarify——纯数字 4-11 位一律按号码/尾号查；
-#: 商品短名纯数字（如「1988」）会被本规则拦截，但 agent 内 phone_lookup
-#: 无命中后仍可自行调 search_products 挽回，代价只是一轮工具调用。
-_PURE_DIGITS_RE = re.compile(r"^\d{4,11}$")
-_PHONE_WORDS = ("尾号", "验证码", "手机号", "手机号码", "电话号", "号码")
-#: 按条件筛选商品列表。
+_PHONE_WORDS = (
+    "手机号码", "是谁的号", "这个号谁的", "手机是谁的", "验证码找谁",
+    "哪台手机", "登录账号", "平台账号", "店铺账号", "谁在用",
+    "尾号", "验证码", "手机号", "电话号", "号码",
+)
 _FILTER_WORDS = ("有哪些", "哪些", "所有", "全部", "列表", "几款")
-#: 手册类（卖点/工艺/话术）——P2 接 RAG，P1 给兜底文案。
 _DOC_WORDS = (
     "怎么介绍", "介绍", "卖点", "工艺", "话术", "品牌故事", "三同两不同",
     "是什么", "怎么说",
 )
 
-#: 闲聊/问候精确匹配（短词会被「疑似商品名直查」兜底误吞，须先拦）。
 _CHITCHAT_EXACT = {
     "你好", "您好", "在吗", "在不在", "早上好", "晚上好", "嗨", "哈喽",
     "hi", "hello", "谢谢", "感谢", "好的", "好", "嗯", "哦", "ok",
 }
 
-#: 提取商品关键词时剥离的问句噪音（长词在前，先剥长的）。
-#: 口语词组（2026-10-23 用户反馈「多个字就匹配不出」）：那个/哪个/帮我/
-#: 看下/看看/我想/我要/有没有/告诉/麻烦——剥不净会残留进关键词让 LIKE
-#: 全 miss；均为口语高频虚词，商品名不含，剥离零误伤。
-_NOISE_WORDS = (
-    "请问", "那个", "哪个", "帮我", "看下", "看看", "我想", "我要",
-    "有没有", "告诉", "麻烦", "一下", "多少", "什么", "怎么", "怎么样",
-    "吗", "呢", "吧",
-    "的", "了", "有", "是", "？", "?", "！", "!", "，", ",", "。", ".",
-) + _ASSET_WORDS + _PARAM_WORDS + _FILTER_WORDS + _DOC_WORDS
+_NOISE_WORDS = tuple(sorted(set(
+    (
+        "请问", "那个", "哪个", "帮我", "看下", "看看", "我想", "我要",
+        "有没有", "告诉", "麻烦", "一下", "多少", "什么", "怎么", "怎么样",
+        "吗", "呢", "吧", "的", "了", "有", "是", "？", "?", "！", "!",
+        "，", ",", "。", ".",
+    ) + _ASSET_WORDS + _PARAM_WORDS + _FILTER_WORDS + _DOC_WORDS
+), key=len, reverse=True))
+
+# 旧问句「怎么跟客户介绍」需要去掉句中疑问词；其余噪声一律只按边界或
+# 句首句尾剥离，避免全局 replace 误伤品名（如品名中间含「看」）。
+_INNER_QUESTION_WORDS = ("怎么样", "怎么", "什么")
 
 
 @dataclass(frozen=True)
@@ -82,55 +73,96 @@ class Intent:
     category: str
     keyword: str
     reason: str
+    confidence: float = 0.3
+
+
+@dataclass(frozen=True)
+class IntentRule:
+    category: str
+    words: tuple
+    patterns: tuple
+    priority: int
+    noise_strip: bool
+
+
+_RULES = tuple(sorted((
+    IntentRule(PHONE_LOOKUP, _PHONE_WORDS, (r"^\d{4,11}$",), 10, True),
+    IntentRule(ORDER_QUERY, _ORDER_WORDS, (r"[A-Z]{2}\d{10,}",), 20, True),
+    IntentRule(PRODUCT_ASSET, _ASSET_WORDS, (), 30, True),
+    IntentRule(PRODUCT_PARAM, _PARAM_WORDS, (), 40, True),
+    IntentRule(SALES_QUERY, _SALES_WORDS, (), 50, True),
+    IntentRule(PRODUCT_FILTER, _FILTER_WORDS, (), 60, True),
+    IntentRule(DOC_QA, _DOC_WORDS, (), 70, True),
+), key=lambda rule: rule.priority))
+
+
+def _bounded_noise(word):
+    return re.compile(
+        r"(?<![0-9A-Za-z\u4e00-\u9fff])" + re.escape(word)
+        + r"(?![0-9A-Za-z\u4e00-\u9fff])"
+    )
 
 
 def extract_keyword(text):
-    """剥离触发词、问句噪音与括号引号，剩下的作为商品名/检索关键词。
-
-    括号字符一律剥（2026-10-10 验收事故：用户按指引发「习酒窖藏1998
-    箱规」带直角引号，残留括号导致精确/LIKE 全 miss）；品名里的括号
-    是表内值的事，查询关键词不需要。
-    """
-    keyword = text.strip()
-    for word in _NOISE_WORDS:
+    """剥离问句噪声与触发词，保留品名中间的噪声子串。"""
+    keyword = _STRIP_CHARS_RE.sub(" ", (text or "").strip())
+    for word in _INNER_QUESTION_WORDS:
         keyword = keyword.replace(word, " ")
-    keyword = _STRIP_CHARS_RE.sub(" ", keyword)
+    # 每轮最多从两端各剥一个词；循环覆盖「请问/帮我/看下」等连续前缀及
+    # 「的重量是多少呢？」等连续后缀。中文之间的单字噪声不做全局替换。
+    for _ in range(24):
+        before = keyword
+        keyword = keyword.strip()
+        for word in _NOISE_WORDS:
+            if keyword.startswith(word):
+                keyword = keyword[len(word):].lstrip()
+                break
+        for word in _NOISE_WORDS:
+            if keyword.endswith(word):
+                keyword = keyword[:-len(word)].rstrip()
+                break
+        for word in _NOISE_WORDS:
+            keyword = _bounded_noise(word).sub(" ", keyword)
+        keyword = " ".join(keyword.split())
+        if keyword == before:
+            break
     return " ".join(keyword.split())
 
 
-def classify(text):
-    """纯规则意图分类。空文本归 CHITCHAT。"""
+def classify_all(text):
+    """返回全部命中意图，按 IntentRule.priority 升序排列。"""
     normalized = (text or "").strip()
     if not normalized:
-        return Intent(CHITCHAT, "", "空消息")
+        return [Intent(CHITCHAT, "", "空消息")]
     if normalized.lower() in _CHITCHAT_EXACT:
-        return Intent(CHITCHAT, normalized, "闲聊/问候")
+        return [Intent(CHITCHAT, normalized, "闲聊/问候", 1.0)]
+
     keyword = extract_keyword(normalized)
-    # 纯数字 4-11 位（号码/尾号）最优先拦——晚于附件/参数词就会被商品
-    # 模糊匹配误吞（「5579」→ 579ml 七款事故，见 _PHONE_WORDS 注释）。
-    if _PURE_DIGITS_RE.match(normalized):
-        return Intent(PHONE_LOOKUP, normalized, "纯数字（号码/尾号）")
-    # 号码词先于附件/参数词：「发我 XX 的手机号」里的「发我」是附件词，
-    # 后置会被吞进商品资源分支。
-    for word in _PHONE_WORDS:
-        if word in normalized:
-            return Intent(PHONE_LOOKUP, keyword, f"命中号码词「{word}」")
-    for word in _ASSET_WORDS:
-        if word in normalized:
-            return Intent(PRODUCT_ASSET, keyword, f"命中附件词「{word}」")
-    for word in _PARAM_WORDS:
-        if word in normalized:
-            return Intent(PRODUCT_PARAM, keyword, f"命中参数词「{word}」")
-    for word in _SALES_WORDS:
-        if word in normalized:
-            return Intent(SALES_QUERY, keyword, f"命中业务数据词「{word}」")
-    for word in _FILTER_WORDS:
-        if word in normalized:
-            return Intent(PRODUCT_FILTER, keyword, f"命中筛选词「{word}」")
-    for word in _DOC_WORDS:
-        if word in normalized:
-            return Intent(DOC_QA, keyword, f"命中手册词「{word}」")
-    # 无触发词但像商品名（>=2 个有效字符）→ 按参数查询处理，查不到再兜底。
+    intents = []
+    for rule in _RULES:
+        pattern = next(
+            (p for p in rule.patterns if re.search(p, normalized, re.IGNORECASE)),
+            None,
+        )
+        if pattern:
+            intents.append(Intent(
+                rule.category, keyword if rule.noise_strip else normalized,
+                f"命中{rule.category}正则", 1.0,
+            ))
+            continue
+        word = next((w for w in rule.words if w in normalized), None)
+        if word:
+            intents.append(Intent(
+                rule.category, keyword if rule.noise_strip else normalized,
+                f"命中{rule.category}词「{word}」", 0.8,
+            ))
+    if intents:
+        return intents
     if keyword and len(keyword) >= 2:
-        return Intent(PRODUCT_PARAM, keyword, "疑似商品名直查")
-    return Intent(CHITCHAT, keyword, "未命中任何规则")
+        return [Intent(PRODUCT_PARAM, keyword, "疑似商品名直查", 0.3)]
+    return [Intent(CHITCHAT, keyword, "未命中任何规则", 0.3)]
+
+
+def classify(text):
+    """单意图兼容入口：取优先级最高的命中意图。"""
+    return classify_all(text)[0]
