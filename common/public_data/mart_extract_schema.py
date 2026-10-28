@@ -890,6 +890,21 @@ def channel_ops_ddl_statements() -> tuple:
     )
 
 
+# 2026-10-28 生产失败定位：WDT 已使用 WH2024030604 等 12 字符仓库编码，
+# 上游 fact_stockout_line 允许 50 字符，sales_daily 的 10 字符限制会在严格
+# 模式下拒绝聚合写入。保留仓库业务键原值，以独立迁移扩列；不得改写已应用的
+# channel-ops-v1（版本校验和冻结）。
+_FACT_SALES_DAILY_WAREHOUSE_NO_DDL = (
+    "ALTER TABLE `fact_sales_daily`\n"
+    "  MODIFY COLUMN `warehouse_no` VARCHAR(50) NOT NULL"
+)
+
+
+def sales_daily_warehouse_no_ddl_statements() -> tuple:
+    """fact_sales_daily 仓库编码与上游长度对齐（channel-ops-v2）。"""
+    return (_FACT_SALES_DAILY_WAREHOUSE_NO_DDL,)
+
+
 def ddl_statements() -> tuple:
     return (
         legacy_ddl_statements()

@@ -58,6 +58,7 @@ from common.public_data.mart_extract_schema import (
     order_line_ddl_statements,
     order_line_channel_ddl_statements,
     order_cancel_ddl_statements,
+    sales_daily_warehouse_no_ddl_statements,
     stock_flow_ddl_statements,
 )
 from common.public_data.db import transaction
@@ -545,6 +546,9 @@ _MIGRATIONS = (
     # 部门领导表（2026-10-24 组织采集补齐配套）：同上红线，独立版本。
     ("mart-extract-dept-leader-v1", "mart", dept_leader_ddl_statements()),
     ("mart-extract-channel-ops-v1", "mart", channel_ops_ddl_statements()),
+    # 仓库编码扩容（2026-10-28）：独立 v2，保持 channel-ops-v1 校验和冻结。
+    ("mart-extract-channel-ops-v2", "mart",
+     sales_daily_warehouse_no_ddl_statements()),
     (
         "mart-extract-daily-report-date-index-v1",
         "mart",

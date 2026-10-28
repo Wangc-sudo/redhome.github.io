@@ -3,7 +3,10 @@ import unittest
 
 from common.public_data.finance_schema import table_definition
 from common.public_data.live_migrations import LiveMigrationError, apply_live_migrations
-from common.public_data.mart_extract_schema import order_line_channel_ddl_statements
+from common.public_data.mart_extract_schema import (
+    order_line_channel_ddl_statements,
+    sales_daily_warehouse_no_ddl_statements,
+)
 
 
 class FakeCursor:
@@ -413,6 +416,46 @@ class OrderLineChannelMigrationTests(unittest.TestCase):
         self.assertIn(
             "CREATE TABLE IF NOT EXISTS `fact_order_cancel_line`", mart_sql
         )
+
+
+class SalesDailyWarehouseNoMigrationTests(unittest.TestCase):
+    """sales_daily 仓库编码扩容（mart-extract-channel-ops-v2）。"""
+
+    def test_migration_is_registered_after_frozen_channel_ops_v1(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        registered = {version: target for version, target, _ in _MIGRATIONS}
+        self.assertEqual("mart", registered["mart-extract-channel-ops-v2"])
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertLess(
+            versions.index("mart-extract-channel-ops-v1"),
+            versions.index("mart-extract-channel-ops-v2"),
+        )
+
+    def test_migration_expands_column_without_truncating_warehouse_codes(self):
+        (sql,) = sales_daily_warehouse_no_ddl_statements()
+
+        self.assertEqual(
+            "ALTER TABLE `fact_sales_daily`\n"
+            "  MODIFY COLUMN `warehouse_no` VARCHAR(50) NOT NULL",
+            sql,
+        )
+        self.assertNotIn("SUBSTRING", sql.upper())
+        self.assertNotIn("CREATE TABLE", sql.upper())
+
+    def test_fresh_database_applies_warehouse_no_expansion(self):
+        dingtalk, wdt, mart = FakeConnection(), FakeConnection(), FakeConnection()
+
+        apply_live_migrations(dingtalk, wdt, mart)
+
+        mart_sql = "\n".join(query for query, _ in mart.cursor_instance.executed)
+        self.assertIn(
+            "MODIFY COLUMN `warehouse_no` VARCHAR(50) NOT NULL", mart_sql
+        )
+        recorded = [
+            params[0] for _, params in mart.cursor_instance.executed if params
+        ]
+        self.assertIn("mart-extract-channel-ops-v2", recorded)
 
 
 class MartSplitMigrationTests(unittest.TestCase):
