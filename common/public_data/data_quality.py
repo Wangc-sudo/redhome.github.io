@@ -743,6 +743,28 @@ class SourceBatch:
     byte_size: int
 
 
+class _WDTWindowRawCache:
+    """Bounded precheck batches reusable only by a WDT dry-run projection."""
+
+    def __init__(self, max_bytes=128 * 1024 * 1024):
+        self.max_bytes = int(max_bytes)
+        self.byte_size = 0
+        self.batches = []
+        self.complete = True
+
+    def append(self, batch):
+        if not self.complete:
+            return
+        batch_size = sum(_wdt_row_size(row) for row in batch)
+        if self.byte_size + batch_size > self.max_bytes:
+            self.batches.clear()
+            self.byte_size = 0
+            self.complete = False
+            return
+        self.batches.append(list(batch))
+        self.byte_size += batch_size
+
+
 class DatabaseQualitySource:
     """Bounded raw readers.  SQL count is independent of business row count."""
 
@@ -763,14 +785,17 @@ class DatabaseQualitySource:
         return cursor
 
     def iter_batches(self, dataset, *, window_start=None, window_end=None,
-                     batch_size=1000, max_batch_bytes=32 * 1024 * 1024):
+                     batch_size=1000, max_batch_bytes=32 * 1024 * 1024,
+                     raw_batch_cache=None):
+        if raw_batch_cache is not None and dataset != "wdt_order_line_fact":
+            raise DataQualityError("raw batch cache is only valid for WDT")
         if dataset == "channel_daily_sales":
             self.channel_business_dates = set()
             yield from self._channel_batches(window_start, window_end, batch_size,
                                              max_batch_bytes)
         elif dataset == "wdt_order_line_fact":
             yield from self._wdt_batches(window_start, window_end, batch_size,
-                                         max_batch_bytes)
+                                         max_batch_bytes, raw_batch_cache)
         else:
             raise DataQualityError("unsupported dataset")
 
@@ -819,12 +844,14 @@ class DatabaseQualitySource:
             if len(rows) >= len(fetched) and len(fetched) < batch_size:
                 return
 
-    def _wdt_batches(self, window_start, window_end, batch_size, max_batch_bytes):
+    def _wdt_batches(self, window_start, window_end, batch_size, max_batch_bytes,
+                     raw_batch_cache=None):
         for trades in iterate_wdt_trades(
             self.wdt, _TRADE_METHOD, batch_size=batch_size,
             max_batch_bytes=max_batch_bytes, metrics=self,
         ):
             rows, source_ids, byte_size = [], [], 0
+            raw_batch = [] if raw_batch_cache is not None else None
             for trade in trades:
                 payload = trade.get("payload_json")
                 if isinstance(payload, str):
@@ -841,8 +868,12 @@ class DatabaseQualitySource:
                 source_id = str(trade.get("source_record_id") or "")
                 source_ids.append(source_id)
                 byte_size += _wdt_row_size(trade)
+                if raw_batch is not None:
+                    raw_batch.append(trade)
                 rows.extend(_wdt_quality_rows(source_id, trade.get("payload_json"), payload))
             if source_ids:
+                if raw_batch:
+                    raw_batch_cache.append(raw_batch)
                 yield SourceBatch(rows, source_ids, byte_size)
 
 
@@ -943,8 +974,10 @@ class DataQualityRunner:
     def run(self, dataset, *, mode="check", window_start=None, window_end=None,
             rules=None, overrides=None, persist=True, requested_by="scheduler", reason="",
             batch_size=1000, max_batch_bytes=32 * 1024 * 1024, existing_run_id=None,
-            finish=True, collect_fingerprints=False):
+            finish=True, collect_fingerprints=False, raw_batch_cache=None):
         _validate_dataset(dataset)
+        if raw_batch_cache is not None and dataset != "wdt_order_line_fact":
+            raise DataQualityError("raw batch cache is only valid for WDT")
         if mode not in {"check", "preview", "rerun"}:
             raise DataQualityError("invalid runner mode")
         if mode == "rerun" and (
@@ -976,6 +1009,7 @@ class DataQualityRunner:
             for batch in self.source.iter_batches(
                 dataset, window_start=window_start, window_end=window_end,
                 batch_size=batch_size, max_batch_bytes=max_batch_bytes,
+                raw_batch_cache=raw_batch_cache,
             ):
                 metrics["batch_count"] += 1
                 metrics["max_batch_rows"] = max(metrics["max_batch_rows"], len(batch.source_record_ids))
@@ -1177,7 +1211,13 @@ class DataQualityRerunWorker:
             rules, overrides = snapshot["rules"], snapshot["overrides"]
 
             stage = "precheck"
-            precheck = self._quality_run(run, rules, overrides)
+            raw_batch_cache = (
+                _WDTWindowRawCache()
+                if dry_run and dataset == "wdt_order_line_fact" else None
+            )
+            precheck = self._quality_run(
+                run, rules, overrides, raw_batch_cache=raw_batch_cache,
+            )
             quality = precheck
             counts = self._counts(precheck)
             metrics = self._metrics(precheck)
@@ -1187,7 +1227,14 @@ class DataQualityRerunWorker:
                 outcome = {"status": "failed", "failure_code": "quality_gate_blocked"}
             elif dry_run:
                 stage = "dry_run_replay"
-                replay = self._replay(run, rules, overrides, dry_run=True)
+                raw_batches = (
+                    raw_batch_cache.batches
+                    if raw_batch_cache is not None and raw_batch_cache.complete
+                    else None
+                )
+                replay = self._replay(
+                    run, rules, overrides, dry_run=True, raw_batches=raw_batches,
+                )
                 diff = replay.get("diff")
                 counts["records_written"] = 0
                 sync_run_id = None
@@ -1256,21 +1303,27 @@ class DataQualityRerunWorker:
             issues_closed=issues_closed, fingerprint_match=fingerprint_match,
         )
 
-    def _quality_run(self, run, rules, overrides):
+    def _quality_run(self, run, rules, overrides, *, raw_batch_cache=None):
+        kwargs = {}
+        if raw_batch_cache is not None:
+            kwargs["raw_batch_cache"] = raw_batch_cache
         return self.runner.run(
             run["dataset"], mode="rerun",
             window_start=run.get("window_start"), window_end=run.get("window_end"),
             rules=rules, overrides=overrides, persist=True,
             requested_by=run.get("requested_by") or self.actor,
             reason=run.get("reason") or "", existing_run_id=run["run_id"],
-            finish=False, collect_fingerprints=True,
+            finish=False, collect_fingerprints=True, **kwargs,
         )
 
-    def _replay(self, run, rules, overrides, *, dry_run):
+    def _replay(self, run, rules, overrides, *, dry_run, raw_batches=None):
+        kwargs = {}
+        if raw_batches is not None:
+            kwargs["raw_batches"] = raw_batches
         return self.replay_service.replay_dataset(
             run["dataset"], window_start=run.get("window_start"),
             window_end=run.get("window_end"), dry_run=dry_run,
-            rules=rules, overrides=overrides,
+            rules=rules, overrides=overrides, **kwargs,
         )
 
     @staticmethod

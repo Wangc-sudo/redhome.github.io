@@ -293,7 +293,7 @@ def _replay_check_dataset_rules(dataset, rules, records_read, window_start,
 
 def project_order_lines(
     repository, dataset, run_id, synced_at, *, window_start=None, window_end=None,
-    dry_run=False, rules=None, overrides=None,
+    dry_run=False, rules=None, overrides=None, raw_batches=None,
 ) -> dict:
     """Expand raw WDT trades, optionally replacing one bounded business window."""
 
@@ -304,6 +304,8 @@ def project_order_lines(
         raise ValueError("dry-run requires a bounded business window")
     if replay and window_start is None:
         raise ValueError("quality replay requires a bounded business window")
+    if raw_batches is not None and not (dry_run and replay):
+        raise ValueError("cached raw batches require a WDT dry-run replay")
     brand_index = _brand_index(repository)
     stats = {"records_read": 0}
     skip_reasons: dict[str, int] = {}
@@ -311,7 +313,11 @@ def project_order_lines(
     quality_state = {}
 
     def expanded_batches():
-        for trades in repository.read_wdt_trade_batches(_TRADE_METHOD):
+        trade_batches = (
+            repository.read_wdt_trade_batches(_TRADE_METHOD)
+            if raw_batches is None else raw_batches
+        )
+        for trades in trade_batches:
             if window_start is None:
                 stats["records_read"] += len(trades)
             expanded = []

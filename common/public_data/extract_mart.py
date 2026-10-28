@@ -1371,7 +1371,7 @@ class MartExtractService:
         return ExtractResult(run_id=run_id, datasets=datasets_summary)
 
     def replay_dataset(self, dataset_name, *, window_start, window_end,
-                       dry_run, rules, overrides):
+                       dry_run, rules, overrides, raw_batches=None):
         """Replay a DQ snapshot into one bounded business window.
 
         Dry-run consumes the same raw projection and cleaning path but creates
@@ -1385,6 +1385,10 @@ class MartExtractService:
             "channel_daily_sales", "wdt_order_line_fact",
         }:
             raise MartExtractError("unsupported quality replay dataset")
+        if raw_batches is not None and (
+            not dry_run or dataset_name != "wdt_order_line_fact"
+        ):
+            raise MartExtractError("cached raw batches require a WDT dry-run")
         window_start = _coerce_date(window_start)
         window_end = _coerce_date(window_end)
         if window_start is None or window_end is None or window_start > window_end:
@@ -1396,6 +1400,7 @@ class MartExtractService:
                 result = self._replay_projection(
                     dataset, None, None, window_start, window_end,
                     dry_run=True, rules=rules, overrides=overrides,
+                    raw_batches=raw_batches,
                 )
             return self._replay_result(dataset, None, result)
 
@@ -1456,13 +1461,14 @@ class MartExtractService:
         return self._replay_result(dataset, sync_run_id, result)
 
     def _replay_projection(self, dataset, run_id, synced_at, window_start,
-                           window_end, *, dry_run, rules, overrides):
+                           window_end, *, dry_run, rules, overrides, raw_batches=None):
         if dataset.dataset == "wdt_order_line_fact":
             from common.public_data.extract_order_line import project_order_lines
             return project_order_lines(
                 self._repository, dataset, run_id, synced_at,
                 window_start=window_start, window_end=window_end,
                 dry_run=dry_run, rules=rules, overrides=overrides,
+                raw_batches=raw_batches,
             )
 
         rows = self._repository.read_dataset(dataset)

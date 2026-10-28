@@ -333,6 +333,52 @@ class OrderLineProjectionTests(unittest.TestCase):
         repo.read_mart_table.assert_not_called()
         repo.read_wdt_trade_batches.assert_not_called()
 
+    def test_window_dry_run_reuses_cached_raw_batches(self):
+        ds = dataset_by_name("wdt_order_line_fact")
+        cached = _trade(
+            trade_no="T-cached", trade_time="2026-10-26 10:00:00",
+            details=[_detail()],
+        )
+        database_repo = self._repo(batches=[[cached]])
+        cached_repo = self._repo(batches=[])
+        for repo in (database_repo, cached_repo):
+            repo.window_row_counts.return_value = {
+                "before_count": 5, "window_before": 2,
+            }
+        kwargs = {
+            "window_start": date(2026, 10, 26),
+            "window_end": date(2026, 10, 26),
+            "dry_run": True, "rules": [_spec_required_rule()], "overrides": {},
+        }
+
+        database_result = project_order_lines(
+            database_repo, ds, None, None, **kwargs,
+        )
+        cached_result = project_order_lines(
+            cached_repo, ds, None, None, raw_batches=[[cached]], **kwargs,
+        )
+
+        cached_repo.read_wdt_trade_batches.assert_not_called()
+        self.assertEqual(database_result, cached_result)
+        self.assertEqual(1, cached_result["records_read"])
+        self.assertEqual(0, cached_result["records_new"])
+        self.assertEqual(1, cached_result["_replay_diff"]["window_after"])
+        self.assertEqual(0, cached_result["_replay_diff"]["records_written"])
+
+    def test_cached_raw_batches_cannot_be_used_for_formal_replay(self):
+        repo = Mock()
+
+        with self.assertRaisesRegex(ValueError, "dry-run"):
+            project_order_lines(
+                repo, dataset_by_name("wdt_order_line_fact"), _RUN_ID, _NOW,
+                window_start=date(2026, 10, 26), window_end=date(2026, 10, 26),
+                dry_run=False, rules=[], overrides={}, raw_batches=[],
+            )
+
+        repo.read_mart_table.assert_not_called()
+        repo.read_wdt_trade_batches.assert_not_called()
+        repo.replace_table_window_batches.assert_not_called()
+
     def test_window_replay_isolates_batches_and_applies_spec_overrides(self):
         ds = dataset_by_name("wdt_order_line_fact")
         repo = self._repo(

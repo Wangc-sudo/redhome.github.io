@@ -1,8 +1,10 @@
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 
 from common.public_data.cleaning import rule_version
 from common.public_data.data_quality import (
+    DatabaseQualitySource,
     DataQualityError,
     DataQualityNotFound,
     DataQualityRepository,
@@ -10,6 +12,7 @@ from common.public_data.data_quality import (
     DataQualityRunner,
     RERUN_WORKER_LOCK_NAME,
     SourceBatch,
+    _WDTWindowRawCache,
     _wdt_quality_rows,
     data_quality_ddl_statements,
     data_quality_snapshot_ddl_statements,
@@ -252,6 +255,40 @@ class DataQualityRunnerTests(unittest.TestCase):
             DataQualityRunner(repo, _Source()).run("channel_daily_sales")
         self.assertEqual("failed", repo.finished["status"])
 
+    @patch("common.public_data.data_quality.iterate_wdt_trades")
+    def test_wdt_source_captures_only_the_bounded_raw_window(self, iterate):
+        outside = {
+            "source_record_id": "raw-before",
+            "payload_json": '{"trade_no":"T-0","trade_time":"2026-10-25 23:59:59"}',
+        }
+        target = {
+            "source_record_id": "raw-target",
+            "payload_json": '{"trade_no":"T-1","trade_time":"2026-10-26 00:00:00"}',
+        }
+        iterate.return_value = iter([[outside, target]])
+        cache = _WDTWindowRawCache()
+        source = DatabaseQualitySource(object(), object())
+
+        batches = list(source.iter_batches(
+            "wdt_order_line_fact",
+            window_start=date(2026, 10, 26), window_end=date(2026, 10, 26),
+            raw_batch_cache=cache,
+        ))
+
+        self.assertEqual([[target]], cache.batches)
+        self.assertEqual(["raw-target"], batches[0].source_record_ids)
+        self.assertTrue(cache.complete)
+
+    def test_wdt_raw_cache_overflow_falls_back_without_retaining_payloads(self):
+        cache = _WDTWindowRawCache(max_bytes=1)
+
+        cache.append([{"source_record_id": "raw-1", "payload_json": "{}"}])
+        cache.append([{"source_record_id": "raw-2", "payload_json": "{}"}])
+
+        self.assertFalse(cache.complete)
+        self.assertEqual([], cache.batches)
+        self.assertEqual(0, cache.byte_size)
+
     def test_ddl_contains_control_tables_and_access_indexes(self):
         ddl = "\n".join(data_quality_ddl_statements())
         for table in ("dq_rule", "dq_run", "dq_issue", "dq_value_override", "dq_audit"):
@@ -368,6 +405,12 @@ class _RerunRunner:
 
     def run(self, dataset, **kwargs):
         self.calls.append((dataset, kwargs))
+        raw_batch_cache = kwargs.get("raw_batch_cache")
+        if raw_batch_cache is not None:
+            raw_batch_cache.append([{
+                "source_record_id": "raw-1",
+                "payload_json": '{"trade_time":"2026-10-26 10:00:00"}',
+            }])
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -524,6 +567,10 @@ class DataQualityRerunWorkerTests(unittest.TestCase):
         replay_kwargs = replay.calls[0][1]
         self.assertIs(snapshot["rules"], replay_kwargs["rules"])
         self.assertIs(snapshot["overrides"], replay_kwargs["overrides"])
+        self.assertNotIn("raw_batches", replay_kwargs)
+        self.assertTrue(all(
+            "raw_batch_cache" not in kwargs for _, kwargs in runner.calls
+        ))
         self.assertEqual(RERUN_WORKER_LOCK_NAME, locks[0].name)
         self.assertNotEqual("public-data:extract:channel_daily_sales", locks[0].name)
         self.assertEqual(0, locks[0].timeout_seconds)
@@ -552,6 +599,22 @@ class DataQualityRerunWorkerTests(unittest.TestCase):
         self.assertEqual(_replay_result(dry_run=True, records_read=3)["diff"],
                          finish["diff"])
         self.assertEqual([], outbox.calls)
+
+    def test_wdt_dry_run_reuses_precheck_raw_batches(self):
+        worker, _, runner, replay, _, _, _ = _rerun_rig(
+            _rerun(dataset="wdt_order_line_fact", dry_run=True),
+            [_quality_result()],
+            replay_outcomes=[_replay_result(dry_run=True)],
+        )
+
+        result = worker.run_once()
+
+        self.assertEqual("finished", result["status"])
+        cache = runner.calls[0][1]["raw_batch_cache"]
+        self.assertTrue(cache.complete)
+        self.assertIs(cache.batches, replay.calls[0][1]["raw_batches"])
+        self.assertEqual(0, replay.sync_runs_created)
+        self.assertEqual([], replay.business_publishes)
 
     def test_critical_and_error_prechecks_block_formal_publish(self):
         for alert_status in ("blocked", "error"):

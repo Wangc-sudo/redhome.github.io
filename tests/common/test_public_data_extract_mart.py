@@ -1595,6 +1595,43 @@ class DeptLeaderExtractTests(unittest.TestCase):
         self.repository.replace_dim_dept_leaders.assert_not_called()
 
 
+class WdtQualityReplayTests(unittest.TestCase):
+
+    @patch("common.public_data.extract_order_line.project_order_lines")
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_dry_run_forwards_precheck_raw_batches(self, _lock, project):
+        repository = Mock()
+        mart_repository = Mock()
+        service = MartExtractService(
+            repository=repository,
+            mart_repository=mart_repository,
+            mart_connection=_FakeConnection(),
+            now=lambda: _NOW,
+            new_run_id=Mock(return_value=_RUN_ID),
+            datasets=[dataset_by_name("wdt_order_line_fact")],
+            calendar_months=(),
+        )
+        project.return_value = {
+            "records_read": 1, "records_new": 0,
+            "_replay_diff": {
+                "before_count": 1, "window_before": 1,
+                "window_after": 1, "after_count": 1, "records_written": 0,
+            },
+        }
+        raw_batches = [[{"source_record_id": "raw-1", "payload_json": "{}"}]]
+
+        result = service.replay_dataset(
+            "wdt_order_line_fact",
+            window_start=date(2026, 10, 26), window_end=date(2026, 10, 26),
+            dry_run=True, rules=[], overrides={}, raw_batches=raw_batches,
+        )
+
+        self.assertIs(raw_batches, project.call_args.kwargs["raw_batches"])
+        self.assertEqual(0, result["records_written"])
+        mart_repository.start_run.assert_not_called()
+        repository.read_wdt_trade_batches.assert_not_called()
+
+
 class ChannelQualityReplayTests(unittest.TestCase):
 
     def _service(self):
