@@ -22,7 +22,6 @@ from common.public_data.data_quality import (
     data_quality_ddl_statements,
     data_quality_snapshot_ddl_statements,
 )
-from common.rag.index_state import ddl_statements as rag_index_state_ddl_statements
 from common.public_data.finance_schema import (
     all_table_definitions,
     table_definition,
@@ -821,12 +820,6 @@ _MIGRATIONS = (
         "mart-ops-data-quality-v2",
         "mart",
         data_quality_snapshot_ddl_statements(),
-    ),
-    (
-        # 商品向量增量索引状态：内容/模型/维度指纹与失效条目对账。
-        "mart-ops-rag-index-state-v1",
-        "mart",
-        rag_index_state_ddl_statements(),
     ),
 )
 

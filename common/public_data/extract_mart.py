@@ -34,6 +34,9 @@ from common.public_data.mart_extract_schema import (
     DIM_DEPT_LEADER,
     DIM_ROBOT_MEMBER,
     EXTRACT_DATASETS,
+    create_staging_table_ddl,
+    drop_staging_table_ddl,
+    publish_staging_table_ddl,
 )
 
 
@@ -503,7 +506,7 @@ class MartExtractRepository:
         written = 0
         try:
             with contextlib.closing(self._mart.cursor()) as cursor:
-                cursor.execute(f"CREATE TABLE `{staging}` LIKE `{target_table}`")
+                cursor.execute(create_staging_table_ddl(staging, target_table))
             created = True
             for rows in batches:
                 params = [tuple(row.get(name) for name in columns) for row in rows]
@@ -521,8 +524,7 @@ class MartExtractRepository:
                 raise MartExtractError("staging row count mismatch")
             with contextlib.closing(self._mart.cursor()) as cursor:
                 cursor.execute(
-                    f"RENAME TABLE `{target_table}` TO `{backup}`, "
-                    f"`{staging}` TO `{target_table}`"
+                    publish_staging_table_ddl(target_table, staging, backup)
                 )
             published = True
             return written
@@ -530,13 +532,13 @@ class MartExtractRepository:
             if published:
                 try:
                     with contextlib.closing(self._mart.cursor()) as cursor:
-                        cursor.execute(f"DROP TABLE `{backup}`")
+                        cursor.execute(drop_staging_table_ddl(backup))
                 except Exception:
                     logger.warning("failed to drop published extract backup %s", backup)
             elif created:
                 try:
                     with contextlib.closing(self._mart.cursor()) as cursor:
-                        cursor.execute(f"DROP TABLE IF EXISTS `{staging}`")
+                        cursor.execute(drop_staging_table_ddl(staging, if_exists=True))
                 except Exception:
                     logger.warning("failed to clean extract staging table %s", staging)
 
@@ -606,7 +608,7 @@ class MartExtractRepository:
         written = 0
         try:
             with contextlib.closing(self._mart.cursor()) as cursor:
-                cursor.execute(f"CREATE TABLE `{staging}` LIKE `{target_table}`")
+                cursor.execute(create_staging_table_ddl(staging, target_table))
             created = True
             with contextlib.closing(self._mart.cursor()) as cursor:
                 cursor.execute(
@@ -639,8 +641,7 @@ class MartExtractRepository:
                 raise MartExtractError("staging row count mismatch")
             with contextlib.closing(self._mart.cursor()) as cursor:
                 cursor.execute(
-                    f"RENAME TABLE `{target_table}` TO `{backup}`, "
-                    f"`{staging}` TO `{target_table}`"
+                    publish_staging_table_ddl(target_table, staging, backup)
                 )
             published = True
             return {
@@ -651,13 +652,13 @@ class MartExtractRepository:
             if published:
                 try:
                     with contextlib.closing(self._mart.cursor()) as cursor:
-                        cursor.execute(f"DROP TABLE `{backup}`")
+                        cursor.execute(drop_staging_table_ddl(backup))
                 except Exception:
                     logger.warning("failed to drop published extract backup %s", backup)
             elif created:
                 try:
                     with contextlib.closing(self._mart.cursor()) as cursor:
-                        cursor.execute(f"DROP TABLE IF EXISTS `{staging}`")
+                        cursor.execute(drop_staging_table_ddl(staging, if_exists=True))
                 except Exception:
                     logger.warning("failed to clean extract staging table %s", staging)
 
