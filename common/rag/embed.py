@@ -17,6 +17,7 @@ provider 抽象（2026-10-19）：除 jina 外支持 ``openai``——OpenAI 兼�
 
 import base64
 import json
+import math
 import time
 import urllib.request
 
@@ -69,7 +70,7 @@ def _post(payload, api_key, *, url=API_URL):
     data = result.get("data")
     if not isinstance(data, list) or not data:
         raise EmbedError(f"jina embed 返回异常: {sorted(result.keys())}")
-    return sorted(data, key=lambda x: x.get("index", 0))
+    return data
 
 
 def default_model(provider):
@@ -98,6 +99,77 @@ def max_image_batch(provider):
     return 8
 
 
+def validate_vectors(vectors, expected_count, *, dimensions=None,
+                     provider="embedding"):
+    """校验数量、维度与有限数值，并统一转成 float 向量。
+
+    这是入库前的硬边界：任一元素异常都会使整批失败，调用方不得用 zip
+    截断或把部分异常向量继续写入 Milvus。
+    """
+    if not isinstance(vectors, (list, tuple)) or len(vectors) != expected_count:
+        actual = len(vectors) if isinstance(vectors, (list, tuple)) else "invalid"
+        raise EmbedError(
+            f"{provider} embed 数量不符: 入{expected_count} 出{actual}")
+    validated = []
+    actual_dim = None
+    for vector in vectors:
+        if not isinstance(vector, (list, tuple)) or not vector:
+            raise EmbedError(f"{provider} embed 返回空向量")
+        if actual_dim is None:
+            actual_dim = len(vector)
+        if len(vector) != actual_dim:
+            raise EmbedError(
+                f"{provider} embed 维度不一致: {actual_dim}/{len(vector)}")
+        if dimensions is not None and len(vector) != dimensions:
+            raise EmbedError(
+                f"{provider} embed 维度不符: 期望{dimensions} 实际{len(vector)}")
+        converted = []
+        for value in vector:
+            if isinstance(value, bool):
+                raise EmbedError(f"{provider} embed 向量含非数值")
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                raise EmbedError(f"{provider} embed 向量含非数值") from None
+            if not math.isfinite(number):
+                raise EmbedError(f"{provider} embed 向量含非有限数值")
+            converted.append(number)
+        validated.append(converted)
+    return validated
+
+
+def _vectors_from_entries(entries, expected_count, *, dimensions, provider,
+                          require_index=True):
+    """按响应 index 还回原输入顺序；仅指定兼容形态允许按位置对齐。"""
+    if not isinstance(entries, list) or len(entries) != expected_count:
+        actual = len(entries) if isinstance(entries, list) else "invalid"
+        raise EmbedError(
+            f"{provider} embed 数量不符: 入{expected_count} 出{actual}")
+    if any(not isinstance(entry, dict) for entry in entries):
+        raise EmbedError(f"{provider} embed 返回结构不符")
+
+    has_index = ["index" in entry for entry in entries]
+    if require_index and not all(has_index):
+        raise EmbedError(f"{provider} embed 返回 index 不完整")
+    if any(has_index) and not all(has_index):
+        raise EmbedError(f"{provider} embed 返回 index 不完整")
+    ordered = [None] * expected_count
+    if all(has_index):
+        seen = set()
+        for entry in entries:
+            index = entry["index"]
+            if type(index) is not int or not 0 <= index < expected_count:
+                raise EmbedError(f"{provider} embed 返回 index 越界")
+            if index in seen:
+                raise EmbedError(f"{provider} embed 返回 index 重复")
+            seen.add(index)
+            ordered[index] = entry.get("embedding")
+    else:
+        ordered = [entry.get("embedding") for entry in entries]
+    return validate_vectors(
+        ordered, expected_count, dimensions=dimensions, provider=provider)
+
+
 def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
                 provider=DEFAULT_PROVIDER, base_url=None):
     """混合批量嵌入。items=[{"text":..}|{"image":..}]，返回 [vector,...]。
@@ -116,7 +188,8 @@ def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
         return _embed_openai(items, api_key, model=model, base_url=base_url,
                              dimensions=dimensions)
     if provider == PROVIDER_CTAIGW:
-        return _embed_ctaigw(items, api_key, model=model, base_url=base_url)
+        return _embed_ctaigw(items, api_key, model=model, base_url=base_url,
+                             dimensions=dimensions)
     if provider != PROVIDER_JINA:
         raise EmbedError(f"未知 embedding provider: {provider}")
     payload = {"model": model, "input": list(items)}
@@ -125,15 +198,8 @@ def embed_items(items, api_key, *, model=DEFAULT_MODEL, dimensions=None,
     t0 = time.perf_counter()
     data = _post(payload, api_key)
     _ = time.perf_counter() - t0  # 延迟由调用方计时统计
-    vectors = []
-    for entry in data:
-        vec = entry.get("embedding")
-        if not isinstance(vec, list) or not vec:
-            raise EmbedError("jina embed 返回空向量")
-        vectors.append([float(v) for v in vec])
-    if len(vectors) != len(items):
-        raise EmbedError(f"jina embed 数量不符: 入{len(items)} 出{len(vectors)}")
-    return vectors
+    return _vectors_from_entries(
+        data, len(items), dimensions=dimensions, provider=PROVIDER_JINA)
 
 
 def _embed_openai(items, api_key, *, model, base_url, dimensions=None):
@@ -155,25 +221,19 @@ def _embed_openai(items, api_key, *, model, base_url, dimensions=None):
     url = base_url.rstrip("/") + OPENAI_EMBEDDINGS_PATH
     result = _post_payload(payload, api_key, url)
     entries = result.get("data")
+    require_index = True
     if not isinstance(entries, list) or not entries:
         output = result.get("output")
         entries = (output or {}).get("embeddings") if isinstance(output, dict) else None
+        require_index = False
     if not isinstance(entries, list) or not entries:
         raise EmbedError(f"openai embed 返回异常: {sorted(result.keys())}")
-    if hasattr(entries[0], "get") is False:
-        raise EmbedError("openai embed 返回结构不符")
-    vectors = []
-    for entry in entries:
-        vec = entry.get("embedding") if isinstance(entry, dict) else None
-        if not isinstance(vec, list) or not vec:
-            raise EmbedError("openai embed 返回空向量")
-        vectors.append([float(v) for v in vec])
-    if len(vectors) != len(items):
-        raise EmbedError(f"openai embed 数量不符: 入{len(items)} 出{len(vectors)}")
-    return vectors
+    return _vectors_from_entries(
+        entries, len(items), dimensions=dimensions, provider=PROVIDER_OPENAI,
+        require_index=require_index)
 
 
-def _embed_ctaigw(items, api_key, *, model, base_url=None):
+def _embed_ctaigw(items, api_key, *, model, base_url=None, dimensions=None):
     """天翼网关 multimodal-embedding：图文同空间，dim=2560（实测契约）。
 
     请求 ``input.contents`` 混合 {"text"}/{"image"}，``enable_fusion=false``
@@ -202,16 +262,8 @@ def _embed_ctaigw(items, api_key, *, model, base_url=None):
     entries = (output or {}).get("embeddings") if isinstance(output, dict) else None
     if not isinstance(entries, list) or not entries:
         raise EmbedError(f"ctaigw embed 返回异常: {sorted(result.keys())}")
-    vectors = []
-    for entry in sorted(entries, key=lambda e: e.get("index", 0)):
-        vec = entry.get("embedding") if isinstance(entry, dict) else None
-        if not isinstance(vec, list) or not vec:
-            raise EmbedError("ctaigw embed 返回空向量")
-        vectors.append([float(v) for v in vec])
-    if len(vectors) != len(items):
-        raise EmbedError(
-            f"ctaigw embed 数量不符: 入{len(items)} 出{len(vectors)}")
-    return vectors
+    return _vectors_from_entries(
+        entries, len(items), dimensions=dimensions, provider=PROVIDER_CTAIGW)
 
 
 def _post_payload(payload, api_key, url):

@@ -8,6 +8,9 @@ from common.kb_qa.schema import (
     kb_ddl_statements,
     kb_web_acl_ddl_statements,
 )
+from common.rag.index_state import (
+    ddl_statements as rag_index_state_ddl_statements,
+)
 from common.public_data.bi_authz import bi_authz_ddl_statements
 from common.public_data.calendar_store import calendar_override_ddl_statements
 from common.public_data.channel_map import (
@@ -820,6 +823,13 @@ _MIGRATIONS = (
         "mart-ops-data-quality-v2",
         "mart",
         data_quality_snapshot_ddl_statements(),
+    ),
+    (
+        # 商品向量增量索引状态：内容指纹、模型/维度、失败保留与失效对账。
+        # 独立版本，不改写知识库或数据质量的既有迁移校验和。
+        "mart-ops-rag-index-state-v1",
+        "mart",
+        rag_index_state_ddl_statements(),
     ),
 )
 

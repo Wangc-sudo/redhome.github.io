@@ -22,11 +22,15 @@
 """
 
 import argparse
+from datetime import datetime
+import hashlib
 import os
+import time
+import uuid
 
 from common.kb_qa import media
 from common.kb_qa.sync_products import ATTACHMENT_FIELDS, normalize_record
-from common.rag import embed
+from common.rag import embed, index_state
 
 #: 文本条目拼接的列（列名, 标签）：全量核心字段，语义检索素材。
 _TEXT_FIELDS = (
@@ -76,95 +80,255 @@ def iter_image_attachments(record):
     return found
 
 
+def _new_stats():
+    return {
+        "records_read": 0, "products": 0, "text": 0, "image": 0,
+        "image_failed": 0, "written": 0, "unchanged": 0,
+        "text_embedded": 0, "image_embedded": 0, "deleted": 0,
+        "failed": 0, "retried": 0, "api_calls": 0, "duration_ms": 0,
+        "skipped": 0, "source_complete": False, "status": "completed",
+        "reason": "",
+    }
+
+
+def _descriptor(row, item_id, kind, content_hash, text, image_ref, model, dim):
+    return {
+        "item_id": item_id, "record_id": row["record_id"], "kind": kind,
+        "content_hash": content_hash, "model": model, "dim": int(dim),
+        "name": row["name"], "text": text, "image_ref": image_ref,
+    }
+
+
+def _is_unchanged(previous, item):
+    """只有上次成功且身份、内容、模型和真实维度全一致才跳过 embedding。"""
+    if not previous or previous.get("status") != index_state.STATUS_OK:
+        return False
+    try:
+        previous_dim = int(previous.get("dim"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        previous.get("item_id") == item["item_id"]
+        and previous.get("content_hash") == item["content_hash"]
+        and previous.get("model") == item["model"]
+        and previous_dim == item["dim"]
+    )
+
+
+def _state_row(item, previous, *, status, now, unchanged=False, error=None):
+    previous = previous or {}
+    if status == index_state.STATUS_DEGRADED:
+        attempts = int(previous.get("attempts") or 0) + 1
+        last_success_at = previous.get("last_success_at")
+    else:
+        attempts = int(previous.get("attempts") or 0) if unchanged else 0
+        last_success_at = previous.get("last_success_at") if unchanged else now
+    return {
+        key: item[key]
+        for key in ("item_id", "record_id", "kind", "content_hash", "model", "dim")
+    } | {
+        "last_success_at": last_success_at,
+        "status": status,
+        "attempts": attempts,
+        "last_error": error,
+    }
+
+
+def _milvus_item(item, vector):
+    return {
+        "id": item["item_id"], "vector": vector, "kind": item["kind"],
+        "name": item["name"], "text": item["text"],
+        "image_ref": item["image_ref"],
+    }
+
+
+def _error_label(exc):
+    """EmbedError 已约定不含输入回显；其他异常只保留类型防签名 URL 泄露。"""
+    return str(exc) if isinstance(exc, embed.EmbedError) else type(exc).__name__
+
+
 def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
               model=embed.DEFAULT_MODEL, provider=embed.DEFAULT_PROVIDER,
-              base_url=None, text_batch=None, on_progress=None):
-    """全量重建索引。返回统计 dict。单张图片失败 fail-soft 跳过记数。
+              base_url=None, text_batch=None, on_progress=None,
+              state_repository=None, run_id=None):
+    """商品快照增量入库；失败保留 last-good，完整成功后才对账删除。
 
-    text_batch 缺省按 provider 取上限（ctaigw 实测 22 条即 HTTP 400，
-    64 的 jina 默认值会把整批打挂——2026-10-20 商品灌库两次全灭于此）。
+    文本哈希基于 normalize_record/build_text 后的规范化内容；图片哈希始终
+    基于实际下载字节，签名 URL 只用于当次获取或 ctaigw embedding，不参与哈希。
+    未传 state_repository 时保留旧的全量 embedding 行为，但不做失效清理。
     """
+    started = time.perf_counter()
+    run_id = run_id or uuid.uuid4().hex
+    now = datetime.now()
+    stats = _new_stats()
     text_batch = text_batch or embed.max_batch(provider)
-    records = client.list_records(base_id, sheet_id)
+    records = client.list_records(base_id, sheet_id) or []
+    stats["records_read"] = len(records)
     pairs = []
     for record in records:
-        row = normalize_record(record)
+        row = normalize_record(record) if isinstance(record, dict) else None
         if row:
             pairs.append((row, record))
+        else:
+            stats["skipped"] += 1
+    stats["products"] = len(pairs)
+    stats["source_complete"] = bool(records) and stats["skipped"] == 0
 
     real_dim = store.ensure_collection(milvus, dim)
+    previous = state_repository.preload() if state_repository else {}
     items = []
-    stats = {"records_read": len(records), "products": len(pairs),
-             "text": 0, "image": 0, "image_failed": 0}
+    state_rows = []
 
-    # 文本：批量 embed（jina 单请求多条，按 text_batch 分批）。
-    for start in range(0, len(pairs), text_batch):
-        chunk = pairs[start:start + text_batch]
-        texts = [build_text(row) for row, _ in chunk]
-        vectors = embed.embed_items([{"text": t} for t in texts], api_key,
-                                    model=model, dimensions=real_dim,
-                                    provider=provider, base_url=base_url)
-        for (row, _), vector, text in zip(chunk, vectors, texts):
-            items.append({
-                "id": f"product:{row['record_id']}",
-                "vector": vector,
-                "kind": "text",
-                "name": row["name"],
-                "text": text,
-                "image_ref": "",
-            })
-        stats["text"] += len(chunk)
+    def embed_part(inputs):
+        stats["api_calls"] += 1
+        vectors = embed.embed_items(
+            inputs, api_key, model=model, dimensions=real_dim,
+            provider=provider, base_url=base_url)
+        # 再守一道入库边界，亦防止测试替身/未来 provider 绕过统一解析器。
+        return embed.validate_vectors(
+            vectors, len(inputs), dimensions=real_dim, provider=provider)
+
+    def mark_failed(item, exc, *, image=False):
+        stats["failed"] += 1
+        if image:
+            stats["image_failed"] += 1
+        state_rows.append(_state_row(
+            item, previous.get(item["item_id"]),
+            status=index_state.STATUS_DEGRADED, now=now,
+            error=_error_label(exc)))
+
+    def mark_embedded(item, vector, *, image=False):
+        items.append(_milvus_item(item, vector))
+        if image:
+            stats["image"] += 1
+            stats["image_embedded"] += 1
+        else:
+            stats["text"] += 1
+            stats["text_embedded"] += 1
+        state_rows.append(_state_row(
+            item, previous.get(item["item_id"]),
+            status=index_state.STATUS_OK, now=now))
+
+    pending_text = []
+    for row, _ in pairs:
+        text = build_text(row)
+        item = _descriptor(
+            row, f"product:{row['record_id']}", "text",
+            hashlib.sha256(text.encode("utf-8")).hexdigest(), text, "",
+            model, real_dim)
+        old = previous.get(item["item_id"])
+        if _is_unchanged(old, item):
+            stats["unchanged"] += 1
+            stats["text"] += 1
+            state_rows.append(_state_row(
+                item, old, status=index_state.STATUS_OK, now=now,
+                unchanged=True))
+        else:
+            pending_text.append(item)
+
+    for start in range(0, len(pending_text), text_batch):
+        part = pending_text[start:start + text_batch]
+        try:
+            vectors = embed_part([{"text": item["text"]} for item in part])
+        except embed.EmbedError as exc:
+            for item in part:
+                mark_failed(item, exc)
+        else:
+            for item, vector in zip(part, vectors):
+                mark_embedded(item, vector)
         if on_progress:
             on_progress("text", stats["text"])
 
-    # 图片：跨商品合批（每批 ≤ max_batch 张）。原设计是逐行商品一次
-    # API 调用——825 行就是 825 次串行调用，慢且脆弱：某张图网关侧处理
-    # 挂起会把整轮拖死（2026-10-20 实测卡死 28 分钟无超时退出）。合批后
-    # 调用次数降一个量级，单批失败只损失该批（fail-soft），不会整体卡死。
+    def image_inputs(part):
+        if provider == embed.PROVIDER_CTAIGW:
+            return [{"image": meta["url"]} for _, meta, _ in part]
+        return [
+            {"image": embed.to_data_uri(content, meta["mime"])}
+            for _, meta, content in part
+        ]
+
+    def process_images(part):
+        try:
+            vectors = embed_part(image_inputs(part))
+        except embed.EmbedError as exc:
+            if len(part) == 1:
+                item, _, _ = part[0]
+                mark_failed(item, exc, image=True)
+            else:
+                # 整批失败不能整批丢弃：拆成单图定位坏图，好图仍可更新。
+                stats["retried"] += len(part)
+                for item, meta, content in part:
+                    single = [(item, meta, content)]
+                    try:
+                        vector = embed_part(image_inputs(single))[0]
+                    except embed.EmbedError as single_exc:
+                        mark_failed(item, single_exc, image=True)
+                    else:
+                        mark_embedded(item, vector, image=True)
+        else:
+            for (item, _, _), vector in zip(part, vectors):
+                mark_embedded(item, vector, image=True)
+        if on_progress:
+            on_progress("image", stats["image"])
+            on_progress("image_failed", stats["image_failed"])
+
+    # 图片先下载并做字节 SHA256，再决定 unchanged；ctaigw 仍把签名 URL
+    # 交给网关 embed。内存最多保留一个图片批次的字节，避免首轮全量占内存。
+    pending_images = []
+    image_batch = embed.max_image_batch(provider)
     image_entries = [
         (row, field_name, index, meta)
         for row, record in pairs
         for field_name, index, meta in iter_image_attachments(record)
     ]
-    image_batch = embed.max_image_batch(provider)
-    for start in range(0, len(image_entries), image_batch):
-        part = image_entries[start:start + image_batch]
+    for row, field_name, index, meta in image_entries:
+        record_id = row["record_id"]
+        item = _descriptor(
+            row, f"product-img:{record_id}:{field_name}:{index}", "image",
+            "", "", f"{record_id}/{field_name}/{index}", model, real_dim)
+        old = previous.get(item["item_id"])
         try:
-            if provider == embed.PROVIDER_CTAIGW:
-                # 天翼网关支持 http(s) 图片 URL（实测）；钉钉附件签名 URL 带
-                # 时效，刚好即用即弃，免下载字节流。data URI 形态未经其实测，
-                # 不赌。
-                vectors = embed.embed_items(
-                    [{"image": meta["url"]} for _, _, _, meta in part],
-                    api_key, model=model, dimensions=real_dim,
-                    provider=provider, base_url=base_url)
-            else:
-                contents = [media.download_bytes(meta["url"])
-                            for _, _, _, meta in part]
-                vectors = embed.embed_items(
-                    [{"image": embed.to_data_uri(content, meta["mime"])}
-                     for content, (_, _, _, meta) in zip(contents, part)],
-                    api_key, model=model, dimensions=real_dim,
-                    provider=provider, base_url=base_url)
-        except embed.EmbedError:
-            stats["image_failed"] += len(part)
+            content = media.download_bytes(meta["url"])
+            item["content_hash"] = hashlib.sha256(content).hexdigest()
+        except Exception as exc:
+            item["content_hash"] = (old or {}).get("content_hash", "")
+            mark_failed(item, exc, image=True)
             if on_progress:
                 on_progress("image_failed", stats["image_failed"])
             continue
-        for (row, field_name, index, meta), vector in zip(part, vectors):
-            items.append({
-                "id": f"product-img:{row['record_id']}:{field_name}:{index}",
-                "vector": vector,
-                "kind": "image",
-                "name": row["name"],
-                "text": "",
-                "image_ref": f"{row['record_id']}/{field_name}/{index}",
-            })
+        if _is_unchanged(old, item):
+            stats["unchanged"] += 1
             stats["image"] += 1
-        if on_progress:
-            on_progress("image", stats["image"])
+            state_rows.append(_state_row(
+                item, old, status=index_state.STATUS_OK, now=now,
+                unchanged=True))
+            continue
+        pending_images.append((item, meta, content))
+        if len(pending_images) == image_batch:
+            process_images(pending_images)
+            pending_images = []
+    if pending_images:
+        process_images(pending_images)
 
-    stats["written"] = store.upsert_items(milvus, items)
+    stats["written"] = store.upsert_items(milvus, items) if items else 0
+    complete = stats["source_complete"] and stats["failed"] == 0
+    if state_repository:
+        state_repository.save_batch(state_rows, run_id=run_id)
+        stale_ids = state_repository.reconcile(run_id, complete=complete)
+        if stale_ids:
+            stats["deleted"] = store.delete_ids(milvus, stale_ids)
+            state_repository.delete_ids(stale_ids)
+
+    if not records:
+        stats["status"] = "skipped"
+        stats["reason"] = "empty_source"
+    elif not stats["source_complete"]:
+        stats["status"] = "degraded"
+        stats["reason"] = "incomplete_source"
+    elif stats["failed"]:
+        stats["status"] = "degraded"
+        stats["reason"] = "index_failed"
+    stats["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
     return stats
 
 
@@ -179,11 +343,14 @@ def main(argv=None):
     provider = os.environ.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
     api_key = os.environ.get("RAG_EMBED_API_KEY") or os.environ.get("JINA_API_KEY")
     if not api_key:
+        stats = _new_stats()
+        stats.update(status="skipped", reason="no_embed_key")
         print("service=rag-index-products status=skipped reason=no_embed_key")
-        return
+        return stats
     base_url = os.environ.get("RAG_EMBED_BASE_URL")
 
     from common.dingtalk.client import DingTalkClient
+    from common.public_data import db
     from common.public_data.live_safety import require_live_run
     from common.public_data.settings import Settings
     from common.rag import store
@@ -208,22 +375,35 @@ def main(argv=None):
     if not model:
         raise SystemExit(f"provider={provider} 需要 RAG_EMBED_MODEL")
 
-    stats = run_index(
-        client=client, milvus=milvus, store=store,
-        api_key=api_key,
-        base_id=os.environ["KB_PRODUCTS_BASE_ID"],
-        sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
-        dim=dim, model=model, provider=provider, base_url=base_url,
-        # 全量灌库可能跑几十分钟，无进度输出时无法区分「慢」与「卡死」
-        # （2026-10-20 两次排查教训）：每批落一行进度。
-        on_progress=lambda kind, n: print(f"progress {kind}={n}", flush=True),
-    )
+    state_connection = db.connect(settings.mart_database)
+    try:
+        stats = run_index(
+            client=client, milvus=milvus, store=store,
+            api_key=api_key,
+            base_id=os.environ["KB_PRODUCTS_BASE_ID"],
+            sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
+            dim=dim, model=model, provider=provider, base_url=base_url,
+            state_repository=index_state.RagIndexStateRepository(state_connection),
+            # 全量灌库可能跑几十分钟，无进度输出时无法区分「慢」与「卡死」
+            # （2026-10-20 两次排查教训）：每批落一行进度。
+            on_progress=lambda kind, n: print(f"progress {kind}={n}", flush=True),
+        )
+    finally:
+        state_connection.close()
+    reason = f" reason={stats['reason']}" if stats["reason"] else ""
     print(
-        f"service=rag-index-products status=completed"
+        f"service=rag-index-products status={stats['status']}{reason}"
         f" records_read={stats['records_read']} products={stats['products']}"
         f" text={stats['text']} image={stats['image']}"
         f" image_failed={stats['image_failed']} written={stats['written']}"
+        f" unchanged={stats['unchanged']}"
+        f" text_embedded={stats['text_embedded']}"
+        f" image_embedded={stats['image_embedded']}"
+        f" deleted={stats['deleted']} failed={stats['failed']}"
+        f" retried={stats['retried']} api_calls={stats['api_calls']}"
+        f" duration_ms={stats['duration_ms']}"
     )
+    return stats
 
 
 if __name__ == "__main__":

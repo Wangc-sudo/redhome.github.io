@@ -92,6 +92,23 @@ def upsert_items(client, items, *, batch=64):
     return written
 
 
+def delete_ids(client, ids, *, batch=256):
+    """按主键批量删除失效向量；只接受 ID 列表，不拼过滤表达式。"""
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return 0
+    client.load_collection(COLLECTION)
+    deleted = 0
+    for start in range(0, len(ids), batch):
+        part = ids[start:start + batch]
+        result = client.delete(COLLECTION, ids=part)
+        if isinstance(result, dict):
+            deleted += int(result.get("delete_count") or 0)
+        else:
+            deleted += len(part)
+    return deleted
+
+
 def delete_prefix(client, prefix):
     """按 id 前缀清空条目，返回删除条数（文档重导入前用）。
 

@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from common.kb_qa import media
-from common.rag import embed, index_docs, index_products, llm, qa
+from common.rag import embed, index_docs, index_products, index_state, llm, qa
 
 
 def _fake_post_factory(vectors, *, strict_count=False):
@@ -53,6 +53,54 @@ class EmbedTest(unittest.TestCase):
         with mock.patch.object(
                 embed, "_post",
                 _fake_post_factory([[1.0]], strict_count=True)), \
+             self.assertRaises(embed.EmbedError):
+            embed.embed_items([{"text": "a"}, {"text": "b"}], "key")
+
+    def test_embed_items_aligns_by_index_not_response_order(self):
+        response = [
+            {"index": 1, "embedding": [0.0, 1.0]},
+            {"index": 0, "embedding": [1.0, 0.0]},
+        ]
+        with mock.patch.object(embed, "_post", return_value=response):
+            vectors = embed.embed_items(
+                [{"text": "a"}, {"text": "b"}], "key", dimensions=2)
+        self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
+
+    def test_embed_items_rejects_missing_index(self):
+        with mock.patch.object(
+                embed, "_post", return_value=[{"embedding": [1.0, 0.0]}]), \
+             self.assertRaises(embed.EmbedError):
+            embed.embed_items([{"text": "a"}], "key")
+
+    def test_embed_items_rejects_duplicate_index(self):
+        response = [
+            {"index": 0, "embedding": [1.0, 0.0]},
+            {"index": 0, "embedding": [0.0, 1.0]},
+        ]
+        with mock.patch.object(embed, "_post", return_value=response), \
+             self.assertRaises(embed.EmbedError):
+            embed.embed_items([{"text": "a"}, {"text": "b"}], "key")
+
+    def test_embed_items_rejects_bad_dimension_and_non_finite_values(self):
+        bad_vectors = (
+            [1.0],
+            [float("nan"), 0.0],
+            [float("inf"), 0.0],
+            ["not-a-number", 0.0],
+        )
+        for vector in bad_vectors:
+            with self.subTest(vector=vector):
+                response = [{"index": 0, "embedding": vector}]
+                with mock.patch.object(embed, "_post", return_value=response), \
+                     self.assertRaises(embed.EmbedError):
+                    embed.embed_items([{"text": "a"}], "key", dimensions=2)
+
+    def test_embed_items_rejects_inconsistent_actual_dimensions(self):
+        response = [
+            {"index": 0, "embedding": [1.0, 0.0]},
+            {"index": 1, "embedding": [1.0]},
+        ]
+        with mock.patch.object(embed, "_post", return_value=response), \
              self.assertRaises(embed.EmbedError):
             embed.embed_items([{"text": "a"}, {"text": "b"}], "key")
 
@@ -245,13 +293,15 @@ class RunIndexTest(unittest.TestCase):
                if k not in ("JINA_API_KEY", "RAG_EMBED_API_KEY")}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
-            index_products.main([])
+            stats = index_products.main([])
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_embed_key", printed)
+        self.assertEqual(stats["status"], "skipped")
+        self.assertEqual(stats["api_calls"], 0)
 
-    def test_ctaigw_provider_passes_signed_url_without_download(self):
-        """ctaigw 图片分支直接传签名 URL（网关实测支持 http URL），不下载字节。"""
+    def test_ctaigw_provider_uses_signed_url_and_downloads_for_hash(self):
+        """ctaigw 用签名 URL embedding，但仍下载实际字节计算内容哈希。"""
         records = [
             _record("r1", "习酒", {"细节图": [_img("a.jpg", "http://oss/a")]})]
         store = _FakeStore(2)
@@ -263,14 +313,270 @@ class RunIndexTest(unittest.TestCase):
 
         with mock.patch.object(embed, "embed_items",
                                mock.Mock(side_effect=fake_embed)), \
-             mock.patch.object(media, "download_bytes") as dl:
+             mock.patch.object(media, "download_bytes", return_value=b"x") as dl:
             index_products.run_index(
                 client=_FakeClient(records), milvus=object(), store=store,
                 api_key="k", base_id="b", sheet_id="s", dim=2,
                 provider=embed.PROVIDER_CTAIGW)
-        dl.assert_not_called()
+        dl.assert_called_once_with("http://oss/a")
         image_batch = [b for b in captured if any("image" in i for i in b)]
         self.assertEqual(image_batch, [[{"image": "http://oss/a"}]])
+
+
+class _IncrementalStore:
+    def __init__(self, dim):
+        self.dim = dim
+        self.items = {}
+
+    def ensure_collection(self, milvus, dim):
+        assert dim == self.dim
+        return dim
+
+    def upsert_items(self, milvus, items):
+        for item in items:
+            self.items[item["id"]] = dict(item)
+        return len(items)
+
+    def delete_ids(self, milvus, ids):
+        deleted = 0
+        for item_id in ids:
+            deleted += self.items.pop(item_id, None) is not None
+        return deleted
+
+
+class _FakeStateRepository:
+    def __init__(self):
+        self.rows = {}
+        self.preload_calls = 0
+        self.complete_checks = []
+
+    def preload(self):
+        self.preload_calls += 1
+        return {key: dict(value) for key, value in self.rows.items()}
+
+    def save_batch(self, rows, *, run_id):
+        for row in rows:
+            value = dict(row)
+            value["last_seen_run"] = run_id
+            self.rows[value["item_id"]] = value
+        return len(rows)
+
+    def reconcile(self, run_id, *, complete):
+        self.complete_checks.append(complete)
+        if not complete:
+            return []
+        return sorted(
+            item_id for item_id, row in self.rows.items()
+            if row["last_seen_run"] != run_id)
+
+    def delete_ids(self, item_ids):
+        for item_id in item_ids:
+            self.rows.pop(item_id, None)
+        return len(item_ids)
+
+
+class IncrementalIndexTest(unittest.TestCase):
+    def _run(self, records, store, state, embed_mock, download_mock=None,
+             *, provider=embed.DEFAULT_PROVIDER, model=embed.DEFAULT_MODEL):
+        download_mock = download_mock or mock.Mock(return_value=b"image")
+        with mock.patch.object(embed, "embed_items", embed_mock), \
+             mock.patch.object(media, "download_bytes", download_mock):
+            stats = index_products.run_index(
+                client=_FakeClient(records), milvus=object(), store=store,
+                api_key="k", base_id="b", sheet_id="s", dim=2,
+                provider=provider, model=model, state_repository=state)
+        return stats
+
+    @staticmethod
+    def _vectors(items, key, **kw):
+        return [[0.1, 0.2] for _ in items]
+
+    def test_second_snapshot_has_zero_embedding_calls_and_ignores_signed_url(self):
+        first_records = [
+            _record("r1", "习酒", {"细节图": [_img("a.jpg", "http://oss/a")]})]
+        second_records = [
+            _record("r1", "习酒", {"细节图": [_img("a.jpg", "http://oss/b")]})]
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        download_mock = mock.Mock(return_value=b"same-image")
+        first = self._run(
+            first_records, store, state, embed_mock, download_mock,
+            provider=embed.PROVIDER_CTAIGW, model="qwen3-vl-embedding")
+        self.assertEqual(first["api_calls"], 2)
+        embed_mock.reset_mock()
+
+        second = self._run(
+            second_records, store, state, embed_mock, download_mock,
+            provider=embed.PROVIDER_CTAIGW, model="qwen3-vl-embedding")
+        self.assertEqual(embed_mock.call_count, 0)
+        self.assertEqual(download_mock.call_count, 2)
+        self.assertEqual(second["unchanged"], 2)
+        self.assertEqual(second["text_embedded"], 0)
+        self.assertEqual(second["image_embedded"], 0)
+        self.assertEqual(second["api_calls"], 0)
+        self.assertEqual(second["written"], 0)
+        self.assertEqual(state.preload_calls, 2)
+
+    def test_changed_image_bytes_reembed_only_image(self):
+        records = [_record(
+            "r1", "习酒", {"细节图": [_img("a.jpg", "http://oss/a")]})]
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        download_mock = mock.Mock(side_effect=[b"before", b"after"])
+        self._run(records, store, state, embed_mock, download_mock)
+        embed_mock.reset_mock()
+
+        stats = self._run(records, store, state, embed_mock, download_mock)
+        self.assertEqual(embed_mock.call_count, 1)
+        self.assertIn("image", embed_mock.call_args.args[0][0])
+        self.assertEqual(stats["unchanged"], 1)
+        self.assertEqual(stats["text_embedded"], 0)
+        self.assertEqual(stats["image_embedded"], 1)
+
+    def test_model_change_does_not_use_stale_vector(self):
+        records = [_record("r1", "习酒", {})]
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        self._run(records, store, state, embed_mock)
+        embed_mock.reset_mock()
+
+        stats = self._run(records, store, state, embed_mock, model="other-model")
+        self.assertEqual(embed_mock.call_count, 1)
+        self.assertEqual(stats["unchanged"], 0)
+        self.assertEqual(stats["text_embedded"], 1)
+
+    def test_failed_update_keeps_last_good_vector_and_marks_degraded(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        self._run([_record("r1", "旧名称", {})], store, state, embed_mock)
+        old_vector = list(store.items["product:r1"]["vector"])
+        old_success = state.rows["product:r1"]["last_success_at"]
+        embed_mock.side_effect = embed.EmbedError("boom")
+
+        stats = self._run(
+            [_record("r1", "新名称", {})], store, state, embed_mock)
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(store.items["product:r1"]["vector"], old_vector)
+        row = state.rows["product:r1"]
+        self.assertEqual(row["status"], index_state.STATUS_DEGRADED)
+        self.assertEqual(row["attempts"], 1)
+        self.assertEqual(row["last_success_at"], old_success)
+        self.assertEqual(state.complete_checks[-1], False)
+
+    def test_invalid_vector_never_reaches_store(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(return_value=[[float("nan"), 0.2]])
+        stats = self._run(
+            [_record("r1", "习酒", {})], store, state, embed_mock)
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(store.items, {})
+        self.assertEqual(
+            state.rows["product:r1"]["status"], index_state.STATUS_DEGRADED)
+
+    def test_failed_image_batch_is_isolated_by_single_image_retries(self):
+        records = [_record("r1", "习酒", {"细节图": [
+            _img("bad.jpg", "http://oss/bad"),
+            _img("good.jpg", "http://oss/good"),
+        ]})]
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        single_calls = []
+
+        def flaky_embed(items, key, **kw):
+            if not any("image" in item for item in items):
+                return [[0.1, 0.2] for _ in items]
+            if len(items) > 1:
+                raise embed.EmbedError("batch failed")
+            single_calls.append(items[0]["image"])
+            if len(single_calls) == 1:
+                raise embed.EmbedError("bad image")
+            return [[0.3, 0.4]]
+
+        stats = self._run(
+            records, store, state, mock.Mock(side_effect=flaky_embed))
+        self.assertEqual(stats["image"], 1)
+        self.assertEqual(stats["image_failed"], 1)
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["retried"], 2)
+        self.assertEqual(stats["api_calls"], 4)
+        image_ids = [key for key, item in store.items.items()
+                     if item["kind"] == "image"]
+        self.assertEqual(image_ids, ["product-img:r1:细节图:1"])
+
+    def test_complete_snapshot_deletes_missing_ids(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        records = [_record("r1", "一", {}), _record("r2", "二", {})]
+        self._run(records, store, state, embed_mock)
+        embed_mock.reset_mock()
+
+        stats = self._run([records[0]], store, state, embed_mock)
+        self.assertEqual(embed_mock.call_count, 0)
+        self.assertEqual(stats["deleted"], 1)
+        self.assertNotIn("product:r2", store.items)
+        self.assertNotIn("product:r2", state.rows)
+
+        empty = self._run([], store, state, embed_mock)
+        self.assertEqual(empty["status"], "skipped")
+        self.assertEqual(empty["deleted"], 0)
+        self.assertIn("product:r1", store.items)
+
+    def test_incomplete_snapshot_never_deletes_missing_ids(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        records = [_record("r1", "一", {}), _record("r2", "二", {})]
+        self._run(records, store, state, embed_mock)
+        embed_mock.reset_mock()
+
+        stats = self._run(
+            [records[0], {"id": "broken", "fields": {}}],
+            store, state, embed_mock)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertEqual(stats["reason"], "incomplete_source")
+        self.assertEqual(stats["deleted"], 0)
+        self.assertIn("product:r2", store.items)
+        self.assertEqual(state.complete_checks[-1], False)
+
+
+class IndexStateRepositoryTest(unittest.TestCase):
+    def test_ddl_contains_required_state_fields(self):
+        ddl = "\n".join(index_state.ddl_statements())
+        for field in (
+                "item_id", "record_id", "kind", "content_hash", "model",
+                "dim", "last_seen_run", "last_success_at", "status",
+                "attempts", "last_error"):
+            self.assertIn(f"`{field}`", ddl)
+
+    def test_state_ddl_is_registered_as_independent_mart_migration(self):
+        from common.public_data import live_migrations
+
+        migrations = {
+            version: (target, statements)
+            for version, target, statements in live_migrations._MIGRATIONS
+        }
+        self.assertIn("mart-ops-rag-index-state-v1", migrations)
+        target, statements = migrations["mart-ops-rag-index-state-v1"]
+        self.assertEqual("mart", target)
+        self.assertEqual(index_state.ddl_statements(), statements)
+
+    def test_save_batch_uses_one_executemany_not_row_sql(self):
+        connection = mock.Mock()
+        cursor = connection.cursor.return_value
+        repository = index_state.RagIndexStateRepository(connection)
+        rows = [
+            {"item_id": f"product:r{i}", "record_id": f"r{i}",
+             "kind": "text", "content_hash": "a" * 64, "model": "m",
+             "dim": 2, "last_success_at": None,
+             "status": index_state.STATUS_DEGRADED, "attempts": 1,
+             "last_error": "EmbedError"}
+            for i in range(3)
+        ]
+        self.assertEqual(repository.save_batch(rows, run_id="run"), 3)
+        cursor.executemany.assert_called_once()
+        cursor.execute.assert_not_called()
+        self.assertEqual(len(cursor.executemany.call_args.args[1]), 3)
+        connection.commit.assert_called_once_with()
 
 
 class CleanMarkdownTest(unittest.TestCase):
@@ -505,6 +811,12 @@ class EmbedProviderTest(unittest.TestCase):
         with self.assertRaises(embed.EmbedError):
             self._call([{"text": "甲"}], {"unexpected": True})
 
+    def test_rejects_actual_dimension_mismatch(self):
+        with self.assertRaises(embed.EmbedError):
+            self._call(
+                [{"text": "甲"}],
+                {"data": [{"index": 0, "embedding": [0.1]}]}, dimensions=2)
+
     def test_requires_base_url(self):
         with self.assertRaises(embed.EmbedError):
             embed.embed_items([{"text": "甲"}], "k", model="m",
@@ -574,6 +886,14 @@ class EmbedCtaigwTest(unittest.TestCase):
                        {"output": {"embeddings": [{"index": 0,
                                                    "embedding": [0.1]}]}})
 
+    def test_rejects_actual_dimension_mismatch(self):
+        with self.assertRaises(embed.EmbedError):
+            self._call(
+                [{"text": "甲"}],
+                {"output": {"embeddings": [
+                    {"index": 0, "embedding": [0.1], "type": "vl"}]}},
+                dimensions=2)
+
     def test_default_model_per_provider(self):
         self.assertEqual(embed.default_model("ctaigw"), "qwen3-vl-embedding")
         self.assertEqual(embed.default_model("jina"), "jina-clip-v2")
@@ -628,7 +948,8 @@ class EmbedCtaigwTest(unittest.TestCase):
             return [[0.1, 0.2] for _ in items]
 
         with mock.patch.object(embed, "embed_items",
-                               mock.Mock(side_effect=fake_embed)):
+                               mock.Mock(side_effect=fake_embed)), \
+             mock.patch.object(media, "download_bytes", return_value=b"x"):
             stats = index_products.run_index(
                 client=_FakeClient(records), milvus=object(), store=store,
                 api_key="k", base_id="b", sheet_id="s", dim=2,
@@ -641,6 +962,9 @@ class EmbedCtaigwTest(unittest.TestCase):
 
 
 class QaTest(unittest.TestCase):
+
+    def setUp(self):
+        qa.clear_query_vector_cache()
 
     def _store(self, hits):
         return mock.Mock(search=mock.Mock(return_value=hits))
@@ -662,7 +986,11 @@ class QaTest(unittest.TestCase):
             result = qa.answer_question("q", milvus="m",
                                         store=self._store(hits),
                                         jina_key="j", deepseek_key="d")
-        self.assertEqual(result, {"answer": "答案", "hits": hits})
+        self.assertEqual(result["answer"], "答案")
+        self.assertEqual(result["hits"], hits)
+        self.assertFalse(result["metrics"]["no_hit"])
+        self.assertFalse(result["metrics"]["fallback"])
+        self.assertEqual(result["metrics"]["top_score"], 0.9)
 
     def test_answer_question_llm_failure_degrades(self):
         hits = [{"kind": "text", "name": "n", "text": "t"}]
@@ -675,14 +1003,88 @@ class QaTest(unittest.TestCase):
                                         jina_key="j", deepseek_key="d")
         self.assertIsNone(result["answer"])
         self.assertEqual(result["hits"], hits)
+        self.assertFalse(result["metrics"]["no_hit"])
+        self.assertTrue(result["metrics"]["fallback"])
 
     def test_answer_question_no_hits(self):
         with mock.patch.object(embed, "embed_text",
-                               mock.Mock(return_value=[0.1])):
+                               mock.Mock(return_value=[0.1])), \
+             mock.patch.object(llm, "answer") as answer:
             result = qa.answer_question("q", milvus="m",
                                         store=self._store([]),
                                         jina_key="j", deepseek_key="d")
-        self.assertEqual(result, {"answer": None, "hits": []})
+        self.assertIsNone(result["answer"])
+        self.assertEqual(result["hits"], [])
+        answer.assert_not_called()
+        self.assertTrue(result["metrics"]["no_hit"])
+        self.assertTrue(result["metrics"]["fallback"])
+        self.assertEqual(result["metrics"]["llm"], 0.0)
+
+    def test_dedupe_keeps_best_product_text_and_limits_images(self):
+        hits = [
+            {"id": "product-img:r1:细节图:0", "kind": "image", "score": 0.8},
+            {"id": "product:r1", "kind": "text", "text": "old", "score": 0.7},
+            {"id": "product-img:r1:细节图:1", "kind": "image", "score": 0.95},
+            {"id": "product:r1", "kind": "text", "text": "best", "score": 0.9},
+            {"id": "product:r2", "kind": "text", "text": "other", "score": 0.75},
+            {"id": "doc:d1:0000", "kind": "text", "text": "doc", "score": 0.85},
+        ]
+        result = qa.dedupe_product_hits(hits, max_images_per_product=1)
+        r1_text = [hit for hit in result if hit["id"] == "product:r1"]
+        r1_images = [hit for hit in result
+                     if hit["id"].startswith("product-img:r1:")]
+        self.assertEqual(len(result), 4)
+        self.assertEqual([hit["text"] for hit in r1_text], ["best"])
+        self.assertEqual(
+            [hit["id"] for hit in r1_images], ["product-img:r1:细节图:1"])
+
+    def test_low_score_and_low_margin_gates_skip_llm(self):
+        cases = (
+            ("low-score", {"min_score": 0.8}, 0.5),
+            ("low-margin", {"min_margin": 0.1}, 0.9),
+        )
+        for question, gate, expected_top in cases:
+            with self.subTest(question=question):
+                qa.clear_query_vector_cache()
+                hits = [
+                    {"id": "doc:a:0000", "kind": "text",
+                     "score": expected_top},
+                    {"id": "doc:b:0000", "kind": "text",
+                     "score": expected_top - 0.05},
+                ]
+                with mock.patch.object(
+                        embed, "embed_text", return_value=[0.1]), \
+                     mock.patch.object(llm, "answer") as answer:
+                    result = qa.answer_question(
+                        question, milvus="m", store=self._store(hits),
+                        jina_key="j", deepseek_key="d", **gate)
+                answer.assert_not_called()
+                self.assertEqual(result["hits"], [])
+                self.assertEqual(result["metrics"]["top_score"], expected_top)
+                self.assertTrue(result["metrics"]["no_hit"])
+                self.assertTrue(result["metrics"]["fallback"])
+                self.assertFalse(result["metrics"]["gate_passed"])
+
+    def test_query_cache_key_uses_normalized_question_model_and_dim(self):
+        store = self._store([])
+        with mock.patch.object(
+                embed, "embed_text", return_value=[0.1, 0.2]) as embed_text:
+            first = qa.answer_question(
+                "  习酒\n图片 ", milvus="m", store=store,
+                jina_key="j", deepseek_key="d", model="m", dimensions=2)
+            second = qa.answer_question(
+                "习酒 图片", milvus="m", store=store,
+                jina_key="j", deepseek_key="d", model="m", dimensions=2)
+            qa.answer_question(
+                "习酒 图片", milvus="m", store=store,
+                jina_key="j", deepseek_key="d", model="m", dimensions=3)
+            qa.answer_question(
+                "习酒 图片", milvus="m", store=store,
+                jina_key="j", deepseek_key="d", model="other", dimensions=2)
+        self.assertEqual(embed_text.call_count, 3)
+        self.assertEqual(embed_text.call_args_list[0].args[0], "习酒 图片")
+        self.assertFalse(first["metrics"]["cache_hit"])
+        self.assertTrue(second["metrics"]["cache_hit"])
 
 
 if __name__ == "__main__":
