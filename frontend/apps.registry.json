@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-10-28",
+  "applications": [
+    {
+      "id": "bi-hangzhou",
+      "name": "杭州线下销售BI看板",
+      "owner": "digital-ops 维护组",
+      "users": "杭州线下业务人员",
+      "criticality": "P0",
+      "status": "protected",
+      "change_policy": "frozen",
+      "public_url": "https://dt.yyhlzj.com/hangzhou.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/hangzhou.html"
+      ],
+      "source_path": [
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> bi-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/api/v1/dashboards/hz-offline-sales"
+      ],
+      "health_check": {
+        "kind": "dashboard",
+        "dashboard_id": "hz-offline-sales",
+        "page_marker": "__INITIAL_DASHBOARD__",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "用户裁决冻结：禁止任何直接或间接改动，仅允许只读巡检。"
+    },
+    {
+      "id": "bi-shaoxing",
+      "name": "绍兴线下销售BI看板",
+      "owner": "digital-ops 维护组",
+      "users": "绍兴线下业务人员",
+      "criticality": "P0",
+      "status": "protected",
+      "change_policy": "frozen",
+      "public_url": "https://dt.yyhlzj.com/shaoxing.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/shaoxing.html"
+      ],
+      "source_path": [
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> bi-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/api/v1/dashboards/sx-offline-sales"
+      ],
+      "health_check": {
+        "kind": "dashboard",
+        "dashboard_id": "sx-offline-sales",
+        "page_marker": "__INITIAL_DASHBOARD__",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "用户裁决冻结：禁止任何直接或间接改动，仅允许只读巡检。"
+    },
+    {
+      "id": "bi-offline-all",
+      "name": "线下整体销售BI看板",
+      "owner": "digital-ops 维护组",
+      "users": "线下业务管理人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/offline_all.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/offline_all.html"
+      ],
+      "source_path": [
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> bi-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/api/v1/dashboards/offline-all-sales"
+      ],
+      "health_check": {
+        "kind": "dashboard",
+        "dashboard_id": "offline-all-sales",
+        "page_marker": "__INITIAL_DASHBOARD__",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "保留独立大屏 URL，可纳入非冻结 BI 的统一治理。"
+    },
+    {
+      "id": "bi-qudao",
+      "name": "渠道销售BI看板",
+      "owner": "digital-ops 维护组",
+      "users": "渠道运营与管理人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/qudao.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/qudao.html"
+      ],
+      "source_path": [
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> bi-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/api/v1/dashboards/qd-channel-sales"
+      ],
+      "health_check": {
+        "kind": "dashboard",
+        "dashboard_id": "qd-channel-sales",
+        "page_marker": "__INITIAL_DASHBOARD__",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "2026-10-28 用户裁决：渠道看板定点公开，页面、定义与卡片 API 免登录。"
+    },
+    {
+      "id": "bi-ops-health",
+      "name": "运维巡检BI看板",
+      "owner": "digital-ops 维护组",
+      "users": "运维与业务管理人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/ops.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/ops.html"
+      ],
+      "source_path": [
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> bi-web",
+      "auth_mode": "login",
+      "api_dependencies": [
+        "/api/v1/dashboards/ops-health"
+      ],
+      "health_check": {
+        "kind": "dashboard",
+        "dashboard_id": "ops-health",
+        "page_marker": "__INITIAL_DASHBOARD__",
+        "expected_access": "login"
+      },
+      "replacement_url": null,
+      "notes": "2026-10-28 用户裁决：继续保持登录，页面与 API 均不公开。"
+    },
+    {
+      "id": "bi-internal",
+      "name": "内部经营BI",
+      "owner": "digital-ops 维护组",
+      "users": "授权的内部管理与业务人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "http://203.205.91.241:18080/",
+      "legacy_urls": [],
+      "source_path": [
+        "common/bi_web/app.py",
+        "common/bi_web/web/bi.html",
+        "docker/integration/bi.seed.yaml"
+      ],
+      "dist_path": null,
+      "runtime_service": "bi-web:8000 / host:18080",
+      "auth_mode": "network_allowlist+login",
+      "api_dependencies": [
+        "/api/v1/dashboards",
+        "/api/v1/dashboards/l1-cockpit"
+      ],
+      "health_check": {
+        "kind": "service",
+        "health_url": "http://203.205.91.241:18080/healthz",
+        "expected_access": "network_restricted"
+      },
+      "replacement_url": null,
+      "notes": "服务与运维入口，不作为普通业务推广链接；外网超时需先区分安全组限制。"
+    },
+    {
+      "id": "leaderboard-vanke",
+      "name": "万科大莲花团购榜单",
+      "owner": "digital-ops 维护组",
+      "users": "万科、大莲花与团购业务人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/vanke.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/vanke.html"
+      ],
+      "source_path": [
+        "common/pages_web/app.py"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> pages-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/vanke.html"
+      ],
+      "health_check": {
+        "kind": "leaderboard",
+        "region": "vanke",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "请求时渲染榜单，继续复用 pages-web，不恢复 pages-* 定时静态主链。"
+    },
+    {
+      "id": "leaderboard-junpin",
+      "name": "君品雅院榜单",
+      "owner": "digital-ops 维护组",
+      "users": "君品雅院业务人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/junpin.html",
+      "legacy_urls": [
+        "http://203.205.91.241:8300/junpin.html"
+      ],
+      "source_path": [
+        "common/pages_web/app.py"
+      ],
+      "dist_path": null,
+      "runtime_service": "nginx -> pages-web",
+      "auth_mode": "public",
+      "api_dependencies": [
+        "/junpin.html"
+      ],
+      "health_check": {
+        "kind": "leaderboard",
+        "region": "junpin",
+        "expected_access": "public"
+      },
+      "replacement_url": null,
+      "notes": "请求时渲染榜单，继续复用 pages-web，不恢复 pages-* 定时静态主链。"
+    },
+    {
+      "id": "ops-web",
+      "name": "运维控制台",
+      "owner": "digital-ops 维护组",
+      "users": "授权的运维与业务管理人员",
+      "criticality": "P1",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "http://203.205.91.241:18100/",
+      "legacy_urls": [],
+      "source_path": [
+        "common/ops_web/web/src",
+        "common/ops_web/app.py"
+      ],
+      "dist_path": "common/ops_web/static/dist",
+      "runtime_service": "ops-web:18000 / host:18100",
+      "auth_mode": "login+role+region_scope",
+      "api_dependencies": [
+        "/healthz",
+        "/api/flow/workspace"
+      ],
+      "health_check": {
+        "kind": "service",
+        "health_url": "http://203.205.91.241:18100/healthz",
+        "expected_access": "health_only"
+      },
+      "replacement_url": null,
+      "notes": "新管理功能只进入现有 Vue SPA，不新增平行控制台。"
+    },
+    {
+      "id": "kb-web",
+      "name": "小易知识问答",
+      "owner": "digital-ops 维护组",
+      "users": "授权的内部业务人员",
+      "criticality": "P2",
+      "status": "active",
+      "change_policy": "governed",
+      "public_url": "https://dt.yyhlzj.com/kb/",
+      "legacy_urls": [],
+      "source_path": [
+        "common/kb_web/web/src",
+        "common/kb_web/routes.py"
+      ],
+      "dist_path": "common/kb_web/web/dist",
+      "runtime_service": "nginx -> bi-web -> kb",
+      "auth_mode": "login",
+      "api_dependencies": [
+        "/kb/api/public-config",
+        "/kb/api/bootstrap"
+      ],
+      "health_check": {
+        "kind": "spa",
+        "page_marker": "<div id=\"app\">",
+        "expected_access": "shell_or_login"
+      },
+      "replacement_url": null,
+      "notes": "HTTP 200 仅代表壳可达，登录、消息发送与知识问答需分别验收。"
+    }
+  ]
+}

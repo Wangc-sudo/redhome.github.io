@@ -398,12 +398,13 @@ class _TTLOptionSets:
 # ---------------------------------------------------------------------------
 
 #: 公开看板保底集合（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网
-#: 榜单页不需要账号密码——群内散客直开）。运行集合 = 本常量 ∪
-#: bi_authz_grant（grant_type='public_dashboard'）——DB 是增量通道
-#: （ops-web 页面可增删），常量是 DB 故障时的可用性保底。加新区请评审
-#: 数据敏感度后再入列。
+#: 榜单页不需要账号密码——群内散客直开；2026-10-28 渠道看板按同口径
+#: 定点公开）。运行集合 = 本常量 ∪ bi_authz_grant
+#: （grant_type='public_dashboard'）——DB 是增量通道（ops-web 页面可增删），
+#: 常量是 DB 故障时的可用性保底。加新区请评审数据敏感度后再入列。
 PUBLIC_DASHBOARD_IDS = frozenset({
     "hz-offline-sales", "sx-offline-sales", "offline-all-sales",
+    "qd-channel-sales",
 })
 
 #: 公开看板页面所需的免登录端点前缀：壳 /d/{id}、定义与卡片、以及日期

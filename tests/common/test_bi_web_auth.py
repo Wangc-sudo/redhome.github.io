@@ -633,6 +633,8 @@ class PublicDashboardTests(unittest.TestCase):
         source = StaticDashboardSource({
             "hz-offline-sales": _l1_mapping(),
             "l1-cockpit": _l1_mapping(),
+            "qd-channel-sales": _l1_mapping(),
+            "ops-health": _l1_mapping(),
         })
         return TestClient(_session_app(dashboard_source=source))
 
@@ -645,6 +647,27 @@ class PublicDashboardTests(unittest.TestCase):
         self.assertEqual(
             200, client.get("/api/v1/dashboards/hz-offline-sales").status_code)
         self.assertEqual(200, client.get("/api/v1/options/dates").status_code)
+
+    def test_qudao_is_public_but_ops_health_stays_gated(self):
+        client = self._client()
+
+        qudao_page = client.get("/d/qd-channel-sales", follow_redirects=False)
+        self.assertEqual(200, qudao_page.status_code)
+        self.assertEqual(
+            200, client.get("/api/v1/dashboards/qd-channel-sales").status_code
+        )
+        self.assertEqual(
+            200,
+            client.get(
+                "/api/v1/d/qd-channel-sales/cards/kpi_offline_mtd"
+            ).status_code,
+        )
+        ops_page = client.get("/d/ops-health", follow_redirects=False)
+        self.assertEqual(302, ops_page.status_code)
+        self.assertEqual(401, client.get("/api/v1/dashboards/ops-health").status_code)
+        self.assertEqual(
+            401, client.get("/api/v1/d/ops-health/cards/kpi_offline_mtd").status_code
+        )
 
     def test_non_public_dashboard_still_gated(self):
         client = self._client()
@@ -705,7 +728,7 @@ class PublicDashboardTests(unittest.TestCase):
 
         resolver = _public_dashboard_resolver(lambda: _Broken())
         self.assertEqual({"hz-offline-sales", "sx-offline-sales",
-                          "offline-all-sales"}, set(resolver()))
+                          "offline-all-sales", "qd-channel-sales"}, set(resolver()))
 
 
 class LegacyModeTests(unittest.TestCase):
