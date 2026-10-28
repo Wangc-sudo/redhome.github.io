@@ -50,6 +50,9 @@ _DDL_WHITELIST = frozenset(
         # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/kb_qa/schema.py",
+        # 商品向量索引状态 schema 定义模块（mart-ops-rag-index-state-v1 的
+        # DDL 源：rag_index_state；被 live_migrations 引用，同上引用关系）
+        "common/rag/index_state.py",
         # 工作日历裁决层 schema 定义模块（mart-ops-calendar-override-v1
         # 的 DDL 源：dim_calendar_override / dim_calendar_override_audit；
         # 被 live_migrations 引用，同上引用关系）
