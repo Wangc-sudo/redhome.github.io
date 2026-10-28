@@ -35,6 +35,22 @@ DIM_ROBOT_MEMBER = "dim_robot_member"
 DIM_DEPT_LEADER = "dim_dept_leader"
 
 
+def create_staging_table_ddl(staging_table, target_table):
+    return f"CREATE TABLE `{staging_table}` LIKE `{target_table}`"
+
+
+def publish_staging_table_ddl(target_table, staging_table, backup_table):
+    return (
+        f"RENAME TABLE `{target_table}` TO `{backup_table}`, "
+        f"`{staging_table}` TO `{target_table}`"
+    )
+
+
+def drop_staging_table_ddl(table_name, *, if_exists=False):
+    conditional = "IF EXISTS " if if_exists else ""
+    return f"DROP TABLE {conditional}`{table_name}`"
+
+
 @dataclass(frozen=True)
 class ExtractDataset:
     """一张 raw 表到一张 mart 表的投影。"""
