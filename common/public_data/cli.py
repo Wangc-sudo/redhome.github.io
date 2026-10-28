@@ -5,6 +5,7 @@ All output is limited to safe run-summary lines.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -458,6 +459,81 @@ def build_extract_service(settings, calendar_months=()):
     )
 
 
+def build_data_quality_runner(settings):
+    """Open local raw/mart connections and build the read-only DQ runner."""
+    from common.public_data.data_quality import (
+        DatabaseQualitySource,
+        DataQualityRepository,
+        DataQualityRunner,
+    )
+    from common.public_data.db import connect
+    from common.public_data.live_migrations import apply_live_migrations
+
+    dingtalk_conn = connect(settings.dingtalk_database)
+    wdt_conn = connect(settings.wdt_database)
+    mart_conn = connect(settings.mart_database)
+    apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+    return DataQualityRunner(
+        DataQualityRepository(mart_conn),
+        DatabaseQualitySource(dingtalk_conn, wdt_conn),
+    )
+
+
+@contextlib.contextmanager
+def build_data_quality_rerun_worker(settings):
+    """Build one rerun worker and close all of its database connections."""
+    from datetime import datetime, timezone
+
+    from common.public_data.data_quality import (
+        DatabaseQualitySource,
+        DataQualityRepository,
+        DataQualityRerunWorker,
+        DataQualityRunner,
+    )
+    from common.public_data.db import connect
+    from common.public_data.extract_mart import (
+        MartExtractRepository,
+        MartExtractService,
+    )
+    from common.public_data.live_migrations import apply_live_migrations
+    from common.public_data.mart_repository import MartRepository
+    from common.public_data.outbox_repository import OutboxRepository
+
+    with contextlib.ExitStack() as stack:
+        dingtalk_conn = stack.enter_context(
+            contextlib.closing(connect(settings.dingtalk_database))
+        )
+        wdt_conn = stack.enter_context(
+            contextlib.closing(connect(settings.wdt_database))
+        )
+        mart_conn = stack.enter_context(
+            contextlib.closing(connect(settings.mart_database))
+        )
+        apply_live_migrations(dingtalk_conn, wdt_conn, mart_conn)
+
+        quality_repository = DataQualityRepository(mart_conn)
+        runner = DataQualityRunner(
+            quality_repository,
+            DatabaseQualitySource(dingtalk_conn, wdt_conn),
+        )
+        replay_service = MartExtractService(
+            repository=MartExtractRepository(
+                dingtalk_conn, mart_conn, wdt_connection=wdt_conn
+            ),
+            mart_repository=MartRepository(mart_conn),
+            mart_connection=mart_conn,
+            now=lambda: datetime.now(timezone.utc),
+            new_run_id=lambda: str(uuid.uuid4()),
+        )
+        yield DataQualityRerunWorker(
+            repository=quality_repository,
+            runner=runner,
+            replay_service=replay_service,
+            outbox=OutboxRepository(mart_conn),
+            lock_connection=mart_conn,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -487,6 +563,36 @@ def _print_success(result):
 
 def _print_failure(run_id="unknown", code="sync_error"):
     print(f"run_id={run_id} status=failed code={code}")
+
+
+def _print_data_quality_rerun_summary(result):
+    status = _get_attr_or_key(result, "status")
+    if status == "idle":
+        print("status=idle")
+        return
+    if status == "skipped" and _get_attr_or_key(result, "reason") == "lock_unavailable":
+        print("status=skipped reason=lock_unavailable")
+        return
+    run_id = _get_attr_or_key(result, "run_id") or "unknown"
+    if status == "failed":
+        failure_code = (
+            _get_attr_or_key(result, "failure_code")
+            or "data_quality_rerun_failed"
+        )
+        _print_failure(run_id=run_id, code=failure_code)
+        return
+    if status != "finished":
+        raise ValueError("invalid data-quality rerun result")
+    print(
+        f"run_id={run_id} dataset={_get_attr_or_key(result, 'dataset', 'unknown')}"
+        f" status=finished alert_status={_get_attr_or_key(result, 'alert_status', 'unknown')}"
+        f" records_read={_get_attr_or_key(result, 'records_read', 0)}"
+        f" records_passed={_get_attr_or_key(result, 'records_passed', 0)}"
+        f" records_quarantined={_get_attr_or_key(result, 'records_quarantined', 0)}"
+        f" records_written={_get_attr_or_key(result, 'records_written', 0)}"
+        f" issue_count={_get_attr_or_key(result, 'issue_count', 0)}"
+        f" issues_closed={_get_attr_or_key(result, 'issues_closed', 0)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +693,74 @@ def _handle_extract_mart(args):
         raise
     except Exception:
         _print_failure()
+        sys.exit(1)
+
+
+def _handle_data_quality_check(args):
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+        runner = build_data_quality_runner(settings)
+        runner.repository.seed_default_rules(actor="system")
+        result = runner.run(
+            args.dataset,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            requested_by=args.requested_by,
+            reason=args.reason,
+            batch_size=args.batch_size,
+            max_batch_bytes=args.max_batch_bytes,
+        )
+        print(
+            f"run_id={result['run_id']} dataset={result['dataset']}"
+            f" rule_version={result['rule_version']} status={result['status']}"
+            f" alert_status={result['alert_status']}"
+            f" records_read={result['records_read']}"
+            f" records_passed={result['records_passed']}"
+            f" records_quarantined={result['records_quarantined']}"
+            f" issue_count={result['issue_count']}"
+        )
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="data_quality_error")
+        sys.exit(1)
+
+
+def _handle_data_quality_rerun(args):
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        with build_data_quality_rerun_worker(settings) as worker:
+            result = worker.run_once()
+        _print_data_quality_rerun_summary(result)
+        if _get_attr_or_key(result, "status") == "failed":
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="data_quality_rerun_error")
         sys.exit(1)
 
 
@@ -1153,6 +1327,39 @@ def main(argv=None):
              "(default: $PUBLIC_DATA_SERVICE_ID)",
     )
 
+    # -- data-quality-check --------------------------------------------------
+    quality = subparsers.add_parser(
+        "data-quality-check", help="Run read-only data-quality checks"
+    )
+    quality.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    quality.add_argument("--dataset", required=True)
+    quality.add_argument("--window-start", default=None)
+    quality.add_argument("--window-end", default=None)
+    quality.add_argument("--batch-size", type=int, default=1000)
+    quality.add_argument("--max-batch-bytes", type=int, default=32 * 1024 * 1024)
+    quality.add_argument("--requested-by", default="scheduler")
+    quality.add_argument("--reason", default="scheduled quality check")
+    quality.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
+    # -- data-quality-rerun --------------------------------------------------
+    rerun = subparsers.add_parser(
+        "data-quality-rerun", help="Consume one pending data-quality rerun"
+    )
+    rerun.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    rerun.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
     # -- publish-pipelines ---------------------------------------------------
     publish = subparsers.add_parser(
         "publish-pipelines", help="Publish the pipeline seed to Nacos"
@@ -1300,6 +1507,8 @@ def main(argv=None):
         "live-sync": _handle_live_sync,
         "rebuild-projection": _handle_rebuild_projection,
         "extract-mart": _handle_extract_mart,
+        "data-quality-check": _handle_data_quality_check,
+        "data-quality-rerun": _handle_data_quality_rerun,
         "publish-pipelines": _handle_publish_pipelines,
         "backfill-pipeline-categories": _handle_backfill_pipeline_categories,
         "backfill-pipeline-sla": _handle_backfill_pipeline_sla,

@@ -103,9 +103,11 @@ class SalesDailyProjectorTests(unittest.TestCase):
 
 class InventorySnapshotProjectorTests(unittest.TestCase):
 
-    def _repo(self, records=(), sales=None):
+    def _repo(self, records=(), sales=None, batches=None):
         repo = Mock()
-        repo.read_wdt_trades.return_value = list(records)
+        if batches is None:
+            batches = [list(records)]
+        repo.read_wdt_trade_batches.return_value = iter(batches)
         repo.read_sales_window_sums.return_value = dict(sales or {})
         repo.replace_inventory_day.side_effect = lambda _d, _c, rows, _bd: len(rows)
         return repo
@@ -121,7 +123,10 @@ class InventorySnapshotProjectorTests(unittest.TestCase):
             _stock_spec(spec_no="外仓Y", warehouse_no="99"),                # 非监控仓剔除
         ]
         # 窗口 15 天销 30 → daily_avg=2；available=8 → days_left=4 ≤7 → URGENT
-        repo = self._repo(records, sales={"习酒493": (30.0, 60.0)})
+        repo = self._repo(
+            batches=[[records[0], records[2], records[3]], [records[1]]],
+            sales={"习酒493": (30.0, 60.0)},
+        )
 
         result = project_inventory_snapshot(repo, ds, _RUN_ID, _NOW)
 
@@ -144,7 +149,12 @@ class InventorySnapshotProjectorTests(unittest.TestCase):
         self.assertEqual(row["moving_window_days"], 15)
         self.assertEqual(row["is_moving"], 1)
         self.assertEqual(row["stock_state"], "URGENT")
+        self.assertEqual(result["records_read"], 4)
         self.assertEqual(result["records_new"], 1)
+        self.assertEqual(result["records_skipped"], 0)
+        self.assertEqual(result["skip_reasons"], {})
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("_record_ids", result)
 
     def test_state_matrix(self):
         ds = dataset_by_name("wdt_inventory_sku_daily")
@@ -197,29 +207,45 @@ class InventorySnapshotProjectorTests(unittest.TestCase):
 
         rows = repo.replace_inventory_day.call_args.args[2]
         self.assertEqual([r["spec_no"] for r in rows], ["有效Z"])
+        self.assertEqual(result["records_read"], 3)
         self.assertEqual(result["records_new"], 1)
+        self.assertEqual(result["records_skipped"], 2)
+        self.assertEqual(result["skip_reasons"], {
+            "invalid_payload": 1,
+            "missing_spec_no": 1,
+        })
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
 
 
 class PurchaseInboundProjectorTests(unittest.TestCase):
 
-    def _repo(self, orders=()):
+    def _repo(self, orders=(), batches=None):
         repo = Mock()
-        repo.read_wdt_trades.return_value = list(orders)
+        if batches is None:
+            batches = [list(orders)]
+        repo.read_wdt_trade_batches.return_value = iter(batches)
         repo.upsert_purchase_inbound.side_effect = lambda _d, _c, rows: len(rows)
         return repo
 
     def test_expands_details_and_maps_columns(self):
         ds = dataset_by_name("wdt_purchase_inbound")
-        repo = self._repo([_purchase(details=[
-            _purchase_detail(),
-            _purchase_detail(spec_no="女儿红41", num="12", spec_name=""),
-        ])])
+        repo = self._repo(batches=[
+            [_purchase(details=[
+                _purchase_detail(),
+                _purchase_detail(spec_no="女儿红41", num="12", spec_name=""),
+            ])],
+            [_purchase(order_no="RK-2", details=[
+                _purchase_detail(spec_no="SP-2", num="1"),
+            ])],
+        ])
 
         result = project_purchase_inbound(repo, ds, _RUN_ID, _NOW)
 
-        _ds, columns, rows = repo.upsert_purchase_inbound.call_args.args
+        calls = repo.upsert_purchase_inbound.call_args_list
+        self.assertEqual(len(calls), 2)
+        _ds, columns, rows = calls[0].args
         self.assertIn("stockin_time", columns)
-        self.assertEqual(len(rows), 2)
+        self.assertEqual([len(call.args[2]) for call in calls], [2, 1])
         row = rows[0]
         self.assertEqual(row["order_no"], "RK2609220011")
         self.assertEqual(row["purchase_no"], "CG20260920001")
@@ -230,8 +256,13 @@ class PurchaseInboundProjectorTests(unittest.TestCase):
         self.assertEqual((row["stockin_time"].year, row["stockin_time"].month), (2026, 8))
         # spec_name 为空回退 goods_name
         self.assertEqual(rows[1]["goods_name"], "fallback名")
-        self.assertEqual(result["records_new"], 2)
-        self.assertEqual(result["_record_ids"], ["RK2609220011:习酒493", "RK2609220011:女儿红41"])
+        self.assertEqual(calls[1].args[2][0]["order_no"], "RK-2")
+        self.assertEqual(result["records_read"], 2)
+        self.assertEqual(result["records_new"], 3)
+        self.assertEqual(result["records_skipped"], 0)
+        self.assertEqual(result["skip_reasons"], {})
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("_record_ids", result)
 
     def test_unknown_warehouse_keeps_raw_no(self):
         ds = dataset_by_name("wdt_purchase_inbound")
@@ -247,7 +278,9 @@ class PurchaseInboundProjectorTests(unittest.TestCase):
         repo = self._repo([
             {"source_record_id": "x", "payload_json": "not json {"},
             _purchase(order_no="", details=[_purchase_detail()]),
-            _purchase(order_no="RK-ok", details=[{"num": "1"}, _purchase_detail(spec_no="SP-1")]),
+            _purchase(order_no="RK-ok", details=[
+                {"num": "1"}, "not-a-dict", _purchase_detail(spec_no="SP-1"),
+            ]),
         ])
 
         result = project_purchase_inbound(repo, ds, _RUN_ID, _NOW)
@@ -255,7 +288,16 @@ class PurchaseInboundProjectorTests(unittest.TestCase):
         rows = repo.upsert_purchase_inbound.call_args.args[2]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["spec_no"], "SP-1")
+        self.assertEqual(result["records_read"], 3)
         self.assertEqual(result["records_new"], 1)
+        self.assertEqual(result["records_skipped"], 4)
+        self.assertEqual(result["skip_reasons"], {
+            "invalid_payload": 1,
+            "missing_order_no": 1,
+            "missing_spec_no": 1,
+            "invalid_detail": 1,
+        })
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

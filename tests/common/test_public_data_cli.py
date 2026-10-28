@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from common.public_data.cli import load_source_credentials, main
 from common.public_data.org_read import OrgSeedEntry
@@ -24,6 +24,85 @@ class BuildExtractServiceTests(unittest.TestCase):
         service = build_extract_service(Mock())
         self.assertIs(service._repository.wdt_connection, wdt)
         migrate.assert_called_once_with(raw, wdt, mart)
+
+
+class BuildDataQualityRerunWorkerTests(unittest.TestCase):
+    @patch("common.public_data.live_migrations.apply_live_migrations")
+    @patch("common.public_data.db.connect")
+    def test_assembles_shared_connections_and_closes_them(self, connect, migrate):
+        from common.public_data.cli import build_data_quality_rerun_worker
+
+        settings = Mock()
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        connect.side_effect = [raw, wdt, mart]
+
+        with build_data_quality_rerun_worker(settings) as worker:
+            self.assertIs(worker.repository.connection, mart)
+            self.assertIs(worker.runner.repository, worker.repository)
+            self.assertIs(worker.runner.source.raw, raw)
+            self.assertIs(worker.runner.source.wdt, wdt)
+            replay = worker.replay_service
+            self.assertIs(replay._repository.raw_connection, raw)
+            self.assertIs(replay._repository.wdt_connection, wdt)
+            self.assertIs(replay._repository._mart, mart)
+            self.assertIs(replay._mart_repository._connection, mart)
+            self.assertIs(replay._mart_connection, mart)
+            self.assertIs(worker.outbox._connection, mart)
+            self.assertIs(worker.lock_connection, mart)
+            for connection in (raw, wdt, mart):
+                connection.close.assert_not_called()
+
+        migrate.assert_called_once_with(raw, wdt, mart)
+        for connection in (raw, wdt, mart):
+            connection.close.assert_called_once_with()
+
+    @patch("common.public_data.live_migrations.apply_live_migrations")
+    @patch("common.public_data.db.connect")
+    def test_closes_all_connections_when_running_raises(self, connect, migrate):
+        from common.public_data.cli import build_data_quality_rerun_worker
+
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        connect.side_effect = [raw, wdt, mart]
+        with self.assertRaisesRegex(RuntimeError, "run failed"):
+            with build_data_quality_rerun_worker(Mock()):
+                raise RuntimeError("run failed")
+
+        migrate.assert_called_once_with(raw, wdt, mart)
+        for connection in (raw, wdt, mart):
+            connection.close.assert_called_once_with()
+
+    @patch("common.public_data.live_migrations.apply_live_migrations")
+    @patch("common.public_data.db.connect")
+    def test_closes_partial_connections_when_a_later_connect_fails(
+        self, connect, migrate
+    ):
+        from common.public_data.cli import build_data_quality_rerun_worker
+
+        raw = Mock()
+        connect.side_effect = [raw, RuntimeError("database unavailable")]
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            with build_data_quality_rerun_worker(Mock()):
+                pass
+
+        raw.close.assert_called_once_with()
+        migrate.assert_not_called()
+
+    @patch("common.public_data.live_migrations.apply_live_migrations")
+    @patch("common.public_data.db.connect")
+    def test_closes_all_connections_when_builder_initialization_fails(
+        self, connect, migrate
+    ):
+        from common.public_data.cli import build_data_quality_rerun_worker
+
+        raw, wdt, mart = Mock(), Mock(), Mock()
+        connect.side_effect = [raw, wdt, mart]
+        migrate.side_effect = RuntimeError("migration failed")
+        with self.assertRaisesRegex(RuntimeError, "migration failed"):
+            with build_data_quality_rerun_worker(Mock()):
+                pass
+
+        for connection in (raw, wdt, mart):
+            connection.close.assert_called_once_with()
 
 
 class LoadSourceCredentialsTests(unittest.TestCase):
@@ -539,6 +618,196 @@ class ExtractMartCliTests(unittest.TestCase):
         self.assertIn("service=extract-mart", text)
         self.assertIn("status=skipped", text)
         build_service.assert_not_called()
+
+
+class DataQualityCliTests(unittest.TestCase):
+    def test_requires_confirmation_before_any_work(self):
+        with patch("common.public_data.cli.load_settings") as load_settings:
+            with self.assertRaises(SystemExit) as raised:
+                main(["data-quality-check", "--dataset", "channel_daily_sales"])
+        self.assertNotEqual(0, raised.exception.code)
+        load_settings.assert_not_called()
+
+    def test_seeds_rules_and_prints_safe_summary(self):
+        output = io.StringIO()
+        runner = Mock()
+        runner.run.return_value = {
+            "run_id": "dq-run-1", "dataset": "channel_daily_sales",
+            "rule_version": "abc123", "status": "finished",
+            "alert_status": "warning", "records_read": 10,
+            "records_passed": 9, "records_quarantined": 1, "issue_count": 1,
+        }
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_extract_run"), \
+             patch("common.public_data.cli.build_data_quality_runner",
+                   return_value=runner):
+            with redirect_stdout(output):
+                main([
+                    "data-quality-check", "--confirm-local-test-write",
+                    "--dataset", "channel_daily_sales",
+                    "--window-start", "2026-10-26", "--window-end", "2026-10-26",
+                ])
+        runner.repository.seed_default_rules.assert_called_once_with(actor="system")
+        self.assertEqual("2026-10-26", runner.run.call_args.kwargs["window_start"])
+        self.assertEqual("channel_daily_sales", runner.run.call_args.args[0])
+        text = output.getvalue()
+        self.assertIn("run_id=dq-run-1", text)
+        self.assertIn("records_quarantined=1", text)
+        self.assertNotIn("payload_json", text)
+
+    def test_failure_is_safe(self):
+        output = io.StringIO()
+        runner = Mock()
+        runner.run.side_effect = RuntimeError("secret-host")
+        with patch("common.public_data.cli.load_settings"), \
+             patch("common.public_data.cli.require_extract_run"), \
+             patch("common.public_data.cli.build_data_quality_runner",
+                   return_value=runner):
+            with redirect_stdout(output):
+                with self.assertRaises(SystemExit):
+                    main([
+                        "data-quality-check", "--confirm-local-test-write",
+                        "--dataset", "wdt_order_line_fact",
+                    ])
+        text = output.getvalue()
+        self.assertIn("code=data_quality_error", text)
+        self.assertNotIn("secret-host", text)
+        self.assertNotIn("Traceback", text)
+
+
+class DataQualityRerunCliTests(unittest.TestCase):
+    def _invoke(self, result=None, *, side_effect=None, enabled=True):
+        settings = Mock()
+        worker = Mock()
+        if side_effect is not None:
+            worker.run_once.side_effect = side_effect
+        else:
+            worker.run_once.return_value = result
+        builder = MagicMock()
+        builder.return_value.__enter__.return_value = worker
+        output = io.StringIO()
+
+        with patch("common.public_data.cli.load_settings", return_value=settings), \
+             patch("common.public_data.cli.require_extract_run") as gate, \
+             patch("common.public_data.cli.resolve_service_id",
+                   return_value="dq-rerun-worker"), \
+             patch("common.public_data.cli._pipeline_enabled",
+                   return_value=enabled), \
+             patch("common.public_data.cli.build_data_quality_rerun_worker",
+                   builder):
+            with redirect_stdout(output):
+                try:
+                    exit_code = main([
+                        "data-quality-rerun", "--confirm-local-test-write",
+                    ])
+                except SystemExit as exc:
+                    exit_code = exc.code
+
+        gate.assert_called_once_with(
+            settings, confirm_local_test_write=True,
+        )
+        if enabled:
+            builder.assert_called_once_with(settings)
+            worker.run_once.assert_called_once_with()
+            worker.replay_service.replay_dataset.assert_not_called()
+        else:
+            builder.assert_not_called()
+            worker.run_once.assert_not_called()
+        return exit_code, output.getvalue()
+
+    def test_requires_confirmation_before_settings_or_worker_construction(self):
+        with patch("common.public_data.cli.load_settings") as load_settings, \
+             patch("common.public_data.cli.build_data_quality_rerun_worker") as builder:
+            with self.assertRaises(SystemExit) as raised:
+                main(["data-quality-rerun"])
+
+        self.assertEqual(1, raised.exception.code)
+        load_settings.assert_not_called()
+        builder.assert_not_called()
+
+    def test_idle_and_lock_unavailable_are_successful_skips(self):
+        cases = (
+            ({"status": "idle", "run_id": None}, "status=idle"),
+            (
+                {"status": "skipped", "reason": "lock_unavailable",
+                 "run_id": None},
+                "status=skipped reason=lock_unavailable",
+            ),
+        )
+        for result, expected in cases:
+            with self.subTest(result=result):
+                exit_code, output = self._invoke(result)
+                self.assertIsNone(exit_code)
+                self.assertEqual(expected, output.strip())
+
+    def test_finished_and_dry_run_results_use_worker_and_print_safe_summary(self):
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                result = {
+                    "run_id": "dq-rerun-1", "dataset": "channel_daily_sales",
+                    "status": "finished", "dry_run": dry_run,
+                    "alert_status": "normal", "records_read": 4,
+                    "records_passed": 4, "records_quarantined": 0,
+                    "records_written": 0 if dry_run else 3,
+                    "issue_count": 0, "issues_closed": 1,
+                    "diff": {"payload_json": "secret-row"},
+                    "samples": ["secret-sample"],
+                }
+                exit_code, output = self._invoke(result)
+
+                self.assertIsNone(exit_code)
+                self.assertIn("run_id=dq-rerun-1", output)
+                self.assertIn("status=finished", output)
+                self.assertIn(
+                    f"records_written={0 if dry_run else 3}", output,
+                )
+                self.assertNotIn("diff", output)
+                self.assertNotIn("secret-row", output)
+                self.assertNotIn("secret-sample", output)
+
+    def test_quality_gate_failure_returns_one_without_printing_diff(self):
+        result = {
+            "run_id": "dq-rerun-2", "dataset": "channel_daily_sales",
+            "status": "failed", "failure_code": "quality_gate_blocked",
+            "diff": {"before": "SELECT secret payload"},
+        }
+        exit_code, output = self._invoke(result)
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("run_id=dq-rerun-2", output)
+        self.assertIn("status=failed", output)
+        self.assertIn("code=quality_gate_blocked", output)
+        self.assertNotIn("diff", output)
+        self.assertNotIn("SELECT", output)
+        self.assertNotIn("secret", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_worker_exception_returns_one_with_only_a_generic_safe_error(self):
+        exit_code, output = self._invoke(
+            side_effect=RuntimeError(
+                "SELECT payload_json; password=secret; https://internal-host"
+            )
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            "run_id=unknown status=failed code=data_quality_rerun_error",
+            output.strip(),
+        )
+        for sensitive in (
+            "SELECT", "payload_json", "password", "secret", "https://",
+            "Traceback",
+        ):
+            self.assertNotIn(sensitive, output)
+
+    def test_disabled_pipeline_does_not_construct_or_run_worker(self):
+        exit_code, output = self._invoke(enabled=False)
+
+        self.assertIsNone(exit_code)
+        self.assertEqual(
+            "service=dq-rerun-worker status=skipped reason=disabled",
+            output.strip(),
+        )
 
 
 class MigrateCliTests(unittest.TestCase):

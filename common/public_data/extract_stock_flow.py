@@ -29,11 +29,13 @@ Two projectors, both WDT-backed and full-replay（与 fact_order_line 同范式�
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from common.public_data.extract_order_line import (
     _UNMATCHED_BRAND,
     _clean,
+    _note_skip,
     _dump_json,
     _normalize_channel,
     _parse_datetime,
@@ -105,41 +107,58 @@ def _expand(repository, dataset, run_id, synced_at, *, method, build_row) -> dic
     ``None`` to skip the detail.
     """
 
-    orders = repository.read_wdt_trades(method)
-    expanded: list[dict] = []
-    record_ids: list[str] = []
-    for row in orders:
-        payload = _load_payload(row)
-        if payload is None:
-            continue
-        order_no = _clean(payload.get("order_no"))
-        if not order_no:
-            continue
-        line_no = 0
-        for detail in payload.get("details_list") or []:
-            if not isinstance(detail, dict):
-                continue
-            if not _clean(detail.get("spec_no")):
-                continue
-            line_no += 1
-            record = build_row(payload, detail, order_no, line_no)
-            if record is None:
-                continue
-            record["synced_at"] = synced_at
-            record["sync_run_id"] = run_id
-            expanded.append(record)
-            record_ids.append(f"{order_no}:{line_no}")
-    written = repository.replace_table(
+    stats = {"records_read": 0}
+    skip_reasons: dict[str, int] = {}
+    digest = hashlib.sha256()
+
+    def expanded_batches():
+        for orders in repository.read_wdt_trade_batches(method):
+            stats["records_read"] += len(orders)
+            expanded = []
+            for row in orders:
+                payload = _load_payload(row)
+                if payload is None:
+                    _note_skip(skip_reasons, "invalid_payload")
+                    continue
+                order_no = _clean(payload.get("order_no"))
+                if not order_no:
+                    _note_skip(skip_reasons, "missing_order_no")
+                    continue
+                details = payload.get("details_list") or []
+                if not isinstance(details, list):
+                    _note_skip(skip_reasons, "invalid_detail_list")
+                    continue
+                line_no = 0
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        _note_skip(skip_reasons, "invalid_detail")
+                        continue
+                    if not _clean(detail.get("spec_no")):
+                        _note_skip(skip_reasons, "missing_spec_no")
+                        continue
+                    line_no += 1
+                    record = build_row(payload, detail, order_no, line_no)
+                    if record is None:
+                        _note_skip(skip_reasons, "rejected_detail")
+                        continue
+                    record["synced_at"] = synced_at
+                    record["sync_run_id"] = run_id
+                    expanded.append(record)
+                    digest.update(f"{order_no}:{line_no}\n".encode("utf-8"))
+            yield expanded
+
+    written = repository.replace_table_batches(
         dataset.target_table,
         list(dataset_columns(dataset)) + ["synced_at", "sync_run_id"],
-        expanded,
+        expanded_batches(),
     )
     return {
-        "records_read": len(orders),
+        "records_read": stats["records_read"],
         "records_new": written,
         "records_updated": 0,
-        "records_skipped": 0,
-        "_record_ids": record_ids,
+        "records_skipped": sum(skip_reasons.values()),
+        "skip_reasons": skip_reasons,
+        "_record_id_digest": digest.hexdigest(),
     }
 
 

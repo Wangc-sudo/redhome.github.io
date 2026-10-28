@@ -80,11 +80,12 @@ def _refund_detail(spec_no="习酒493", num="3"):
 
 class StockoutLineProjectionTests(unittest.TestCase):
 
-    def _repo(self, orders=()):
+    def _repo(self, orders=(), batches=None):
         repo = Mock()
-        repo.read_wdt_trades.return_value = list(orders)
-        repo.replace_table.side_effect = lambda _t, _c, rows: len(rows)
-        return repo
+        if batches is None:
+            batches = [list(orders)]
+        repo.read_wdt_trade_batches.return_value = iter(batches)
+        return helpers._capture_replace_batches(repo)
 
     def test_expands_details_list_and_maps_columns(self):
         ds = dataset_by_name("wdt_stockout_line_fact")
@@ -95,8 +96,9 @@ class StockoutLineProjectionTests(unittest.TestCase):
 
         result = project_stockout_lines(repo, ds, _RUN_ID, _NOW)
 
-        repo.read_wdt_trades.assert_called_once_with(_STOCKOUT_METHOD)
-        table, columns, rows = repo.replace_table.call_args.args
+        repo.read_wdt_trade_batches.assert_called_once_with(_STOCKOUT_METHOD)
+        table, columns, _ = repo.replace_table_batches.call_args.args
+        rows = repo.expanded_rows
         self.assertEqual(table, "fact_stockout_line")
         self.assertEqual(
             set(columns),
@@ -117,7 +119,10 @@ class StockoutLineProjectionTests(unittest.TestCase):
         self.assertEqual(rows[0]["sync_run_id"], _RUN_ID)
         self.assertEqual(result["records_read"], 1)
         self.assertEqual(result["records_new"], 2)
-        self.assertEqual(result["_record_ids"], ["CK2162992:1", "CK2162992:2"])
+        self.assertEqual(result["records_skipped"], 0)
+        self.assertEqual(result["skip_reasons"], {})
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("_record_ids", result)
 
     def test_missing_brand_falls_back_to_unmatched(self):
         ds = dataset_by_name("wdt_stockout_line_fact")
@@ -127,7 +132,7 @@ class StockoutLineProjectionTests(unittest.TestCase):
 
         project_stockout_lines(repo, ds, _RUN_ID, _NOW)
 
-        rows = repo.replace_table.call_args.args[2]
+        rows = repo.expanded_rows
         self.assertEqual(rows[0]["brand_name"], "未匹配")
 
     def test_bad_payload_and_missing_keys_are_skipped(self):
@@ -146,20 +151,30 @@ class StockoutLineProjectionTests(unittest.TestCase):
 
         result = project_stockout_lines(repo, ds, _RUN_ID, _NOW)
 
-        rows = repo.replace_table.call_args.args[2]
+        rows = repo.expanded_rows
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["order_no"], "CK-ok")
         self.assertEqual(rows[0]["spec_no"], "SP-9")
+        self.assertEqual(result["records_read"], 3)
         self.assertEqual(result["records_new"], 1)
+        self.assertEqual(result["records_skipped"], 4)
+        self.assertEqual(result["skip_reasons"], {
+            "invalid_payload": 1,
+            "missing_order_no": 1,
+            "missing_spec_no": 1,
+            "invalid_detail": 1,
+        })
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
 
 
 class RefundLineProjectionTests(unittest.TestCase):
 
-    def _repo(self, orders=()):
+    def _repo(self, orders=(), batches=None):
         repo = Mock()
-        repo.read_wdt_trades.return_value = list(orders)
-        repo.replace_table.side_effect = lambda _t, _c, rows: len(rows)
-        return repo
+        if batches is None:
+            batches = [list(orders)]
+        repo.read_wdt_trade_batches.return_value = iter(batches)
+        return helpers._capture_replace_batches(repo)
 
     def test_expands_details_list_and_maps_columns(self):
         ds = dataset_by_name("wdt_refund_line_fact")
@@ -167,8 +182,9 @@ class RefundLineProjectionTests(unittest.TestCase):
 
         result = project_refund_lines(repo, ds, _RUN_ID, _NOW)
 
-        repo.read_wdt_trades.assert_called_once_with(_REFUND_METHOD)
-        table, columns, rows = repo.replace_table.call_args.args
+        repo.read_wdt_trade_batches.assert_called_once_with(_REFUND_METHOD)
+        table, columns, _ = repo.replace_table_batches.call_args.args
+        rows = repo.expanded_rows
         self.assertEqual(table, "fact_refund_line")
         self.assertEqual(
             set(columns),
@@ -189,7 +205,10 @@ class RefundLineProjectionTests(unittest.TestCase):
         self.assertEqual(row["synced_at"], _NOW)
         self.assertEqual(result["records_read"], 1)
         self.assertEqual(result["records_new"], 1)
-        self.assertEqual(result["_record_ids"], ["RK2609200130:1"])
+        self.assertEqual(result["records_skipped"], 0)
+        self.assertEqual(result["skip_reasons"], {})
+        self.assertRegex(result["_record_id_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("_record_ids", result)
 
     def test_check_time_falls_back_to_created_time(self):
         ds = dataset_by_name("wdt_refund_line_fact")
@@ -202,7 +221,7 @@ class RefundLineProjectionTests(unittest.TestCase):
 
         project_refund_lines(repo, ds, _RUN_ID, _NOW)
 
-        rows = repo.replace_table.call_args.args[2]
+        rows = repo.expanded_rows
         self.assertIsNotNone(rows[0]["check_time"])
 
     def test_lenient_decimal_and_bad_rows(self):
@@ -213,7 +232,7 @@ class RefundLineProjectionTests(unittest.TestCase):
 
         project_refund_lines(repo, ds, _RUN_ID, _NOW)
 
-        rows = repo.replace_table.call_args.args[2]
+        rows = repo.expanded_rows
         self.assertEqual(rows[0]["quantity"], Decimal("0"))
         self.assertEqual(rows[0]["refund_amount"], Decimal("0"))
         self.assertEqual(rows[0]["brand_name"], "未匹配")
@@ -270,30 +289,40 @@ class StockFlowServiceTests(unittest.TestCase):
             dataset_by_name("wdt_stockout_line_fact"),
             dataset_by_name("wdt_refund_line_fact"),
         ])
-        self.repository.read_wdt_trades.side_effect = [
-            [_stockout(details=[_stockout_detail()])],
-            [_refund(details=[_refund_detail()])],
+        self.repository.read_wdt_trade_batches.side_effect = [
+            iter([[_stockout(details=[_stockout_detail()])]]),
+            iter([[_refund(details=[_refund_detail()])]]),
         ]
-        self.repository.replace_table.side_effect = lambda _t, _c, rows: len(rows)
+        helpers._capture_replace_batches(self.repository)
 
         result = service.extract()
 
         self.assertEqual(len(result.datasets), 2)
+        self.assertEqual(self.repository.read_wdt_trade_batches.call_count, 2)
+        self.assertEqual(self.repository.replace_table_batches.call_count, 2)
+        self.assertEqual(len(self.repository.expanded_rows), 2)
         summaries = self.mart_repository.save_dataset_summary.call_args_list
         self.assertEqual(summaries[0].kwargs["dataset_name"], "wdt_stockout_line_fact")
         self.assertEqual(summaries[1].kwargs["dataset_name"], "wdt_refund_line_fact")
         self.assertEqual(summaries[0].kwargs["raw_records_written"], 1)
+        self.assertEqual(summaries[1].kwargs["raw_records_written"], 1)
+        for summary in summaries:
+            self.assertRegex(
+                summary.kwargs["record_id_digest"], r"^[0-9a-f]{64}$",
+            )
         self.mart_repository.mark_completed.assert_called_once()
 
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_stock_flow_write_failure_marks_run_failed(self, _lock):
         service = self._service(datasets=[dataset_by_name("wdt_stockout_line_fact")])
-        self.repository.read_wdt_trades.return_value = [
+        self.repository.read_wdt_trade_batches.return_value = iter([[
             _stockout(details=[_stockout_detail()]),
-        ]
-        self.repository.replace_table.side_effect = RuntimeError("write failed")
+        ]])
+        helpers._capture_replace_batches(
+            self.repository, error=RuntimeError("write failed"),
+        )
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
             service.extract()
 
         self.mart_repository.mark_failed.assert_called_once()

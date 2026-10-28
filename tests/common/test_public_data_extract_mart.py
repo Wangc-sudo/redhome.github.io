@@ -51,12 +51,26 @@ class _RecordingCursor:
         self.executed = []
         self.executemany_calls = []
         self.closed = False
+        self.count_override = None
+        self._fetchone_rows = list(rows)
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
 
     def executemany(self, sql, sequence):
         self.executemany_calls.append((sql, list(sequence)))
+
+    def fetchone(self):
+        if self.executed and "SELECT COUNT(" in self.executed[-1][0]:
+            if self.count_override is not None:
+                return {"row_count": self.count_override}
+            return {"row_count": sum(
+                len(sequence) for sql, sequence in self.executemany_calls
+                if "INSERT INTO `__extract_s_" in sql
+            )}
+        if self._fetchone_rows:
+            return self._fetchone_rows.pop(0)
+        return None
 
     def fetchall(self):
         return list(self.rows)
@@ -65,13 +79,24 @@ class _RecordingCursor:
         self.closed = True
 
 
+class _WindowCountCursor(_RecordingCursor):
+    def __init__(self, count_rows):
+        super().__init__()
+        self.count_rows = list(count_rows)
+
+    def fetchone(self):
+        return self.count_rows.pop(0) if self.count_rows else None
+
+
 class _FakeConnection:
     def __init__(self, rows=()):
         self.cursor_instance = _RecordingCursor(rows)
+        self.cursor_classes = []
         self.commits = 0
         self.rollbacks = 0
 
-    def cursor(self):
+    def cursor(self, cursor_class=None):
+        self.cursor_classes.append(cursor_class)
         return self.cursor_instance
 
     def commit(self):
@@ -79,6 +104,26 @@ class _FakeConnection:
 
     def rollback(self):
         self.rollbacks += 1
+
+
+def _capture_replace_batches(repository, *, error=None):
+    """Consume streaming batches and retain expanded rows for field assertions."""
+    repository.expanded_rows = []
+    repository.expanded_batches = []
+
+    def replace(_target_table, _columns, batches):
+        written = 0
+        for batch in batches:
+            rows = list(batch)
+            repository.expanded_batches.append(rows)
+            repository.expanded_rows.extend(rows)
+            written += len(rows)
+        if error is not None:
+            raise error
+        return written
+
+    repository.replace_table_batches.side_effect = replace
+    return repository
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +338,164 @@ class MartExtractRepositoryTests(unittest.TestCase):
         repo = self._repo()
         repo.replace_dim_calendar([], sync_run_id=_RUN_ID, synced_at=_NOW)
         self.assertEqual(self.mart.cursor_instance.executemany_calls, [])
+
+    @staticmethod
+    def _streaming_order_line_columns():
+        from common.public_data.extract_order_line import _ORDER_LINE_COLUMNS
+        return list(_ORDER_LINE_COLUMNS) + ["synced_at", "sync_run_id"]
+
+    def test_replace_table_batches_reconciles_and_publishes_staging(self):
+        repo = self._repo()
+        columns = self._streaming_order_line_columns()
+        batches = iter([
+            [{"trade_no": "T-1", "line_no": 1}],
+            [],
+            [{"trade_no": "T-2", "line_no": 1},
+             {"trade_no": "T-2", "line_no": 2}],
+        ])
+
+        written = repo.replace_table_batches(
+            "fact_order_line", columns, batches,
+        )
+
+        self.assertEqual(written, 3)
+        cursor = self.mart.cursor_instance
+        executed = [sql for sql, _ in cursor.executed]
+        create_sql = executed[0]
+        staging = create_sql.split("`")[1]
+        backup = staging.replace("__extract_s_", "__extract_b_", 1)
+        self.assertTrue(staging.startswith("__extract_s_"))
+        self.assertEqual(len(staging), len("__extract_s_") + 32)
+        self.assertEqual(
+            create_sql,
+            f"CREATE TABLE `{staging}` LIKE `fact_order_line`",
+        )
+        self.assertEqual(len(cursor.executemany_calls), 2)
+        self.assertEqual(
+            [len(sequence) for _, sequence in cursor.executemany_calls],
+            [1, 2],
+        )
+        for insert_sql, _ in cursor.executemany_calls:
+            self.assertTrue(
+                insert_sql.startswith(f"INSERT INTO `{staging}` ("),
+                insert_sql,
+            )
+        self.assertIn(
+            f"SELECT COUNT(*) AS `row_count` FROM `{staging}`", executed,
+        )
+        self.assertIn(
+            f"RENAME TABLE `fact_order_line` TO `{backup}`, "
+            f"`{staging}` TO `fact_order_line`",
+            executed,
+        )
+        self.assertEqual(executed[-1], f"DROP TABLE `{backup}`")
+        self.assertFalse(any("DELETE FROM `fact_order_line`" in sql
+                             for sql in executed))
+
+    def test_replace_table_batches_insert_failure_preserves_old_table(self):
+        class _FailInsertCursor(_RecordingCursor):
+            def executemany(self, sql, sequence):
+                raise RuntimeError("insert failed")
+
+        repo = self._repo()
+        self.mart.cursor_instance = _FailInsertCursor()
+
+        with self.assertRaisesRegex(RuntimeError, "insert failed"):
+            repo.replace_table_batches(
+                "fact_order_line",
+                self._streaming_order_line_columns(),
+                iter([[{"trade_no": "T-1", "line_no": 1}]]),
+            )
+
+        executed = [sql for sql, _ in self.mart.cursor_instance.executed]
+        self.assertFalse(any(sql.startswith("RENAME TABLE") for sql in executed))
+        self.assertFalse(any("DELETE FROM `fact_order_line`" in sql
+                             for sql in executed))
+        self.assertTrue(any(
+            sql.startswith("DROP TABLE IF EXISTS `__extract_s_")
+            for sql in executed
+        ))
+
+    def test_replace_table_batches_count_failure_preserves_old_table(self):
+        repo = self._repo()
+        self.mart.cursor_instance.count_override = 0
+
+        with self.assertRaisesRegex(MartExtractError, "staging row count mismatch"):
+            repo.replace_table_batches(
+                "fact_order_line",
+                self._streaming_order_line_columns(),
+                iter([[{"trade_no": "T-1", "line_no": 1}]]),
+            )
+
+        executed = [sql for sql, _ in self.mart.cursor_instance.executed]
+        self.assertTrue(any("SELECT COUNT(" in sql for sql in executed))
+        self.assertFalse(any(sql.startswith("RENAME TABLE") for sql in executed))
+        self.assertFalse(any("DELETE FROM `fact_order_line`" in sql
+                             for sql in executed))
+        self.assertTrue(any(
+            sql.startswith("DROP TABLE IF EXISTS `__extract_s_")
+            for sql in executed
+        ))
+
+    def test_window_replay_preserves_outside_and_null_rows_before_publishing(self):
+        repo = self._repo()
+        cursor = _WindowCountCursor([
+            {"row_count": 6, "window_count": 2},
+            {"row_count": 5},
+        ])
+        self.mart.cursor_instance = cursor
+
+        result = repo.replace_table_window_batches(
+            "fact_order_line", self._streaming_order_line_columns(),
+            iter([[{"trade_no": "T-new", "line_no": 1}]]),
+            window_start=date(2026, 10, 26), window_end=date(2026, 10, 26),
+        )
+
+        self.assertEqual(result, {
+            "before_count": 6, "window_before": 2, "window_after": 1,
+            "after_count": 5, "records_written": 1,
+        })
+        count_sql, count_params = cursor.executed[0]
+        self.assertIn("`trade_time` >= %s", count_sql)
+        self.assertIn("`trade_time` < %s", count_sql)
+        self.assertEqual(
+            count_params, (date(2026, 10, 26), date(2026, 10, 27)),
+        )
+        copy_sql, copy_params = next(
+            (sql, params) for sql, params in cursor.executed
+            if sql.startswith("INSERT INTO `__extract_s_")
+            and "SELECT" in sql and "FROM `fact_order_line`" in sql
+        )
+        self.assertIn("`trade_time` < %s", copy_sql)
+        self.assertIn("`trade_time` >= %s", copy_sql)
+        self.assertIn("`trade_time` IS NULL", copy_sql)
+        self.assertEqual(
+            copy_params, (date(2026, 10, 26), date(2026, 10, 27)),
+        )
+        executed = [sql for sql, _ in cursor.executed]
+        self.assertTrue(any(sql.startswith("RENAME TABLE") for sql in executed))
+
+    def test_window_replay_count_failure_never_renames(self):
+        repo = self._repo()
+        cursor = _WindowCountCursor([
+            {"row_count": 4, "window_count": 1},
+            {"row_count": 99},
+        ])
+        self.mart.cursor_instance = cursor
+
+        with self.assertRaisesRegex(MartExtractError, "staging row count mismatch"):
+            repo.replace_table_window_batches(
+                "fact_order_line", self._streaming_order_line_columns(),
+                iter([[{"trade_no": "T-new", "line_no": 1}]]),
+                window_start=date(2026, 10, 26), window_end=date(2026, 10, 26),
+            )
+
+        executed = [sql for sql, _ in cursor.executed]
+        self.assertFalse(any(sql.startswith("RENAME TABLE") for sql in executed))
+        self.assertTrue(any(
+            sql.startswith("DROP TABLE IF EXISTS `__extract_s_")
+            for sql in executed
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1593,173 @@ class DeptLeaderExtractTests(unittest.TestCase):
                                 dept_names={"1049919540": "总经办"})
         service.extract()
         self.repository.replace_dim_dept_leaders.assert_not_called()
+
+
+class ChannelQualityReplayTests(unittest.TestCase):
+
+    def _service(self):
+        self.repository = Mock()
+        self.repository.read_dataset.return_value = []
+        self.mart_repository = Mock()
+        self.mart_connection = _FakeConnection()
+        self.new_run_id = Mock(return_value=_RUN_ID)
+        return MartExtractService(
+            repository=self.repository,
+            mart_repository=self.mart_repository,
+            mart_connection=self.mart_connection,
+            now=lambda: _NOW,
+            new_run_id=self.new_run_id,
+            datasets=[dataset_by_name("channel_daily_sales")],
+            calendar_months=(),
+        )
+
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_dry_run_has_no_sync_run_or_business_writes(self, _lock):
+        service = self._service()
+        self.repository.read_dataset.return_value = [{
+            "source_record_id": "ai-1", "channel": "抖音", "store_name": "甲",
+            "business_date": date(2026, 10, 26), "sales_amount": 10,
+        }]
+        self.repository.window_row_counts.return_value = {
+            "before_count": 5, "window_before": 2,
+        }
+
+        result = service.replay_dataset(
+            "channel_daily_sales", window_start=date(2026, 10, 26),
+            window_end=date(2026, 10, 26), dry_run=True, rules=[], overrides={},
+        )
+
+        self.assertIsNone(result["sync_run_id"])
+        self.assertEqual(result["records_read"], 1)
+        self.assertEqual(result["records_written"], 0)
+        self.assertEqual(result["diff"]["window_after"], 1)
+        self.assertEqual(result["diff"]["after_count"], 4)
+        self.new_run_id.assert_not_called()
+        self.mart_repository.start_run.assert_not_called()
+        self.mart_repository.save_dataset_summary.assert_not_called()
+        self.mart_repository.mark_raw_committed.assert_not_called()
+        self.mart_repository.mark_completed.assert_not_called()
+        self.repository.upsert_fact.assert_not_called()
+        self.repository.replace_table_window_batches.assert_not_called()
+        executed = [sql for sql, _ in self.mart_connection.cursor_instance.executed]
+        self.assertFalse(any(sql.startswith("RENAME TABLE") for sql in executed))
+
+    def test_dry_run_rejects_missing_or_reversed_window_before_reading(self):
+        service = self._service()
+        windows = (
+            (None, date(2026, 10, 26)),
+            (date(2026, 10, 26), None),
+            (date(2026, 10, 27), date(2026, 10, 26)),
+        )
+        for window_start, window_end in windows:
+            with self.subTest(window_start=window_start, window_end=window_end):
+                with self.assertRaisesRegex(MartExtractError, "invalid business window"):
+                    service.replay_dataset(
+                        "channel_daily_sales", window_start=window_start,
+                        window_end=window_end, dry_run=True, rules=[], overrides={},
+                    )
+        self.repository.read_dataset.assert_not_called()
+        self.new_run_id.assert_not_called()
+        self.mart_repository.start_run.assert_not_called()
+
+    def test_formal_replay_filters_after_robot_merge_and_returns_real_counts(self):
+        service = self._service()
+        inside = date(2026, 10, 26)
+        outside = date(2026, 10, 25)
+        self.repository.read_dataset.return_value = [
+            {"source_record_id": "ai-zero", "channel": "抖音",
+             "store_name": "零元店", "business_date": inside, "sales_amount": 0},
+            {"source_record_id": "ai-negative", "channel": "京东",
+             "store_name": "退货店", "business_date": inside, "sales_amount": -12},
+            {"source_record_id": "ai-outside", "channel": "天猫",
+             "store_name": "窗口外", "business_date": outside, "sales_amount": 30},
+        ]
+        inbox = {
+            (inside, "拼多多", "机器人店"): {
+                "id": 30, "channel": "拼多多", "store_name": "机器人店",
+                "business_date": inside, "sales_amount": 88,
+            },
+            (outside, "拼多多", "窗口外机器人"): {
+                "id": 31, "channel": "拼多多", "store_name": "窗口外机器人",
+                "business_date": outside, "sales_amount": 99,
+            },
+        }
+        published = []
+
+        def replace_window(_table, _columns, batches, **_kwargs):
+            published.extend(row for batch in batches for row in batch)
+            written = len(published)
+            return {
+                "before_count": 8, "window_before": 2,
+                "window_after": written, "after_count": 6 + written,
+                "records_written": written,
+            }
+
+        self.repository.replace_table_window_batches.side_effect = replace_window
+        with patch(
+            "common.public_data.extract_mart.named_lock", return_value=_Ctx(),
+        ), patch(
+            "common.public_data.channel_robot_inbox.fetch_latest_inbox",
+            return_value=inbox,
+        ), patch(
+            "common.public_data.channel_robot_inbox.fetch_raw_business_keys",
+            return_value={},
+        ):
+            result = service.replay_dataset(
+                "channel_daily_sales", window_start=inside, window_end=inside,
+                dry_run=False, rules=[], overrides={},
+            )
+
+        by_id = {row["source_record_id"]: row for row in published}
+        self.assertEqual(set(by_id), {"ai-zero", "ai-negative", "robot:30"})
+        self.assertEqual(by_id["ai-zero"]["sales_amount"], 0)
+        self.assertEqual(by_id["ai-negative"]["sales_amount"], -12)
+        self.assertEqual(by_id["robot:30"]["sales_amount"], 88)
+        self.assertEqual(result["sync_run_id"], _RUN_ID)
+        self.assertEqual(result["records_read"], 3)
+        self.assertEqual(result["records_written"], 3)
+        self.mart_repository.start_run.assert_called_once()
+        self.mart_repository.mark_raw_committed.assert_called_once_with(_RUN_ID)
+        self.assertEqual(
+            self.mart_repository.save_dataset_summary.call_args.kwargs[
+                "raw_records_written"
+            ],
+            3,
+        )
+        self.mart_repository.mark_completed.assert_called_once()
+        self.mart_repository.mark_failed.assert_not_called()
+
+    def test_summary_failure_terminates_as_projection_pending_not_failed(self):
+        service = self._service()
+        self.repository.read_dataset.return_value = [{
+            "source_record_id": "ai-1", "channel": "抖音", "store_name": "甲",
+            "business_date": date(2026, 10, 26), "sales_amount": 1,
+        }]
+        self.repository.replace_table_window_batches.return_value = {
+            "before_count": 1, "window_before": 1, "window_after": 1,
+            "after_count": 1, "records_written": 1,
+        }
+        self.mart_repository.save_dataset_summary.side_effect = RuntimeError(
+            "summary db",
+        )
+
+        with patch(
+            "common.public_data.extract_mart.named_lock", return_value=_Ctx(),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "summary db"):
+                service.replay_dataset(
+                    "channel_daily_sales", window_start=date(2026, 10, 26),
+                    window_end=date(2026, 10, 26), dry_run=False,
+                    rules=[], overrides={},
+                )
+
+        self.mart_repository.mark_raw_committed.assert_called_once_with(_RUN_ID)
+        self.mart_repository.mark_projection_pending.assert_called_once_with(
+            sync_run_id=_RUN_ID, failure_code="projection_failed", finished_at=_NOW,
+        )
+        self.mart_repository.mark_failed.assert_not_called()
+        self.mart_repository.mark_completed.assert_not_called()
+        self.assertEqual(self.mart_connection.rollbacks, 0)
 
 
 if __name__ == "__main__":

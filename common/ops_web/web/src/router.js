@@ -19,6 +19,7 @@ import RecordsPage from './pages/RecordsPage.vue';
 import GrantsPage from './pages/GrantsPage.vue';
 import FlowPage from './pages/FlowPage.vue';
 import BroadcastBoardPage from './pages/BroadcastBoardPage.vue';
+import DataQualityPage from './pages/DataQualityPage.vue';
 
 const routes = [
   // P4（2026-10-16 画布即应用）：首页直达画布；OverviewPage 退役
@@ -54,6 +55,7 @@ const routes = [
     meta: { capability: 'pipelines' },
   },
   { path: '/records', name: 'records', component: RecordsPage, meta: { capability: 'audit' } },
+  { path: '/data-quality', name: 'data-quality', component: DataQualityPage },
   {
     path: '/grants',
     alias: '/audit',

@@ -30,6 +30,7 @@ Two projectors, both WDT-backed and full-replay:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -135,6 +136,10 @@ def normalize_area(raw):
 
 def _clean(value: object) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _note_skip(reasons: dict, reason: str) -> None:
+    reasons[reason] = reasons.get(reason, 0) + 1
 
 
 def _to_decimal(value: object) -> Decimal:
@@ -257,82 +262,235 @@ def _brand_index(repository) -> dict[str, str]:
     return index
 
 
-def project_order_lines(repository, dataset, run_id, synced_at) -> dict:
-    """Expand raw WDT trade payloads into fact_order_line rows."""
+def _replay_clean_rows(dataset, rows, rules, overrides, state, scope):
+    """Apply a frozen DQ snapshot to the exact rows staged for publication."""
+    from common.public_data.cleaning import evaluate_rows
+    from common.public_data.data_quality import _rule_scope
+    from common.public_data.extract_mart import MartExtractError
 
-    trades = repository.read_wdt_trades(_TRADE_METHOD)
-    brand_index = _brand_index(repository)
-    expanded: list[dict] = []
-    record_ids: list[str] = []
-    for trade in trades:
-        payload = trade.get("payload_json")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except ValueError:
-                continue
-        if not isinstance(payload, dict):
-            continue
-        trade_status = _clean(payload.get("trade_status"))
-        if trade_status in _EXCLUDED_TRADE_STATUSES:
-            continue
-        trade_no = _clean(payload.get("trade_no"))
-        if not trade_no:
-            continue
-        trade_time = _parse_datetime(payload.get("trade_time"))
-        shop_name = _clean(payload.get("shop_name"))
-        channel_name = _normalize_channel(shop_name)
-        receiver_area_raw = _clean(payload.get("receiver_area")) or None
-        details = payload.get("detail_list") or []
-        line_no = 0
-        for detail in details:
-            if not isinstance(detail, dict):
-                continue
-            spec_no = _clean(detail.get("spec_no"))
-            if not spec_no:
-                continue
-            line_no += 1
-            record = {
-                "trade_no": trade_no,
-                "line_no": line_no,
-                "trade_time": trade_time,
-                "trade_status": trade_status,
-                # 买家标识（WDT 交易级 customer_id，2026-10-12 实测确认）；
-                # 拼多多按隐私协议不返回 → NULL，查询层显式计数。
-                "buyer_id": _clean(payload.get("customer_id")) or None,
-                # 渠道抬头（2026-10-23）：B2B 渠道单的客户主体（丰享/朴朴/
-                # 天猫寄售…）在 buyer_nick；customer_name 只在 B2C 零售单填
-                # （JY202610222323 实锤）。B2C 单此列为空 → NULL。
-                "buyer_nick": _clean(payload.get("buyer_nick")) or None,
-                "spec_no": spec_no,
-                "goods_name": _clean(detail.get("goods_name")) or None,
-                "brand_name": brand_index.get(spec_no, _UNMATCHED_BRAND),
-                "shop_name": shop_name or None,
-                "channel_name": channel_name,
-                "receiver_area_raw": receiver_area_raw,
-                "receiver_area_norm": normalize_area(receiver_area_raw),
-                "quantity": _to_decimal(detail.get("num")),
-                "paid_amount": _to_decimal(detail.get("paid")),
-                "platform_subsidy": Decimal("0"),
-                "shop_subsidy": Decimal("0"),
-                "raw_json": _dump_json(detail),
-                "synced_at": synced_at,
-                "sync_run_id": run_id,
-            }
-            expanded.append(record)
-            record_ids.append(f"{trade_no}:{line_no}")
-    written = repository.replace_table(
-        dataset.target_table,
-        list(_ORDER_LINE_COLUMNS) + ["synced_at", "sync_run_id"],
-        expanded,
+    selected = [rule for rule in rules if _rule_scope(rule) == scope]
+    result = evaluate_rows(
+        dataset, rows, selected, overrides=overrides,
+        keep_quarantined=False, state=state,
     )
-    return {
-        "records_read": len(trades),
+    if any(issue.severity in {"critical", "error"} for issue in result.issues):
+        raise MartExtractError("quality_gate_blocked")
+    return result.rows
+
+
+def _replay_check_dataset_rules(dataset, rules, records_read, window_start,
+                                window_end, channel_business_dates=()):
+    from common.public_data.data_quality import evaluate_dataset_rules
+    from common.public_data.extract_mart import MartExtractError
+
+    issues = evaluate_dataset_rules(
+        dataset.dataset, rules, {"records_read": records_read},
+        window_start, window_end, channel_business_dates=channel_business_dates,
+    )
+    if any(issue.severity in {"critical", "error"} for issue in issues):
+        raise MartExtractError("quality_gate_blocked")
+
+
+def project_order_lines(
+    repository, dataset, run_id, synced_at, *, window_start=None, window_end=None,
+    dry_run=False, rules=None, overrides=None,
+) -> dict:
+    """Expand raw WDT trades, optionally replacing one bounded business window."""
+
+    replay = rules is not None
+    if (window_start is None) != (window_end is None):
+        raise ValueError("business window must have both boundaries")
+    if dry_run and window_start is None:
+        raise ValueError("dry-run requires a bounded business window")
+    if replay and window_start is None:
+        raise ValueError("quality replay requires a bounded business window")
+    brand_index = _brand_index(repository)
+    stats = {"records_read": 0}
+    skip_reasons: dict[str, int] = {}
+    digest = hashlib.sha256()
+    quality_state = {}
+
+    def expanded_batches():
+        for trades in repository.read_wdt_trade_batches(_TRADE_METHOD):
+            if window_start is None:
+                stats["records_read"] += len(trades)
+            expanded = []
+            for trade in trades:
+                source_id = str(trade.get("source_record_id") or "")
+                original_payload = trade.get("payload_json")
+                payload = original_payload
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except ValueError:
+                        payload = None
+                if not isinstance(payload, dict):
+                    if replay:
+                        from common.public_data.data_quality import _wdt_quality_rows
+                        header = _wdt_quality_rows(
+                            source_id, original_payload, payload,
+                        )[0]
+                        _replay_clean_rows(
+                            dataset.dataset, [header], rules, overrides,
+                            quality_state, "header",
+                        )
+                    _note_skip(skip_reasons, "invalid_payload")
+                    continue
+                trade_time = _parse_datetime(payload.get("trade_time"))
+                if window_start is not None:
+                    trade_date = trade_time.date() if trade_time is not None else None
+                    if (trade_date is None or trade_date < window_start
+                            or trade_date > window_end):
+                        continue
+                    stats["records_read"] += 1
+                if replay:
+                    from common.public_data.data_quality import _wdt_quality_rows
+                    header = _wdt_quality_rows(
+                        source_id, original_payload, payload,
+                    )[0]
+                    cleaned = _replay_clean_rows(
+                        dataset.dataset, [header], rules, overrides,
+                        quality_state, "header",
+                    )[0]
+                    payload = dict(payload)
+                    for field_name in (
+                        "trade_no", "trade_status", "trade_time", "customer_id",
+                    ):
+                        if field_name in cleaned:
+                            payload[field_name] = cleaned[field_name]
+                    trade_time = _parse_datetime(payload.get("trade_time"))
+                trade_status = _clean(payload.get("trade_status"))
+                if trade_status in _EXCLUDED_TRADE_STATUSES:
+                    continue
+                trade_no = _clean(payload.get("trade_no"))
+                if not trade_no:
+                    _note_skip(skip_reasons, "missing_trade_no")
+                    continue
+                shop_name = _clean(payload.get("shop_name"))
+                channel_name = _normalize_channel(shop_name)
+                receiver_area_raw = _clean(payload.get("receiver_area")) or None
+                details = payload.get("detail_list") or []
+                if not isinstance(details, list):
+                    _note_skip(skip_reasons, "invalid_detail_list")
+                    continue
+                line_no = 0
+                trade_rows = []
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        _note_skip(skip_reasons, "invalid_detail")
+                        continue
+                    spec_no = _clean(detail.get("spec_no"))
+                    if not spec_no and not replay:
+                        _note_skip(skip_reasons, "missing_spec_no")
+                        continue
+                    line_no += 1
+                    record = {
+                        "trade_no": trade_no,
+                        "line_no": line_no,
+                        "trade_time": trade_time,
+                        "trade_status": trade_status,
+                        # 买家标识（WDT 交易级 customer_id，2026-10-12 实测确认）；
+                        # 拼多多按隐私协议不返回 → NULL，查询层显式计数。
+                        "buyer_id": _clean(payload.get("customer_id")) or None,
+                        # 渠道抬头（2026-10-23）：B2B 渠道单的客户主体（丰享/朴朴/
+                        # 天猫寄售…）在 buyer_nick；customer_name 只在 B2C 零售单填
+                        # （JY202610222323 实锤）。B2C 单此列为空 → NULL。
+                        "buyer_nick": _clean(payload.get("buyer_nick")) or None,
+                        "spec_no": spec_no,
+                        "goods_name": _clean(detail.get("goods_name")) or None,
+                        "brand_name": brand_index.get(spec_no, _UNMATCHED_BRAND),
+                        "shop_name": shop_name or None,
+                        "channel_name": channel_name,
+                        "receiver_area_raw": receiver_area_raw,
+                        "receiver_area_norm": normalize_area(receiver_area_raw),
+                        "quantity": _to_decimal(detail.get("num")),
+                        "paid_amount": _to_decimal(detail.get("paid")),
+                        "platform_subsidy": Decimal("0"),
+                        "shop_subsidy": Decimal("0"),
+                        "raw_json": _dump_json(detail),
+                        "synced_at": synced_at,
+                        "sync_run_id": run_id,
+                    }
+                    if replay:
+                        record["source_record_id"] = f"{source_id}#{line_no}"
+                    trade_rows.append(record)
+                if replay and trade_rows:
+                    trade_rows = _replay_clean_rows(
+                        dataset.dataset, trade_rows, rules, overrides,
+                        quality_state, "detail",
+                    )
+                kept_rows = []
+                for row in trade_rows:
+                    if not _clean(row.get("spec_no")):
+                        _note_skip(skip_reasons, "missing_spec_no")
+                        continue
+                    if replay:
+                        row["line_no"] = _to_int(row.get("line_no"))
+                        row["trade_time"] = _parse_datetime(row.get("trade_time"))
+                        row["quantity"] = _to_decimal(row.get("quantity"))
+                        row["paid_amount"] = _to_decimal(row.get("paid_amount"))
+                        row["platform_subsidy"] = _to_decimal(
+                            row.get("platform_subsidy")
+                        )
+                        row["shop_subsidy"] = _to_decimal(row.get("shop_subsidy"))
+                        row["brand_name"] = brand_index.get(
+                            _clean(row.get("spec_no")), _UNMATCHED_BRAND,
+                        )
+                    kept_rows.append(row)
+                expanded.extend(kept_rows)
+            if replay:
+                for row in expanded:
+                    row.pop("source_record_id", None)
+                    row.pop("_dq_scope", None)
+                    row.pop("_dq_parent", None)
+                    digest.update(
+                        f"{row['trade_no']}:{row['line_no']}\n".encode("utf-8")
+                    )
+            else:
+                for row in expanded:
+                    digest.update(
+                        f"{row['trade_no']}:{row['line_no']}\n".encode("utf-8")
+                    )
+            yield expanded
+        if replay:
+            _replay_check_dataset_rules(
+                dataset, rules, stats["records_read"], window_start, window_end,
+            )
+
+    columns = list(_ORDER_LINE_COLUMNS) + ["synced_at", "sync_run_id"]
+    replay_diff = None
+    if window_start is None:
+        written = repository.replace_table_batches(
+            dataset.target_table, columns, expanded_batches(),
+        )
+    elif dry_run:
+        counts = repository.window_row_counts(
+            dataset.target_table, window_start, window_end,
+        )
+        would_write = sum(len(batch) for batch in expanded_batches())
+        written = 0
+        replay_diff = {
+            **counts, "window_after": would_write,
+            "after_count": counts["before_count"] - counts["window_before"] + would_write,
+            "records_written": 0,
+        }
+    else:
+        replay_diff = repository.replace_table_window_batches(
+            dataset.target_table, columns, expanded_batches(),
+            window_start=window_start, window_end=window_end,
+        )
+        written = replay_diff["records_written"]
+    result = {
+        "records_read": stats["records_read"],
         "records_new": written,
         "records_updated": 0,
-        "records_skipped": 0,
-        "_record_ids": record_ids,
+        "records_skipped": sum(skip_reasons.values()),
+        "skip_reasons": skip_reasons,
+        "_record_id_digest": digest.hexdigest(),
     }
+    if replay_diff is not None:
+        result["_replay_diff"] = replay_diff
+    return result
 
 
 # 取消单（BI 阶段 2）：主投影剔除 trade_status=4（已取消、明细实付全 0），
@@ -357,47 +515,58 @@ def project_order_cancels(repository, dataset, run_id, synced_at) -> dict:
     缺失回退 ``modified``）；channel 口径与主表一致（_normalize_channel）。
     replace 语义全量重放。
     """
-    trades = repository.read_wdt_trades(_TRADE_METHOD)
-    rows: list[dict] = []
-    record_ids: list[str] = []
-    for trade in trades:
-        payload = trade.get("payload_json")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except ValueError:
-                continue
-        if not isinstance(payload, dict):
-            continue
-        if _clean(payload.get("trade_status")) != _CANCELLED_TRADE_STATUS:
-            continue
-        trade_no = _clean(payload.get("trade_no"))
-        if not trade_no:
-            continue
-        shop_name = _clean(payload.get("shop_name"))
-        rows.append({
-            "trade_no": trade_no,
-            "cancel_time": (
-                _parse_datetime(payload.get("created"))
-                or _parse_datetime(payload.get("modified"))
-            ),
-            "shop_name": shop_name or None,
-            "channel_name": _normalize_channel(shop_name),
-            "synced_at": synced_at,
-            "sync_run_id": run_id,
-        })
-        record_ids.append(trade_no)
-    written = repository.replace_table(
+    stats = {"records_read": 0}
+    skip_reasons: dict[str, int] = {}
+    digest = hashlib.sha256()
+
+    def row_batches():
+        for trades in repository.read_wdt_trade_batches(_TRADE_METHOD):
+            stats["records_read"] += len(trades)
+            rows = []
+            for trade in trades:
+                payload = trade.get("payload_json")
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except ValueError:
+                        _note_skip(skip_reasons, "invalid_payload")
+                        continue
+                if not isinstance(payload, dict):
+                    _note_skip(skip_reasons, "invalid_payload")
+                    continue
+                if _clean(payload.get("trade_status")) != _CANCELLED_TRADE_STATUS:
+                    continue
+                trade_no = _clean(payload.get("trade_no"))
+                if not trade_no:
+                    _note_skip(skip_reasons, "missing_trade_no")
+                    continue
+                shop_name = _clean(payload.get("shop_name"))
+                rows.append({
+                    "trade_no": trade_no,
+                    "cancel_time": (
+                        _parse_datetime(payload.get("created"))
+                        or _parse_datetime(payload.get("modified"))
+                    ),
+                    "shop_name": shop_name or None,
+                    "channel_name": _normalize_channel(shop_name),
+                    "synced_at": synced_at,
+                    "sync_run_id": run_id,
+                })
+                digest.update(f"{trade_no}\n".encode("utf-8"))
+            yield rows
+
+    written = repository.replace_table_batches(
         dataset.target_table,
         list(_ORDER_CANCEL_COLUMNS) + ["synced_at", "sync_run_id"],
-        rows,
+        row_batches(),
     )
     return {
-        "records_read": len(trades),
+        "records_read": stats["records_read"],
         "records_new": written,
         "records_updated": 0,
-        "records_skipped": 0,
-        "_record_ids": record_ids,
+        "records_skipped": sum(skip_reasons.values()),
+        "skip_reasons": skip_reasons,
+        "_record_id_digest": digest.hexdigest(),
     }
 
 

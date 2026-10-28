@@ -431,7 +431,7 @@ class ExtractReadonlyGateTests(unittest.TestCase):
         with self.assertRaises(MartExtractError):
             self.repository.read_wdt_table("wdt_records")
         with self.assertRaises(MartExtractError):
-            self.repository.read_wdt_trades("trades")
+            list(self.repository.read_wdt_trade_batches("trades"))
 
 
 if __name__ == "__main__":

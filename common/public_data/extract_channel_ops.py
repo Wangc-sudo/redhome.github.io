@@ -21,11 +21,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta, timezone
 
 from common.broadcast import moving_window_days
 from common.public_data.extract_order_line import (
     _clean,
+    _note_skip,
     _parse_datetime,
     _to_decimal,
 )
@@ -164,43 +166,48 @@ def _classify_stock(*, available, daily_avg, days_left, was_active):
 def project_inventory_snapshot(repository, dataset, run_id, synced_at) -> dict:
     """wms.StockSpec.search2 payload → 当日库存快照（跨仓合并）。"""
 
-    records = repository.read_wdt_trades(_STOCK_SPEC_METHOD)
     window_days = moving_window_days()
     business_date = _business_date_of(synced_at)
+    records_read = 0
+    skip_reasons: dict[str, int] = {}
 
     # 跨仓合并：spec_no → 累加行（只留 01/12 两仓正品，口径同旧脚本）。
     merged: dict[str, dict] = {}
-    for row in records:
-        payload = _load_payload(row)
-        if payload is None:
-            continue
-        if _clean(payload.get("warehouse_no")) not in WAREHOUSE_MAP:
-            continue
-        if _clean(payload.get("defect")) not in ("", "0", "false", "False"):
-            continue  # 只保留正品（旧脚本 defect 过滤口径）
-        spec_no = _clean(payload.get("spec_no"))
-        if not spec_no:
-            continue
-        slot = merged.setdefault(spec_no, {
-            "goods_name": _clean(payload.get("goods_name")) or None,
-            "available_qty": 0.0,
-            "stock_qty": 0.0,
-            "qty_7days": None,
-            "qty_month": None,
-            "purchase_intransit_qty": 0.0,
-        })
-        slot["goods_name"] = slot["goods_name"] or (
-            _clean(payload.get("goods_name")) or None
-        )
-        slot["available_qty"] += float(_to_decimal(payload.get("available_send_stock")))
-        slot["stock_qty"] += float(_to_decimal(payload.get("stock_num")))
-        slot["purchase_intransit_qty"] += float(_to_decimal(payload.get("purchase_num")))
-        # WDT 原生桶值（mask=1 才有；存量无 mask 的行保持 None）：跨仓求和。
-        for src_key, dst_key in (("num_7days", "qty_7days"), ("num_month", "qty_month")):
-            raw_val = payload.get(src_key)
-            if raw_val in (None, ""):
+    for records in repository.read_wdt_trade_batches(_STOCK_SPEC_METHOD):
+        records_read += len(records)
+        for row in records:
+            payload = _load_payload(row)
+            if payload is None:
+                _note_skip(skip_reasons, "invalid_payload")
                 continue
-            slot[dst_key] = (slot[dst_key] or 0.0) + float(_to_decimal(raw_val))
+            if _clean(payload.get("warehouse_no")) not in WAREHOUSE_MAP:
+                continue
+            if _clean(payload.get("defect")) not in ("", "0", "false", "False"):
+                continue  # 只保留正品（旧脚本 defect 过滤口径）
+            spec_no = _clean(payload.get("spec_no"))
+            if not spec_no:
+                _note_skip(skip_reasons, "missing_spec_no")
+                continue
+            slot = merged.setdefault(spec_no, {
+                "goods_name": _clean(payload.get("goods_name")) or None,
+                "available_qty": 0.0,
+                "stock_qty": 0.0,
+                "qty_7days": None,
+                "qty_month": None,
+                "purchase_intransit_qty": 0.0,
+            })
+            slot["goods_name"] = slot["goods_name"] or (
+                _clean(payload.get("goods_name")) or None
+            )
+            slot["available_qty"] += float(_to_decimal(payload.get("available_send_stock")))
+            slot["stock_qty"] += float(_to_decimal(payload.get("stock_num")))
+            slot["purchase_intransit_qty"] += float(_to_decimal(payload.get("purchase_num")))
+            # WDT 原生桶值（mask=1 才有；存量无 mask 的行保持 None）：跨仓求和。
+            for src_key, dst_key in (("num_7days", "qty_7days"), ("num_month", "qty_month")):
+                raw_val = payload.get(src_key)
+                if raw_val in (None, ""):
+                    continue
+                slot[dst_key] = (slot[dst_key] or 0.0) + float(_to_decimal(raw_val))
 
     # 窗口/兜底销量：投影期从 fact_sales_daily 一次算好。
     sales = repository.read_sales_window_sums(
@@ -210,7 +217,9 @@ def project_inventory_snapshot(repository, dataset, run_id, synced_at) -> dict:
     )
 
     rows: list[dict] = []
+    digest = hashlib.sha256()
     for spec_no, slot in sorted(merged.items()):
+        digest.update(f"{business_date}:{spec_no}\n".encode("utf-8"))
         window_qty, active_qty = sales.get(spec_no, (0.0, 0.0))
         was_active = active_qty > 0
         daily_avg = window_qty / window_days if window_qty > 0 else None
@@ -248,71 +257,83 @@ def project_inventory_snapshot(repository, dataset, run_id, synced_at) -> dict:
         business_date,
     )
     return {
-        "records_read": len(records),
+        "records_read": records_read,
         "records_new": written,
         "records_updated": 0,
-        "records_skipped": 0,
-        "_record_ids": [f"{business_date}:{spec}" for spec in sorted(merged)],
+        "records_skipped": sum(skip_reasons.values()),
+        "skip_reasons": skip_reasons,
+        "_record_id_digest": digest.hexdigest(),
     }
 
 
 def project_purchase_inbound(repository, dataset, run_id, synced_at) -> dict:
     """采购入库单 payload → fact_purchase_inbound（append/upsert）。"""
 
-    orders = repository.read_wdt_trades(_PURCHASE_METHOD)
-    rows: list[dict] = []
-    record_ids: list[str] = []
-    for row in orders:
-        payload = _load_payload(row)
-        if payload is None:
-            continue
-        order_no = _clean(payload.get("order_no"))
-        if not order_no:
-            continue
-        purchase_no = _clean(payload.get("purchase_no")) or None
-        warehouse_no = _clean(payload.get("warehouse_no")) or None
-        warehouse_name = WAREHOUSE_MAP.get(warehouse_no, warehouse_no)
-        stockin_time = _parse_datetime(
-            payload.get("check_time") or payload.get("created_time")
-        )
-        status = _clean(payload.get("status")) or None
-        for detail in payload.get("details_list") or []:
-            if not isinstance(detail, dict):
+    records_read = 0
+    written = 0
+    skip_reasons: dict[str, int] = {}
+    digest = hashlib.sha256()
+    columns = list(_PURCHASE_INBOUND_COLUMNS) + ["synced_at", "sync_run_id"]
+    for orders in repository.read_wdt_trade_batches(_PURCHASE_METHOD):
+        records_read += len(orders)
+        rows = []
+        for row in orders:
+            payload = _load_payload(row)
+            if payload is None:
+                _note_skip(skip_reasons, "invalid_payload")
                 continue
-            spec_no = _clean(detail.get("spec_no"))
-            if not spec_no:
+            order_no = _clean(payload.get("order_no"))
+            if not order_no:
+                _note_skip(skip_reasons, "missing_order_no")
                 continue
-            goods_name = (
-                _clean(detail.get("spec_name"))
-                or _clean(detail.get("goods_name"))
-                or None
+            purchase_no = _clean(payload.get("purchase_no")) or None
+            warehouse_no = _clean(payload.get("warehouse_no")) or None
+            warehouse_name = WAREHOUSE_MAP.get(warehouse_no, warehouse_no)
+            stockin_time = _parse_datetime(
+                payload.get("check_time") or payload.get("created_time")
             )
-            rows.append({
-                "order_no": order_no,
-                "spec_no": spec_no,
-                "purchase_no": purchase_no,
-                "warehouse_no": warehouse_no,
-                "warehouse_name": warehouse_name,
-                "goods_name": goods_name,
-                "qty": _to_decimal(detail.get("num")),
-                "stockin_time": stockin_time,
-                "status": status,
-                "synced_at": synced_at,
-                "sync_run_id": run_id,
-            })
-            record_ids.append(f"{order_no}:{spec_no}")
+            status = _clean(payload.get("status")) or None
+            details = payload.get("details_list") or []
+            if not isinstance(details, list):
+                _note_skip(skip_reasons, "invalid_detail_list")
+                continue
+            for detail in details:
+                if not isinstance(detail, dict):
+                    _note_skip(skip_reasons, "invalid_detail")
+                    continue
+                spec_no = _clean(detail.get("spec_no"))
+                if not spec_no:
+                    _note_skip(skip_reasons, "missing_spec_no")
+                    continue
+                goods_name = (
+                    _clean(detail.get("spec_name"))
+                    or _clean(detail.get("goods_name"))
+                    or None
+                )
+                rows.append({
+                    "order_no": order_no,
+                    "spec_no": spec_no,
+                    "purchase_no": purchase_no,
+                    "warehouse_no": warehouse_no,
+                    "warehouse_name": warehouse_name,
+                    "goods_name": goods_name,
+                    "qty": _to_decimal(detail.get("num")),
+                    "stockin_time": stockin_time,
+                    "status": status,
+                    "synced_at": synced_at,
+                    "sync_run_id": run_id,
+                })
+                digest.update(f"{order_no}:{spec_no}\n".encode("utf-8"))
+        if rows:
+            written += repository.upsert_purchase_inbound(dataset, columns, rows)
 
-    written = repository.upsert_purchase_inbound(
-        dataset,
-        list(_PURCHASE_INBOUND_COLUMNS) + ["synced_at", "sync_run_id"],
-        rows,
-    )
     return {
-        "records_read": len(orders),
+        "records_read": records_read,
         "records_new": written,
         "records_updated": 0,
-        "records_skipped": 0,
-        "_record_ids": record_ids,
+        "records_skipped": sum(skip_reasons.values()),
+        "skip_reasons": skip_reasons,
+        "_record_id_digest": digest.hexdigest(),
     }
 
 
