@@ -9,6 +9,7 @@ import threading
 import time
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -1880,6 +1881,85 @@ class AgentToolExecutorTests(unittest.TestCase):
         sql, _ = executor._conn.cursor_instance.executed[-1]
         self.assertIn("`business_date`<=CURDATE()", sql)
 
+    @staticmethod
+    def _yoy_rules():
+        return [
+            {"channel_key": "京东", "match_type": "buyer_nick",
+             "match_mode": "exact", "match_value": "北京京东世纪信息技术有限公司",
+             "priority": 12},
+            {"channel_key": "京东", "match_type": "shop",
+             "match_mode": "contains", "match_value": "京东", "priority": 73},
+        ]
+
+    def _execute_yoy(self, executor, args):
+        with mock.patch(
+                "common.public_data.channel_map.fetch_channel_map",
+                return_value=self._yoy_rules()):
+            return json.loads(executor.execute("channel_yoy", args))
+
+    def test_channel_yoy_uses_db_and_channel_map_for_both_periods(self):
+        executor = self._executor([[
+            {"shop_name": "杭易-京东购喝旗舰店sop", "buyer_nick": "",
+             "current_sales_amount": 120, "previous_sales_amount": 100,
+             "current_row_count": 2, "previous_row_count": 1},
+            {"shop_name": "杭州易元宏雷贸易有限公司",
+             "buyer_nick": "北京京东世纪信息技术有限公司",
+             "current_sales_amount": 80, "previous_sales_amount": 50,
+             "current_row_count": 1, "previous_row_count": 1},
+        ]])
+        result = self._execute_yoy(executor, {
+            "channel": "京东", "start_date": "2026-10-01",
+            "end_date": "2026-10-27",
+        })
+        self.assertEqual("DB:fact_order_line", result["source"])
+        self.assertEqual("dim_channel_map", result["channel_mapping"])
+        self.assertEqual("2025-10-01", result["previous_period"]["start"])
+        self.assertEqual("2025-10-27", result["previous_period"]["end"])
+        self.assertTrue(result["has_previous_data"])
+        self.assertEqual(200, result["rows"][0]["current_sales_amount"])
+        self.assertEqual(150, result["rows"][0]["previous_sales_amount"])
+        self.assertEqual(50, result["rows"][0]["delta_amount"])
+        self.assertEqual(0.333333, result["rows"][0]["yoy_rate"])
+        sql, params = executor._conn.cursor_instance.executed[-1]
+        self.assertIn("FROM `fact_order_line`", sql)
+        self.assertIn("GROUP BY `shop_name`, `buyer_nick`", sql)
+        self.assertNotIn("fact_channel_daily_sales", sql)
+        self.assertNotIn("`channel_name`=%s", sql)
+        period = ["2026-10-01", "2026-10-28", "2025-10-01", "2025-10-28"]
+        self.assertEqual(period * 3, [str(value) for value in params])
+
+    def test_channel_yoy_defaults_to_mtd_and_splits_stores(self):
+        executor = self._executor([[
+            {"shop_name": "杭易-京东购喝旗舰店sop", "buyer_nick": "",
+             "current_sales_amount": 50, "previous_sales_amount": 0,
+             "current_row_count": 2, "previous_row_count": 0},
+        ]], now=lambda: datetime(2026, 10, 27))
+        result = self._execute_yoy(
+            executor, {"channel": "京东", "group_by": "store"})
+        self.assertEqual("2026-10-01", result["current_period"]["start"])
+        self.assertEqual("2026-10-27", result["current_period"]["end"])
+        self.assertEqual("store", result["group_by"])
+        self.assertFalse(result["has_previous_data"])
+        self.assertIsNone(result["rows"][0]["yoy_rate"])
+        self.assertEqual("杭易-京东购喝旗舰店sop",
+                         result["rows"][0]["shop_name"])
+
+    def test_channel_yoy_validates_dates_and_is_registered(self):
+        executor = self._executor([])
+        result = json.loads(executor.execute(
+            "channel_yoy", {"start_date": "2026-10-01"}))
+        self.assertIn("同时提供", result["error"])
+        result = json.loads(executor.execute("channel_yoy", {
+            "start_date": "2026-10-27", "end_date": "2026-10-01",
+        }))
+        self.assertIn("不能晚于", result["error"])
+        names = {t["function"]["name"] for t in agent_module.TOOLS}
+        self.assertIn("channel_yoy", names)
+        self.assertIn("channel_yoy", agent_module._SYSTEM_PROMPT)
+        from common.kb_web.service import tools_for
+        narrow = {t["function"]["name"] for t in tools_for(False)}
+        self.assertNotIn("channel_yoy", narrow)
+
     def test_product_stats(self):
         # 商品库统计（2026-10-24）：总数 + 品牌/大类分布
         executor = self._executor([
@@ -2141,6 +2221,18 @@ class AgentLoopTests(unittest.TestCase):
         answer = agent_module.run_agent(self._llm(responses), "q",
                                         executor=self._Executor())
         self.assertIn("排名", answer)
+
+    def test_yoy_question_only_offers_channel_yoy(self):
+        offered = []
+
+        class _Llm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                offered.append([t["function"]["name"] for t in tools])
+                return {"content": "答", "tool_calls": []}
+
+        agent_module.run_agent(
+            _Llm(), "京东本月销售额同比去年怎么样", executor=self._Executor())
+        self.assertEqual([["channel_yoy"]], offered)
 
     def test_history_enters_system_prompt(self):
         captured = []
