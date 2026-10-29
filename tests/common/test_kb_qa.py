@@ -2205,6 +2205,39 @@ class AgentLoopTests(unittest.TestCase):
                                         executor=self._Executor())
         self.assertEqual("最终答案", answer)
 
+    def test_final_answer_paths_have_no_application_token_cap(self):
+        # 2026-10-29 用户裁决：最终答复不再由应用设置 max_tokens。
+        # 覆盖循环内直接作答与轮尽后作答两条路径。
+        tool_kwargs = []
+        chat_kwargs = []
+
+        class _DirectLlm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                tool_kwargs.append(kw)
+                return {"content": "完整答案", "tool_calls": []}
+
+        answer = agent_module.run_agent(
+            _DirectLlm(), "q", executor=self._Executor())
+        self.assertEqual("完整答案", answer)
+        self.assertIsNone(tool_kwargs[0]["max_tokens"])
+
+        class _FallbackLlm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                tool_kwargs.append(kw)
+                return {"content": None, "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "daily_sales", "arguments": "{}"}}]}
+
+            def chat(self, messages, **kw):
+                chat_kwargs.append(kw)
+                return "轮尽后的完整答案"
+
+        answer = agent_module.run_agent(
+            _FallbackLlm(), "q", executor=self._Executor(), max_rounds=1)
+        self.assertEqual("轮尽后的完整答案", answer)
+        self.assertIsNone(tool_kwargs[1]["max_tokens"])
+        self.assertIsNone(chat_kwargs[0]["max_tokens"])
+
     def test_two_tool_calls_then_answer_within_three_rounds(self):
         # 2026-10-21 实测场景：先查基准日期再算完成率，两轮工具后第三轮作答
         responses = [
@@ -2332,6 +2365,23 @@ class ChatWithToolsTests(unittest.TestCase):
         self.assertIsNone(result["content"])
         self.assertEqual("daily_sales",
                          result["tool_calls"][0]["function"]["name"])
+
+    def test_none_max_tokens_omits_payload_field(self):
+        payloads = []
+
+        def fake_request(payload):
+            payloads.append(payload)
+            return {"choices": [{"message": {
+                "content": "ok", "tool_calls": []}}]}
+
+        client = llm_module.LlmClient("http://x", "k", "m",
+                                      request=fake_request)
+        client.chat([{"role": "user", "content": "q"}], max_tokens=None)
+        client.chat_with_tools(
+            [{"role": "user", "content": "q"}], tools=[], max_tokens=None)
+        self.assertEqual(2, len(payloads))
+        self.assertTrue(all("max_tokens" not in payload
+                            for payload in payloads))
 
 
 class AgentAnswerRoutingTests(unittest.TestCase):

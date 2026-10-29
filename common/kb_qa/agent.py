@@ -883,7 +883,9 @@ def run_agent(llm, question, *, executor, history=None,
     ]
     for round_index in range(max_rounds):
         try:
-            response = call(messages, tools=tools)
+            # 工具决策与最终作答共用一次调用；不传 max_tokens，避免长答案
+            # 被应用层 2048 上限截断（平台/模型自身上限仍客观存在）。
+            response = call(messages, tools=tools, max_tokens=None)
         except LlmError:
             return None
         except Exception:
@@ -939,7 +941,7 @@ def run_agent(llm, question, *, executor, history=None,
     if meta is not None:
         meta["rounds"] += 1  # 轮尽作答也是一次 LLM 调用
     try:
-        final = llm.chat(messages, max_tokens=2048, temperature=0.3)
+        final = llm.chat(messages, max_tokens=None, temperature=0.3)
     except LlmError:
         return None
     if has_dsml_residue(final):
