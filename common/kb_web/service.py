@@ -18,7 +18,8 @@ import uuid
 from common.kb_qa.context import DEFAULT_MAX_TURNS
 
 #: 业务数据工具名（白名单外用户不可见）。
-_BUSINESS_TOOLS = frozenset(("daily_sales", "channel_sales", "query_sql"))
+_BUSINESS_TOOLS = frozenset(
+    ("daily_sales", "channel_sales", "channel_yoy", "query_sql"))
 
 
 def web_history_from_messages(messages, *, max_turns=DEFAULT_MAX_TURNS):

@@ -21,6 +21,9 @@ fail-open：LLM 异常/返回畸形/工具执行异常 → 返回 None，调用�
 
 import json
 import re
+from collections import defaultdict
+from datetime import datetime, timedelta
+from decimal import Decimal
 
 from common.kb_qa.context import format_history
 from common.kb_qa.llm import LlmError
@@ -32,6 +35,7 @@ from common.kb_qa.llm import LlmError
 MAX_TOOL_ROUNDS = 3
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CHANNEL_YOY_RE = re.compile(r"同比|去年同期")
 
 _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获取数据后回答。
 
@@ -39,15 +43,19 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 1. 商品参数（箱规/尺寸/重量/材质/条码/礼袋）或按条件筛选商品 → search_products
 2. 产品手册/品牌工艺/卖点话术/售后流程/销售总结规划 → search_docs
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
-4. 各渠道销售额汇总对比 → channel_sales
-5. 商品库统计（总数、按品牌/大类分布）→ product_stats
-6. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup；
+4. 各渠道某日销售额汇总 → channel_sales（AI 表格日销口径）
+5. 渠道销售额同比/去年同期（含按店铺拆分）→ channel_yoy，
+   必须使用 DB 订单行与 dim_channel_map 渠道映射，两期同源同口径；
+   has_previous_data=false 时必须明示去年同期缺数，禁止改用 channel_sales
+   或静默改成环比
+6. 商品库统计（总数、按品牌/大类分布）→ product_stats
+7. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup；
    结果 requires_clarification=true 时列出候选请用户选择，不得猜属主
-7. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
+8. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
    与 fact_stockout_line（trade_no/logistics_no），不要只做聚合；其他业务
    数据问题（出库/退款/库存/人员目标等）也走 query_sql（只用白名单表，
    大表必须带日期过滤，结果超 100 行用 GROUP BY 聚合）
-8. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+9. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
@@ -129,6 +137,30 @@ TOOLS = [
                                 "description": "渠道名，留空为全部渠道"},
                     "date": {"type": "string",
                              "description": "YYYY-MM-DD，缺省为最近一天"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "channel_yoy",
+            "description": "按 DB 订单行计算渠道销售同比：本期与去年同期均查 "
+                           "fact_order_line.paid_amount，支持按店铺拆分；缺省"
+                           "日期为本月 1 日截至今天",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string",
+                                "description": "渠道名（如京东），留空为全部渠道"},
+                    "start_date": {"type": "string",
+                                   "description": "本期开始日期 YYYY-MM-DD，"
+                                                  "需与 end_date 同时提供"},
+                    "end_date": {"type": "string",
+                                 "description": "本期结束日期 YYYY-MM-DD（含当天），"
+                                                "需与 start_date 同时提供"},
+                    "group_by": {"type": "string", "enum": ["channel", "store"],
+                                 "description": "channel 按渠道汇总；store 按店铺拆分"},
                 },
             },
         },
@@ -581,6 +613,138 @@ class ToolExecutor:
             cursor.close()
         return {"count": len(rows), "rows": rows}
 
+    def _tool_channel_yoy(self, args):
+        """DB 订单行同源同比；渠道归集复用 dim_channel_map。"""
+        from common.public_data.channel_map import fetch_channel_map, resolve_channel
+
+        channel = str(args.get("channel") or "").strip()
+        group_by = str(args.get("group_by") or "channel").strip()
+        if group_by not in ("channel", "store"):
+            return {"error": "group_by must be channel or store"}
+        start_text = str(args.get("start_date") or "").strip()
+        end_text = str(args.get("end_date") or "").strip()
+        if bool(start_text) != bool(end_text):
+            return {"error": "start_date 和 end_date 必须同时提供"}
+        try:
+            if start_text:
+                start = datetime.strptime(start_text, "%Y-%m-%d").date()
+                end = datetime.strptime(end_text, "%Y-%m-%d").date()
+            else:
+                end = (self._now or datetime.now)().date()
+                start = end.replace(day=1)
+            if start > end:
+                return {"error": "start_date 不能晚于 end_date"}
+
+            def previous_year(day):
+                try:
+                    return day.replace(year=day.year - 1)
+                except ValueError:  # 2 月 29 日对齐到平年 2 月 28 日
+                    return day.replace(year=day.year - 1, day=28)
+
+            previous_start = previous_year(start)
+            previous_end = previous_year(end)
+        except ValueError:
+            return {"error": "date must be YYYY-MM-DD"}
+
+        rules = fetch_channel_map(self._conn)
+        if not rules:
+            return {"error": "dim_channel_map 无可用映射，无法按业务渠道计算同比"}
+        valid_channels = {row.get("channel_key") for row in rules
+                          if row.get("channel_key")}
+        if channel and channel not in valid_channels:
+            return {"error": f"unknown channel: {channel}",
+                    "valid_channels": sorted(valid_channels)}
+
+        end_exclusive = end + timedelta(days=1)
+        previous_end_exclusive = previous_end + timedelta(days=1)
+        # 先在 SQL 内按店铺×抬头聚合两期金额与行数，再用同一套渠道映射
+        # 归集。直接过滤 channel_name 会漏掉京东 B2B 大额抬头。
+        sql = (
+            "SELECT `shop_name`, `buyer_nick`,"
+            " SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+            " THEN `paid_amount` ELSE 0 END) AS `current_sales_amount`,"
+            " SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+            " THEN `paid_amount` ELSE 0 END) AS `previous_sales_amount`,"
+            " SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+            " THEN 1 ELSE 0 END) AS `current_row_count`,"
+            " SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+            " THEN 1 ELSE 0 END) AS `previous_row_count`"
+            " FROM `fact_order_line`"
+            " WHERE ((`trade_time`>=%s AND `trade_time`<%s)"
+            " OR (`trade_time`>=%s AND `trade_time`<%s))"
+            " GROUP BY `shop_name`, `buyer_nick`"
+        )
+        params = [
+            start, end_exclusive, previous_start, previous_end_exclusive,
+            start, end_exclusive, previous_start, previous_end_exclusive,
+            start, end_exclusive, previous_start, previous_end_exclusive,
+        ]
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(sql, params)
+            source_rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        buckets = defaultdict(lambda: {
+            "current": Decimal("0"), "previous": Decimal("0"),
+            "current_rows": 0, "previous_rows": 0,
+        })
+        for source in source_rows:
+            channel_key = resolve_channel(source, rules) or "未映射"
+            if channel and channel_key != channel:
+                continue
+            identity = (channel_key if group_by == "channel"
+                        else (channel_key, source.get("shop_name") or "未命名店铺"))
+            bucket = buckets[identity]
+            bucket["current"] += Decimal(str(
+                source.get("current_sales_amount") or 0))
+            bucket["previous"] += Decimal(str(
+                source.get("previous_sales_amount") or 0))
+            bucket["current_rows"] += int(source.get("current_row_count") or 0)
+            bucket["previous_rows"] += int(source.get("previous_row_count") or 0)
+
+        rows = []
+        for identity, bucket in buckets.items():
+            if group_by == "channel":
+                row = {"channel_key": identity}
+            else:
+                row = {"channel_key": identity[0], "shop_name": identity[1]}
+            current = bucket["current"]
+            previous = bucket["previous"]
+            row.update({
+                "current_sales_amount": float(round(current, 2)),
+                "previous_sales_amount": float(round(previous, 2)),
+                "delta_amount": float(round(current - previous, 2)),
+                "yoy_rate": (round(float((current - previous) / previous), 6)
+                             if previous else None),
+                "current_row_count": bucket["current_rows"],
+                "previous_row_count": bucket["previous_rows"],
+            })
+            rows.append(row)
+        rows.sort(key=lambda row: row["current_sales_amount"], reverse=True)
+        result = {
+            "source": "DB:fact_order_line",
+            "channel_mapping": "dim_channel_map",
+            "metric": "paid_amount（已剔除取消/待付款/全额退款关闭，部分退款不回扣）",
+            "group_by": group_by,
+            "current_period": {"start": start.isoformat(),
+                               "end": end.isoformat()},
+            "previous_period": {"start": previous_start.isoformat(),
+                                "end": previous_end.isoformat()},
+            "has_previous_data": any(
+                bucket["previous_rows"] for bucket in buckets.values()),
+            "count": len(rows),
+            "rows": rows[:50],
+        }
+        budget = _RESULT_LIMIT - 200
+        while (result["rows"]
+               and len(json.dumps(result, ensure_ascii=False,
+                                  default=str)) > budget):
+            result["rows"].pop()
+        result["returned"] = len(result["rows"])
+        return result
+
     def _tool_query_sql(self, args):
         try:
             sql = validate_sql(args.get("sql"))
@@ -692,6 +856,13 @@ def run_agent(llm, question, *, executor, history=None,
     """
     call = chat_with_tools or llm.chat_with_tools
     tools = TOOLS if tools is None else tools
+    # 同比问句的路由不能靠模型自由发挥：只 offering channel_yoy，
+    # 从协议面杜绝又走 AI 表格 channel_sales 或 query_sql 混口径。
+    if _CHANNEL_YOY_RE.search(question or ""):
+        yoy_tools = [t for t in tools
+                     if t.get("function", {}).get("name") == "channel_yoy"]
+        if yoy_tools:
+            tools = yoy_tools
     if meta is not None:
         meta["tools"] = []
         meta["rounds"] = 0
