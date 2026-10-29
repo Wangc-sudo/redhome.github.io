@@ -68,13 +68,14 @@ class LlmClient:
             return json.loads(resp.read().decode())
 
     def chat(self, messages, *, max_tokens=600, temperature=0.3):
-        """单轮 chat，返回 content 文本；失败抛 LlmError（调用方降级）。"""
+        """单轮 chat；max_tokens=None 时不向平台传应用层输出上限。"""
         payload = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         try:
             result = self._request(payload)
             self._accumulate_usage(result)
@@ -91,17 +92,17 @@ class LlmClient:
         返回 {"content": str|None, "tool_calls": [...]}；失败抛 LlmError。
         tool_calls 原样透传（id/type/function{name,arguments}）。
 
-        max_tokens 默认 2048：该模型是推理版，reasoning_tokens 与答案共享
-        max_tokens 预算——600 曾被 reasoning 吃光导致 content 空、agent
-        静默无答（2026-10-21「各区域目标完成排名」实测）。
+        max_tokens=None 时不传该字段，由平台/模型自身能力决定输出上限；
+        agent 最终答复走此形态，其他调用方保留原有默认预算。
         """
         payload = {
             "model": self._model,
             "messages": messages,
             "tools": list(tools),
-            "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         try:
             result = self._request(payload)
             self._accumulate_usage(result)
