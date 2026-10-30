@@ -1,6 +1,8 @@
+import json
 import os
 from dataclasses import replace
 from datetime import date, datetime, time
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -14,6 +16,7 @@ from common.public_data.dataset_contract import (
 )
 from common.public_data.freshness_repository import (
     KnowledgeIndexFreshnessRepository,
+    _json_dumps,
 )
 from common.public_data.freshness import (
     STATUS_BLOCKED,
@@ -128,6 +131,20 @@ class DatasetContractTests(TestCase):
             self.assertFalse(service_recovery_allowed("extract-channel", "auto_catchup"))
         self.assertTrue(service_recovery_allowed("sync-wdt", "auto_replay"))
         self.assertTrue(service_recovery_allowed("unregistered-service", "auto_replay"))
+
+
+class FreshnessJsonTests(TestCase):
+    def test_database_datetime_and_decimal_values_are_serializable(self):
+        payload = json.loads(_json_dumps({
+            "finished_at": datetime(2026, 10, 28, 5, 9, 13, 577314),
+            "business_date": date(2026, 10, 28),
+            "records": Decimal("1188"),
+            "ratio": Decimal("0.25"),
+        }))
+        self.assertEqual("2026-10-28T05:09:13.577314", payload["finished_at"])
+        self.assertEqual("2026-10-28", payload["business_date"])
+        self.assertEqual(1188, payload["records"])
+        self.assertEqual(0.25, payload["ratio"])
 
 
 class KnowledgeFreshnessRepositoryTests(TestCase):

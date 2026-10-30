@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from common.kb_qa.export_schema import (
     query_export_ddl_statements,
+    query_export_v2_ddl_statements,
     query_snapshot_ddl_statements,
 )
 from common.kb_qa.schema import (
@@ -866,6 +867,11 @@ _MIGRATIONS = (
         "mart-ops-kb-export-v1",
         "mart",
         query_export_ddl_statements(),
+    ),
+    (
+        "mart-ops-kb-export-v2",
+        "mart",
+        query_export_v2_ddl_statements(),
     ),
 )
 
