@@ -19,6 +19,13 @@ from common.kb_web.service import KbWebService
 from common.kb_web.sessions import WebSessionStore
 
 
+def _export_authorizer(member_checker):
+    """将登录在册检查适配为导出授权的双参数契约。"""
+    def authorize(userid, _conversation_id):
+        return member_checker(userid)
+    return authorize
+
+
 def build_kb_web_deps(settings, environ=None):
     """返回 register_kb_routes 的 kwargs；缺关键配置返回 None。"""
     env = os.environ if environ is None else environ
@@ -131,5 +138,5 @@ def build_kb_web_deps(settings, environ=None):
         "qr_redirect_uri": f"{public_base}/kb/api/auth/dingtalk/callback",
         "member_checker": member_checker,
         "export_service": export_service,
-        "export_authorizer": member_checker,
+        "export_authorizer": _export_authorizer(member_checker),
     }
