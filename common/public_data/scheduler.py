@@ -21,11 +21,19 @@ Design notes:
 * ``project-mart`` stays unschedulable: ``rebuild-projection`` requires an
   explicit ``SYNC_RUN_ID`` and remains a manual/repair tool.  If someone
   puts a cron on it in the registry the scheduler logs a WARNING and skips.
-* No catch-up beyond the current minute: the next fire is computed from
-  ``now - 60s``, so a scheduler that comes up at 02:00:05 still honours the
-  02:00 window, but one that was down since 01:00 does not retroactively
-  fire hours-old misses at 09:00 -- those surface via the data-watermark
-  checks instead.
+* By default there is no catch-up beyond the current minute: the next fire
+  is computed from ``now - 60s``, so a scheduler that comes up at 02:00:05
+  still honours the 02:00 window, but one that was down since 01:00 does not
+  retroactively fire hours-old misses at 09:00.  ``AUTO_CATCHUP_ENABLE=1``
+  explicitly opts into at most one recent missed window per service, bounded
+  by the last heartbeat and ``AUTO_CATCHUP_MAX_AGE_SECONDS``.
+* Automatic recovery is off by default.  ``AUTO_RETRY_ENABLE=1`` retries
+  retryable non-zero exits with bounded exponential backoff;
+  ``AUTO_REPLAY_ENABLE=1`` replays only runs confirmed not to have started
+  (lock acquisition failed).  Runner exceptions have an unknown outcome and
+  are never replayed.  Every logical run keeps a deterministic run id for
+  in-process dedup, and recovery reuses the normal command/dependency/lock
+  gates without adding ``--force``.
 * Command templates are generic for the ``robot-<region>`` /
   ``pages-<region>`` / ``leaderboard-<region>`` families
   (:func:`command_spec`): a new region can be
@@ -57,6 +65,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -248,6 +257,21 @@ _COMMAND_TABLE = {
     # L3 数据新鲜度看门狗（A3）：跨区域，投递固定 region=ops；
     # 依赖 extract-channel 完成后触发，避免早于数据落地误报。
     "freshness-check": _mart_cli_entry("freshness-check"),
+    # 统一数据集新鲜度检查（2026-10-29 自动化闭环 P0）：按数据集契约检查
+    # raw 到达、mart 发布、业务窗口完整性与源目标对账，结果落
+    # pd_dataset_freshness。与既有 L3 看门狗（freshness-check）并行运行。
+    "dataset-freshness-check": {
+        "argv": [
+            "common.public_data.cli", "freshness-check",
+            "--confirm-local-test-write",
+        ],
+    },
+    "kb-export-cleanup": {
+        "argv": [
+            "common.public_data.cli", "kb-export-cleanup",
+            "--confirm-local-test-write",
+        ],
+    },
     # 舰队月检（2026-10-17 治理 P2）：四节体检快照落 pd_ops_fleet_audit，
     # 产出只进 ops-web 治理抽屉（用户裁决：治理产出不发群播报）。
     "fleet-audit": {
@@ -305,6 +329,30 @@ _LOCK_PREFIX = "public-data-scheduler"
 #: Grace window for honouring the current cron minute (see module docstring).
 _FIRE_GRACE_SECONDS = 60
 
+#: Recovery defaults are deliberately conservative.  The three feature flags
+#: require an explicit truthy value; numeric knobs only bound an opted-in run.
+DEFAULT_AUTO_RETRY_MAX_ATTEMPTS = 3
+DEFAULT_AUTO_RETRY_BACKOFF_SECONDS = 60.0
+DEFAULT_AUTO_CATCHUP_MAX_AGE_SECONDS = 3600.0
+_MAX_AUTO_RETRY_ATTEMPTS = 10
+_PERMANENT_EXIT_CODES = frozenset({2, 64, 78, 126, 127})
+
+
+def _env_flag(env, name):
+    return (env.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_number(env, name, default, cast, *, minimum, maximum):
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s 配置非法，使用安全默认值", name)
+        return default
+    return min(maximum, max(minimum, value))
+
 
 @dataclass(frozen=True)
 class SchedulerSettings:
@@ -315,6 +363,14 @@ class SchedulerSettings:
     poll_seconds: float = DEFAULT_POLL_SECONDS
     #: roll-manifest 依赖探针盯的 live manifest 路径（见 _roll_manifest_probe）。
     manifest_path: str = ""
+    heartbeat_path: str = ""
+    auto_retry_enable: bool = False
+    auto_catchup_enable: bool = False
+    auto_replay_enable: bool = False
+    #: 总尝试次数（含首次），不是首次之外的额外重试次数。
+    auto_retry_max_attempts: int = DEFAULT_AUTO_RETRY_MAX_ATTEMPTS
+    auto_retry_backoff_seconds: float = DEFAULT_AUTO_RETRY_BACKOFF_SECONDS
+    auto_catchup_max_age_seconds: float = DEFAULT_AUTO_CATCHUP_MAX_AGE_SECONDS
 
     @staticmethod
     def from_env(environ=None):
@@ -334,7 +390,35 @@ class SchedulerSettings:
                 (env.get("PUBLIC_DATA_LIVE_MANIFEST_PATH") or "").strip()
                 or (env.get("PUBLIC_DATA_CONFIG") or "").strip()
             ),
+            heartbeat_path=(env.get("SCHEDULER_HEARTBEAT_PATH") or "").strip(),
+            auto_retry_enable=_env_flag(env, "AUTO_RETRY_ENABLE"),
+            auto_catchup_enable=_env_flag(env, "AUTO_CATCHUP_ENABLE"),
+            auto_replay_enable=_env_flag(env, "AUTO_REPLAY_ENABLE"),
+            auto_retry_max_attempts=_env_number(
+                env, "AUTO_RETRY_MAX_ATTEMPTS",
+                DEFAULT_AUTO_RETRY_MAX_ATTEMPTS, int,
+                minimum=1, maximum=_MAX_AUTO_RETRY_ATTEMPTS,
+            ),
+            auto_retry_backoff_seconds=_env_number(
+                env, "AUTO_RETRY_BACKOFF_SECONDS",
+                DEFAULT_AUTO_RETRY_BACKOFF_SECONDS, float,
+                minimum=0.0, maximum=86400.0,
+            ),
+            auto_catchup_max_age_seconds=_env_number(
+                env, "AUTO_CATCHUP_MAX_AGE_SECONDS",
+                DEFAULT_AUTO_CATCHUP_MAX_AGE_SECONDS, float,
+                minimum=0.0, maximum=86400.0,
+            ),
         )
+
+
+def write_heartbeat(path):
+    if not path:
+        return
+    target = Path(path)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(str(time.time()), encoding="ascii")
+    os.replace(temporary, target)
 
 
 def build_argv(service_id, settings):
@@ -435,7 +519,12 @@ def build_mysql_lock_factory(connect, database_settings):
 
     def factory(service_id):
         connection = connect(database_settings)
-        lock_name = f"{_LOCK_PREFIX}:{service_id}"
+        lock_scope = (
+            "kb-rag-milvus"
+            if service_id in {"rag-index-docs", "rag-index-products"}
+            else service_id
+        )
+        lock_name = f"{_LOCK_PREFIX}:{lock_scope}"
         return _MysqlLock(connection, lock_name)
 
     return factory
@@ -493,6 +582,36 @@ def _next_fire(schedule, now):
         return None
 
 
+def _previous_fire(schedule, now):
+    """Latest cron window strictly before *now*; invalid schedules return None."""
+    try:
+        from croniter import croniter
+    except ImportError:  # pragma: no cover - dependency is pinned
+        raise RuntimeError("croniter is required for the scheduler")
+    segments = _cron_segments(schedule)
+    if not segments:
+        return None
+    try:
+        return max(
+            croniter(segment, now).get_prev(datetime) for segment in segments
+        )
+    except (ValueError, KeyError):
+        return None
+
+
+def _read_heartbeat(path, now):
+    """Read a heartbeat as *now*'s datetime shape; bad input fails closed."""
+    if not path:
+        return None
+    try:
+        timestamp = float(Path(path).read_text(encoding="ascii").strip())
+        if now.tzinfo is None:
+            return datetime.fromtimestamp(timestamp)
+        return datetime.fromtimestamp(timestamp, tz=now.tzinfo)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 #: 摘要型依赖探针登记：service_id -> (source_name, dataset_name LIKE 模式,
 #: 北京窗口时刻)。今日（北京）窗口时刻之后存在 completed run 的匹配摘要
 #: 即视为上游已就绪；时间列存 UTC，阈值按 UTC+8 折算。
@@ -503,6 +622,12 @@ _DEP_SUMMARY_PROBES = {
     # 07:00 批次的 extract 完成才生成页面——失败时暂缓+补发，治停机日
     # 页面静默陈旧。daily_report_offline 是每次 extract 的核心数据集。
     "extract-mart": ("extract", "daily_report_offline", (7, 0)),
+}
+
+#: 无 sync 摘要的知识任务以运行流水判断依赖；失败/降级非零退出时不会放行。
+_DEP_HISTORY_PROBES = {
+    "kb-sync-products": (3, 0),
+    "kb-sync-wiki": (3, 5),
 }
 
 
@@ -547,6 +672,38 @@ def build_summary_dep_probe(
     return probe
 
 
+def build_history_dep_probe(
+    connect, database_settings, *, service_id, beijing_hm, now=None,
+):
+    """要求上游在当日指定时刻后有成功运行流水，异常一律 fail-closed。"""
+    clock = now or (lambda: datetime.now(timezone.utc))
+
+    def probe():
+        try:
+            beijing_now = clock() + timedelta(hours=8)
+            hour, minute = beijing_hm
+            threshold_utc = beijing_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            ) - timedelta(hours=8)
+            connection = connect(database_settings)
+            try:
+                with contextlib.closing(connection.cursor()) as cursor:
+                    cursor.execute(
+                        "SELECT 1 AS hit FROM `pd_ops_run_history` "
+                        "WHERE `service_id` = %s AND `status` = 'finished' "
+                        "AND `exit_code` = 0 AND `finished_at` >= %s LIMIT 1",
+                        (service_id, threshold_utc),
+                    )
+                    return cursor.fetchone() is not None
+            finally:
+                connection.close()
+        except Exception:
+            logger.warning("运行流水依赖探针异常，按未满足处理", exc_info=True)
+            return False
+
+    return probe
+
+
 def _roll_manifest_probe(settings, *, now):
     """roll-manifest 今日已成功：live manifest 今日被原子重写。
 
@@ -581,7 +738,8 @@ class Scheduler:
     def __init__(self, *, config_source, service_ids, runner, lock_factory,
                  settings=None, executor=None, clock=None, sleeper=None,
                  poll_seconds=DEFAULT_POLL_SECONDS, dep_probe=None,
-                 dep_probes=None, run_requests=None, run_history=None):
+                 dep_probes=None, run_requests=None, run_history=None,
+                 dead_letter_store=None):
         self._config_source = config_source
         if callable(service_ids):
             self._fleet_source = service_ids
@@ -592,6 +750,7 @@ class Scheduler:
         self._runner = runner
         self._run_requests = run_requests
         self._run_history = run_history
+        self._dead_letter_store = dead_letter_store
         self._lock_factory = lock_factory
         self._settings = settings or SchedulerSettings.from_env()
         self._executor = executor or ThreadExecutor()
@@ -606,28 +765,62 @@ class Scheduler:
         self._next_fire = {}   # service_id -> datetime
         self._running = set()  # service_ids with a run in flight
         self._warned = set()   # one-shot WARNING dedup
+        #: 自动恢复均为进程内状态；run_id 防止同一逻辑窗口被重复点燃。
+        self._run_states = {}  # run_id -> running / finished / failed
+        self._pending_recovery = {}  # run_id -> recovery attempt metadata
+        self._dead_letters = {}  # service_id -> safe, bounded failure metadata
+        if self._dead_letter_store is not None:
+            try:
+                for item in self._dead_letter_store.list_active():
+                    self._dead_letters[item["service_id"]] = dict(item)
+            except Exception:
+                logger.warning("dead-letter 状态恢复失败，启动后按进程内状态运行")
+        self._recovery_lock = threading.RLock()
+        self._run_id_counter = 0
+        self._catchup_pending = self._settings.auto_catchup_enable
+        self._catchup_reference = (
+            _read_heartbeat(self._settings.heartbeat_path, self._clock())
+            if self._catchup_pending else None
+        )
 
     def _default_dep_probe(self, service_id):
-        """默认依赖探针：已知依赖逐项判定；未知依赖告警后按满足处理。"""
+        """默认依赖探针：未知依赖与一切探针异常均 fail-closed。"""
         probe = self._dep_probes.get(service_id)
         if probe is not None:
-            return probe()
+            try:
+                return bool(probe())
+            except Exception:
+                logger.warning(
+                    "service=%s 依赖探针异常，按未满足处理", service_id,
+                )
+                return False
         if service_id == "roll-manifest":
             try:
                 return _roll_manifest_probe(self._settings, now=self._clock())
             except Exception:
-                logger.warning("roll-manifest 依赖探针异常，按未满足处理", exc_info=True)
+                logger.warning("roll-manifest 依赖探针异常，按未满足处理")
                 return False
         self._warn_once(
             service_id, "dep-unknown",
-            "service=%s 作为依赖被引用但无探针实现，按已满足处理（请检查 depends_on 拼写）",
+            "service=%s 作为依赖被引用但无探针实现，按未满足处理（请检查 depends_on 拼写）",
             service_id,
         )
-        return True
+        return False
 
     def _unsatisfied_deps(self, service_id, config):
         """返回未满足的依赖列表（空 = 可触发）。"""
-        pending = [d for d in config.depends_on if not self._dep_probe(d)]
+        pending = []
+        for dependency in config.depends_on:
+            try:
+                satisfied = self._dep_probe(dependency)
+            except Exception:
+                logger.warning(
+                    "service=%s 的依赖 %s 探针异常，按未满足处理",
+                    service_id, dependency,
+                )
+                satisfied = False
+            if not satisfied:
+                pending.append(dependency)
         if pending:
             self._warn_once(
                 service_id, "dep-wait",
@@ -639,6 +832,17 @@ class Scheduler:
     # -- configuration (re-resolved every tick: Nacos hot reload) -----------
 
     def _reload(self, now):
+        catchup_reference = None
+        if self._catchup_pending:
+            # 只在首轮 reload 允许补跑；之后新增/改线的配置绝不追溯历史。
+            self._catchup_pending = False
+            catchup_reference = self._catchup_reference
+            self._catchup_reference = None
+            if catchup_reference is None:
+                self._warn_once(
+                    "*", "catchup-no-heartbeat",
+                    "自动补跑已开启但上次心跳不可用，仅保留当前分钟宽限",
+                )
         if self._fleet_source is not None:
             try:
                 refreshed = tuple(self._fleet_source())
@@ -670,6 +874,19 @@ class Scheduler:
                 fire_at = _next_fire(
                     schedule, now - timedelta(seconds=_FIRE_GRACE_SECONDS)
                 )
+                if catchup_reference is not None and fire_at is not None:
+                    candidate = _previous_fire(schedule, now)
+                    cutoff = now - timedelta(
+                        seconds=self._settings.auto_catchup_max_age_seconds
+                    )
+                    # 每线最多补最新一个窗口；必须晚于上次心跳且在年龄上限内。
+                    if (
+                        candidate is not None
+                        and catchup_reference < candidate <= now
+                        and cutoff <= candidate
+                        and self._recovery_allowed(service_id, "auto_catchup")
+                    ):
+                        fire_at = candidate
                 if fire_at is None:
                     self._next_fire.pop(service_id, None)
                     self._warn_once(
@@ -693,6 +910,37 @@ class Scheduler:
 
     # -- firing ---------------------------------------------------------------
 
+    def _launch_run(self, service_id, argv, *, run_id, trigger_type, attempt=1,
+                    run_once_request_id=None):
+        """Dedup and launch one logical attempt through the existing run path."""
+        with self._recovery_lock:
+            state = self._run_states.get(run_id)
+            if state is not None and state != "pending":
+                return False
+            if service_id in self._running:
+                return False
+            if trigger_type == "cron" and service_id in self._dead_letters:
+                return False
+            self._run_states[run_id] = "running"
+            self._pending_recovery.pop(run_id, None)
+            self._running.add(service_id)
+        if run_once_request_id is None:
+            fn = lambda sid=service_id, cmd=argv, rid=run_id, n=attempt: self._run(
+                sid, cmd, trigger_type=trigger_type, run_id=rid, attempt=n,
+            )
+        else:
+            fn = lambda sid=service_id, cmd=argv, rid=run_id, qid=run_once_request_id: (
+                self._run_once(sid, cmd, qid, run_id=rid)
+            )
+        try:
+            self._executor.launch(fn)
+        except Exception:
+            with self._recovery_lock:
+                self._running.discard(service_id)
+                self._run_states[run_id] = "failed"
+            raise
+        return True
+
     def tick(self):
         """One poll iteration: reload configs, fire whatever is due."""
         now = self._clock()
@@ -701,6 +949,14 @@ class Scheduler:
             if now < fire_at:
                 continue
             config = self._configs.get(service_id) or PipelineConfig(service_id)
+            if service_id in self._dead_letters:
+                self._next_fire[service_id] = _next_fire(config.schedule, now)
+                self._warn_once(
+                    service_id, "dead-letter",
+                    "service=%s 已进入 dead-letter，定时/自动恢复暂停；须人工成功运行后解除",
+                    service_id,
+                )
+                continue
             # 依赖门禁（DAG）：depends_on 未满足时暂缓——**不推进**点火时间，
             # 下一 tick 重查，满足即补发（与其他跳过语义的「等下一 cron 槽」
             # 不同：依赖是分钟级等待，不该错过整个周期）。
@@ -712,6 +968,12 @@ class Scheduler:
             if service_id in self._running:
                 logger.info("service=%s 上次运行未结束，本次跳过", service_id)
                 continue
+            if any(
+                item["service_id"] == service_id
+                for item in self._pending_recovery.values()
+            ):
+                logger.info("service=%s 已有待恢复运行，本次 cron 窗口跳过", service_id)
+                continue
             argv = build_argv(service_id, self._settings)
             if argv is None:
                 self._warn_once(
@@ -719,12 +981,170 @@ class Scheduler:
                     "service=%s 无调度命令映射，忽略其 schedule", service_id,
                 )
                 continue
-            self._running.add(service_id)
-            logger.info("service=%s 触发：%s", service_id, " ".join(argv[2:4]))
-            self._executor.launch(
-                lambda sid=service_id, cmd=argv: self._run(sid, cmd)
-            )
+            run_id = f"cron:{service_id}:{fire_at.isoformat()}"
+            if self._launch_run(
+                service_id, argv, run_id=run_id, trigger_type="cron",
+            ):
+                logger.info(
+                    "service=%s 触发：%s run_id=%s",
+                    service_id, " ".join(argv[2:4]), run_id,
+                )
+        self._drain_recovery(now)
         self._drain_run_requests()
+
+    @staticmethod
+    def _recovery_allowed(service_id, action):
+        from common.public_data.dataset_contract import service_recovery_allowed
+
+        return service_recovery_allowed(service_id, action)
+
+    def _retry_limit(self):
+        return min(
+            _MAX_AUTO_RETRY_ATTEMPTS,
+            max(1, int(self._settings.auto_retry_max_attempts)),
+        )
+
+    def _schedule_recovery(self, service_id, run_id, attempt, returncode, reason):
+        delay = max(0.0, self._settings.auto_retry_backoff_seconds)
+        delay *= 2 ** max(0, attempt - 1)
+        due = self._clock() + timedelta(seconds=delay)
+        self._run_states[run_id] = "pending"
+        self._pending_recovery[run_id] = {
+            "service_id": service_id,
+            "attempt": attempt + 1,
+            "due": due,
+        }
+        logger.warning(
+            "service=%s run_id=%s 第 %d 次失败（退出码=%s），%.1fs 后执行第 %d 次尝试；reason=%s",
+            service_id, run_id, attempt, returncode, delay, attempt + 1, reason,
+        )
+
+    def _dead_letter(self, service_id, run_id, attempt, returncode, reason):
+        self._run_states[run_id] = "dead_letter"
+        self._pending_recovery.pop(run_id, None)
+        self._dead_letters[service_id] = {
+            "run_id": run_id,
+            "attempts": attempt,
+            "returncode": returncode,
+            "reason": reason,
+            "at": self._clock(),
+        }
+        if self._dead_letter_store is not None:
+            try:
+                self._dead_letter_store.record(
+                    service_id, run_id, attempt, returncode, reason,
+                )
+            except Exception:
+                logger.error("service=%s dead-letter 持久化失败", service_id)
+            try:
+                self._dead_letter_store.notify(
+                    service_id, run_id, reason, attempt,
+                )
+            except Exception:
+                logger.warning("service=%s dead-letter 告警入队失败", service_id)
+        # 安全日志：只含线名、内部 run_id、次数和退出码；不打印异常正文/命令/凭据。
+        logger.error(
+            "service=%s run_id=%s 连续失败达到上限或遇永久错误，进入 dead-letter；attempts=%d exit_code=%s reason=%s",
+            service_id, run_id, attempt, returncode, reason,
+        )
+
+    def _after_run(self, service_id, argv, trigger_type, run_id, attempt,
+                   returncode, failure_kind):
+        """Update bounded recovery state after history has been finalized."""
+        del argv  # 恢复时重建命令，确保沿用最新门禁与配置，不保存敏感参数。
+        with self._recovery_lock:
+            if returncode == 0:
+                self._run_states[run_id] = "finished"
+                self._pending_recovery.pop(run_id, None)
+                for pending_id, item in list(self._pending_recovery.items()):
+                    if item["service_id"] == service_id:
+                        self._pending_recovery.pop(pending_id, None)
+                        self._run_states[pending_id] = "cancelled"
+                if service_id in self._dead_letters:
+                    del self._dead_letters[service_id]
+                    logger.info("service=%s 人工/后续运行成功，解除 dead-letter", service_id)
+                if self._dead_letter_store is not None:
+                    try:
+                        self._dead_letter_store.resolve(service_id)
+                    except Exception:
+                        logger.warning("service=%s dead-letter 解除回写失败", service_id)
+                return
+            self._run_states[run_id] = "failed"
+            if trigger_type != "cron":
+                return  # 手动 --force 运行绝不自动重试，避免重复外部投递。
+            auto_retry = (
+                self._settings.auto_retry_enable
+                and self._recovery_allowed(service_id, "auto_retry")
+            )
+            auto_replay = (
+                self._settings.auto_replay_enable
+                and self._recovery_allowed(service_id, "auto_replay")
+            )
+            if returncode is not None and auto_retry:
+                if returncode in _PERMANENT_EXIT_CODES:
+                    self._dead_letter(
+                        service_id, run_id, attempt, returncode, "permanent_exit",
+                    )
+                elif attempt >= self._retry_limit():
+                    self._dead_letter(
+                        service_id, run_id, attempt, returncode, "retry_limit",
+                    )
+                else:
+                    self._schedule_recovery(
+                        service_id, run_id, attempt, returncode, "nonzero_exit",
+                    )
+                return
+            if failure_kind == "unknown_outcome":
+                # 已启动但异常：结果未知，自动重放可能造成重复写/重复投递。
+                if auto_retry or auto_replay:
+                    self._dead_letter(
+                        service_id, run_id, attempt, returncode, "unknown_outcome",
+                    )
+                return
+            if failure_kind == "not_started" and auto_replay:
+                if attempt >= self._retry_limit():
+                    self._dead_letter(
+                        service_id, run_id, attempt, returncode, "replay_limit",
+                    )
+                else:
+                    self._schedule_recovery(
+                        service_id, run_id, attempt, returncode, "not_started",
+                    )
+
+    def _drain_recovery(self, now):
+        """Fire due retries, re-checking enable/command/dependency gates."""
+        for run_id, item in list(self._pending_recovery.items()):
+            service_id = item["service_id"]
+            if now < item["due"]:
+                continue
+            if service_id in self._dead_letters:
+                self._pending_recovery.pop(run_id, None)
+                continue
+            if service_id in self._running:
+                continue
+            config = self._configs.get(service_id)
+            if (
+                config is None or not config.enabled or not config.schedule
+                or service_id in _UNSCHEDULABLE
+            ):
+                self._pending_recovery.pop(run_id, None)
+                self._run_states[run_id] = "cancelled"
+                logger.warning(
+                    "service=%s run_id=%s 配置已禁用或不可调度，取消自动恢复",
+                    service_id, run_id,
+                )
+                continue
+            if self._unsatisfied_deps(service_id, config):
+                continue
+            argv = build_argv(service_id, self._settings)
+            if argv is None:
+                self._pending_recovery.pop(run_id, None)
+                self._run_states[run_id] = "cancelled"
+                continue
+            self._launch_run(
+                service_id, argv, run_id=run_id, trigger_type="cron",
+                attempt=item["attempt"],
+            )
 
     # -- 「立即运行一次」通道（pd_ops_run_request，ops-web 写入）----------------
 
@@ -774,15 +1194,15 @@ class Scheduler:
                 continue
             if not claimed:
                 continue  # 已被其他副本认领
-            self._running.add(service_id)
-            logger.info(
-                "service=%s 手动触发（run-once #%s，发起人 %s）",
-                service_id, request.request_id, request.requested_by,
-            )
-            self._executor.launch(
-                lambda sid=service_id, cmd=argv, rid=request.request_id:
-                    self._run_once(sid, cmd, rid)
-            )
+            run_id = f"run_once:{service_id}:{request.request_id}"
+            if self._launch_run(
+                service_id, argv, run_id=run_id, trigger_type="run_once",
+                run_once_request_id=request.request_id,
+            ):
+                logger.info(
+                    "service=%s 手动触发（run-once #%s，发起人 %s）",
+                    service_id, request.request_id, request.requested_by,
+                )
 
     # -- 执行流水（pd_ops_run_history，旁路审计：故障只告警、绝不阻断运行）----
 
@@ -830,9 +1250,11 @@ class Scheduler:
             )
             return 0
 
-    def _run_once(self, service_id, argv, request_id):
+    def _run_once(self, service_id, argv, request_id, *, run_id=None):
         """run-once 包装：复用 _run 的锁/运行路径，结束后回写结果。"""
-        returncode = self._run(service_id, argv, trigger_type="run_once")
+        returncode = self._run(
+            service_id, argv, trigger_type="run_once", run_id=run_id,
+        )
         try:
             self._run_requests.mark_finished(request_id, returncode)
         except Exception:
@@ -841,18 +1263,27 @@ class Scheduler:
                 request_id, exc_info=True,
             )
 
-    def _run(self, service_id, argv, trigger_type="cron"):
+    def _run(self, service_id, argv, trigger_type="cron", *, run_id=None, attempt=1):
         """持锁运行一条管道；返回子进程退出码（锁失败/异常返回 None）。
 
-        *trigger_type* 仅用于执行流水（cron / run_once）；流水行在取锁
-        之前落库，锁被占用/运行异常（无退出码）也会留下 failed 记录。
+        *trigger_type* 仅用于执行流水（cron / run_once）；自动恢复仍记 cron，
+        以兼容既有流水枚举。流水行在取锁之前落库，锁被占用/运行异常
+        （无退出码）也会留下 failed 记录。
         """
+        if run_id is None:
+            with self._recovery_lock:
+                self._run_id_counter += 1
+                run_id = f"direct:{service_id}:{self._run_id_counter}"
+                self._run_states[run_id] = "running"
         history_id = self._record_start(service_id, trigger_type)
         returncode = None
+        failure_kind = None
+        started = False
         try:
             try:
                 lock = self._lock_factory(service_id)
             except Exception:
+                failure_kind = "not_started"
                 logger.error(
                     "service=%s 获取调度锁失败（DB 不可达？），本次跳过",
                     service_id, exc_info=True,
@@ -860,15 +1291,18 @@ class Scheduler:
                 return None
             try:
                 with lock:
+                    started = True
                     returncode = self._runner(service_id, argv)
             except Exception:
+                failure_kind = "unknown_outcome" if started else "not_started"
                 logger.error(
                     "service=%s 运行异常", service_id, exc_info=True
                 )
                 return None
             if returncode != 0:
+                failure_kind = "exit"
                 logger.error(
-                    "service=%s 退出码 %s（失败不计入禁跑，下个 cron 窗口照常重试）",
+                    "service=%s 退出码 %s（自动恢复按显式开关与上限处理）",
                     service_id, returncode,
                 )
             else:
@@ -877,6 +1311,10 @@ class Scheduler:
         finally:
             self._running.discard(service_id)
             self._record_finish(history_id, returncode)
+            self._after_run(
+                service_id, argv, trigger_type, run_id, attempt,
+                returncode, failure_kind,
+            )
 
     # -- main loop ------------------------------------------------------------
 
@@ -889,6 +1327,10 @@ class Scheduler:
         if reconciled:
             logger.info("启动自愈：收口 %d 条遗留 running 流水行", reconciled)
         while True:
+            try:
+                write_heartbeat(self._settings.heartbeat_path)
+            except OSError:
+                logger.warning("scheduler 心跳写入失败", exc_info=True)
             self.tick()
             self._sleeper(self._poll_seconds)
 
@@ -989,6 +1431,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
 
     from common.public_data.db import connect
     from common.public_data.ops_control import (
+        DbDeadLetterGateway,
         DbRunHistoryGateway,
         DbRunRequestGateway,
     )
@@ -1005,6 +1448,12 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
         for service_id, (source_name, dataset_like, beijing_hm)
         in _DEP_SUMMARY_PROBES.items()
     }
+    dep_probes.update({
+        service_id: build_history_dep_probe(
+            connect, mart_database, service_id=service_id, beijing_hm=beijing_hm,
+        )
+        for service_id, beijing_hm in _DEP_HISTORY_PROBES.items()
+    })
     scheduler = Scheduler(
         config_source=build_config_source(),
         service_ids=build_fleet_source(),
@@ -1016,6 +1465,7 @@ def main():  # pragma: no cover - thin wiring, exercised in integration env
         dep_probes=dep_probes,
         run_requests=DbRunRequestGateway(connect, mart_database),
         run_history=DbRunHistoryGateway(connect, mart_database),
+        dead_letter_store=DbDeadLetterGateway(connect, mart_database),
     )
     scheduler.run_forever()
 

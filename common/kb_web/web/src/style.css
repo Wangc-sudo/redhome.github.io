@@ -258,6 +258,16 @@ body {
   padding: 3px 6px; cursor: pointer; border-radius: 4px;
 }
 .msg-actions button:active { background: #f0f2f5; }
+.export-panel {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 12px; color: #646a73;
+}
+.export-panel button, .export-panel a {
+  border: 1px solid #cbd5ff; background: #f5f7ff; color: #3b5bff;
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; text-decoration: none;
+}
+.export-panel small { flex-basis: 100%; color: #8f959e; line-height: 1.5; }
+.export-panel .export-error { color: #d83931; }
 
 /* ---- 思考态 ---- */
 .thinking { color: #646a73; }

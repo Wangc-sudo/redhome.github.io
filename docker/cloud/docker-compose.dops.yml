@@ -70,17 +70,24 @@ services:
       # 写入侧仍只有 scheduler；kb-gateway 侧 search_vector 即用即 close
       # （排他 flock 毫秒级持有），与凌晨灌库几乎零冲突窗口。
       - /opt/vector:/opt/vector:rw
+      - /opt/dops/kb-exports:/opt/dops/kb-exports:rw
 
   scheduler:
     image: dops-app:latest
     container_name: dops-scheduler
     network_mode: host
     restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 1536m
+    pids_limit: 256
     env_file: /opt/dops/app.env
     working_dir: /opt/dops/repo
     environment:
       TZ: Asia/Shanghai
       PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      # 业务开关与嵌入参数由 app.env 提供；不在 Compose 再设默认值覆盖 env_file。
+      SCHEDULER_HEARTBEAT_PATH: /var/lib/dops-scheduler/heartbeat
     entrypoint: ["python3"]
     command:
       - -m
@@ -96,6 +103,18 @@ services:
       # RAG 向量索引（2026-10-13）：rag-index-products 读写 Milvus Lite
       # 嵌入式库文件（/opt/vector/data/rag.db），落宿主机持久化。
       - /opt/vector:/opt/vector:rw
+      - /opt/dops/scheduler-state:/var/lib/dops-scheduler:rw
+      - /opt/dops/kb-exports:/opt/dops/kb-exports:rw
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os,sys,time;sys.exit(0 if time.time()-os.path.getmtime('/var/lib/dops-scheduler/heartbeat')<120 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # 业务线 bi-web（2026-09-23 上云）：只读 mart_ops 的 L1 驾驶舱。
   # 与 host 网络三件套不同，本服务走桥接 + 端口映射——uvicorn 端口
@@ -133,6 +152,7 @@ services:
       - /opt/dops/repo:/opt/dops/repo:ro
       # Settings 启动即读 PUBLIC_DATA_CONFIG（source-manifest.json）
       - /opt/dops/live:/opt/dops/live:ro
+      - /opt/dops/kb-exports:/opt/dops/kb-exports:rw
     healthcheck:
       test:
         - CMD

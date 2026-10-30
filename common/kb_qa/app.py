@@ -386,7 +386,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                  log=print, reply_client=None, robot_code=None, llm=None,
                  doc_search=None, vector_search=None, context_store=None,
                  agent_runner=None, asset_sender=None, image_search=None,
-                 wdt_search=None):
+                 wdt_search=None, export_sender=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -402,6 +402,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._asset_sender = asset_sender
         self._image_search = image_search
         self._wdt_search = wdt_search
+        self._export_sender = export_sender
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         # DB/LLM/向量均为同步客户端，整体移出 Stream 事件循环。
@@ -438,19 +439,29 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: duplicate delivery")
                 return AckMessage.STATUS_OK, "OK"
             meta = {}
-            # clarify 待选择闭环（2026-10-23）：上一条若是多款反问，先取出
-            # 候选（消费即作废），本轮是选择形态则 _answer 内直接命中。
+            from common.kb_qa.export_delivery import (
+                is_export_only_request,
+                is_export_request,
+            )
+
+            export_only = is_export_only_request(text)
+            export_requested = is_export_request(text)
             pending = None
             if ctx_key is not None:
                 pending = self._context_store.pop_pending(ctx_key)
-            # token 成本统计（2026-10-22）：LLM 用量前后快照差值归账到
-            # 本条消息（遥测口径）。_RecordingLlm 类替身无 usage_snapshot，
-            # getattr 守卫。
             usage_snap = getattr(self._llm, "usage_snapshot", None)
             usage_before = usage_snap() if usage_snap else None
-            reply, intent, matched = self._answer(
-                conn, text, history=history, conversation_id=conversation_id,
-                meta=meta, pending=pending)
+            if export_only:
+                delivery = self._deliver_latest_export(incoming, conversation_id)
+                reply = delivery["reply"]
+                intent, matched = "EXPORT", None
+                meta["export_sent"] = delivery.get("sent", False)
+                if delivery.get("export_id"):
+                    meta["export_id"] = delivery["export_id"]
+            else:
+                reply, intent, matched = self._answer(
+                    conn, text, history=history, conversation_id=conversation_id,
+                    meta=meta, pending=pending)
             if usage_before is not None:
                 usage_after = usage_snap()
                 meta["prompt_tokens"] = max(
@@ -460,18 +471,24 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     0, usage_after["completion_tokens"]
                     - usage_before["completion_tokens"])
             latency_ms = int((time.monotonic() - started) * 1000)
-            self._finish_audit(conn, msg_id, intent, matched,
-                               "text" if reply else "none",
-                               meta=meta, reply=reply, latency_ms=latency_ms)
-            # 噪声轮过滤（2026-10-22）：CHITCHAT 轮（HELP 帮助文案等）
-            # 不进历史，避免稀释 6 轮窗口里的有效上文。subject=最近命中
-            # 商品名，供历史透出「上文涉及商品」（指代补全锚点）。
-            if ctx_key is not None and intent != CHITCHAT:
+            self._finish_audit(
+                conn, msg_id, intent, matched, "text" if reply else "none",
+                meta=meta, reply=reply, latency_ms=latency_ms,
+                sender_uid=getattr(incoming, "sender_staff_id", None),
+                conversation_id=conversation_id,
+            )
+            if not export_only and export_requested:
+                conn.commit()
+                delivery = self._deliver_latest_export(incoming, conversation_id)
+                meta["export_sent"] = delivery.get("sent", False)
+                if delivery.get("export_id"):
+                    meta["export_id"] = delivery["export_id"]
+                reply = f"{reply}\n\n{delivery['reply']}" if reply else delivery["reply"]
+            if ctx_key is not None and intent != CHITCHAT and not export_only:
                 self._context_store.record(
                     ctx_key, question=text, answer=reply,
                     category=intent, record_id=matched,
                     subject=meta.get("subject"))
-            # 本轮发出的是多款反问 → 存候选，等下一条选择消息闭环。
             if ctx_key is not None and meta.get("pending_candidates"):
                 self._context_store.set_pending(
                     ctx_key, meta["pending_candidates"])
@@ -503,6 +520,13 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                              extra_at=meta.get("at_user_ids") or ())
         return AckMessage.STATUS_OK, "OK"
 
+    def _deliver_latest_export(self, incoming, conversation_id):
+        if self._export_sender is None:
+            return {"sent": False, "reply": "Excel 导出功能暂未开放。"}
+        return self._export_sender.deliver_latest(
+            getattr(incoming, "sender_staff_id", None), conversation_id,
+        )
+
     # ------------------------------------------------------------------
     # 审计与去重
     # ------------------------------------------------------------------
@@ -527,7 +551,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             cursor.close()
 
     def _finish_audit(self, conn, msg_id, intent, matched, reply_kind,
-                      meta=None, reply=None, latency_ms=None):
+                      meta=None, reply=None, latency_ms=None,
+                      sender_uid=None, conversation_id=None):
         if not msg_id:
             return
         meta = meta or {}
@@ -538,8 +563,9 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 "UPDATE `kb_qa_audit` SET `intent`=%s, `matched_record_id`=%s,"
                 " `reply_kind`=%s, `recall_source`=%s, `tool_used`=%s,"
                 " `agent_rounds`=%s, `latency_ms`=%s, `answer_excerpt`=%s,"
-                " `prompt_tokens`=%s, `completion_tokens`=%s"
-                " WHERE `msg_id`=%s",
+                " `prompt_tokens`=%s, `completion_tokens`=%s, `export_count`=%s,"
+                " `embedding_model`=%s, `embedding_dim`=%s, `index_version`=%s,"
+                " `error_summary`=%s WHERE `msg_id`=%s",
                 (
                     intent, matched, reply_kind,
                     meta.get("recall_source"),
@@ -549,11 +575,28 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     (reply or "")[:500] or None,
                     meta.get("prompt_tokens"),
                     meta.get("completion_tokens"),
+                    meta.get("export_count", len(meta.get("query_snapshots") or [])),
+                    meta.get("embedding_model"),
+                    meta.get("embedding_dim"),
+                    meta.get("index_version"),
+                    (meta.get("error_summary") or "")[:255] or None,
                     msg_id,
                 ),
             )
         finally:
             cursor.close()
+        snapshots = meta.get("query_snapshots") or []
+        if snapshots and sender_uid and conversation_id:
+            import uuid
+            from common.kb_qa.query_export import QuerySnapshotRepository
+
+            QuerySnapshotRepository(conn).save(
+                snapshot_id=uuid.uuid4().hex,
+                msg_id=msg_id,
+                sender_uid=sender_uid,
+                conversation_id=conversation_id,
+                payload={"version": 1, "items": snapshots},
+            )
 
     def _mark_failed(self, msg_id, incoming, text, conversation_id):
         """处理异常后的失败流水补记（新连接，best-effort 不抛）。
@@ -949,6 +992,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         pending = []
         holders = []
         tools = []
+        query_snapshots = []
         rounds = 0
         for (_, intent), (reply, _, _, branch_meta) in zip(plan, results):
             sections.append({
@@ -969,6 +1013,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 if holder not in holders:
                     holders.append(holder)
             tools.extend(branch_meta.get("tools") or [])
+            query_snapshots.extend(branch_meta.get("query_snapshots") or [])
             rounds += branch_meta.get("rounds") or 0
             if meta is not None:
                 for key in ("subject", "asset"):
@@ -1000,6 +1045,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 meta["phone_holders"] = holders
             if tools:
                 meta["tools"] = tools
+            if query_snapshots:
+                meta["query_snapshots"] = query_snapshots
             if rounds:
                 meta["rounds"] = rounds
         return reply, "multi", None
@@ -1255,6 +1302,32 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
     if asset_sender is None:
         log("kb qa: asset delivery disabled (missing env)")
 
+    from common.kb_qa.export_delivery import build_group_export_sender
+
+    def export_authorizer(userid):
+        """发送前复核原查询主体仍在册；会话归属由快照/任务另行校验。"""
+        conn = connection_factory()
+        try:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT 1 AS `hit` FROM `dim_robot_member` WHERE `user_id`=%s LIMIT 1",
+                    (userid,),
+                )
+                return cursor.fetchone() is not None
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+    export_sender = build_group_export_sender(
+        connection_factory=connection_factory,
+        reply_client=reply_client,
+        robot_code=robot_code,
+        authorizer=export_authorizer,
+        log=log,
+    )
+
     return KbStreamHandler(
         connection_factory=connection_factory,
         conversation_ids=conversation_ids,
@@ -1267,6 +1340,7 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
         asset_sender=asset_sender,
         image_search=image_search,
         wdt_search=wdt_search,
+        export_sender=export_sender,
     )
 
 

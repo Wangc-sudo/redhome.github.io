@@ -30,7 +30,7 @@ import uuid
 
 from common.kb_qa import media
 from common.kb_qa.sync_products import ATTACHMENT_FIELDS, normalize_record
-from common.rag import embed, index_state
+from common.rag import embed, freshness, index_state
 
 #: 文本条目拼接的列（列名, 标签）：全量核心字段，语义检索素材。
 _TEXT_FIELDS = (
@@ -87,7 +87,8 @@ def _new_stats():
         "text_embedded": 0, "image_embedded": 0, "deleted": 0,
         "failed": 0, "retried": 0, "api_calls": 0, "duration_ms": 0,
         "skipped": 0, "source_complete": False, "status": "completed",
-        "reason": "",
+        "reason": "", "delete_planned": 0, "publish_failed": 0,
+        "last_error": None, "run_id": "", "index_version": "", "content_hash": "",
     }
 
 
@@ -149,8 +150,9 @@ def _error_label(exc):
 
 def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
               model=embed.DEFAULT_MODEL, provider=embed.DEFAULT_PROVIDER,
-              base_url=None, text_batch=None, on_progress=None,
-              state_repository=None, run_id=None):
+              base_url=None, text_batch=None, image_batch=None, on_progress=None,
+              state_repository=None, run_id=None, freshness_repository=None,
+              auto_delete=False, delete_max_count=100, delete_max_ratio=0.1):
     """商品快照增量入库；失败保留 last-good，完整成功后才对账删除。
 
     文本哈希基于 normalize_record/build_text 后的规范化内容；图片哈希始终
@@ -161,6 +163,8 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
     run_id = run_id or uuid.uuid4().hex
     now = datetime.now()
     stats = _new_stats()
+    stats["run_id"] = run_id
+    stats["index_version"] = run_id
     text_batch = text_batch or embed.max_batch(provider)
     records = client.list_records(base_id, sheet_id) or []
     stats["records_read"] = len(records)
@@ -275,7 +279,9 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
     # 图片先下载并做字节 SHA256，再决定 unchanged；ctaigw 仍把签名 URL
     # 交给网关 embed。内存最多保留一个图片批次的字节，避免首轮全量占内存。
     pending_images = []
-    image_batch = embed.max_image_batch(provider)
+    image_batch = image_batch or embed.max_image_batch(provider)
+    if not 1 <= image_batch <= embed.max_image_batch(provider):
+        raise ValueError("image_batch exceeds provider limit")
     image_entries = [
         (row, field_name, index, meta)
         for row, record in pairs
@@ -310,14 +316,53 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
     if pending_images:
         process_images(pending_images)
 
-    stats["written"] = store.upsert_items(milvus, items) if items else 0
+    if items and state_repository:
+        staged = []
+        try:
+            staged = store.stage_items(milvus, items, run_id=run_id)
+            store.verify_staged_items(milvus, staged, dim=real_dim)
+            stats["written"] = store.publish_staged_items(milvus, staged)
+        except Exception as exc:
+            try:
+                store.discard_staged_items(milvus, staged)
+            except Exception:
+                pass
+            published_ids = {item["id"] for item in items}
+            stats["failed"] += len(items)
+            stats["publish_failed"] = len(items)
+            stats["last_error"] = _error_label(exc)
+            for item in items:
+                if item["kind"] == "image":
+                    stats["image"] -= 1
+                    stats["image_failed"] += 1
+                else:
+                    stats["text"] -= 1
+            for row in state_rows:
+                if row["item_id"] not in published_ids:
+                    continue
+                old = previous.get(row["item_id"]) or {}
+                row["status"] = index_state.STATUS_DEGRADED
+                row["attempts"] = int(old.get("attempts") or 0) + 1
+                row["last_success_at"] = old.get("last_success_at")
+                row["last_error"] = stats["last_error"]
+    elif items:
+        stats["written"] = store.upsert_items(milvus, items)
     complete = stats["source_complete"] and stats["failed"] == 0
+    stale_ids = []
+    deletion_pending = 0
     if state_repository:
         state_repository.save_batch(state_rows, run_id=run_id)
         stale_ids = state_repository.reconcile(run_id, complete=complete)
-        if stale_ids:
-            stats["deleted"] = store.delete_ids(milvus, stale_ids)
-            state_repository.delete_ids(stale_ids)
+        stats["delete_planned"] = len(stale_ids)
+        if stale_ids and auto_delete:
+            ratio = len(stale_ids) / max(len(previous), 1)
+            if (len(stale_ids) <= delete_max_count
+                    and ratio <= delete_max_ratio):
+                stats["deleted"] = store.delete_ids(milvus, stale_ids)
+                state_repository.delete_ids(stale_ids)
+            else:
+                stats["reason"] = "delete_threshold"
+        deletion_pending = len(stale_ids) - stats["deleted"]
 
     if not records:
         stats["status"] = "skipped"
@@ -328,6 +373,52 @@ def run_index(*, client, milvus, store, api_key, base_id, sheet_id, dim,
     elif stats["failed"]:
         stats["status"] = "degraded"
         stats["reason"] = "index_failed"
+    elif deletion_pending:
+        stats["status"] = "degraded"
+        stats["reason"] = stats["reason"] or "deletion_pending"
+
+    snapshot = hashlib.sha256()
+    for row in sorted(state_rows, key=lambda value: value["item_id"]):
+        snapshot.update(row["item_id"].encode("utf-8"))
+        snapshot.update(b"\0")
+        snapshot.update(row["content_hash"].encode("ascii"))
+        snapshot.update(b"\0")
+    stats["content_hash"] = snapshot.hexdigest()
+    if freshness_repository:
+        remaining_stale = stale_ids[stats["deleted"]:]
+        text_pending = sum(not item_id.startswith("product-img:")
+                           for item_id in remaining_stale)
+        image_pending = len(remaining_stale) - text_pending
+        common = {
+            "source_type": "aitable",
+            "source_id": f"{base_id}:{sheet_id}"[:128],
+            "source_version": stats["content_hash"],
+            "content_hash": stats["content_hash"],
+            "chunker_version": "product-fields-v1",
+            "embedding_model": model,
+            "dim": real_dim,
+            "index_version": run_id,
+            "last_source_snapshot_at": now,
+        }
+        for index_key, kind, source_count, indexed_count, failed_count, pending in (
+                ("kb_product_text_vector", "text", stats["products"],
+                 stats["text"], stats["failed"] - stats["image_failed"],
+                 text_pending),
+                ("kb_product_image_vector", "image", len(image_entries),
+                 stats["image"], stats["image_failed"], image_pending)):
+            blocked = not records
+            degraded = not stats["source_complete"] or failed_count or pending
+            common_status = "blocked" if blocked else (
+                "degraded" if degraded else "fresh")
+            freshness_repository.record(common | {
+                "index_key": index_key,
+                "source_count": source_count,
+                "indexed_count": indexed_count,
+                "pending_count": pending + source_count - indexed_count - failed_count,
+                "failed_count": failed_count,
+                "status": common_status,
+                "last_error": stats["last_error"] or stats["reason"] or None,
+            })
     stats["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
     return stats
 
@@ -338,19 +429,28 @@ def main(argv=None):
     parser.add_argument("--confirm-local-test-write", action="store_true")
     args = parser.parse_args(argv)
 
-    # fail-soft：凭据未配置不算故障（灰度期 seed enabled 但 env 未发 key 时
-    # 每小时静默跳过，不刷失败告警）；配好即自动生效。
     provider = os.environ.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
     api_key = os.environ.get("RAG_EMBED_API_KEY") or os.environ.get("JINA_API_KEY")
     if not api_key:
+        source_id = (
+            f"{os.environ.get('KB_PRODUCTS_BASE_ID', 'unknown')}:"
+            f"{os.environ.get('KB_PRODUCTS_SHEET_ID', 'unknown')}"
+        )
+        freshness.record_run_failure(
+            ("kb_product_text_vector", "kb_product_image_vector"),
+            source_type="aitable", source_id=source_id, reason="no_embed_key",
+        )
         stats = _new_stats()
         stats.update(status="skipped", reason="no_embed_key")
         print("service=rag-index-products status=skipped reason=no_embed_key")
-        return stats
+        raise SystemExit(1)
     base_url = os.environ.get("RAG_EMBED_BASE_URL")
 
     from common.dingtalk.client import DingTalkClient
     from common.public_data import db
+    from common.public_data.freshness_repository import (
+        KnowledgeIndexFreshnessRepository,
+    )
     from common.public_data.live_safety import require_live_run
     from common.public_data.settings import Settings
     from common.rag import store
@@ -375,6 +475,11 @@ def main(argv=None):
     if not model:
         raise SystemExit(f"provider={provider} 需要 RAG_EMBED_MODEL")
 
+    text_batch = int(os.environ.get("RAG_EMBED_TEXT_BATCH", embed.max_batch(provider)))
+    image_batch = int(os.environ.get("RAG_EMBED_IMAGE_BATCH", embed.max_image_batch(provider)))
+    concurrency = int(os.environ.get("RAG_EMBED_CONCURRENCY", "1"))
+    if not 1 <= text_batch <= 64 or concurrency != 1:
+        raise SystemExit("RAG_EMBED_TEXT_BATCH 须为 1..64，且单写者并发只能为 1")
     state_connection = db.connect(settings.mart_database)
     try:
         stats = run_index(
@@ -383,7 +488,12 @@ def main(argv=None):
             base_id=os.environ["KB_PRODUCTS_BASE_ID"],
             sheet_id=os.environ["KB_PRODUCTS_SHEET_ID"],
             dim=dim, model=model, provider=provider, base_url=base_url,
+            text_batch=text_batch, image_batch=image_batch,
             state_repository=index_state.RagIndexStateRepository(state_connection),
+            freshness_repository=KnowledgeIndexFreshnessRepository(state_connection),
+            auto_delete=os.environ.get("INDEX_AUTO_DELETE_ENABLE", "0") == "1",
+            delete_max_count=int(os.environ.get("INDEX_DELETE_MAX_COUNT", "100")),
+            delete_max_ratio=float(os.environ.get("INDEX_DELETE_MAX_RATIO", "0.1")),
             # 全量灌库可能跑几十分钟，无进度输出时无法区分「慢」与「卡死」
             # （2026-10-20 两次排查教训）：每批落一行进度。
             on_progress=lambda kind, n: print(f"progress {kind}={n}", flush=True),
@@ -399,10 +509,14 @@ def main(argv=None):
         f" unchanged={stats['unchanged']}"
         f" text_embedded={stats['text_embedded']}"
         f" image_embedded={stats['image_embedded']}"
-        f" deleted={stats['deleted']} failed={stats['failed']}"
-        f" retried={stats['retried']} api_calls={stats['api_calls']}"
-        f" duration_ms={stats['duration_ms']}"
+        f" deleted={stats['deleted']} delete_planned={stats['delete_planned']}"
+        f" failed={stats['failed']} publish_failed={stats['publish_failed']}"
+        f" retried={stats['retried']}"
+        f" api_calls={stats['api_calls']} duration_ms={stats['duration_ms']}"
+        f" index_version={stats['index_version']}"
     )
+    if stats["status"] != "completed":
+        raise SystemExit(1)
     return stats
 
 

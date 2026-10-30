@@ -6,6 +6,7 @@ fail-open 与 LLM 同款铁律：缺配/检索异常一律返回 []，调用方�
 （与 rag.index_docs/index_products 同一组变量，一处配置三处生效）。
 """
 
+import importlib
 import os
 
 from common.rag import embed
@@ -48,7 +49,7 @@ def search_vector(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
     供 app._merge_doc_hits 与 BM25 结果合并去重。
     """
     values = os.environ if environ is None else environ
-    from common.rag import store
+    store = importlib.import_module("common.rag.store")
 
     milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
     try:
@@ -84,7 +85,7 @@ def search_wdt(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
                environ=None, limit=VECTOR_K):
     """订单问题 → kind="wdt" 交易明细块；低分命中与手册文本同样过滤。"""
     values = os.environ if environ is None else environ
-    from common.rag import store
+    store = importlib.import_module("common.rag.store")
 
     milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
     try:
@@ -151,7 +152,7 @@ def search_images(question, *, provider=embed.DEFAULT_PROVIDER, api_key=None,
     约定：异常由调用方兜底。
     """
     values = os.environ if environ is None else environ
-    from common.rag import store
+    store = importlib.import_module("common.rag.store")
 
     milvus = store.connect(values.get("RAG_MILVUS_PATH", store.DEFAULT_PATH))
     try:

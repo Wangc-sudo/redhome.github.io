@@ -525,7 +525,8 @@ class _StubService:
 
 
 def _make_client(store=None, service=None, record_fetcher=None,
-                 auth_client=None, secret="test-secret"):
+                 auth_client=None, secret="test-secret", export_service=None,
+                 export_authorizer=None):
     app = FastAPI()
     kb_routes.register_kb_routes(
         app,
@@ -534,6 +535,8 @@ def _make_client(store=None, service=None, record_fetcher=None,
         session_secret=secret,
         auth_client=auth_client,
         record_fetcher=record_fetcher,
+        export_service=export_service,
+        export_authorizer=export_authorizer,
     )
     return TestClient(app)
 
@@ -678,6 +681,125 @@ class KbRoutesTests(unittest.TestCase):
         good = client.post("/kb/api/auth/dingtalk", json={"authCode": "good"})
         self.assertEqual(200, good.status_code)
         self.assertIn(auth.SESSION_COOKIE, good.cookies)
+
+
+class _StubExports:
+    def __init__(self, path=None):
+        self.path = path
+        self.state = "pending"
+        self.generated = []
+        self.conversation_id = None
+
+    def latest_snapshot_id(self, uid, conversation_id):
+        return "s" * 32
+
+    def create(self, snapshot_id, uid, conversation_id, authorizer=None):
+        self._check(uid, conversation_id)
+        self.conversation_id = conversation_id
+        self.state = "pending"
+        return "e" * 32
+
+    def generate(self, export_id, authorizer=None):
+        self.generated.append(export_id)
+        self.state = "completed"
+
+    def status(self, export_id, uid, conversation_id, authorizer=None):
+        self._check(uid, conversation_id)
+        return {
+            "export_id": export_id,
+            "snapshot_id": "s" * 32,
+            "status": self.state,
+            "file_name": "小易查询结果.xlsx",
+            "row_count": 1,
+            "file_size": 4,
+            "freshness_status": "fresh",
+            "query_summary": {"items": [{
+                "data_scope": "杭州日销", "data_version": "2026-10-29",
+            }]},
+            "expires_at": "2026-10-31 00:00:00",
+            "created_at": "2026-10-30 00:00:00",
+            "finished_at": None,
+            "error": None,
+        }
+
+    def download(self, export_id, uid, conversation_id, authorizer=None):
+        self._check(uid, conversation_id)
+        if self.state != "completed":
+            raise RuntimeError("not ready")
+        return self.path, "小易查询结果.xlsx"
+
+    def _check(self, uid, conversation_id):
+        if uid != "u1" or not conversation_id.startswith("web:"):
+            raise PermissionError("forbidden")
+        if self.conversation_id is not None and conversation_id != self.conversation_id:
+            raise PermissionError("forbidden")
+
+
+class KbExportRouteTests(unittest.TestCase):
+    def test_create_poll_download_and_cross_user_denial(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "random.xlsx"
+            path.write_bytes(b"xlsx")
+            exports = _StubExports(path)
+            client = _make_client(export_service=exports)
+            cookies = _login_cookie("u1")
+            sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+            base = f"/kb/api/sessions/{sid}/exports"
+            self.assertEqual(401, client.post(base, json={"snapshot_id": "s" * 32}).status_code)
+            created = client.post(base, json={"snapshot_id": "s" * 32}, cookies=cookies)
+            self.assertEqual(200, created.status_code)
+            self.assertEqual("pending", created.json()["status"])
+            self.assertEqual(["e" * 32], exports.generated)
+            status = client.get(f"{base}/{'e' * 32}", cookies=cookies)
+            self.assertEqual("completed", status.json()["status"])
+            downloaded = client.get(f"{base}/{'e' * 32}/download", cookies=cookies)
+            self.assertEqual(200, downloaded.status_code)
+            self.assertEqual(b"xlsx", downloaded.content)
+            self.assertIn("attachment", downloaded.headers["content-disposition"])
+            denied = client.get(f"{base}/{'e' * 32}", cookies=_login_cookie("u2"))
+            self.assertEqual(404, denied.status_code)
+            other_sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+            cross_session = client.get(
+                f"/kb/api/sessions/{other_sid}/exports/{'e' * 32}", cookies=cookies,
+            )
+            self.assertEqual(403, cross_session.status_code)
+
+    def test_export_followup_short_circuits_llm(self):
+        service = _StubService()
+        client = _make_client(service=service, export_service=_StubExports())
+        cookies = _login_cookie("u1")
+        sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+        response = client.post(
+            f"/kb/api/sessions/{sid}/messages",
+            json={"content": "把刚才的结果导出 Excel"}, cookies=cookies,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([], service.calls)
+        self.assertEqual("EXPORT", response.json()["intent"])
+        self.assertIn("export", response.json()["meta"])
+
+    def test_direct_query_export_uses_answer_snapshot(self):
+        class _SnapshotService(_StubService):
+            def answer(self, userid, content, **kwargs):
+                result = super().answer(userid, content, **kwargs)
+                result["meta"]["export_snapshot_id"] = "s" * 32
+                return result
+
+        client = _make_client(
+            service=_SnapshotService(), export_service=_StubExports(),
+        )
+        cookies = _login_cookie("u1")
+        sid = client.post("/kb/api/sessions", cookies=cookies).json()["sid"]
+        response = client.post(
+            f"/kb/api/sessions/{sid}/messages",
+            json={"content": "查询销售额并导出 Excel"}, cookies=cookies,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn("正在生成 Excel", response.json()["reply"])
+        self.assertIn("export", response.json()["meta"])
 
 
 # ---------------------------------------------------------------------------

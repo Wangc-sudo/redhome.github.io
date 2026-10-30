@@ -19,8 +19,8 @@
         2. kb_doc_chunks（BM25 通路；按 doc_id 先 DELETE 再灌——切片数随
            改版变化，UPSERT 会留孤儿尾块）。
 
-幂等：整体可重跑。单篇文档失败跳过记数（fail-soft），workspace/节点级
-异常直接上抛（宁可整批失败由调度重试，不留半写状态）。
+幂等：整体可重跑。单篇失败或空快照会拒绝整批发布并保留旧版本；完整快照
+先提交 BM25，再原子替换清单。源删除默认只生成计划，受开关与双阈值约束。
 门禁：require_live_run（外部 live 读钉钉 API + 写 mart_ops + 写清单文件）。
 
 环境变量：
@@ -31,6 +31,8 @@
 """
 
 import argparse
+from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -48,6 +50,10 @@ _PAGE_SIZE = 100
 #: config-local 是只读挂载写不了（2026-10-21 冒烟 OSError 实测）；
 #: /opt/vector/data 与 rag.db 同区：scheduler 可写、容器 recreate 不丢。
 DEFAULT_OUTPUT = "/opt/vector/data/kb_docs.json"
+
+
+class SourceSnapshotError(RuntimeError):
+    pass
 
 
 def blocks_to_markdown(blocks):
@@ -214,24 +220,121 @@ def collect_documents(wiki, workspace_ids=None, on_progress=None):
     return docs, stats
 
 
-def run_sync(*, wiki, conn, out_path, workspace_ids=None, on_progress=None):
-    """遍历知识库 → 双写（清单 JSON + kb_doc_chunks）。返回统计 dict。"""
+def list_indexed_doc_ids(conn):
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT DISTINCT `doc_id` FROM `kb_doc_chunks`")
+        return {row["doc_id"] if isinstance(row, dict) else row[0]
+                for row in cursor.fetchall()}
+    finally:
+        cursor.close()
+
+
+def _snapshot_hash(payload):
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _record_freshness(repository, stats, *, source_id, status, error=None):
+    if not repository:
+        return
+    repository.record({
+        "index_key": "kb_doc_bm25",
+        "source_type": "wiki",
+        "source_id": source_id,
+        "source_version": stats["content_hash"],
+        "content_hash": stats["content_hash"],
+        "chunker_version": "kb-bm25-v1",
+        "index_version": stats["index_version"],
+        "source_count": stats.get("source_count", 0),
+        "indexed_count": stats.get("docs", 0),
+        "pending_count": stats.get("deletion_pending", 0),
+        "failed_count": stats.get("failed", 0),
+        "last_source_snapshot_at": datetime.now(),
+        "status": status,
+        "last_error": error,
+    })
+
+
+def run_sync(*, wiki, conn, out_path, workspace_ids=None, on_progress=None,
+             freshness_repository=None, source_id="wiki:all-visible",
+             auto_delete=False, delete_max_count=100, delete_max_ratio=0.1):
+    """只发布完整快照；BM25 提交后原子替换清单，失败保留下载旧版本。"""
     docs, stats = collect_documents(wiki, workspace_ids=workspace_ids,
                                     on_progress=on_progress)
     payload = [{"doc_id": d["doc_id"], "doc_title": d["doc_title"],
                 "content": d["content"]} for d in docs]
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    stats["docs"] = 0
-    stats["chunks"] = 0
+    stats.update({
+        "docs": 0, "chunks": 0, "deleted": 0, "delete_planned": 0,
+        "source_count": len(payload), "source_complete": bool(payload)
+        and stats["failed"] == 0, "content_hash": _snapshot_hash(payload),
+        "index_version": _snapshot_hash(payload), "status": "completed",
+        "reason": "", "deletion_pending": 0,
+    })
+    if not stats["source_complete"]:
+        reason = "empty_source" if not payload else "incomplete_source"
+        stats.update(status="blocked" if not payload else "degraded",
+                     reason=reason)
+        _record_freshness(
+            freshness_repository, stats, source_id=source_id,
+            status=stats["status"], error=reason)
+        raise SourceSnapshotError(reason)
+
+    prepared = []
     for doc in payload:
-        delete_doc_chunks(conn, doc["doc_id"])
         chunks = chunk_text(doc["content"])
-        stats["chunks"] += upsert_chunks(conn, doc["doc_id"],
-                                         doc["doc_title"], chunks)
-        stats["docs"] += 1
+        if not chunks:
+            stats.update(status="degraded", reason="empty_chunks")
+            _record_freshness(
+                freshness_repository, stats, source_id=source_id,
+                status="degraded", error="empty_chunks")
+            raise SourceSnapshotError("empty_chunks")
+        prepared.append((doc, chunks))
+
+    current_ids = {doc["doc_id"] for doc in payload}
+    stale_ids = sorted(list_indexed_doc_ids(conn) - current_ids)
+    stats["delete_planned"] = len(stale_ids)
+    delete_stale = False
+    if stale_ids and auto_delete:
+        ratio = len(stale_ids) / max(len(stale_ids) + len(current_ids), 1)
+        delete_stale = (len(stale_ids) <= delete_max_count
+                        and ratio <= delete_max_ratio)
+        if not delete_stale:
+            stats["reason"] = "delete_threshold"
+
+    out = Path(out_path)
+    temporary = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    try:
+        for doc, chunks in prepared:
+            delete_doc_chunks(conn, doc["doc_id"])
+            stats["chunks"] += upsert_chunks(
+                conn, doc["doc_id"], doc["doc_title"], chunks)
+            stats["docs"] += 1
+        if delete_stale:
+            for doc_id in stale_ids:
+                stats["deleted"] += delete_doc_chunks(conn, doc_id)
+        conn.commit()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, out)
+    except Exception as exc:
+        conn.rollback()
+        temporary.unlink(missing_ok=True)
+        _record_freshness(
+            freshness_repository, stats, source_id=source_id,
+            status="degraded", error=type(exc).__name__)
+        raise
+
+    stats["deletion_pending"] = 0 if delete_stale else len(stale_ids)
+    if stats["deletion_pending"]:
+        stats["status"] = "degraded"
+        stats["reason"] = stats["reason"] or "deletion_pending"
+    _record_freshness(
+        freshness_repository, stats, source_id=source_id,
+        status="fresh" if stats["status"] == "completed" else "degraded",
+        error=stats["reason"] or None)
     return stats
 
 
@@ -244,6 +347,9 @@ def main(argv=None):
 
     from common.dingtalk.client import DingTalkClient
     from common.public_data import db
+    from common.public_data.freshness_repository import (
+        KnowledgeIndexFreshnessRepository,
+    )
     from common.public_data.live_safety import require_live_run
     from common.public_data.settings import Settings
 
@@ -266,22 +372,37 @@ def main(argv=None):
 
     conn = db.connect(settings.mart_database)
     try:
-        stats = run_sync(wiki=wiki, conn=conn, out_path=out_path,
-                         workspace_ids=workspace_ids,
-                         on_progress=lambda msg: print(f"progress {msg}",
-                                                       flush=True))
-        conn.commit()
+        stats = run_sync(
+            wiki=wiki, conn=conn, out_path=out_path,
+            workspace_ids=workspace_ids,
+            on_progress=lambda msg: print(f"progress {msg}", flush=True),
+            freshness_repository=KnowledgeIndexFreshnessRepository(conn),
+            source_id=("wiki:" + ",".join(workspace_ids))[:128]
+            if workspace_ids else "wiki:all-visible",
+            auto_delete=os.environ.get("INDEX_AUTO_DELETE_ENABLE", "0") == "1",
+            delete_max_count=int(os.environ.get("INDEX_DELETE_MAX_COUNT", "100")),
+            delete_max_ratio=float(os.environ.get("INDEX_DELETE_MAX_RATIO", "0.1")),
+        )
+    except SourceSnapshotError as exc:
+        conn.rollback()
+        print(f"service=kb-sync-wiki status=degraded reason={exc}")
+        raise SystemExit(1)
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+    reason = f" reason={stats['reason']}" if stats["reason"] else ""
     print(
-        f"service=kb-sync-wiki status=completed"
+        f"service=kb-sync-wiki status={stats['status']}{reason}"
         f" workspaces={stats['workspaces']} docs={stats['docs']}"
         f" chunks={stats['chunks']} failed={stats['failed']}"
-        f" output={out_path}"
+        f" deleted={stats['deleted']} delete_planned={stats['delete_planned']}"
+        f" index_version={stats['index_version']} output={out_path}"
     )
+    if stats["status"] != "completed":
+        raise SystemExit(1)
+    return stats
 
 
 if __name__ == "__main__":

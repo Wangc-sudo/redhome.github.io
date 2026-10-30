@@ -96,6 +96,16 @@ def build_kb_web_deps(settings, environ=None):
     public_base = ((env.get("KB_WEB_PUBLIC_BASE_URL") or "").strip()
                    or "https://dt.yyhlzj.com").rstrip("/")
 
+    export_service = None
+    try:
+        from common.kb_qa.query_export import ExportService
+
+        export_service = ExportService.from_env(connection_factory, environ=env)
+        if not export_service.enabled:
+            export_service = None
+    except (ValueError, OSError):
+        pass
+
     return {
         "service": KbWebService(
             connection_factory=connection_factory,
@@ -120,4 +130,6 @@ def build_kb_web_deps(settings, environ=None):
         "state_store": OAuthStateStore(redis_url),
         "qr_redirect_uri": f"{public_base}/kb/api/auth/dingtalk/callback",
         "member_checker": member_checker,
+        "export_service": export_service,
+        "export_authorizer": member_checker,
     }

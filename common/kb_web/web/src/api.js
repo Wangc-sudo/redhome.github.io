@@ -64,4 +64,11 @@ export const api = {
   regenerate: (sid) => request(`/kb/api/sessions/${sid}/regenerate`, {
     method: 'POST', retry: false, timeout: MESSAGE_TIMEOUT_MS,
   }),
+  createExport: (sid, snapshotId) => request(`/kb/api/sessions/${sid}/exports`, {
+    method: 'POST', body: { snapshot_id: snapshotId }, retry: false,
+  }),
+  exportStatus: (sid, exportId) => request(
+    `/kb/api/sessions/${sid}/exports/${exportId}`,
+    { retry: false },
+  ),
 }

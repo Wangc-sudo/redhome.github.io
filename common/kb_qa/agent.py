@@ -396,6 +396,9 @@ class ToolExecutor:
         self.phone_candidates = []
         self.phone_query = ""
         self.phone_not_found = False
+        self.query_snapshots = []
+        self.index_telemetry = {}
+        self.export_error_summary = None
 
     # ------------------------------------------------------------------
     def execute(self, name, arguments):
@@ -405,8 +408,83 @@ class ToolExecutor:
         if handler is None:
             return json.dumps({"error": f"unknown tool: {name}"},
                               ensure_ascii=False)
-        return json.dumps(handler(args), ensure_ascii=False, default=str)[
+        result = handler(args)
+        if isinstance(result, dict) and not result.get("error"):
+            self._capture_query_snapshot(name, args, result)
+        return json.dumps(result, ensure_ascii=False, default=str)[
             :_RESULT_LIMIT]
+
+    def _snapshot_freshness(self, name):
+        mapping = {
+            "daily_sales": ("pd_dataset_freshness", "dataset_key", "daily_report_offline"),
+            "channel_sales": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
+            "channel_yoy": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
+            "product_stats": (
+                "pd_knowledge_index_freshness", "index_key", "kb_product_structured",
+            ),
+        }
+        target = mapping.get(name)
+        if target is None:
+            return "unknown"
+        table, column, key = target
+        cursor = self._conn.cursor()
+        try:
+            fields = "`status`"
+            if table == "pd_knowledge_index_freshness":
+                fields += ", `embedding_model`, `dim`, `index_version`"
+            cursor.execute(
+                f"SELECT {fields} FROM `{table}` WHERE `{column}`=%s",
+                (key,),
+            )
+            row = cursor.fetchone()
+            status = str((row or {}).get("status") or "unknown")
+            if row and table == "pd_knowledge_index_freshness":
+                self.index_telemetry = {
+                    "embedding_model": row.get("embedding_model"),
+                    "embedding_dim": row.get("dim"),
+                    "index_version": row.get("index_version"),
+                }
+            if status not in {"fresh", "unknown"}:
+                self.export_error_summary = f"{key}:{status}"[:255]
+            return status
+        except Exception:
+            return "unknown"
+        finally:
+            cursor.close()
+
+    def _capture_query_snapshot(self, name, args, result):
+        rows = result.pop("_export_rows", None)
+        effective_params = result.pop("_export_params", None) or dict(args)
+        if name == "query_sql":
+            rows = rows if rows is not None else list(result.get("rows") or ())
+        elif name in {"channel_sales", "channel_yoy"}:
+            rows = rows if rows is not None else list(result.get("rows") or ())
+        elif name == "daily_sales":
+            rows = [dict(result)] if result.get("found") else []
+        elif name == "product_stats":
+            rows = [{"item": "商品总数", "name": "全部", "count": result.get("total", 0)}]
+            rows += [
+                {"item": label, "name": row.get("name"), "count": row.get("count")}
+                for label, key in (("品牌", "by_brand"), ("大类", "by_category"))
+                for row in result.get(key) or ()
+            ]
+        else:
+            return
+        business_dates = [
+            str(row.get("business_date") or row.get("date"))
+            for row in rows
+            if row.get("business_date") or row.get("date")
+        ]
+        self.query_snapshots.append({
+            "tool_name": name,
+            "effective_params": effective_params,
+            "rows": rows,
+            "data_scope": {
+                key: value for key, value in effective_params.items() if key != "sql"
+            },
+            "data_version": max(business_dates) if business_dates else None,
+            "freshness_status": self._snapshot_freshness(name),
+        })
 
     # ------------------------------------------------------------------
     def _tool_search_products(self, args):
@@ -743,6 +821,14 @@ class ToolExecutor:
                                   default=str)) > budget):
             result["rows"].pop()
         result["returned"] = len(result["rows"])
+        result["_export_rows"] = rows
+        result["_export_params"] = {
+            **args,
+            "current_period": {"start": start.isoformat(), "end": end.isoformat()},
+            "previous_period": {
+                "start": previous_start.isoformat(), "end": previous_end.isoformat(),
+            },
+        }
         return result
 
     def _tool_query_sql(self, args):
@@ -788,6 +874,8 @@ class ToolExecutor:
                                   default=str)) > budget):
             result["rows"].pop()
         result["returned"] = len(result["rows"])
+        result["_export_rows"] = rows
+        result["_export_params"] = {"sql": sql}
         return result
 
     # ------------------------------------------------------------------
@@ -839,6 +927,17 @@ def _sync_phone_meta(executor, meta):
         meta["phone_not_found"] = True
     else:
         meta.pop("phone_not_found", None)
+    if hasattr(executor, "query_snapshots"):
+        meta["export_count"] = len(executor.query_snapshots)
+        if executor.query_snapshots:
+            meta["query_snapshots"] = list(executor.query_snapshots)
+        else:
+            meta.pop("query_snapshots", None)
+    for key, value in getattr(executor, "index_telemetry", {}).items():
+        if value is not None:
+            meta[key] = value
+    if getattr(executor, "export_error_summary", None):
+        meta["error_summary"] = executor.export_error_summary
 
 
 def run_agent(llm, question, *, executor, history=None,
@@ -866,6 +965,10 @@ def run_agent(llm, question, *, executor, history=None,
     if meta is not None:
         meta["tools"] = []
         meta["rounds"] = 0
+        meta["export_count"] = 0
+        meta.pop("query_snapshots", None)
+        if hasattr(executor, "query_snapshots"):
+            executor.query_snapshots = []
     history_text = format_history(history) if history else ""
     # 工具子集运行时（Web 角色白名单）同步收窄 prompt：没 offering
     # query_sql 就不列出可用表，避免模型凭空写 SQL。

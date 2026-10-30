@@ -53,6 +53,7 @@ from common.public_data import (
 )
 from common.daily_robot.inspection_alert import ALERT_SERVICES
 from common.ops_web.data_quality import register_data_quality_routes
+from common.ops_web.freshness import register_freshness_routes
 from common.public_data.channel_target import CHANNELS
 from common.public_data.pipeline_config import PipelineConfig
 from common.public_data.pipeline_taxonomy import (
@@ -84,16 +85,20 @@ def connect(database_settings):
     return _connect(database_settings)
 
 
-def _mart_connector(settings):
+def _database_connector(database_settings):
     @contextmanager
     def connector():
-        connection = connect(settings.mart_database)
+        connection = connect(database_settings)
         try:
             yield connection
         finally:
             connection.close()
 
     return connector
+
+
+def _mart_connector(settings):
+    return _database_connector(settings.mart_database)
 
 
 def _esc(value):
@@ -4593,6 +4598,36 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         require_write=require_data_quality_write,
         source_connector=data_quality_source_connector,
         connect=connect, logger=_LOGGER, error_detail=ErrorDetail,
+    )
+
+    # -- 数据新鲜度与知识索引（2026-10-29 自动化闭环 P0）：系统后台只读 +
+    # 受控检查。权限与数据质量写面同级（pipelines/datafix/admin）。
+    def require_freshness_read(request: Request) -> authz.Viewer:
+        return require_capability(request, CAPABILITY_PIPELINES)
+
+    def require_business_freshness_read(request: Request, region: str) -> authz.Viewer:
+        viewer = _resolve_request_viewer(request)
+        if not (
+            capability_allows(viewer, CAPABILITY_ORG, region)
+            or capability_allows(viewer, CAPABILITY_ROSTER, region)
+        ):
+            _forbidden(request)
+        request.state.viewer = viewer
+        return viewer
+
+    register_freshness_routes(
+        app, connector=_mart_connector(settings),
+        manual_connector=(
+            _database_connector(settings.manual_database)
+            if getattr(settings, "manual_database", None) is not None else None
+        ),
+        require_capability=require_freshness_read,
+        business_require_capability=require_business_freshness_read,
+        audit_writer=lambda conn, actor, dataset_key, status: (
+            ops_control.insert_pipeline_audit(
+                conn, actor, "freshness_check", dataset_key, status,
+            )
+        ),
     )
 
     # -- SPA 单壳 catch-all（注册在最后：未匹配 GET 返回壳；API 等前缀 404）-

@@ -1,52 +1,98 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
-import { me, isAdmin, hasCapability, hasAnyCapability, flash, clearFlash } from './store/me.js';
+import { useRoute, useRouter } from 'vue-router';
+import { me, flash, clearFlash } from './store/me.js';
+import {
+  availableBusinessLines,
+  getModule,
+  modulePath,
+  preferredBusinessLine,
+  visibleModules,
+} from './modules/registry.js';
 
-// 2026-10-16 P4：画布即应用——导航只留「闭环画布」；旧页面入口收进
-// admin 可见的「更多」折叠组（过渡期回退通道，P4 观察期满后删路由）。
+const route = useRoute();
+const router = useRouter();
 const who = computed(() => (me.value && me.value.name) || '');
-const showLegacy = ref(false);
+const businessModules = computed(() => visibleModules('business'));
+const adminModules = computed(() => visibleModules('admin'));
+const workspace = computed(() => route.meta.workspace || null);
+const currentLine = computed(() => route.params.businessLine || preferredBusinessLine());
+const businessLines = computed(() => {
+  const keys = new Set();
+  for (const item of businessModules.value) {
+    for (const key of availableBusinessLines(item)) keys.add(key);
+  }
+  return [...keys];
+});
+const navigation = computed(() => {
+  if (!workspace.value) return [];
+  const items = workspace.value === 'business'
+    ? visibleModules('business', currentLine.value)
+    : adminModules.value;
+  const groups = new Map();
+  for (const item of items) {
+    if (!groups.has(item.nav_group)) groups.set(item.nav_group, []);
+    groups.get(item.nav_group).push(item);
+  }
+  return [...groups.entries()].map(([title, modules]) => ({ title, modules }));
+});
+
+function workspacePath(target) {
+  const items = target === 'business' ? businessModules.value : adminModules.value;
+  for (const item of items) {
+    const path = modulePath(item, target === 'business' ? currentLine.value : null);
+    if (path) return path;
+  }
+  return '/';
+}
+
+async function changeBusinessLine(event) {
+  const line = event.target.value;
+  const current = getModule('business', route.params.moduleKey);
+  let destination = current && visibleModules('business', line).includes(current)
+    ? modulePath(current, line)
+    : null;
+  if (!destination) {
+    const first = visibleModules('business', line)[0];
+    destination = first ? modulePath(first, line) : null;
+  }
+  if (destination) await router.push(destination);
+}
 
 let flashTimer = null;
 watch(flash, (value) => {
   if (flashTimer) clearTimeout(flashTimer);
-  if (value) {
-    flashTimer = setTimeout(() => {
-      clearFlash();
-    }, 4000);
-  }
+  if (value) flashTimer = setTimeout(clearFlash, 4000);
 });
 </script>
 
 <template>
-  <header>
+  <header class="app-header">
     <strong>ops-web</strong>
-    <!-- 2026-10-16 P4 画布即应用：导航只留画布（各页功能已收进画布节点/抽屉；
-         旧路由保留可达——深链与外部引用不炸），admin 多一个「更多页面」入口。 -->
-    <nav>
-      <router-link v-if="hasCapability('org')" to="/flow">闭环画布</router-link>
-      <router-link v-if="hasCapability('pipelines')" to="/broadcast">播报编排</router-link>
-      <router-link to="/data-quality">数据质量</router-link>
-      <span v-if="showLegacy" class="nav-group legacy">
-        <router-link v-if="hasCapability('roster')" to="/roster">名册</router-link>
-        <router-link v-if="hasAnyCapability('org')" to="/org">组织</router-link>
-        <router-link v-if="hasCapability('pipelines')" to="/pipelines">任务</router-link>
-        <router-link v-if="hasCapability('calendar')" to="/calendar">日历</router-link>
-        <router-link v-if="hasCapability('phone')" to="/phones">号码</router-link>
-        <router-link v-if="isAdmin()" to="/recipients">收件人</router-link>
-        <router-link v-if="isAdmin()" to="/grants">授权</router-link>
-        <router-link v-if="hasCapability('audit')" to="/records">记录</router-link>
-      </span>
-      <button
-        v-if="isAdmin()"
-        class="legacy-toggle"
-        :title="showLegacy ? '收起旧页面入口' : '展开旧页面入口（过渡期）'"
-        @click="showLegacy = !showLegacy"
-      >{{ showLegacy ? '收起 ⌃' : '更多 ⌄' }}</button>
+    <nav class="workspaces" aria-label="工作区">
+      <router-link v-if="businessModules.length" :to="workspacePath('business')">业务工作台</router-link>
+      <router-link v-if="adminModules.length" :to="workspacePath('admin')">系统后台</router-link>
     </nav>
-    <a href="/auth/logout">退出</a>
+    <label v-if="workspace === 'business' && businessLines.length" class="line-picker">
+      <span>业务线</span>
+      <select :value="currentLine" @change="changeBusinessLine">
+        <option v-for="line in businessLines" :key="line" :value="line">{{ line }}</option>
+      </select>
+    </label>
+    <a class="logout" href="/auth/logout">退出</a>
     <span class="who">{{ who }}</span>
   </header>
+
+  <nav v-if="navigation.length" class="module-nav" aria-label="模块导航">
+    <section v-for="group in navigation" :key="group.title">
+      <span class="nav-label">{{ group.title }}</span>
+      <router-link
+        v-for="item in group.modules"
+        :key="item.module_key"
+        :to="modulePath(item, workspace === 'business' ? currentLine : null)"
+      >{{ item.title }}</router-link>
+    </section>
+  </nav>
 
   <main>
     <transition name="flash">
@@ -57,21 +103,53 @@ watch(flash, (value) => {
 </template>
 
 <style scoped>
-.legacy-toggle {
-  margin-left: 8px;
-  padding: 2px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+.workspaces a {
+  padding: 5px 10px;
   border-radius: 6px;
-  background: none;
-  color: inherit;
-  font-size: 12px;
-  cursor: pointer;
 }
-.nav-group.legacy {
-  display: inline-flex;
+.workspaces a.router-link-active {
+  background: rgba(255, 255, 255, 0.14);
+}
+.line-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cfe0f5;
+}
+.line-picker select {
+  max-width: 150px;
+}
+.logout {
+  margin-left: auto;
+}
+.module-nav {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 10px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6ea;
+}
+.module-nav section {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  margin-left: 6px;
-  padding-left: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  flex-wrap: wrap;
+}
+.module-nav a {
+  color: #4b5563;
+  font-size: 13px;
+  text-decoration: none;
+  padding: 4px 0;
+}
+.module-nav a.router-link-active {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+@media (max-width: 760px) {
+  .app-header { padding: 10px 14px; gap: 12px; }
+  .module-nav { padding: 10px 14px; gap: 12px; }
+  .who { display: none; }
 }
 </style>

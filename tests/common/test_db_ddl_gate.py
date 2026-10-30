@@ -50,6 +50,11 @@ _DDL_WHITELIST = frozenset(
         # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/kb_qa/schema.py",
+        # 查询快照与 XLSX 导出任务 schema 定义模块
+        # （mart-ops-kb-query-snapshot-v1 / mart-ops-kb-export-v1 的 DDL 源）
+        "common/kb_qa/export_schema.py",
+        # 业务数据与知识索引新鲜度 schema 定义模块（mart-ops-freshness-v1）
+        "common/public_data/freshness_repository.py",
         # 商品向量索引状态 schema 定义模块（mart-ops-rag-index-state-v1 的
         # DDL 源：rag_index_state；被 live_migrations 引用，同上引用关系）
         "common/rag/index_state.py",

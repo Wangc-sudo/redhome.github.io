@@ -96,6 +96,18 @@
                   · 仅参考最近 {{ m.meta.history_rounds }} 轮对话
                 </span>
               </div>
+              <div v-if="m.meta && (m.meta.export_snapshot_id || m.meta.export)" class="export-panel">
+                <template v-if="m.meta.export">
+                  <span v-if="['pending', 'running'].includes(m.meta.export.status)">Excel 生成中…</span>
+                  <a v-else-if="m.meta.export.status === 'completed'"
+                     :href="m.meta.export.download_url">下载 Excel</a>
+                  <button v-else @click="startExport(m)">重新导出</button>
+                  <span v-if="m.meta.export.status === 'failed'" class="export-error">生成失败，请重试</span>
+                  <span v-else-if="m.meta.export.status === 'expired'" class="export-error">文件已过期</span>
+                  <small v-if="exportScope(m.meta.export)">{{ exportScope(m.meta.export) }}</small>
+                </template>
+                <button v-else @click="startExport(m)">导出 Excel</button>
+              </div>
               <div class="msg-actions">
                 <button @click="copyText(m.content)">复制</button>
                 <button v-if="canShare" @click="shareText(m.content)">转发</button>
@@ -378,6 +390,7 @@ async function switchSession(sid) {
   sidebarOpen.value = false
   scrollBottom()
   writeCache()
+  trackAllExports()
 }
 
 async function removeSession(sid) {
@@ -420,6 +433,7 @@ async function send() {
       role: 'assistant', content: result.reply, ts: '',
       meta: result.meta, attachments: result.attachments,
     })
+    trackAllExports()
     refreshSessions()
     writeCache()
   } catch (err) {
@@ -436,6 +450,7 @@ async function send() {
           && prev.role === 'user' && prev.content === content) {
         messages.value = msgs
         sendError.value = false
+        trackAllExports()
         refreshSessions()
         writeCache()
         return
@@ -470,6 +485,7 @@ async function regenerate() {
       role: 'assistant', content: result.reply, ts: '',
       meta: result.meta, attachments: result.attachments, regenerated: true,
     })
+    trackAllExports()
     writeCache()
   } catch (err) {
     showToast('重新生成失败，请稍后再试')
@@ -497,6 +513,50 @@ function quoteMessage(content) {
   nextTick(() => inputEl.value && inputEl.value.focus())
 }
 
+const exportTimers = new Map()
+
+function exportScope(task) {
+  const items = task && task.query_summary && task.query_summary.items
+  if (!items || !items.length) return ''
+  return items.map((item) => {
+    const scope = item.data_scope || '查询范围见导出说明'
+    return item.data_version ? `${scope} · 数据截至 ${item.data_version}` : scope
+  }).join('；')
+}
+
+async function startExport(message) {
+  const snapshotId = message.meta && message.meta.export_snapshot_id
+  if (!snapshotId || !currentSid.value) return
+  try {
+    message.meta.export = await api.createExport(currentSid.value, snapshotId)
+    trackExport(message)
+  } catch (err) {
+    showToast(err.status === 403 ? '没有导出该结果的权限' : '导出创建失败，请稍后重试')
+  }
+}
+
+function trackExport(message) {
+  const task = message.meta && message.meta.export
+  if (!task || !['pending', 'running'].includes(task.status)) return
+  const key = task.export_id
+  const sid = currentSid.value
+  if (exportTimers.has(key)) return
+  const timer = setTimeout(async () => {
+    exportTimers.delete(key)
+    try {
+      message.meta.export = await api.exportStatus(sid, key)
+      trackExport(message)
+    } catch (err) {
+      showToast('导出状态刷新失败，请稍后刷新会话')
+    }
+  }, 1000)
+  exportTimers.set(key, timer)
+}
+
+function trackAllExports() {
+  messages.value.forEach(trackExport)
+}
+
 function onUnauthorized() {
   phase.value = 'need-dd'
 }
@@ -509,5 +569,7 @@ onUnmounted(() => {
   window.removeEventListener('kb:unauthenticated', onUnauthorized)
   clearInterval(timer)
   clearTimeout(toastTimer)
+  exportTimers.forEach(clearTimeout)
+  exportTimers.clear()
 })
 </script>

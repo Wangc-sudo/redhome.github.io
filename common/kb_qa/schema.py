@@ -112,6 +112,19 @@ def kb_audit_v3_ddl_statements():
     return (_KB_QA_AUDIT_V3_DDL,)
 
 
+_KB_QA_AUDIT_V4_DDL = """ALTER TABLE `kb_qa_audit`
+  ADD COLUMN `export_count` int NULL COMMENT '可导出冻结结果数量',
+  ADD COLUMN `embedding_model` varchar(128) NULL COMMENT '查询时关联的 embedding 模型',
+  ADD COLUMN `embedding_dim` int NULL COMMENT '查询时关联的向量维度',
+  ADD COLUMN `index_version` varchar(128) NULL COMMENT '查询时关联的知识索引版本',
+  ADD COLUMN `error_summary` varchar(255) NULL COMMENT '安全错误类型或新鲜度摘要，不含异常正文'"""
+
+
+def kb_audit_v4_ddl_statements():
+    """mart-ops-kb-qa-audit-v4：导出与索引观测列。"""
+    return (_KB_QA_AUDIT_V4_DDL,)
+
+
 # Web 通道角色白名单（2026-10-23 裁决：业务数据按角色白名单）——
 # 小易 Web 前端用户默认只答商品/手册；行在册才开放日销/渠道/query_sql
 # 等经营数据工具。独立于 bi_authz（那是看板授权，语义不混用）。

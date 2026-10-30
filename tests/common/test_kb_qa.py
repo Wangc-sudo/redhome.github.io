@@ -15,7 +15,7 @@ from unittest import mock
 
 from dingtalk_stream import AckMessage
 
-from common.kb_qa import bm25, docs, products, sync_docs
+from common.kb_qa import bm25, docs, products, sync_docs, sync_products
 from common.kb_qa import llm as llm_module
 from common.kb_qa import media
 from common.kb_qa import agent as agent_module
@@ -62,9 +62,14 @@ class _FakeCursor:
     def __init__(self, script):
         self._script = list(script)
         self.executed = []
+        self.freshness_executed = []
         self.rowcount = 0
 
     def execute(self, sql, params=None):
+        if "FROM `pd_dataset_freshness`" in sql or "FROM `pd_knowledge_index_freshness`" in sql:
+            self.freshness_executed.append((sql, params))
+            self.rowcount = {"status": "fresh"}
+            return
         self.executed.append((sql, params))
         self.rowcount = self._script.pop(0) if self._script else 0
 
@@ -388,6 +393,30 @@ class SyncNormalizeTests(unittest.TestCase):
         self.assertEqual("rec1", params[0])
         self.assertEqual("习酒窖藏1998", params[2])
 
+    def test_structured_sync_rejects_partial_snapshot(self):
+        conn = _FakeConn()
+        records = [
+            {"id": "rec1", "fields": {"货品名称": "习酒"}},
+            {"id": "broken", "fields": {}},
+        ]
+        with self.assertRaises(sync_products.SourceSnapshotError):
+            sync_products.run_sync(records, conn=conn, source_id="base:sheet")
+        self.assertEqual(conn.cursor_instance.executed, [])
+        self.assertFalse(conn.committed)
+
+    def test_structured_sync_deletion_is_plan_only_by_default(self):
+        conn = _FakeConn([[("removed",)], 1])
+        stats = sync_products.run_sync(
+            [{"id": "rec1", "fields": {"货品名称": "习酒"}}],
+            conn=conn, source_id="base:sheet")
+        self.assertEqual(stats["rows_written"], 1)
+        self.assertEqual(stats["delete_planned"], 1)
+        self.assertEqual(stats["deletion_pending"], 1)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertTrue(conn.committed)
+        self.assertFalse(any(
+            sql.startswith("DELETE") for sql, _ in conn.cursor_instance.executed))
+
 
 class MediaCacheTests(unittest.TestCase):
     def test_cache_key_and_type(self):
@@ -556,6 +585,31 @@ class ProcessEndToEndTests(unittest.TestCase):
         asyncio.run(handler.process(callback))
         # 只有占位插入，无后续查询
         self.assertEqual(1, len(conn.cursor_instance.executed))
+
+    def test_export_followup_skips_answer_and_uses_sender(self):
+        import asyncio
+
+        class _Sender:
+            def __init__(self):
+                self.calls = []
+
+            def deliver_latest(self, uid, conversation_id):
+                self.calls.append((uid, conversation_id))
+                return {"sent": True, "reply": "已发送", "export_id": "e" * 32}
+
+        sender = _Sender()
+        conn = _FakeConn([1])
+        handler = KbStreamHandler(
+            connection_factory=lambda: conn, log=lambda _: None,
+            export_sender=sender,
+        )
+        handler._answer = mock.Mock()
+        replies = []
+        handler.reply_text = lambda text, incoming: replies.append(text)
+        asyncio.run(handler.process(_FakeCallback("m-export", "导出 Excel")))
+        self.assertEqual([("u1", "cid1")], sender.calls)
+        handler._answer.assert_not_called()
+        self.assertEqual(["已发送"], replies)
 
     def test_process_moves_blocking_work_off_event_loop(self):
         handler = KbStreamHandler(
@@ -1343,26 +1397,39 @@ class _FakeWiki:
 class SyncWikiRunTests(unittest.TestCase):
 
     class _Conn:
-        def __init__(self):
+        def __init__(self, existing=()):
             self.deleted = []
             self.upserted = []
+            self.existing = set(existing)
+            self.committed = False
 
         def cursor(self):
             conn = self
 
             class _Cur:
                 def execute(self, sql, params=None):
-                    if sql.strip().startswith("DELETE"):
+                    if sql.strip().startswith("SELECT"):
+                        self._rows = [(doc_id,) for doc_id in conn.existing]
+                    elif sql.strip().startswith("DELETE"):
                         conn.deleted.append(params[0])
                         self.rowcount = 3
                     else:
                         conn.upserted.append(params[:3])
                         self.rowcount = 1
 
+                def fetchall(self):
+                    return self._rows
+
                 def close(self):
                     pass
 
             return _Cur()
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            pass
 
     def test_collect_skips_failed_and_empty(self):
         wiki = _FakeWiki(
@@ -1396,8 +1463,59 @@ class SyncWikiRunTests(unittest.TestCase):
         self.assertIn("n1 的正文内容", payload[0]["content"])
         # workspace 字段不进清单（下游 sync_docs/rag 不认它）
         self.assertNotIn("workspace", payload[0])
-        self.assertEqual(conn.deleted, ["n1"])   # 先删后灌
-        self.assertTrue(conn.upserted)           # 切片已写
+        self.assertEqual(conn.deleted, ["n1"])
+        self.assertTrue(conn.upserted)
+        self.assertTrue(conn.committed)
+
+    def test_partial_snapshot_preserves_manifest_and_chunks(self):
+        import tempfile
+
+        wiki = _FakeWiki(
+            {"w1": [("n1", "手册A"), ("n2", "手册B")]}, fail_ids={"n2"})
+        conn = self._Conn()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "kb_docs.json"
+            out.write_text("old-manifest", encoding="utf-8")
+            with self.assertRaises(sync_wiki.SourceSnapshotError):
+                sync_wiki.run_sync(wiki=wiki, conn=conn, out_path=str(out))
+            self.assertEqual(out.read_text(encoding="utf-8"), "old-manifest")
+        self.assertEqual(conn.deleted, [])
+        self.assertEqual(conn.upserted, [])
+        self.assertFalse(conn.committed)
+
+    def test_empty_snapshot_is_blocked(self):
+        conn = self._Conn()
+        with self.assertRaises(sync_wiki.SourceSnapshotError) as raised:
+            sync_wiki.run_sync(
+                wiki=_FakeWiki({}), conn=conn, out_path="unused.json")
+        self.assertEqual(str(raised.exception), "empty_source")
+        self.assertFalse(conn.committed)
+
+    def test_deleted_document_is_plan_only_by_default(self):
+        import tempfile
+
+        conn = self._Conn(existing={"n1", "removed"})
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = sync_wiki.run_sync(
+                wiki=_FakeWiki({"w1": [("n1", "手册A")]}), conn=conn,
+                out_path=str(Path(tmp) / "kb_docs.json"))
+        self.assertEqual(stats["delete_planned"], 1)
+        self.assertEqual(stats["deletion_pending"], 1)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertNotIn("removed", conn.deleted)
+
+    def test_deleted_document_reconciles_when_enabled_within_threshold(self):
+        import tempfile
+
+        conn = self._Conn(existing={"n1", "removed"})
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = sync_wiki.run_sync(
+                wiki=_FakeWiki({"w1": [("n1", "手册A")]}), conn=conn,
+                out_path=str(Path(tmp) / "kb_docs.json"), auto_delete=True,
+                delete_max_ratio=1.0)
+        self.assertEqual(stats["deletion_pending"], 0)
+        self.assertEqual(stats["status"], "completed")
+        self.assertIn("removed", conn.deleted)
 
 
 class ConversationStoreTests(unittest.TestCase):
@@ -1742,8 +1860,8 @@ class LlmUsageTests(unittest.TestCase):
                    if "prompt_tokens" in s]
         self.assertEqual(1, len(updates))
         _sql, params = updates[0]
-        self.assertEqual(700, params[-3])   # prompt_tokens
-        self.assertEqual(90, params[-2])    # completion_tokens
+        self.assertEqual(700, params[8])   # prompt_tokens
+        self.assertEqual(90, params[9])    # completion_tokens
 
 
 class ConversationFlowTests(unittest.TestCase):
@@ -3173,6 +3291,13 @@ class QuerySqlToolTests(unittest.TestCase):
         self.assertLess(result["returned"], 60)
         self.assertGreater(result["returned"], 0)
         self.assertEqual(200, len(result["rows"][0]["name"]))
+        self.assertNotIn("_export_rows", result)
+        self.assertEqual(60, len(executor.query_snapshots[0]["rows"]))
+        self.assertEqual(300, len(executor.query_snapshots[0]["rows"][0]["name"]))
+        self.assertEqual(
+            "SELECT code, name FROM kb_products LIMIT 100",
+            executor.query_snapshots[0]["effective_params"]["sql"],
+        )
         executed_sql = [sql for sql, _ in
                         executor._conn.cursor_instance.executed]
         self.assertTrue(any("MAX_EXECUTION_TIME" in s for s in executed_sql))
@@ -3189,7 +3314,10 @@ class AuditObservabilityTests(unittest.TestCase):
             conn, "m1", "agent", None, "text",
             meta={"recall_source": "agent",
                   "tools": ["daily_sales", "query_sql"], "rounds": 3,
-                  "prompt_tokens": 800, "completion_tokens": 120},
+                  "prompt_tokens": 800, "completion_tokens": 120,
+                  "export_count": 2, "embedding_model": "embed-v1",
+                  "embedding_dim": 2560, "index_version": "idx-1",
+                  "error_summary": "kb_doc_vector:degraded"},
             reply="答案" * 300,  # 600 字 → 截 500
             latency_ms=1234)
         sql, params = conn.cursor_instance.executed[0]
@@ -3202,7 +3330,8 @@ class AuditObservabilityTests(unittest.TestCase):
         self.assertIn("`completion_tokens`=%s", sql)
         self.assertEqual(
             ("agent", None, "text", "agent", "daily_sales,query_sql", 3,
-             1234, "答案" * 250, 800, 120, "m1"),
+             1234, "答案" * 250, 800, 120, 2, "embed-v1", 2560, "idx-1",
+             "kb_doc_vector:degraded", "m1"),
             params)
 
     def test_finish_audit_empty_meta(self):
@@ -3213,7 +3342,7 @@ class AuditObservabilityTests(unittest.TestCase):
         _sql, params = conn.cursor_instance.executed[0]
         # recall_source/tool_used/rounds/latency/摘要/token 全部 None，不受影响
         self.assertEqual((CHITCHAT, None, "text", None, None, None, None,
-                          None, None, None, "m2"), params)
+                          None, None, None, 0, None, None, None, None, "m2"), params)
 
     def test_answer_meta_recall_source_products(self):
         handler, _ = HandlerAnswerTests()._handler([[_product_row()]])

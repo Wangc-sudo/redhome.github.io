@@ -95,6 +95,25 @@ def run_history_ddl_statements() -> tuple:
     return (_RUN_HISTORY_DDL,)
 
 
+_DEAD_LETTER_DDL = (
+    "CREATE TABLE IF NOT EXISTS `pd_ops_dead_letter` (\n"
+    "  `service_id` VARCHAR(64) PRIMARY KEY,\n"
+    "  `run_id` VARCHAR(255) NOT NULL,\n"
+    "  `attempts` INT NOT NULL,\n"
+    "  `exit_code` INT DEFAULT NULL,\n"
+    "  `reason` VARCHAR(64) NOT NULL,\n"
+    "  `status` ENUM('active', 'resolved') NOT NULL DEFAULT 'active',\n"
+    "  `created_at` DATETIME(6) NOT NULL,\n"
+    "  `resolved_at` DATETIME(6) DEFAULT NULL,\n"
+    "  KEY `idx_status_created` (`status`, `created_at`)\n"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def dead_letter_ddl_statements() -> tuple:
+    return (_DEAD_LETTER_DDL,)
+
+
 # ---------------------------------------------------------------------------
 # 写面校验（ops-web 新增管道表单）
 # ---------------------------------------------------------------------------
@@ -472,6 +491,52 @@ def fetch_run_history(connection, limit=200, service_id=None):
         cursor.close()
 
 
+def record_dead_letter(connection, service_id, run_id, attempts, exit_code, reason):
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "INSERT INTO `pd_ops_dead_letter` "
+                "(`service_id`, `run_id`, `attempts`, `exit_code`, `reason`, "
+                " `status`, `created_at`, `resolved_at`) "
+                "VALUES (%s, %s, %s, %s, %s, 'active', %s, NULL) "
+                "ON DUPLICATE KEY UPDATE `run_id`=VALUES(`run_id`), "
+                "`attempts`=VALUES(`attempts`), `exit_code`=VALUES(`exit_code`), "
+                "`reason`=VALUES(`reason`), `status`='active', "
+                "`created_at`=VALUES(`created_at`), `resolved_at`=NULL",
+                (service_id, run_id, attempts, exit_code, reason, _utc_now_text()),
+            )
+    finally:
+        cursor.close()
+
+
+def resolve_dead_letter(connection, service_id):
+    cursor = connection.cursor()
+    try:
+        with transaction(connection):
+            cursor.execute(
+                "UPDATE `pd_ops_dead_letter` SET `status`='resolved', "
+                "`resolved_at`=%s WHERE `service_id`=%s AND `status`='active'",
+                (_utc_now_text(), service_id),
+            )
+    finally:
+        cursor.close()
+
+
+def fetch_active_dead_letters(connection, limit=200):
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT `service_id`, `run_id`, `attempts`, `exit_code`, `reason`, "
+            "`created_at` FROM `pd_ops_dead_letter` "
+            "WHERE `status`='active' ORDER BY `created_at` DESC LIMIT %s",
+            (limit,),
+        )
+        return tuple(cursor.fetchall())
+    finally:
+        cursor.close()
+
+
 # ---------------------------------------------------------------------------
 # scheduler 侧网关（长驻进程：每次调用一条短连接，规避 RDS wait_timeout）
 # ---------------------------------------------------------------------------
@@ -534,3 +599,54 @@ class DbRunHistoryGateway:
     def reconcile_orphans(self):
         """启动自愈：收口上一实例遗留的 running 流水行。返回受影响行数。"""
         return self._call(reconcile_stale_run_history)
+
+
+class DbDeadLetterGateway:
+    def __init__(self, connect, database_settings):
+        self._connect = connect
+        self._settings = database_settings
+
+    def _call(self, fn, *args):
+        connection = self._connect(self._settings)
+        try:
+            return fn(connection, *args)
+        finally:
+            connection.close()
+
+    def list_active(self):
+        return self._call(fetch_active_dead_letters)
+
+    def record(self, service_id, run_id, attempts, exit_code, reason):
+        return self._call(
+            record_dead_letter, service_id, run_id, attempts, exit_code, reason,
+        )
+
+    def notify(self, service_id, run_id, reason, attempts):
+        from common.public_data.db import transaction
+        from common.public_data.outbox_repository import OutboxRepository
+
+        suffix = f"dead-letter:{service_id}:{reason}"
+        body = (
+            f"### 调度死信\n服务：{service_id}\n原因：{reason}\n"
+            f"尝试：{attempts}\n\n自动处理已停止，请在新鲜度治理工作区人工恢复。"
+        )
+
+        def _write(conn):
+            with transaction(conn):
+                OutboxRepository(conn).enqueue(
+                    region="ops", kind="alert", business_date=self._today(),
+                    title="调度死信", body_md=body, dedupe_suffix=suffix,
+                    recipient_user_ids=(),
+                )
+
+        return self._call(_write)
+
+    @staticmethod
+    def _today():
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+    def resolve(self, service_id):
+        return self._call(resolve_dead_letter, service_id)
