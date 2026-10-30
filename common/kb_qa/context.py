@@ -60,6 +60,7 @@ class ConversationStore:
         self._now = now
         self._turns = {}
         self._pending = {}
+        self._offers = {}
 
     @staticmethod
     def key(conversation_id, sender_id):
@@ -106,12 +107,33 @@ class ConversationStore:
             return None
         return candidates
 
+    # ---- 助手提议状态（2026-10-30 对话状态层） --------------------------
+    # 助手回复末尾的提议（「需要我…吗？」）是一等公民状态：用户回「可以」
+    # 只消费它，不进 agent 自由猜（此前确认词被历史旧话题带偏的事故）。
+    # 消费语义同 pending：任一条新消息都消费，说了别的自然作废。
+
+    def set_offer(self, key, offer):
+        """存助手提议（{question, action}，TTL 跟随会话）。"""
+        self._offers[key] = (dict(offer), self._now())
+
+    def pop_offer(self, key):
+        """取出并作废助手提议（消费语义）；无/过期返回 None。"""
+        entry = self._offers.pop(key, None)
+        if not entry:
+            return None
+        offer, ts = entry
+        if self._now() - ts > self._ttl:
+            return None
+        return offer
+
 
 #: Redis 键前缀（与 biweb:card 同风格，杜绝跨面混淆）。
 _KEY_PREFIX = "kbqa:ctx"
 #: clarify 待选择状态键前缀（消费即作废，GET+DEL 两步——GETDEL 需
 #: Redis 6.2+，两步非原子但对「同人同群短时选择」场景足够）。
 _PENDING_PREFIX = "kbqa:pending"
+#: 助手提议状态键前缀（同 pending 消费语义）。
+_OFFER_PREFIX = "kbqa:offer"
 
 #: 后端选择环境变量：KB_REDIS_URL 优先，其次复用 bi-web 的
 #: PUBLIC_DATA_REDIS_URL（同一 Redis 实例，kb-gateway 经 app.env 已注入）。
@@ -196,6 +218,35 @@ class RedisConversationStore:
             pending_key = self._pending_key(key)
             raw = client.get(pending_key)
             client.delete(pending_key)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _offer_key(key):
+        return _OFFER_PREFIX + key[len(_KEY_PREFIX):]
+
+    def set_offer(self, key, offer):
+        """存助手提议（{question, action}，EX 跟随会话 TTL）；异常静默。"""
+        try:
+            self._redis().setex(
+                self._offer_key(key), self._ttl,
+                json.dumps(dict(offer), ensure_ascii=False, default=str))
+        except Exception:
+            pass
+
+    def pop_offer(self, key):
+        """取出并作废助手提议（消费语义）；无/异常返回 None。"""
+        try:
+            client = self._redis()
+            offer_key = self._offer_key(key)
+            raw = client.get(offer_key)
+            client.delete(offer_key)
         except Exception:
             return None
         if not raw:

@@ -279,6 +279,9 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             # clarify 闭环（2026-10-23）：先 pop 上一轮候选（消费即作废），
             # 本轮再发反问则把新候选存回。
             pending = store.pop_pending(userid, sid)
+            # 助手提议状态（2026-10-30）：同 pending 消费语义——纯确认词
+            # 在 service 内短路为「执行上一轮提议」。
+            offer = store.pop_offer(userid, sid)
             from common.kb_qa.export_delivery import (
                 is_export_only_request,
                 is_export_request,
@@ -309,7 +312,8 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             else:
                 result = service.answer(userid, content,
                                         history_messages=history,
-                                        pending=pending, audit={"sid": sid})
+                                        pending=pending, offer=offer,
+                                        audit={"sid": sid})
                 snapshot_id = result["meta"].get("export_snapshot_id")
                 if export_service is not None and is_export_request(content) and snapshot_id:
                     try:
@@ -322,11 +326,16 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             pending_candidates = result.pop("pending_candidates", None)
             if pending_candidates:
                 store.set_pending(userid, sid, pending_candidates)
+            new_offer = result.pop("offer", None)
+            if new_offer:
+                store.set_offer(userid, sid, new_offer)
             now = _now_text()
             store.append(userid, sid, [
                 {"role": "user", "content": content, "ts": now},
                 {"role": "assistant", "content": result["reply"], "ts": now,
-                 "meta": result["meta"], "attachments": result["attachments"]},
+                 # intent 入 meta：历史卫生层据此过滤 CHITCHAT/HELP 噪声轮。
+                 "meta": dict(result["meta"], intent=result["intent"]),
+                 "attachments": result["attachments"]},
             ], title_hint=content)
         except Exception:
             store.release_idem(userid, sid, content)
@@ -346,12 +355,14 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         result = service.answer(userid, last_user["content"],
                                 history_messages=history,
                                 audit={"sid": sid})
-        # 重答不改变 clarify 状态：状态键不透给前端。
+        # 重答不改变 clarify/提议状态：状态键不透给前端、不写回存储。
         result.pop("pending_candidates", None)
+        result.pop("offer", None)
         now = _now_text()
         store.append(userid, sid, [
             {"role": "assistant", "content": result["reply"], "ts": now,
-             "meta": result["meta"], "attachments": result["attachments"],
+             "meta": dict(result["meta"], intent=result["intent"]),
+             "attachments": result["attachments"],
              "regenerated": True},
         ])
         return result

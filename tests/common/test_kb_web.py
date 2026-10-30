@@ -527,7 +527,7 @@ class _StubService:
         self.calls = []
 
     def answer(self, userid, content, *, history_messages, pending=None,
-               audit=None):
+               offer=None, audit=None):
         self.calls.append((userid, content))
         return {"reply": "答案", "intent": "product_param",
                 "meta": {"tools": [], "rounds": None, "latency_ms": 5},
@@ -622,7 +622,7 @@ class KbRoutesTests(unittest.TestCase):
 
         class _ClarifyStub:
             def answer(self, userid, content, *, history_messages,
-                       pending=None, audit=None):
+                       pending=None, offer=None, audit=None):
                 seen.append(pending)
                 return {"reply": "r", "intent": "PRODUCT_PARAM",
                         "meta": {"tools": [], "rounds": None,
