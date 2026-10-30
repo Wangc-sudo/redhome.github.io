@@ -45,6 +45,11 @@ class OfferDetectTests(unittest.TestCase):
         self.assertEqual("整理成表格",
                          offers.detect_offer("我可以整理成表格吗？")
                          ["action"])
+        # 云上真实回复形态（1030 e2e 暴露）：「需要看一下…吗？」
+        self.assertEqual(
+            "看一下绍兴、渠道或其他区域做对比",
+            offers.detect_offer("需要看一下绍兴、渠道或其他区域做对比吗？")
+            ["action"])
 
     def test_non_offer_returns_none(self):
         self.assertIsNone(offers.detect_offer("销售额 102,808 元。"))
