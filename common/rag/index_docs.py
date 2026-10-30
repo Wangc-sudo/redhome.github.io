@@ -19,15 +19,13 @@ docs.json → 落到容器可见路径 → 本管道读清单灌库。API 权限
   避免「}]$」式孤片答非所问）；
 - 超长 section 再按字滑窗二次切（size=600 / overlap=80），末窗保留。
 
-幂等：条目 id = ``doc:{doc_id}:{chunk_index:04d}``；导入前按 ``doc:{doc_id}:``
-前缀清空旧切片——文档改版后切片数变少也不留残块，重跑零脏数据（数据层幂等，
-手动触发无需 --force）。
+幂等：条目 id 包含内容、切片器和模型共同决定的版本；新版本完成
+Embedding、数量/维度校验、写入和抽样检索后才清理旧版本，失败保留 last-good。
 
 平台标准形态：
 - 调度：scheduler 命令表 ``rag-index-docs``；
 - 门禁：``require_business_run``（只读本地清单 + 写本地向量库，无外部调用）；
-- fail-soft：缺 JINA_API_KEY 或清单文件不存在 → 打印 skipped 静默跳过
-  （灰度期 key 未到位的常规态，不刷失败告警）。
+- 缺 key、缺输入、空/部分快照和索引失败均以非零退出，不登记正常成功。
 
 环境变量（凭据进 /opt/dops/app.env，不入库）：
     RAG_EMBED_PROVIDER  ``jina``（默认，图文同空间）/ ``openai``（OpenAI 兼容
@@ -50,13 +48,15 @@ docs.json → 落到容器可见路径 → 本管道读清单灌库。API 权限
 """
 
 import argparse
+from datetime import datetime
+import hashlib
 import html
 import json
 import os
 import re
 from pathlib import Path
 
-from common.rag import embed
+from common.rag import embed, freshness
 
 #: 清单缺省路径：/opt/vector/data 与 rag.db 同区（scheduler 可写、recreate
 #: 不丢；config-local 只读挂载，kb-sync-wiki 写不了——2026-10-21 冒烟实测）。
@@ -68,6 +68,8 @@ CHUNK_OVERLAP = 80
 
 #: 嵌入批大小（jina 单请求多条；过大易触发限流，过小浪费往返）。
 TEXT_BATCH = 16
+
+CHUNKER_VERSION = "markdown-section-v2"
 
 #: doc_id 白名单：必须简洁可寻址，因为它直接进 Milvus 主键与 like 前缀，
 #: 禁止空格/引号/百分号（like 通配符注入面）。
@@ -206,56 +208,172 @@ def normalize_doc(raw):
     return doc_id, title, content.strip()
 
 
-def _chunk_id(doc_id, index):
-    return f"doc:{doc_id}:{index:04d}"
+def _chunk_id(doc_id, version, index):
+    return f"doc:{doc_id}:{version}:{index:04d}"
+
+
+def _doc_version(doc_id, title, texts, *, model, dim, size, overlap):
+    digest = hashlib.sha256()
+    for value in (doc_id, title, CHUNKER_VERSION, model, str(dim),
+                  str(size), str(overlap), *texts):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:20]
+
+
+def _snapshot_hash(payload):
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _error_label(exc):
+    return str(exc) if isinstance(exc, embed.EmbedError) else type(exc).__name__
 
 
 def run_index(payload, *, milvus, store, api_key, dim, model=embed.DEFAULT_MODEL,
               provider=embed.DEFAULT_PROVIDER, base_url=None,
               size=CHUNK_SIZE, overlap=CHUNK_OVERLAP, text_batch=TEXT_BATCH,
-              on_progress=None):
-    """文档清单 → 向量库。返回统计 dict。
-
-    逐文档处理：先清前缀（幂等底线）→ 批量 embed → upsert。单篇失败直接
-    上抛，不留半写状态（宁可整批失败由调度重试，也不让库里出现残缺文档）。
-    """
+              on_progress=None, freshness_repository=None,
+              source_id="wiki:kb_docs", source_snapshot_at=None,
+              auto_delete=False, delete_max_count=100, delete_max_ratio=0.1):
+    """完整准备并按版本发布文档；任何失败都保留可检索的旧版本。"""
     real_dim = store.ensure_collection(milvus, dim)
-    stats = {"docs": 0, "chunks": 0, "skipped": 0, "written": 0}
+    snapshot_hash = _snapshot_hash(payload)
+    stats = {
+        "docs": 0, "chunks": 0, "skipped": 0, "written": 0,
+        "unchanged": 0, "failed": 0, "deleted": 0, "delete_planned": 0,
+        "source_count": 0, "source_complete": False, "status": "completed",
+        "reason": "", "last_error": None, "content_hash": snapshot_hash,
+        "index_version": snapshot_hash,
+    }
+    documents = []
+    seen = set()
     for raw in payload:
         normalized = normalize_doc(raw)
-        if normalized is None:
+        if normalized is None or normalized[0] in seen:
             stats["skipped"] += 1
             continue
-        doc_id, title, content = normalized
+        seen.add(normalized[0])
+        documents.append(normalized)
+    stats["source_count"] = len(documents)
+    stats["source_complete"] = bool(documents) and stats["skipped"] == 0
+
+    for doc_id, title, content in documents:
         texts = build_chunks(content, size=size, overlap=overlap)
         if not texts:
             stats["skipped"] += 1
+            stats["source_complete"] = False
             continue
-        store.delete_prefix(milvus, f"doc:{doc_id}:")
-        vectors = []
-        for start in range(0, len(texts), text_batch):
-            part = texts[start:start + text_batch]
-            vectors.extend(
-                embed.embed_items([{"text": t} for t in part], api_key,
-                                  model=model, dimensions=real_dim,
-                                  provider=provider, base_url=base_url)
-            )
-        items = [
-            {
-                "id": _chunk_id(doc_id, index),
-                "vector": vector,
-                "kind": "text",
-                "name": title,
-                "text": text,
-                "image_ref": "",
-            }
-            for index, (text, vector) in enumerate(zip(texts, vectors))
-        ]
-        stats["written"] += store.upsert_items(milvus, items)
-        stats["docs"] += 1
-        stats["chunks"] += len(items)
+        version = _doc_version(
+            doc_id, title, texts, model=model, dim=real_dim,
+            size=size, overlap=overlap)
+        version_prefix = f"doc:{doc_id}:{version}:"
+        expected_ids = {
+            _chunk_id(doc_id, version, index) for index in range(len(texts))
+        }
+        try:
+            existing_ids = store.list_ids(milvus, f"doc:{doc_id}:")
+            if expected_ids.issubset(existing_ids):
+                stats["unchanged"] += 1
+            else:
+                vectors = []
+                for start in range(0, len(texts), text_batch):
+                    part = texts[start:start + text_batch]
+                    embedded = embed.embed_items(
+                        [{"text": text} for text in part], api_key,
+                        model=model, dimensions=real_dim,
+                        provider=provider, base_url=base_url)
+                    vectors.extend(embed.validate_vectors(
+                        embedded, len(part), dimensions=real_dim,
+                        provider=provider))
+                items = [
+                    {
+                        "id": _chunk_id(doc_id, version, index),
+                        "vector": vector,
+                        "kind": "text",
+                        "name": title,
+                        "text": text,
+                        "image_ref": "",
+                    }
+                    for index, (text, vector) in enumerate(zip(texts, vectors))
+                ]
+                if len(items) != len(texts) or len({item["id"] for item in items}) != len(items):
+                    raise embed.EmbedError("文档发布元数据或数量不符")
+                written = store.upsert_items(milvus, items)
+                if written != len(items):
+                    raise RuntimeError("publish_count_mismatch")
+                stats["written"] += written
+                hits = store.search(
+                    milvus, items[0]["vector"],
+                    limit=max(1, min(20, len(items))), kind="text")
+                if not any(str(hit.get("id", "")).startswith(version_prefix)
+                           for hit in hits):
+                    raise RuntimeError("sample_verification_failed")
+            old_ids = [item_id for item_id in existing_ids
+                       if not item_id.startswith(version_prefix)]
+            if old_ids:
+                stats["deleted"] += store.delete_ids(milvus, old_ids)
+            stats["docs"] += 1
+            stats["chunks"] += len(texts)
+        except Exception as exc:
+            stats["failed"] += 1
+            stats["last_error"] = _error_label(exc)
         if on_progress:
             on_progress(doc_id, stats["chunks"])
+
+    deletion_pending = 0
+    stale_deleted = 0
+    if stats["source_complete"] and stats["failed"] == 0:
+        current_doc_ids = {doc_id for doc_id, _, _ in documents}
+        all_ids = store.list_ids(milvus, "doc:")
+        stale_ids = [item_id for item_id in all_ids
+                     if item_id.split(":", 2)[1] not in current_doc_ids]
+        stats["delete_planned"] = len(stale_ids)
+        if stale_ids and auto_delete:
+            previous_count = len(all_ids)
+            ratio = len(stale_ids) / max(previous_count, 1)
+            if (len(stale_ids) <= delete_max_count
+                    and ratio <= delete_max_ratio):
+                stale_deleted = store.delete_ids(milvus, stale_ids)
+                stats["deleted"] += stale_deleted
+            else:
+                stats["reason"] = "delete_threshold"
+        deletion_pending = stats["delete_planned"] - stale_deleted
+
+    if not documents:
+        stats["status"] = "skipped"
+        stats["reason"] = "empty_source" if not payload else "incomplete_source"
+    elif stats["failed"]:
+        stats["status"] = "degraded"
+        stats["reason"] = "index_failed"
+    elif not stats["source_complete"]:
+        stats["status"] = "degraded"
+        stats["reason"] = "incomplete_source"
+    elif deletion_pending:
+        stats["status"] = "degraded"
+        stats["reason"] = stats["reason"] or "deletion_pending"
+
+    if freshness_repository:
+        freshness_repository.record({
+            "index_key": "kb_doc_vector",
+            "source_type": "wiki",
+            "source_id": source_id,
+            "source_version": snapshot_hash,
+            "content_hash": snapshot_hash,
+            "chunker_version": CHUNKER_VERSION,
+            "embedding_model": model,
+            "dim": real_dim,
+            "index_version": snapshot_hash,
+            "source_count": stats["source_count"],
+            "indexed_count": stats["docs"],
+            "pending_count": stats["source_count"] - stats["docs"] + deletion_pending,
+            "failed_count": stats["failed"],
+            "last_source_snapshot_at": source_snapshot_at or datetime.now(),
+            "status": "fresh" if stats["status"] == "completed" else (
+                "blocked" if not documents else "degraded"),
+            "last_error": stats["last_error"] or stats["reason"] or None,
+        })
     return stats
 
 
@@ -265,12 +383,16 @@ def main(argv=None):
     parser.add_argument("--confirm-local-test-write", action="store_true")
     args = parser.parse_args(argv)
 
-    # fail-soft：凭据未到位时静默跳过，不刷失败告警；配好即生效。
     provider = os.environ.get("RAG_EMBED_PROVIDER", embed.DEFAULT_PROVIDER)
+    path = Path(args.file or os.environ.get("RAG_DOCS_INPUT") or DEFAULT_INPUT)
     api_key = os.environ.get("RAG_EMBED_API_KEY") or os.environ.get("JINA_API_KEY")
     if not api_key:
+        freshness.record_run_failure(
+            ("kb_doc_vector",), source_type="wiki",
+            source_id=f"wiki:{path.name}", reason="no_embed_key",
+        )
         print("service=rag-index-docs status=skipped reason=no_embed_key")
-        return
+        raise SystemExit(1)
     base_url = os.environ.get("RAG_EMBED_BASE_URL")
     if provider == embed.PROVIDER_OPENAI and not base_url:
         raise SystemExit("provider=openai 需要 RAG_EMBED_BASE_URL（如 https://host/v1）")
@@ -278,12 +400,19 @@ def main(argv=None):
                         embed.PROVIDER_CTAIGW):
         raise SystemExit(f"未知 RAG_EMBED_PROVIDER: {provider}")
 
-    path = Path(args.file or os.environ.get("RAG_DOCS_INPUT") or DEFAULT_INPUT)
     if not path.is_file():
+        freshness.record_run_failure(
+            ("kb_doc_vector",), source_type="wiki",
+            source_id=f"wiki:{path.name}", reason="no_input",
+        )
         print(f"service=rag-index-docs status=skipped reason=no_input"
               f" file={path}")
-        return
+        raise SystemExit(1)
 
+    from common.public_data import db
+    from common.public_data.freshness_repository import (
+        KnowledgeIndexFreshnessRepository,
+    )
     from common.public_data.live_safety import require_business_run
     from common.public_data.settings import Settings
     from common.rag import store
@@ -306,15 +435,38 @@ def main(argv=None):
     if not model:
         raise SystemExit(f"provider={provider} 需要 RAG_EMBED_MODEL")
 
-    stats = run_index(payload, milvus=milvus, store=store, api_key=api_key,
-                      dim=dim, model=model, provider=provider,
-                      base_url=base_url)
+    text_batch = int(os.environ.get("RAG_EMBED_TEXT_BATCH", TEXT_BATCH))
+    concurrency = int(os.environ.get("RAG_EMBED_CONCURRENCY", "1"))
+    if not 1 <= text_batch <= 64 or concurrency != 1:
+        raise SystemExit("RAG_EMBED_TEXT_BATCH 须为 1..64，且单写者并发只能为 1")
+    state_connection = db.connect(settings.mart_database)
+    try:
+        stats = run_index(
+            payload, milvus=milvus, store=store, api_key=api_key,
+            dim=dim, model=model, provider=provider, base_url=base_url,
+            text_batch=text_batch,
+            freshness_repository=KnowledgeIndexFreshnessRepository(state_connection),
+            source_id=f"wiki:{path.name}"[:128],
+            source_snapshot_at=datetime.fromtimestamp(path.stat().st_mtime),
+            auto_delete=os.environ.get("INDEX_AUTO_DELETE_ENABLE", "0") == "1",
+            delete_max_count=int(os.environ.get("INDEX_DELETE_MAX_COUNT", "100")),
+            delete_max_ratio=float(os.environ.get("INDEX_DELETE_MAX_RATIO", "0.1")),
+        )
+    finally:
+        state_connection.close()
+    reason = f" reason={stats['reason']}" if stats["reason"] else ""
     print(
-        f"service=rag-index-docs status=completed"
+        f"service=rag-index-docs status={stats['status']}{reason}"
         f" provider={provider} dim={dim}"
         f" docs={stats['docs']} chunks={stats['chunks']}"
         f" skipped={stats['skipped']} written={stats['written']}"
+        f" unchanged={stats['unchanged']} failed={stats['failed']}"
+        f" deleted={stats['deleted']} delete_planned={stats['delete_planned']}"
+        f" index_version={stats['index_version']}"
     )
+    if stats["status"] != "completed":
+        raise SystemExit(1)
+    return stats
 
 
 if __name__ == "__main__":

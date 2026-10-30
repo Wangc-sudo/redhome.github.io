@@ -2,9 +2,14 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
+from common.kb_qa.export_schema import (
+    query_export_ddl_statements,
+    query_snapshot_ddl_statements,
+)
 from common.kb_qa.schema import (
     kb_audit_v2_ddl_statements,
     kb_audit_v3_ddl_statements,
+    kb_audit_v4_ddl_statements,
     kb_ddl_statements,
     kb_web_acl_ddl_statements,
 )
@@ -65,7 +70,11 @@ from common.public_data.mart_extract_schema import (
 )
 from common.public_data.db import transaction
 from common.public_data.fleet_audit import fleet_audit_ddl_statements
+from common.public_data.freshness_repository import (
+    ddl_statements as freshness_ddl_statements,
+)
 from common.public_data.ops_control import (
+    dead_letter_ddl_statements,
     pipeline_ops_ddl_statements,
     run_history_ddl_statements,
 )
@@ -611,6 +620,11 @@ _MIGRATIONS = (
         _build_mart_run_history_ddl(),
     ),
     (
+        "mart-ops-dead-letter-v1",
+        "mart",
+        dead_letter_ddl_statements(),
+    ),
+    (
         # 舰队月检快照（2026-10-17 治理 P2）：pd_ops_fleet_audit——
         # fleet-audit 管道（每月 2 日 07:00）唯一写方，ops-web 治理抽屉
         # 「上次月检快照」节只读。独立版本（校验和红线）。
@@ -638,6 +652,11 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-audit-v3",
         "mart",
         kb_audit_v3_ddl_statements(),
+    ),
+    (
+        "mart-ops-kb-qa-audit-v4",
+        "mart",
+        kb_audit_v4_ddl_statements(),
     ),
     (
         # Web 通道角色白名单（2026-10-23 裁决）：kb_web_acl，在册用户才
@@ -830,6 +849,23 @@ _MIGRATIONS = (
         "mart-ops-rag-index-state-v1",
         "mart",
         rag_index_state_ddl_statements(),
+    ),
+    (
+        # 数据新鲜度与知识索引新鲜度状态表（2026-10-29 自动化闭环 P0）。
+        # 独立版本，新增表不触碰既有迁移校验和。
+        "mart-ops-freshness-v1",
+        "mart",
+        freshness_ddl_statements(),
+    ),
+    (
+        "mart-ops-kb-query-snapshot-v1",
+        "mart",
+        query_snapshot_ddl_statements(),
+    ),
+    (
+        "mart-ops-kb-export-v1",
+        "mart",
+        query_export_ddl_statements(),
     ),
 )
 

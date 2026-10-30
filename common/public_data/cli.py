@@ -737,6 +737,142 @@ def _handle_data_quality_check(args):
         sys.exit(1)
 
 
+def _freshness_check_enabled():
+    return os.environ.get("DATA_FRESHNESS_CHECK_ENABLE", "1").strip() == "1"
+
+
+def _freshness_alerts_enabled():
+    return os.environ.get("DATA_FRESHNESS_ALERT_ENABLE", "").strip() == "1"
+
+
+def _enqueue_freshness_alert(outbox, contract, result, *, created_at):
+    if result.status == "fresh":
+        return False
+    business_date = created_at.date()
+    latest_business_date = result.latest_business_date or business_date
+    return outbox.enqueue(
+        region="ops",
+        kind="alert",
+        business_date=business_date,
+        title="数据新鲜度告警",
+        body_md=(
+            f"- 数据集：`{contract.dataset_key}`\n"
+            f"- 负责人：{contract.owner}\n"
+            f"- 状态：**{result.status}**\n"
+            f"- 业务日期：{latest_business_date.isoformat()}\n"
+            f"- 错误码：`{result.error or result.status}`"
+        ),
+        created_at=created_at,
+        dedupe_suffix=f"freshness:{contract.dataset_key}:{result.status}",
+    )
+
+
+def _handle_freshness_check(args):
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+
+    try:
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        service_id = resolve_service_id(getattr(args, "service", None))
+        if not _pipeline_enabled(service_id):
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+        if not _freshness_check_enabled():
+            print(f"service={service_id} status=skipped reason=disabled")
+            return
+
+        from datetime import datetime
+        from types import SimpleNamespace
+
+        from common.public_data.dataset_contract import get_contract, list_contracts
+        from common.public_data.db import transaction
+        from common.public_data.freshness import FreshnessChecker
+        from common.public_data.freshness_repository import (
+            FreshnessRepository,
+            KnowledgeIndexFreshnessRepository,
+        )
+        from common.public_data.outbox_repository import OutboxRepository
+
+        contracts = (
+            (get_contract(args.dataset),)
+            if args.dataset else (
+                list_contracts(kind="business") + list_contracts(kind="manual")
+                + list_contracts(kind="knowledge")
+            )
+        )
+        conn = connect(settings.mart_database)
+        manual_conn = None
+        try:
+            if settings.manual_database is not None and any(
+                contract.kind == "manual" for contract in contracts
+            ):
+                manual_conn = connect(settings.manual_database)
+            checker = FreshnessChecker(
+                connection=conn, manual_connection=manual_conn,
+            )
+            repository = FreshnessRepository(conn)
+            knowledge_repository = KnowledgeIndexFreshnessRepository(conn)
+            outbox = OutboxRepository(conn) if _freshness_alerts_enabled() else None
+            for contract in contracts:
+                if contract.kind == "knowledge":
+                    item = knowledge_repository.check_sla(contract)
+                    result = SimpleNamespace(
+                        dataset_key=contract.dataset_key,
+                        status=item["status"],
+                        latest_business_date=None,
+                        lag_minutes=None,
+                        error=item.get("last_error"),
+                    )
+                else:
+                    result = checker.check(contract)
+                    repository.upsert(result)
+                if outbox is not None:
+                    with transaction(conn):
+                        _enqueue_freshness_alert(
+                            outbox, contract, result, created_at=datetime.utcnow(),
+                        )
+                print(
+                    f"dataset={result.dataset_key} status={result.status}"
+                    f" lag_minutes={result.lag_minutes}"
+                    f" latest_business_date={result.latest_business_date}"
+                    f" error={result.error or ''}"
+                )
+        finally:
+            if manual_conn is not None:
+                manual_conn.close()
+            conn.close()
+    except SystemExit:
+        raise
+    except Exception:
+        _print_failure(code="freshness_check_error")
+        sys.exit(1)
+
+
+def _handle_kb_export_cleanup(args):
+    if not args.confirm_local_test_write:
+        sys.exit(1)
+    try:
+        from common.kb_qa.query_export import ExportService
+
+        settings = load_settings()
+        require_extract_run(
+            settings,
+            confirm_local_test_write=args.confirm_local_test_write,
+        )
+        service = ExportService.from_env(
+            lambda: connect(settings.mart_database),
+        )
+        expired = service.cleanup()
+        print(f"kb_export_cleanup expired={expired}")
+    except Exception:
+        _print_failure(code="kb_export_cleanup_error")
+        sys.exit(1)
+
+
 def _handle_data_quality_rerun(args):
     if not args.confirm_local_test_write:
         sys.exit(1)
@@ -1347,6 +1483,28 @@ def main(argv=None):
              "(default: $PUBLIC_DATA_SERVICE_ID)",
     )
 
+    # -- freshness-check -----------------------------------------------------
+    freshness = subparsers.add_parser(
+        "freshness-check", help="Check dataset freshness against contracts"
+    )
+    freshness.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+    freshness.add_argument("--dataset", default=None)
+    freshness.add_argument(
+        "--service", default=None,
+        help="pipeline service id for the registry enable gate "
+             "(default: $PUBLIC_DATA_SERVICE_ID)",
+    )
+
+    # -- kb-export-cleanup ---------------------------------------------------
+    export_cleanup = subparsers.add_parser(
+        "kb-export-cleanup", help="Expire KB XLSX exports and remove files"
+    )
+    export_cleanup.add_argument(
+        "--confirm-local-test-write", action="store_true", default=False
+    )
+
     # -- data-quality-rerun --------------------------------------------------
     rerun = subparsers.add_parser(
         "data-quality-rerun", help="Consume one pending data-quality rerun"
@@ -1508,6 +1666,8 @@ def main(argv=None):
         "rebuild-projection": _handle_rebuild_projection,
         "extract-mart": _handle_extract_mart,
         "data-quality-check": _handle_data_quality_check,
+        "freshness-check": _handle_freshness_check,
+        "kb-export-cleanup": _handle_kb_export_cleanup,
         "data-quality-rerun": _handle_data_quality_rerun,
         "publish-pipelines": _handle_publish_pipelines,
         "backfill-pipeline-categories": _handle_backfill_pipeline_categories,

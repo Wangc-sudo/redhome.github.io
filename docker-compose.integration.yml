@@ -497,6 +497,18 @@ services:
       PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
       PUBLIC_DATA_SERVICE_ID: scheduler
       TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+      SCHEDULER_HEARTBEAT_PATH: /tmp/dops-scheduler-heartbeat
+      AUTO_RETRY_ENABLE: "0"
+      AUTO_REPLAY_ENABLE: "0"
+      AUTO_CATCHUP_ENABLE: "0"
+      INDEX_AUTO_DELETE_ENABLE: "0"
+      RAG_EMBED_TEXT_BATCH: "16"
+      RAG_EMBED_IMAGE_BATCH: "8"
+      RAG_EMBED_CONCURRENCY: "1"
+      KB_EXPORT_ENABLE: "0"
+      KB_EXPORT_GROUP_ENABLE: "0"
+      KB_EXPORT_DIR: /tmp/kb-exports
       INTEGRATION_TEST_RUNNER: "1"
     volumes:
       - type: bind
@@ -551,6 +563,9 @@ services:
       # Redis 后端。bi-web 对 redis 零 depends_on —— 缓存挂 ≠ 看板挂
       # （fail-open，miss 即 mart 直查），见 cache.py。
       PUBLIC_DATA_REDIS_URL: ${PUBLIC_DATA_REDIS_URL:-}
+      KB_EXPORT_ENABLE: "0"
+      KB_EXPORT_GROUP_ENABLE: "0"
+      KB_EXPORT_DIR: /tmp/kb-exports
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:18080:8080"

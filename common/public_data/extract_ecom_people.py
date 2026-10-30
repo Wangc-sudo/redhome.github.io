@@ -55,6 +55,7 @@ import contextlib
 import json
 import logging
 import sys
+import uuid
 from datetime import date, datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -540,6 +541,7 @@ def main(argv=None):
             return 0
 
         from common.public_data.live_safety import require_extract_run
+        from common.public_data.mart_repository import MartRepository
         from common.public_data.mart_routing import (
             MartSplitSwitches,
             facts_write_databases,
@@ -552,18 +554,38 @@ def main(argv=None):
         now = datetime.now(timezone.utc)
         for db_settings in facts_write_databases(settings, switches):
             connection = connect(db_settings)
+            run_id = uuid.uuid4()
+            manifest_hash = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"ecom-people:{month or 'all'}",
+            ).hex
             try:
+                repository = MartRepository(connection)
                 with transaction(connection):
+                    repository.start_run(run_id, manifest_hash)
+                    repository.mark_raw_committed(run_id)
                     stats = upsert_rows(connection, rows, now)
                     stores_written = replace_store_targets(
                         connection, target_rows,
                         sync_run_id=ECOM_RUN_ID, synced_at=now,
                     )
+                    for dataset_key, read_count, written_count in (
+                        ("ecom_people", len(rows), stats["inserted"] + stats["updated"]),
+                        ("channel_monthly_target", len(target_rows), stores_written),
+                    ):
+                        digest = uuid.uuid5(
+                            uuid.NAMESPACE_URL, f"{run_id}:{dataset_key}",
+                        ).hex
+                        repository.save_dataset_summary(
+                            run_id, dataset_key, "dingtalk", read_count,
+                            written_count, digest,
+                        )
+                    repository.mark_completed(run_id)
             finally:
                 connection.close()
             print(f"dataset=ecom_people database={db_settings.name} "
-                  f"inserted={stats['inserted']} updated={stats['updated']} "
-                  f"store_targets={stores_written} status=completed")
+                  f"run_id={run_id} inserted={stats['inserted']} "
+                  f"updated={stats['updated']} store_targets={stores_written} "
+                  "status=completed")
         return 0
     except Exception:
         logger.error("extract_ecom_people 运行失败", exc_info=True)

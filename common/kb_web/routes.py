@@ -12,8 +12,8 @@ authCode 就必须用哪个应用的 key/secret 换。
 import asyncio
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from common.bi_web import auth
 
@@ -42,7 +42,8 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
                        member_name_lookup=None, session_secure=False,
                        guide_config=None, corp_id=None,
                        qr_client=None, state_store=None,
-                       qr_redirect_uri=None, member_checker=None):
+                       qr_redirect_uri=None, member_checker=None,
+                       export_service=None, export_authorizer=None):
     """注册 /kb/api 路由组。依赖全注入：
 
     service          KbWebService（问答主链路）
@@ -65,6 +66,49 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
         if userid is None:
             raise HTTPException(status_code=401, detail="unauthenticated")
         return userid
+
+    def export_status(sid, userid, export_id):
+        status = export_service.status(
+            export_id, userid, f"web:{sid}", authorizer=export_authorizer,
+        )
+        status["download_url"] = (
+            f"/kb/api/sessions/{sid}/exports/{export_id}/download"
+        )
+        return status
+
+    def start_export(sid, userid, snapshot_id, background_tasks):
+        export_id = export_service.create(
+            snapshot_id, userid, f"web:{sid}", authorizer=export_authorizer,
+        )
+        background_tasks.add_task(
+            export_service.generate, export_id, authorizer=export_authorizer,
+        )
+        return export_status(sid, userid, export_id)
+
+    def raise_export_http(exc):
+        if isinstance(exc, KeyError):
+            raise HTTPException(status_code=404, detail="export not found") from exc
+        if isinstance(exc, PermissionError):
+            raise HTTPException(status_code=403, detail="export forbidden") from exc
+        if isinstance(exc, FileNotFoundError):
+            raise HTTPException(status_code=410, detail="export file unavailable") from exc
+        if isinstance(exc, RuntimeError):
+            raise HTTPException(status_code=409, detail="export not ready") from exc
+        raise HTTPException(status_code=400, detail="invalid export request") from exc
+
+    if export_service is not None and callable(getattr(export_service, "recover_pending", None)):
+        @app.on_event("startup")
+        async def kb_recover_exports():
+            async def recover():
+                try:
+                    await asyncio.to_thread(
+                        export_service.recover_pending,
+                        authorizer=export_authorizer,
+                    )
+                except Exception as exc:
+                    app.state.kb_export_recovery_error = type(exc).__name__
+
+            app.state.kb_export_recovery = asyncio.create_task(recover())
 
     # ------------------------------------------------------------------
     # 认证
@@ -203,6 +247,7 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
     # ------------------------------------------------------------------
     @app.post("/kb/api/sessions/{sid}/messages")
     async def kb_send_message(sid: str, request: Request,
+                              background_tasks: BackgroundTasks,
                               userid=Depends(require_userid)):
         try:
             body = await request.json()
@@ -234,9 +279,46 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
             # clarify 闭环（2026-10-23）：先 pop 上一轮候选（消费即作废），
             # 本轮再发反问则把新候选存回。
             pending = store.pop_pending(userid, sid)
-            result = service.answer(userid, content,
-                                    history_messages=history,
-                                    pending=pending, audit={"sid": sid})
+            from common.kb_qa.export_delivery import (
+                is_export_only_request,
+                is_export_request,
+            )
+
+            export_only = is_export_only_request(content)
+            if export_only:
+                result = {
+                    "reply": "Excel 导出功能暂未开放。",
+                    "intent": "EXPORT",
+                    "meta": {},
+                    "attachments": [],
+                }
+                if export_service is not None:
+                    snapshot_id = export_service.latest_snapshot_id(
+                        userid, f"web:{sid}",
+                    )
+                    if snapshot_id:
+                        try:
+                            result["meta"]["export"] = start_export(
+                                sid, userid, snapshot_id, background_tasks,
+                            )
+                            result["reply"] = "正在生成 Excel，请在此消息中查看进度。"
+                        except Exception:
+                            result["reply"] = "导出创建失败，请重新查询后再试。"
+                    else:
+                        result["reply"] = "暂无可导出的结构化查询结果，请先完成一次数据查询。"
+            else:
+                result = service.answer(userid, content,
+                                        history_messages=history,
+                                        pending=pending, audit={"sid": sid})
+                snapshot_id = result["meta"].get("export_snapshot_id")
+                if export_service is not None and is_export_request(content) and snapshot_id:
+                    try:
+                        result["meta"]["export"] = start_export(
+                            sid, userid, snapshot_id, background_tasks,
+                        )
+                        result["reply"] += "\n\n正在生成 Excel，请在此消息中查看进度。"
+                    except Exception:
+                        result["reply"] += "\n\n导出创建失败，可稍后点击“导出 Excel”重试。"
             pending_candidates = result.pop("pending_candidates", None)
             if pending_candidates:
                 store.set_pending(userid, sid, pending_candidates)
@@ -273,6 +355,57 @@ def register_kb_routes(app: FastAPI, *, service, store, session_secret,
              "regenerated": True},
         ])
         return result
+
+    @app.post("/kb/api/sessions/{sid}/exports")
+    async def kb_create_export(sid: str, request: Request,
+                               background_tasks: BackgroundTasks,
+                               userid=Depends(require_userid)):
+        if export_service is None:
+            raise HTTPException(status_code=503, detail="export unavailable")
+        if store.get_messages(userid, sid) is None:
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        snapshot_id = body.get("snapshot_id") if isinstance(body, dict) else None
+        if not snapshot_id:
+            raise HTTPException(status_code=400, detail="snapshot_id required")
+        try:
+            return start_export(sid, userid, snapshot_id, background_tasks)
+        except Exception as exc:
+            raise_export_http(exc)
+
+    @app.get("/kb/api/sessions/{sid}/exports/{export_id}")
+    def kb_export_status(sid: str, export_id: str,
+                         userid=Depends(require_userid)):
+        if export_service is None:
+            raise HTTPException(status_code=503, detail="export unavailable")
+        if store.get_messages(userid, sid) is None:
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            return export_status(sid, userid, export_id)
+        except Exception as exc:
+            raise_export_http(exc)
+
+    @app.get("/kb/api/sessions/{sid}/exports/{export_id}/download")
+    def kb_download_export(sid: str, export_id: str,
+                           userid=Depends(require_userid)):
+        if export_service is None:
+            raise HTTPException(status_code=503, detail="export unavailable")
+        if store.get_messages(userid, sid) is None:
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            path, file_name = export_service.download(
+                export_id, userid, f"web:{sid}", authorizer=export_authorizer,
+            )
+        except Exception as exc:
+            raise_export_http(exc)
+        return FileResponse(
+            path,
+            filename=file_name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     # ------------------------------------------------------------------
     # 附件（现取签名 URL → 302；签名 URL 不落前端日志）

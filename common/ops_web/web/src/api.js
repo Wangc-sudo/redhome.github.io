@@ -598,3 +598,31 @@ export function createDataQualityRerun(payload) {
 export function getDataQualityRerun(runId) {
   return request(`/api/data-quality/reruns/${encodeURIComponent(runId)}`);
 }
+
+// -- 数据与知识索引新鲜度 ------------------------------------------------------
+
+export function getDataFreshness(params = {}) {
+  return request(`/api/data-freshness${queryString(params)}`);
+}
+
+export function getDataFreshnessDetail(datasetKey) {
+  return request(`/api/data-freshness/${encodeURIComponent(datasetKey)}`);
+}
+
+export function checkDataFreshness(datasetKey) {
+  return post(`/api/data-freshness/${encodeURIComponent(datasetKey)}/check`, {});
+}
+
+export function getKnowledgeIndexes(params = {}) {
+  return request(`/api/knowledge-indexes${queryString(params)}`);
+}
+
+export function getKnowledgeIndexDetail(indexKey) {
+  return request(`/api/knowledge-indexes/${encodeURIComponent(indexKey)}`);
+}
+
+export function getBusinessDataFreshness(businessLine) {
+  return request(
+    `/api/business/${encodeURIComponent(businessLine)}/data-freshness`,
+  );
+}

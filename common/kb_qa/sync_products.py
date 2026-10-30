@@ -17,9 +17,10 @@
 """
 
 import argparse
+from datetime import datetime
+import hashlib
 import json
 import os
-from datetime import datetime
 
 #: AI 字段名 → (列名, 类型)。
 FIELD_MAP = {
@@ -171,6 +172,105 @@ def upsert_products(conn, rows, *, synced_at=None):
     return written
 
 
+class SourceSnapshotError(RuntimeError):
+    pass
+
+
+def list_product_ids(conn):
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT `record_id` FROM `kb_products`")
+        return {row["record_id"] if isinstance(row, dict) else row[0]
+                for row in cursor.fetchall()}
+    finally:
+        cursor.close()
+
+
+def delete_products(conn, record_ids):
+    deleted = 0
+    cursor = conn.cursor()
+    try:
+        for record_id in record_ids:
+            cursor.execute(
+                "DELETE FROM `kb_products` WHERE `record_id`=%s", (record_id,))
+            deleted += cursor.rowcount
+    finally:
+        cursor.close()
+    return deleted
+
+
+def _snapshot_hash(rows):
+    serialized = json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _record_freshness(repository, stats, *, source_id, status):
+    if not repository:
+        return
+    repository.record({
+        "index_key": "kb_product_structured",
+        "source_type": "aitable",
+        "source_id": source_id,
+        "source_version": stats["content_hash"],
+        "content_hash": stats["content_hash"],
+        "chunker_version": "product-record-v1",
+        "index_version": stats["index_version"],
+        "source_count": stats["records_read"],
+        "indexed_count": stats["rows_written"],
+        "pending_count": stats["deletion_pending"],
+        "failed_count": stats["skipped"],
+        "last_source_snapshot_at": datetime.now(),
+        "status": status,
+        "last_error": stats["reason"] or None,
+    })
+
+
+def run_sync(records, *, conn, source_id, freshness_repository=None,
+             auto_delete=False, delete_max_count=100, delete_max_ratio=0.1):
+    rows = [row for row in (normalize_record(record) for record in records) if row]
+    skipped = len(records) - len(rows)
+    unique_ids = {row["record_id"] for row in rows}
+    content_hash = _snapshot_hash(rows)
+    stats = {
+        "records_read": len(records), "rows_written": 0, "skipped": skipped,
+        "deleted": 0, "delete_planned": 0, "deletion_pending": 0,
+        "content_hash": content_hash, "index_version": content_hash,
+        "status": "completed", "reason": "",
+    }
+    complete = bool(rows) and skipped == 0 and len(unique_ids) == len(rows)
+    if not complete:
+        stats["status"] = "blocked" if not rows else "degraded"
+        stats["reason"] = "empty_source" if not rows else "incomplete_source"
+        _record_freshness(
+            freshness_repository, stats, source_id=source_id,
+            status=stats["status"])
+        raise SourceSnapshotError(stats["reason"])
+
+    current_ids = {row["record_id"] for row in rows}
+    stale_ids = sorted(list_product_ids(conn) - current_ids)
+    stats["delete_planned"] = len(stale_ids)
+    delete_stale = False
+    if stale_ids and auto_delete:
+        ratio = len(stale_ids) / max(len(stale_ids) + len(current_ids), 1)
+        delete_stale = (len(stale_ids) <= delete_max_count
+                        and ratio <= delete_max_ratio)
+        if not delete_stale:
+            stats["reason"] = "delete_threshold"
+    stats["rows_written"] = upsert_products(conn, rows)
+    if delete_stale:
+        stats["deleted"] = delete_products(conn, stale_ids)
+    stats["deletion_pending"] = 0 if delete_stale else len(stale_ids)
+    if stats["deletion_pending"]:
+        stats["status"] = "degraded"
+        stats["reason"] = stats["reason"] or "deletion_pending"
+    conn.commit()
+    _record_freshness(
+        freshness_repository, stats, source_id=source_id,
+        status="fresh" if stats["status"] == "completed" else "degraded")
+    return stats
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="kb_qa.sync_products")
     parser.add_argument("--live-read", action="store_true")
@@ -179,6 +279,9 @@ def main(argv=None):
 
     from common.dingtalk.client import DingTalkClient
     from common.public_data import db
+    from common.public_data.freshness_repository import (
+        KnowledgeIndexFreshnessRepository,
+    )
     from common.public_data.live_safety import require_live_run
     from common.public_data.settings import Settings
 
@@ -197,22 +300,36 @@ def main(argv=None):
     sheet_id = os.environ["KB_PRODUCTS_SHEET_ID"]
 
     records = client.list_records(base_id, sheet_id)
-    rows = [row for row in (normalize_record(r) for r in records) if row]
 
     conn = db.connect(settings.mart_database)
     try:
-        written = upsert_products(conn, rows)
-        conn.commit()
+        stats = run_sync(
+            records, conn=conn, source_id=f"{base_id}:{sheet_id}"[:128],
+            freshness_repository=KnowledgeIndexFreshnessRepository(conn),
+            auto_delete=os.environ.get("INDEX_AUTO_DELETE_ENABLE", "0") == "1",
+            delete_max_count=int(os.environ.get("INDEX_DELETE_MAX_COUNT", "100")),
+            delete_max_ratio=float(os.environ.get("INDEX_DELETE_MAX_RATIO", "0.1")),
+        )
+    except SourceSnapshotError as exc:
+        conn.rollback()
+        print(f"service=kb-sync-products status=degraded reason={exc}")
+        raise SystemExit(1)
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+    reason = f" reason={stats['reason']}" if stats["reason"] else ""
     print(
-        f"service=kb-sync-products status=completed"
-        f" records_read={len(records)} rows_written={written}"
-        f" skipped={len(records) - len(rows)}"
+        f"service=kb-sync-products status={stats['status']}{reason}"
+        f" records_read={stats['records_read']}"
+        f" rows_written={stats['rows_written']} skipped={stats['skipped']}"
+        f" deleted={stats['deleted']} delete_planned={stats['delete_planned']}"
+        f" index_version={stats['index_version']}"
     )
+    if stats["status"] != "completed":
+        raise SystemExit(1)
+    return stats
 
 
 if __name__ == "__main__":

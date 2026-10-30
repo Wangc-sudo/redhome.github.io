@@ -156,12 +156,14 @@ class KbWebService:
                     "url": (f"/kb/api/attachments/{asset['record_id']}"
                             f"/{asset['field']}/{index}"),
                 })
+        export_snapshot_id = None
         if audit:
-            self._write_audit(audit, userid=userid, question=content,
-                              reply=None if failed else reply,
-                              intent=intent, matched=matched, meta=meta,
-                              tokens=tokens, latency_ms=latency_ms,
-                              failed=failed)
+            export_snapshot_id = self._write_audit(
+                audit, userid=userid, question=content,
+                reply=None if failed else reply,
+                intent=intent, matched=matched, meta=meta,
+                tokens=tokens, latency_ms=latency_ms, failed=failed,
+            )
         return {
             "reply": reply or "",
             "intent": intent,
@@ -172,6 +174,7 @@ class KbWebService:
                 "history_rounds": len(history),
                 "history_truncated": total_turns > len(history),
                 "tokens": tokens,
+                "export_snapshot_id": export_snapshot_id,
             },
             "attachments": attachments,
             # clarify 闭环状态（路由层消费，不透给前端）。
@@ -188,6 +191,7 @@ class KbWebService:
         """
         sid = audit.get("sid") or ""
         msg_id = f"web:{sid}:{uuid.uuid4().hex[:12]}"
+        snapshot_id = uuid.uuid4().hex if meta.get("query_snapshots") else None
         try:
             conn = self._connection_factory()
             try:
@@ -218,8 +222,25 @@ class KbWebService:
                     )
                 finally:
                     cursor.close()
+                if snapshot_id and not failed:
+                    from common.kb_qa.query_export import QuerySnapshotRepository
+
+                    QuerySnapshotRepository(conn).save(
+                        snapshot_id=snapshot_id,
+                        msg_id=msg_id,
+                        sender_uid=userid,
+                        conversation_id=f"web:{sid}",
+                        payload={
+                            "version": 1,
+                            "items": meta["query_snapshots"],
+                        },
+                    )
+                else:
+                    snapshot_id = None
                 conn.commit()
+                return snapshot_id
             finally:
                 conn.close()
         except Exception:
             self._log("kb web: audit skipped")
+            return None

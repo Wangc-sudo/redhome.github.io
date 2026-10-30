@@ -45,6 +45,16 @@ class RecordingRunner:
         return self.returncode
 
 
+class SequenceRunner(RecordingRunner):
+    def __init__(self, returncodes):
+        super().__init__()
+        self._returncodes = iter(returncodes)
+
+    def __call__(self, service_id, argv):
+        self.calls.append((service_id, argv))
+        return next(self._returncodes)
+
+
 class LockedOutLock:
     """Simulates a MySQL named lock held by someone else."""
 
@@ -57,15 +67,17 @@ class LockedOutLock:
         return False
 
 
-def make_scheduler(configs, clock=None, runner=None, lock_factory=None):
+def make_scheduler(configs, clock=None, runner=None, lock_factory=None, settings=None,
+                   dead_letter_store=None):
     return Scheduler(
         config_source=StaticConfigSource(configs),
         service_ids=tuple(configs.keys()),
         runner=runner or RecordingRunner(),
         lock_factory=lock_factory or (lambda service_id: NullLock()),
-        settings=SETTINGS,
+        settings=settings or SETTINGS,
         executor=SyncExecutor(),
         clock=clock or FakeClock(),
+        dead_letter_store=dead_letter_store,
     )
 
 
@@ -151,8 +163,8 @@ def test_dependency_fire_at_not_advanced_while_waiting():
     assert scheduler._runner.calls == []
 
 
-def test_unknown_dependency_warns_once_and_fires(caplog):
-    # probe=None → 走 Scheduler 默认探针（未知依赖告警一次后按满足处理）
+def test_unknown_dependency_warns_once_and_never_fires(caplog):
+    # probe=None → 走 Scheduler 默认探针（未知依赖 fail-closed，告警一次）。
     clock = FakeClock(datetime(2026, 9, 21, 2, 0, 5))
     scheduler = make_dag_scheduler(
         {"schedule": "0 2 * * *", "depends_on": ["typo-service"]},
@@ -160,11 +172,48 @@ def test_unknown_dependency_warns_once_and_fires(caplog):
     )
     with caplog.at_level(logging.WARNING):
         scheduler.tick()
-        clock.advance(days=1)  # 次日同一窗口（no-catch-up：同分钟不重燃）
-        scheduler.tick()  # 第二次：告警去重
+        clock.advance(days=1)
+        scheduler.tick()  # 第二次：告警去重，仍不得放行
     fired = [sid for sid, _ in scheduler._runner.calls if sid == "sync-wdt"]
-    assert fired == ["sync-wdt", "sync-wdt"]
+    assert fired == []
     assert caplog.text.count("无探针实现") == 1
+    assert "按未满足处理" in caplog.text
+
+
+def test_scheduler_heartbeat_is_atomic_and_configurable(tmp_path):
+    from common.public_data.scheduler import write_heartbeat
+
+    heartbeat = tmp_path / "scheduler-heartbeat"
+    settings = SchedulerSettings.from_env({
+        "SCHEDULER_HEARTBEAT_PATH": str(heartbeat),
+    })
+    assert settings.heartbeat_path == str(heartbeat)
+    write_heartbeat(settings.heartbeat_path)
+    assert heartbeat.exists()
+    assert float(heartbeat.read_text(encoding="ascii")) > 0
+    assert not (tmp_path / "scheduler-heartbeat.tmp").exists()
+
+
+def test_recovery_settings_default_off_and_require_explicit_opt_in():
+    defaults = SchedulerSettings.from_env({})
+    assert defaults.auto_retry_enable is False
+    assert defaults.auto_catchup_enable is False
+    assert defaults.auto_replay_enable is False
+
+    enabled = SchedulerSettings.from_env({
+        "AUTO_RETRY_ENABLE": "1",
+        "AUTO_CATCHUP_ENABLE": "true",
+        "AUTO_REPLAY_ENABLE": "yes",
+        "AUTO_RETRY_MAX_ATTEMPTS": "2",
+        "AUTO_RETRY_BACKOFF_SECONDS": "0.5",
+        "AUTO_CATCHUP_MAX_AGE_SECONDS": "120",
+    })
+    assert enabled.auto_retry_enable is True
+    assert enabled.auto_catchup_enable is True
+    assert enabled.auto_replay_enable is True
+    assert enabled.auto_retry_max_attempts == 2
+    assert enabled.auto_retry_backoff_seconds == 0.5
+    assert enabled.auto_catchup_max_age_seconds == 120
 
 
 def test_roll_manifest_probe_reads_manifest_mtime(tmp_path):
@@ -358,7 +407,184 @@ def test_nonzero_exit_does_not_block_future_windows():
     scheduler.tick()
     clock.advance(days=1)
     scheduler.tick()
-    assert len(runner.calls) == 2  # 失败不禁跑，下个窗口照常重试
+    assert len(runner.calls) == 2  # 默认关闭自动恢复；下个窗口照常重试
+
+
+def test_auto_retry_uses_backoff_then_dead_letters_at_limit(caplog):
+    runner = SequenceRunner([1, 1, 1])
+    settings = SchedulerSettings(
+        auto_retry_enable=True,
+        auto_retry_max_attempts=3,
+        auto_retry_backoff_seconds=30,
+    )
+    scheduler, clock = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        runner=runner, settings=settings,
+    )
+    with caplog.at_level(logging.ERROR):
+        scheduler.tick()
+        assert len(runner.calls) == 1
+        scheduler.tick()  # 退避未到，不因轮询频率放大重试
+        assert len(runner.calls) == 1
+        clock.advance(seconds=30)
+        scheduler.tick()
+        assert len(runner.calls) == 2
+        clock.advance(seconds=59)
+        scheduler.tick()
+        assert len(runner.calls) == 2
+        clock.advance(seconds=1)  # 第二次退避为 60 秒
+        scheduler.tick()
+
+    assert len(runner.calls) == 3
+    assert scheduler._pending_recovery == {}
+    assert scheduler._dead_letters["sync-wdt"]["reason"] == "retry_limit"
+    assert scheduler._dead_letters["sync-wdt"]["attempts"] == 3
+    assert "dead-letter" in caplog.text
+    assert "source-credentials" not in caplog.text
+    clock.advance(minutes=5)
+    scheduler.tick()
+    assert len(runner.calls) == 3  # dead-letter 后不再自动点燃
+
+
+def test_dead_letter_persists_and_emits_safe_alert():
+    class Store:
+        def __init__(self):
+            self.records = []
+            self.notifications = []
+
+        def list_active(self):
+            return []
+
+        def record(self, *args):
+            self.records.append(args)
+
+        def notify(self, *args):
+            self.notifications.append(args)
+
+    store = Store()
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_retry_max_attempts=1,
+    )
+    scheduler, _ = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        runner=RecordingRunner(returncode=1), settings=settings,
+        dead_letter_store=store,
+    )
+    scheduler.tick()
+    assert len(store.records) == 1
+    assert len(store.notifications) == 1
+    assert store.notifications[0][0] == "sync-wdt"
+    assert store.notifications[0][2] == "retry_limit"
+
+
+def test_auto_retry_success_finishes_same_run_id_without_duplicate():
+    runner = SequenceRunner([1, 0])
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_retry_backoff_seconds=10,
+    )
+    scheduler, clock = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        runner=runner, settings=settings,
+    )
+    scheduler.tick()
+    run_id = next(iter(scheduler._pending_recovery))
+    clock.advance(seconds=10)
+    scheduler.tick()
+    scheduler.tick()
+    assert len(runner.calls) == 2
+    assert scheduler._run_states[run_id] == "finished"
+    assert scheduler._pending_recovery == {}
+    assert scheduler._dead_letters == {}
+
+
+def test_permanent_exit_is_not_retried_and_dead_letters_immediately():
+    runner = RecordingRunner(returncode=2)
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_retry_max_attempts=10,
+        auto_retry_backoff_seconds=0,
+    )
+    scheduler, clock = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        runner=runner, settings=settings,
+    )
+    scheduler.tick()
+    clock.advance(days=1)
+    scheduler.tick()
+    assert len(runner.calls) == 1
+    assert scheduler._dead_letters["sync-wdt"]["reason"] == "permanent_exit"
+
+
+def test_auto_replay_is_limited_to_confirmed_not_started_runs():
+    settings = SchedulerSettings(
+        auto_replay_enable=True, auto_retry_max_attempts=2,
+        auto_retry_backoff_seconds=0,
+    )
+    scheduler, _ = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        lock_factory=lambda service_id: LockedOutLock(), settings=settings,
+    )
+    scheduler.tick()  # 首次锁失败 + 一次安全重放；runner 从未执行
+    assert scheduler._runner.calls == []
+    assert scheduler._pending_recovery == {}
+    assert scheduler._dead_letters["sync-wdt"]["reason"] == "replay_limit"
+
+
+def test_unknown_runner_outcome_is_never_auto_replayed():
+    class ExplodingRunner(RecordingRunner):
+        def __call__(self, service_id, argv):
+            super().__call__(service_id, argv)
+            raise RuntimeError("sensitive body must not enter dead-letter log")
+
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_replay_enable=True,
+        auto_retry_backoff_seconds=0,
+    )
+    scheduler, _ = due_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}},
+        runner=ExplodingRunner(), settings=settings,
+    )
+    scheduler.tick()
+    assert scheduler._pending_recovery == {}
+    assert scheduler._dead_letters["sync-wdt"]["reason"] == "unknown_outcome"
+    assert "sensitive body" not in str(scheduler._dead_letters)
+
+
+def test_manual_run_once_is_never_auto_retried():
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(21, "sync-wdt", "alice")]
+    runner = RecordingRunner(returncode=1)
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_retry_backoff_seconds=0,
+    )
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+        runner=runner, settings=settings,
+    )
+    scheduler.tick()
+    scheduler.tick()
+    assert len(runner.calls) == 1
+    assert store.finished == [(21, 1)]
+    assert scheduler._pending_recovery == {}
+
+
+def test_successful_manual_run_clears_dead_letter():
+    store = FakeRunRequestStore()
+    runner = SequenceRunner([1, 0])
+    settings = SchedulerSettings(
+        auto_retry_enable=True, auto_retry_max_attempts=1,
+    )
+    scheduler = _run_once_scheduler(
+        {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+        clock=FakeClock(datetime(2026, 9, 21, 2, 0, 5)),
+        runner=runner, settings=settings,
+    )
+    scheduler.tick()
+    assert "sync-wdt" in scheduler._dead_letters
+    store.pending = [_RunReq(22, "sync-wdt", "operator")]
+    scheduler.tick()  # cron 被 dead-letter 阻断，人工 run-once 可执行
+    assert len(runner.calls) == 2
+    assert store.finished == [(22, 0)]
+    assert scheduler._dead_letters == {}
 
 
 def test_overlap_skipped():
@@ -402,6 +628,46 @@ def test_hot_reload_disable_stops_firing():
         {"sync-wdt": {"schedule": "0 2 * * *", "enabled": False}}
     ).get_pipeline("sync-wdt")
     clock.advance(hours=1, seconds=5)  # 02:00:05，已禁用
+    scheduler.tick()
+    assert scheduler._runner.calls == []
+
+
+def test_auto_catchup_replays_latest_bounded_window_once_without_force(tmp_path):
+    clock = FakeClock(datetime(2026, 9, 21, 2, 10, 5))
+    heartbeat = tmp_path / "scheduler-heartbeat"
+    heartbeat.write_text(
+        str((clock.now - timedelta(minutes=15)).timestamp()), encoding="ascii",
+    )
+    settings = SchedulerSettings(
+        heartbeat_path=str(heartbeat), auto_catchup_enable=True,
+        auto_catchup_max_age_seconds=3600,
+    )
+    scheduler = make_scheduler(
+        {"robot-check-hangzhou": {"schedule": "0 * * * *"}},
+        clock=clock, settings=settings,
+    )
+    scheduler.tick()
+    scheduler.tick()  # deterministic run_id + next_fire 防止同窗口重复补跑
+    assert len(scheduler._runner.calls) == 1
+    _, argv = scheduler._runner.calls[0]
+    assert "--force" not in argv  # 自动通道不得绕开 outbox 去重/既有命令门禁
+    run_id = next(iter(scheduler._run_states))
+    assert run_id.startswith("cron:robot-check-hangzhou:2026-09-21T02:00:00")
+
+
+def test_auto_catchup_refuses_window_older_than_age_limit(tmp_path):
+    clock = FakeClock(datetime(2026, 9, 21, 2, 10, 5))
+    heartbeat = tmp_path / "scheduler-heartbeat"
+    heartbeat.write_text(
+        str((clock.now - timedelta(minutes=11)).timestamp()), encoding="ascii",
+    )
+    settings = SchedulerSettings(
+        heartbeat_path=str(heartbeat), auto_catchup_enable=True,
+        auto_catchup_max_age_seconds=300,
+    )
+    scheduler = make_scheduler(
+        {"sync-wdt": {"schedule": "0 * * * *"}}, clock=clock, settings=settings,
+    )
     scheduler.tick()
     assert scheduler._runner.calls == []
 
@@ -584,6 +850,43 @@ def test_summary_dep_probe_fail_closed_on_db_error():
     assert probe() is False
 
 
+def test_history_dep_probe_requires_successful_upstream_run():
+    from common.public_data.scheduler import build_history_dep_probe
+
+    cursor = _ProbeCursor(hit=True)
+    probe = build_history_dep_probe(
+        _probe_connect(cursor), object(), service_id="kb-sync-wiki",
+        beijing_hm=(3, 5),
+        now=lambda: datetime(2026, 10, 29, 19, 20, tzinfo=timezone.utc),
+    )
+    assert probe() is True
+    sql, params = cursor.queries[0]
+    assert "`status` = 'finished'" in sql
+    assert "`exit_code` = 0" in sql
+    assert params == (
+        "kb-sync-wiki", datetime(2026, 10, 29, 19, 5, tzinfo=timezone.utc),
+    )
+
+
+def test_history_dep_probe_fail_closed_without_success_or_on_db_error():
+    from common.public_data.scheduler import build_history_dep_probe
+
+    probe = build_history_dep_probe(
+        _probe_connect(_ProbeCursor(hit=False)), object(),
+        service_id="kb-sync-products", beijing_hm=(3, 0),
+    )
+    assert probe() is False
+
+    def broken_connect(_settings):
+        raise RuntimeError("db down")
+
+    probe = build_history_dep_probe(
+        broken_connect, object(), service_id="kb-sync-products",
+        beijing_hm=(3, 0),
+    )
+    assert probe() is False
+
+
 def test_scheduler_consults_registered_dep_probes_first():
     calls = []
 
@@ -595,8 +898,27 @@ def test_scheduler_consults_registered_dep_probes_first():
     scheduler._dep_probes = {"sync-channel-sales": probe}
     assert scheduler._default_dep_probe("sync-channel-sales") is False
     assert calls == [1]
-    # 未登记的依赖维持原有语义（roll-manifest 之外告警后按满足处理）
-    assert scheduler._default_dep_probe("some-unknown-line") is True
+    # 未登记依赖 fail-closed（roll-manifest 使用自己的专用探针）。
+    assert scheduler._default_dep_probe("some-unknown-line") is False
+
+
+def test_registered_or_injected_dependency_probe_exception_fails_closed():
+    def broken_probe():
+        raise ConnectionError("db down")
+
+    scheduler = make_scheduler({})
+    scheduler._dep_probes = {"sync-channel-sales": broken_probe}
+    assert scheduler._default_dep_probe("sync-channel-sales") is False
+
+    # 即使调用方注入了整体 dep_probe，异常也不能绕过 DAG 门禁。
+    due, _ = due_scheduler({
+        "sync-wdt": {"schedule": "0 2 * * *", "depends_on": ["broken"]},
+    })
+    due._dep_probe = lambda _service_id: (_ for _ in ()).throw(
+        ConnectionError("db down")
+    )
+    due.tick()
+    assert due._runner.calls == []
 
 
 # -- 命令模板泛化（ops-web「可添加」A 方案，2026-09-30） --------------------
@@ -703,13 +1025,13 @@ class FakeRunRequestStore:
         self.rejected.append((request_id, note))
 
 
-def _run_once_scheduler(configs, store, clock=None):
+def _run_once_scheduler(configs, store, clock=None, runner=None, settings=None):
     return Scheduler(
         config_source=StaticConfigSource(configs),
         service_ids=tuple(configs.keys()),
-        runner=RecordingRunner(),
+        runner=runner or RecordingRunner(),
         lock_factory=lambda service_id: NullLock(),
-        settings=SETTINGS,
+        settings=settings or SETTINGS,
         executor=SyncExecutor(),
         clock=clock or FakeClock(datetime(2026, 9, 21, 9, 0, 0)),
         run_requests=store,

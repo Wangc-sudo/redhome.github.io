@@ -434,6 +434,23 @@ kb-sync-wiki:
   schedule: "10 3 * * *"
   reads: [mart_ops]
   description: "wiki docs sync (DingTalk wiki/doc OpenAPI -> kb_docs.json + kb_doc_chunks)"
+# 统一数据集新鲜度检查（2026-10-29 自动化闭环 P0）：按契约检查全部业务
+# 数据集，结果落 pd_dataset_freshness，供 ops-web 系统后台统一展示。
+dataset-freshness-check:
+  kind: apps
+  category: 加工
+  enabled: true
+  schedule: "0 6,12,18,23 * * *"
+  reads: [mart_ops]
+  depends_on: [extract-mart]
+  description: "dataset freshness check against versioned contracts (raw/mart/window/reconcile)"
+kb-export-cleanup:
+  kind: apps
+  category: 平台
+  enabled: true
+  schedule: "17 * * * *"
+  reads: [mart_ops]
+  description: "expire KB XLSX exports and remove expired files"
 kb-gateway:
   kind: apps
   category: 钉钉
@@ -451,6 +468,7 @@ rag-index-products:
   enabled: true
   schedule: "47 3 * * *"
   reads: [mart_ops]
+  depends_on: [kb-sync-products]
   description: "RAG vector index (DingTalk aitable -> embedding -> Milvus Lite)"
 # RAG 第二期（2026-10-19）：知识库文档（销售总结/规划/制度等）按标题结构
 # 切片后写进同一个 collection，与商品图文同向量空间、同检索入口混排召回。
@@ -462,4 +480,5 @@ rag-index-docs:
   enabled: true
   schedule: "17 3 * * *"
   reads: []
+  depends_on: [kb-sync-wiki]
   description: "RAG vector index for docs (DingTalk knowledge-base markdown -> embedding -> Milvus Lite)"

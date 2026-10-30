@@ -45,6 +45,8 @@ SERVICE_CATEGORIES = {
     "channel-order-daily": "加工",
     "channel-missing-check": "催办",
     "freshness-check": "催办",
+    "dataset-freshness-check": "加工",
+    "kb-export-cleanup": "平台",
     "channel-daily-qudao": "播报",
     "offline-daily-summary": "播报",
     "target-rollover": "加工",

@@ -4,11 +4,12 @@
 import base64
 import json
 import os
+import re
 import unittest
 from unittest import mock
 
 from common.kb_qa import media
-from common.rag import embed, index_docs, index_products, index_state, llm, qa
+from common.rag import embed, freshness, index_docs, index_products, index_state, llm, qa
 
 
 def _fake_post_factory(vectors, *, strict_count=False):
@@ -288,17 +289,16 @@ class RunIndexTest(unittest.TestCase):
         self.assertEqual(stats["image_failed"], 2)
 
     def test_main_skips_without_embed_key(self):
-        """缺 embedding 凭据时静默跳过（不触发 live 门禁/外部调用）。"""
         env = {k: v for k, v in os.environ.items()
                if k not in ("JINA_API_KEY", "RAG_EMBED_API_KEY")}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
-            stats = index_products.main([])
+            with self.assertRaises(SystemExit) as raised:
+                index_products.main([])
+        self.assertEqual(raised.exception.code, 1)
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_embed_key", printed)
-        self.assertEqual(stats["status"], "skipped")
-        self.assertEqual(stats["api_calls"], 0)
 
     def test_ctaigw_provider_uses_signed_url_and_downloads_for_hash(self):
         """ctaigw 用签名 URL embedding，但仍下载实际字节计算内容哈希。"""
@@ -343,6 +343,21 @@ class _IncrementalStore:
             deleted += self.items.pop(item_id, None) is not None
         return deleted
 
+    def stage_items(self, milvus, items, *, run_id):
+        return [
+            {"staged_id": f"__stage__:{run_id}:{index}", "item": item}
+            for index, item in enumerate(items)
+        ]
+
+    def verify_staged_items(self, milvus, staged, *, dim):
+        return True
+
+    def publish_staged_items(self, milvus, staged):
+        return self.upsert_items(milvus, [entry["item"] for entry in staged])
+
+    def discard_staged_items(self, milvus, staged):
+        return len(staged)
+
 
 class _FakeStateRepository:
     def __init__(self):
@@ -377,14 +392,17 @@ class _FakeStateRepository:
 
 class IncrementalIndexTest(unittest.TestCase):
     def _run(self, records, store, state, embed_mock, download_mock=None,
-             *, provider=embed.DEFAULT_PROVIDER, model=embed.DEFAULT_MODEL):
+             *, provider=embed.DEFAULT_PROVIDER, model=embed.DEFAULT_MODEL,
+             auto_delete=False, delete_max_count=100, delete_max_ratio=0.1):
         download_mock = download_mock or mock.Mock(return_value=b"image")
         with mock.patch.object(embed, "embed_items", embed_mock), \
              mock.patch.object(media, "download_bytes", download_mock):
             stats = index_products.run_index(
                 client=_FakeClient(records), milvus=object(), store=store,
                 api_key="k", base_id="b", sheet_id="s", dim=2,
-                provider=provider, model=model, state_repository=state)
+                provider=provider, model=model, state_repository=state,
+                auto_delete=auto_delete, delete_max_count=delete_max_count,
+                delete_max_ratio=delete_max_ratio)
         return stats
 
     @staticmethod
@@ -464,6 +482,21 @@ class IncrementalIndexTest(unittest.TestCase):
         self.assertEqual(row["last_success_at"], old_success)
         self.assertEqual(state.complete_checks[-1], False)
 
+    def test_publish_failure_keeps_last_good_vector(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        self._run([_record("r1", "旧名称", {})], store, state, embed_mock)
+        old_vector = list(store.items["product:r1"]["vector"])
+        with mock.patch.object(
+                store, "publish_staged_items", side_effect=RuntimeError("disk")):
+            stats = self._run(
+                [_record("r1", "新名称", {})], store, state, embed_mock)
+        self.assertEqual(1, stats["publish_failed"])
+        self.assertEqual(0, stats["written"])
+        self.assertEqual(old_vector, store.items["product:r1"]["vector"])
+        self.assertEqual(index_state.STATUS_DEGRADED, state.rows["product:r1"]["status"])
+        self.assertEqual(state.complete_checks[-1], False)
+
     def test_invalid_vector_never_reaches_store(self):
         store, state = _IncrementalStore(2), _FakeStateRepository()
         embed_mock = mock.Mock(return_value=[[float("nan"), 0.2]])
@@ -511,7 +544,8 @@ class IncrementalIndexTest(unittest.TestCase):
         self._run(records, store, state, embed_mock)
         embed_mock.reset_mock()
 
-        stats = self._run([records[0]], store, state, embed_mock)
+        stats = self._run([records[0]], store, state, embed_mock,
+                          auto_delete=True, delete_max_ratio=1.0)
         self.assertEqual(embed_mock.call_count, 0)
         self.assertEqual(stats["deleted"], 1)
         self.assertNotIn("product:r2", store.items)
@@ -521,6 +555,33 @@ class IncrementalIndexTest(unittest.TestCase):
         self.assertEqual(empty["status"], "skipped")
         self.assertEqual(empty["deleted"], 0)
         self.assertIn("product:r1", store.items)
+
+    def test_deletion_is_plan_only_by_default(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        records = [_record("r1", "一", {}), _record("r2", "二", {})]
+        self._run(records, store, state, embed_mock)
+
+        stats = self._run([records[0]], store, state, embed_mock)
+        self.assertEqual(stats["delete_planned"], 1)
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertEqual(stats["reason"], "deletion_pending")
+        self.assertIn("product:r2", store.items)
+        self.assertIn("product:r2", state.rows)
+
+    def test_deletion_threshold_blocks_even_when_enabled(self):
+        store, state = _IncrementalStore(2), _FakeStateRepository()
+        embed_mock = mock.Mock(side_effect=self._vectors)
+        records = [_record("r1", "一", {}), _record("r2", "二", {})]
+        self._run(records, store, state, embed_mock)
+
+        stats = self._run([records[0]], store, state, embed_mock,
+                          auto_delete=True, delete_max_ratio=0.1)
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertEqual(stats["reason"], "delete_threshold")
+        self.assertIn("product:r2", store.items)
 
     def test_incomplete_snapshot_never_deletes_missing_ids(self):
         store, state = _IncrementalStore(2), _FakeStateRepository()
@@ -661,8 +722,6 @@ class NormalizeDocTest(unittest.TestCase):
 
 
 class _DocStore:
-    """index_docs 用的 store 替身：记录写入与前缀删除。"""
-
     def __init__(self, dim):
         self.dim = dim
         self.items = []
@@ -672,13 +731,25 @@ class _DocStore:
         assert dim == self.dim
         return dim
 
-    def delete_prefix(self, milvus, prefix):
-        self.deleted.append(prefix)
-        return 1
+    def list_ids(self, milvus, prefix):
+        return [item["id"] for item in self.items
+                if item["id"].startswith(prefix)]
+
+    def delete_ids(self, milvus, ids):
+        ids = set(ids)
+        before = len(self.items)
+        self.deleted.extend(sorted(ids))
+        self.items = [item for item in self.items if item["id"] not in ids]
+        return before - len(self.items)
 
     def upsert_items(self, milvus, items):
-        self.items.extend(items)
+        by_id = {item["id"]: item for item in self.items}
+        by_id.update({item["id"]: item for item in items})
+        self.items = list(by_id.values())
         return len(items)
+
+    def search(self, milvus, vector, *, limit, kind):
+        return [{"id": item["id"]} for item in reversed(self.items[-limit:])]
 
 
 class IndexDocsRunTest(unittest.TestCase):
@@ -695,7 +766,7 @@ class IndexDocsRunTest(unittest.TestCase):
                 payload, milvus=object(), store=store, api_key="k", dim=dim)
         return stats, store, fake_embed
 
-    def test_indexes_doc_with_chunk_ids_and_clears_prefix(self):
+    def test_indexes_doc_with_versioned_chunk_ids(self):
         payload = [{"doc_id": "jd-q3", "doc_title": "京东Q3总结及Q4规划",
                     "content": "## 摘要\n销售额 500 万。\n## Q4 打法\n三条主线。"}]
         stats, store, _ = self._run(payload)
@@ -703,9 +774,10 @@ class IndexDocsRunTest(unittest.TestCase):
         self.assertEqual(stats["chunks"], 2)
         self.assertEqual(stats["skipped"], 0)
         self.assertEqual(stats["written"], 2)
-        self.assertEqual(store.deleted, ["doc:jd-q3:"])
         ids = [item["id"] for item in store.items]
-        self.assertEqual(ids, ["doc:jd-q3:0000", "doc:jd-q3:0001"])
+        self.assertEqual(len(ids), 2)
+        self.assertTrue(all(re.match(r"doc:jd-q3:[0-9a-f]{20}:000[01]$", item_id)
+                            for item_id in ids))
         self.assertTrue(all(i["kind"] == "text" for i in store.items))
         self.assertTrue(all(i["name"] == "京东Q3总结及Q4规划" for i in store.items))
         self.assertTrue(all(i["image_ref"] == "" for i in store.items))
@@ -716,9 +788,42 @@ class IndexDocsRunTest(unittest.TestCase):
                    {"doc_id": "no-content"},
                    "garbage"]
         stats, store, _ = self._run(payload)
-        self.assertEqual(stats, {"docs": 0, "chunks": 0, "skipped": 3,
-                                 "written": 0})
+        self.assertEqual(stats["docs"], 0)
+        self.assertEqual(stats["chunks"], 0)
+        self.assertEqual(stats["skipped"], 3)
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(stats["status"], "skipped")
         self.assertEqual(store.items, [])
+
+    def test_embedding_failure_keeps_last_good_version(self):
+        old_payload = [{"doc_id": "jd-q3", "doc_title": "旧版", "content": "旧正文"}]
+        _, store, _ = self._run(old_payload)
+        old_ids = {item["id"] for item in store.items}
+        with mock.patch.object(
+                embed, "embed_items", side_effect=embed.EmbedError("boom")):
+            stats = index_docs.run_index(
+                [{"doc_id": "jd-q3", "doc_title": "新版", "content": "新正文"}],
+                milvus=object(), store=store, api_key="k", dim=2)
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["status"], "degraded")
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual({item["id"] for item in store.items}, old_ids)
+
+    def test_unchanged_document_does_not_embed_again(self):
+        payload = [{"doc_id": "jd-q3", "doc_title": "手册", "content": "正文"}]
+        store = _DocStore(2)
+        with mock.patch.object(
+                embed, "embed_items",
+                side_effect=lambda items, key, **kw: [[0.1, 0.2] for _ in items]
+        ) as embedded:
+            first = index_docs.run_index(
+                payload, milvus=object(), store=store, api_key="k", dim=2)
+            second = index_docs.run_index(
+                payload, milvus=object(), store=store, api_key="k", dim=2)
+        self.assertEqual(embedded.call_count, 1)
+        self.assertEqual(first["unchanged"], 0)
+        self.assertEqual(second["unchanged"], 1)
+        self.assertEqual(second["written"], 0)
 
 
 class IndexDocsMainTest(unittest.TestCase):
@@ -728,7 +833,9 @@ class IndexDocsMainTest(unittest.TestCase):
                if k not in ("JINA_API_KEY", "RAG_EMBED_API_KEY")}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
-            index_docs.main([])
+            with self.assertRaises(SystemExit) as raised:
+                index_docs.main([])
+        self.assertEqual(raised.exception.code, 1)
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_embed_key", printed)
@@ -736,7 +843,9 @@ class IndexDocsMainTest(unittest.TestCase):
     def test_skips_without_input_file(self):
         with mock.patch.dict(os.environ, {"RAG_EMBED_API_KEY": "k"}), \
              mock.patch("builtins.print") as out:
-            index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+            with self.assertRaises(SystemExit) as raised:
+                index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+        self.assertEqual(raised.exception.code, 1)
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("status=skipped", printed)
         self.assertIn("reason=no_input", printed)
@@ -752,7 +861,9 @@ class IndexDocsMainTest(unittest.TestCase):
         env = {"RAG_EMBED_API_KEY": "k", "RAG_EMBED_PROVIDER": "ctaigw"}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("builtins.print") as out:
-            index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+            with self.assertRaises(SystemExit) as raised:
+                index_docs.main(["--file", "/nonexistent/kb_docs.json"])
+        self.assertEqual(raised.exception.code, 1)
         printed = " ".join(str(c.args[0]) for c in out.call_args_list)
         self.assertIn("reason=no_input", printed)
 
