@@ -42,6 +42,9 @@ _QUERY_EXPORT_DDL = """CREATE TABLE IF NOT EXISTS `kb_qa_export` (
   KEY `idx_kb_qa_export_expires` (`expires_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
 
+_QUERY_EXPORT_V2_DDL = """ALTER TABLE `kb_qa_export`
+  ADD COLUMN `started_at` datetime(6) NULL AFTER `created_at`"""
+
 
 def query_snapshot_ddl_statements():
     """返回 ``kb_qa_query_snapshot`` 的可重放建表语句。"""
@@ -51,3 +54,8 @@ def query_snapshot_ddl_statements():
 def query_export_ddl_statements():
     """返回 ``kb_qa_export`` 的可重放建表语句。"""
     return (_QUERY_EXPORT_DDL,)
+
+
+def query_export_v2_ddl_statements():
+    """v2 补运行租约列；不修改已应用 v1 的校验和。"""
+    return (_QUERY_EXPORT_V2_DDL,)

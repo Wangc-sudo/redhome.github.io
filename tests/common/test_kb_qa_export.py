@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 
 from common.kb_qa.export_schema import (
     query_export_ddl_statements,
+    query_export_v2_ddl_statements,
     query_snapshot_ddl_statements,
 )
 from common.kb_qa.query_export import (
@@ -207,6 +208,14 @@ class DdlAndRepositoryTests(unittest.TestCase):
         self.assertNotIn("payload_json", export)
         self.assertNotIn("message_content", export)
         self.assertNotIn("full_sql", export)
+
+    def test_export_v2_adds_started_at_without_changing_v1(self):
+        v1 = query_export_ddl_statements()[0]
+        v2 = query_export_v2_ddl_statements()
+        self.assertNotIn("started_at", v1)
+        self.assertEqual(1, len(v2))
+        self.assertIn("ALTER TABLE `kb_qa_export`", v2[0])
+        self.assertIn("ADD COLUMN `started_at` datetime(6) NULL", v2[0])
 
     def test_snapshot_repository_serializes_decodes_and_scopes_owner(self):
         connection = _Connection()
