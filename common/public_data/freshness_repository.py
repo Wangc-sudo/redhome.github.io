@@ -2,9 +2,23 @@
 
 import contextlib
 import json
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from common.public_data.db import transaction
+
+
+def _json_default(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, default=_json_default)
+
 
 _FRESHNESS_DDL = """CREATE TABLE IF NOT EXISTS `pd_dataset_freshness` (
   `dataset_key` VARCHAR(64) NOT NULL,
@@ -83,11 +97,11 @@ class FreshnessRepository:
                     result.dataset_key, result.status, result.latest_business_date,
                     result.last_collected_at, result.last_processed_at,
                     result.last_published_at, result.lag_minutes,
-                    json.dumps(result.source_target_diff, ensure_ascii=False)
+                    _json_dumps(result.source_target_diff)
                     if result.source_target_diff is not None else None,
-                    json.dumps(result.downstream_consumers, ensure_ascii=False),
+                    _json_dumps(result.downstream_consumers),
                     result.last_run_id,
-                    json.dumps(result.check_details, ensure_ascii=False),
+                    _json_dumps(result.check_details),
                     result.error, checked_at,
                 ))
 
