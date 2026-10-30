@@ -16,10 +16,20 @@ from fastapi.testclient import TestClient
 
 from common.bi_web import auth
 from common.kb_web import acl as acl_module
+from common.kb_web import bootstrap as bootstrap_module
 from common.kb_web import qr_login as qr_module
 from common.kb_web import routes as kb_routes
 from common.kb_web import service as svc_module
 from common.kb_web import sessions as sess_module
+
+
+class BootstrapExportAuthorizerTests(unittest.TestCase):
+    def test_member_checker_is_adapted_to_export_contract(self):
+        calls = []
+        authorize = bootstrap_module._export_authorizer(
+            lambda userid: calls.append(userid) or True)
+        self.assertTrue(authorize("u1", "web:s1"))
+        self.assertEqual(["u1"], calls)
 
 
 # ---------------------------------------------------------------------------
