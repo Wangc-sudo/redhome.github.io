@@ -447,8 +447,20 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             export_only = is_export_only_request(text)
             export_requested = is_export_request(text)
             pending = None
+            offer = None
             if ctx_key is not None:
                 pending = self._context_store.pop_pending(ctx_key)
+                offer = self._context_store.pop_offer(ctx_key)
+            # 提议确认短路（2026-10-30 对话状态层）：「可以」只确认上一轮
+            # 提议，改写成显式任务文本再进链路——不再由 LLM 在历史里自由
+            # 猜锚点（此前被旧商品话题带偏答非所问）。审计/历史仍记原文。
+            answer_text = text
+            if offer:
+                from common.kb_qa.offers import (
+                    build_confirmed_text, parse_ack)
+                if parse_ack(text) == "confirm":
+                    answer_text = build_confirmed_text(
+                        offer, history[-1]["q"] if history else "")
             usage_snap = getattr(self._llm, "usage_snapshot", None)
             usage_before = usage_snap() if usage_snap else None
             if export_only:
@@ -460,7 +472,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     meta["export_id"] = delivery["export_id"]
             else:
                 reply, intent, matched = self._answer(
-                    conn, text, history=history, conversation_id=conversation_id,
+                    conn, answer_text, history=history,
+                    conversation_id=conversation_id,
                     meta=meta, pending=pending)
             if usage_before is not None:
                 usage_after = usage_snap()
@@ -492,6 +505,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             if ctx_key is not None and meta.get("pending_candidates"):
                 self._context_store.set_pending(
                     ctx_key, meta["pending_candidates"])
+            # 本轮回复末尾的提议 → 存 offer，等下一条确认消息闭环。
+            if ctx_key is not None and not export_only:
+                from common.kb_qa.offers import detect_offer
+                new_offer = detect_offer(reply)
+                if new_offer:
+                    self._context_store.set_offer(ctx_key, new_offer)
             # 号码台账问句命中持卡人（2026-10-26 用户裁决「小易要 @ 对应的
             # 人要验证码」）：姓名→userId，群回复真实 @ 到 TA——光在文案里
             # 写「直接找 TA 要」对方收不到任何通知。同名歧义/不在册静默跳过。

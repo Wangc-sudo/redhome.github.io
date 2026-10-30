@@ -41,6 +41,8 @@ _KEY_IDEM_DONE = "kbqa:web:idem:done"
 #: clarify 待选择候选键（2026-10-23 Web 侧接线）：与群内 kbqa:pending
 #: 同语义——消费即作废，TTL 随会话滑动。
 _KEY_PENDING = "kbqa:web:pending"
+#: 助手提议状态键（2026-10-30 对话状态层）：与群内 kbqa:offer 同语义。
+_KEY_OFFER = "kbqa:web:offer"
 
 
 class _MemoryKV:
@@ -135,6 +137,10 @@ class WebSessionStore:
     def _pending_key(userid, sid):
         return f"{_KEY_PENDING}:{userid}:{sid}"
 
+    @staticmethod
+    def _offer_key(userid, sid):
+        return f"{_KEY_OFFER}:{userid}:{sid}"
+
     # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
@@ -211,6 +217,7 @@ class WebSessionStore:
         try:
             self._kv().delete(self._session_key(userid, sid))
             self._kv().delete(self._pending_key(userid, sid))
+            self._kv().delete(self._offer_key(userid, sid))
         except Exception:
             pass
         return True
@@ -231,6 +238,25 @@ class WebSessionStore:
         """
         key = self._pending_key(userid, sid)
         value = self._read_json(key, [])
+        if not value:
+            return None
+        try:
+            self._kv().delete(key)
+        except Exception:
+            pass
+        return value
+
+    # ------------------------------------------------------------------
+    # 助手提议状态（2026-10-30 对话状态层）
+    # ------------------------------------------------------------------
+    def set_offer(self, userid, sid, offer):
+        """存助手提议（{question, action}，消费语义同 pending）。"""
+        self._write_json(self._offer_key(userid, sid), dict(offer))
+
+    def pop_offer(self, userid, sid):
+        """取出并作废助手提议；无/异常返回 None（default {} 判型防污染）。"""
+        key = self._offer_key(userid, sid)
+        value = self._read_json(key, {})
         if not value:
             return None
         try:
