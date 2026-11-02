@@ -1331,12 +1331,17 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
     # 预定义只读查询，白名单参数）。LLM 未配置则不启用（规则兜底照旧）。
     agent_runner = None
     if llm is not None:
+        from common import cache_core
         from common.kb_qa.agent import ToolExecutor, run_agent
         from common.kb_qa.focus import parse_focus
+
+        # R5 查询缓存（D4a）：进程级共享 store，Redis 优先、内存兜底。
+        qcache_store = cache_core.store_from_environment()
 
         def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
                 conn, doc_search=search_docs, vector_search=vector_search,
+                cache_store=qcache_store,
                 # 问句焦点（2026-11-02）：只用于工具结果的聚焦压缩。
                 focus=parse_focus(text), question=text)
             answer = run_agent(llm, text, executor=executor, history=history,
