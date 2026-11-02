@@ -315,6 +315,9 @@ def run_sync(*, wiki, conn, out_path, workspace_ids=None, on_progress=None,
             for doc_id in stale_ids:
                 stats["deleted"] += delete_doc_chunks(conn, doc_id)
         conn.commit()
+        from common.kb_qa import docs
+
+        docs.bump_version()  # 重导后各进程文档缓存即失效（D4b）
         out.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

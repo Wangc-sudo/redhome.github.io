@@ -106,6 +106,10 @@ def import_docs(conn, payload, *, synced_at=None):
             conn, doc_id, title, chunks, synced_at=synced_at
         )
         stats["docs"] += 1
+    if stats["docs"]:
+        from common.kb_qa import docs
+
+        docs.bump_version()  # 重导后各进程文档缓存即失效（D4b）
     return stats
 
 

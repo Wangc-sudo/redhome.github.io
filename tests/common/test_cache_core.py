@@ -188,5 +188,73 @@ class QuerySqlCacheTests(unittest.TestCase):
         self.assertEqual(2, conn.calls)  # 错误不缓存，第二次重新执行
 
 
+class _FakeRedisClient:
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ex=None):
+        self.data[key] = value
+
+
+class _RedisLikeStore(MemoryStore):
+    def __init__(self):
+        super().__init__()
+        self._client = _FakeRedisClient()
+
+
+class DocsVersionTests(unittest.TestCase):
+    """D4b：版本戳失效——bump 后各进程缓存键即失效。"""
+
+    def setUp(self):
+        from common.kb_qa import docs
+
+        self.docs = docs
+        self.store = _RedisLikeStore()
+        self._old_store = docs._STORE
+        docs._STORE = self.store
+        self.calls = []
+        self._original_load = docs._load
+        docs._load = lambda conn: self.calls.append(1) or [
+            {"doc_id": "d", "doc_title": "t", "chunk_index": 0,
+             "content": "售后退款流程"}]
+
+    def tearDown(self):
+        self.docs._STORE = self._old_store
+        self.docs._load = self._original_load
+
+    def test_bump_version_invalidates_cached_chunks(self):
+        self.docs._index_for(object(), now=1000.0)
+        self.docs._index_for(object(), now=1100.0)
+        self.assertEqual(1, len(self.calls))  # TTL 内复用
+        self.docs.bump_version()
+        self.docs._index_for(object(), now=1101.0)
+        self.assertEqual(2, len(self.calls))  # 版本变化即重载
+
+    def test_redis_mode_returns_chunks_and_index(self):
+        chunks, index = self.docs._index_for(object(), now=1000.0)
+        self.assertEqual(1, len(chunks))
+        self.assertIsNotNone(index)
+        self.assertEqual(1, len(index.topk("退款", k=1)))
+
+    def test_bump_version_noop_without_redis(self):
+        self.docs._STORE = MemoryStore()
+        self.docs.bump_version()  # 无 Redis 客户端：空操作不抛错
+
+    def test_import_docs_bumps_version(self):
+        from unittest import mock
+        from common.kb_qa import sync_docs
+
+        payload = [{"doc_id": "d1", "doc_title": "手册", "content": "售后退款流程"}]
+        conn = _Conn(_Cursor([]))
+        with mock.patch.object(sync_docs, "upsert_chunks", return_value=1), \
+             mock.patch.object(self.docs, "bump_version") as bump:
+            stats = sync_docs.import_docs(conn, payload)
+        self.assertEqual(1, stats["docs"])
+        bump.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()

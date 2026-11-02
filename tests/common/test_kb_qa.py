@@ -825,8 +825,8 @@ class DocSearchTests(unittest.TestCase):
             chunks, index = docs._index_for(_FakeConn(), now=1300.0)
         self.assertIs(new_chunks, chunks)
         self.assertEqual("new-index", index)
-        from common import cache_core
-        cached = cache_core.default_store().get(docs._CACHE_KEY, now=1301.0)
+        cached = docs._store().get(
+            f"{docs._CACHE_KEY}:{docs._version()}", now=1301.0)
         self.assertIs(new_chunks, cached[0])
         self.assertEqual("new-index", cached[1])
 
