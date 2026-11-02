@@ -16,10 +16,12 @@ import time
 import uuid
 
 from common.kb_qa.context import DEFAULT_MAX_TURNS
+from common.kb_qa.focus import parse_focus
 
 #: 业务数据工具名（白名单外用户不可见）。
 _BUSINESS_TOOLS = frozenset(
-    ("daily_sales", "channel_sales", "channel_yoy", "query_sql"))
+    ("daily_sales", "channel_sales", "channel_yoy", "query_sql",
+     "sku_sales", "sku_inventory"))
 
 
 #: 历史卫生（2026-10-30 对话状态层）：进入 LLM prompt 的轮次时间窗。
@@ -118,7 +120,9 @@ class KbWebService:
         def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
                 conn, doc_search=self._doc_search,
-                vector_search=self._vector_search)
+                vector_search=self._vector_search,
+                # 问句焦点（2026-11-02）：只用于工具结果的聚焦压缩。
+                focus=parse_focus(text), question=text)
             return run_agent(
                 llm, text, executor=executor, history=history, meta=meta,
                 tools=tools_for(allow_business))
