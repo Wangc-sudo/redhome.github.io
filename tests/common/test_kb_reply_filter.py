@@ -106,6 +106,22 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotIn("0 条", filtered)
         self.assertIn("无数据", filtered)
 
+    def test_masked_field_leaves_no_backtick_or_empty_parens(self):
+        """内部字段掩蔽后的残留清理（2026-11-03 干跑 7 天真答复发现）：
+        `has_previous_data=false` → 「去年同期数据」不带反引号；
+        未知 snake_case 删光后不留空括号、不留空 code span。"""
+        filtered = rf.filter_reply(
+            "同比",
+            "DB 里没有去年同期数据，`has_previous_data=false`，所以算不了。")
+        self.assertIn("去年同期数据", filtered)
+        self.assertNotIn("`", filtered)
+        self.assertNotIn("has_previous_data", filtered)
+        filtered2 = rf.filter_reply(
+            "同比", "本次按 DB 订单行（fact_order_line）计算。")
+        self.assertNotIn("（）", filtered2)
+        self.assertNotIn("()", filtered2)
+        self.assertIn("本次按 DB 订单行", filtered2)
+
     def test_zero_in_compare_context_becomes_missing(self):
         """「同比：0 条」是缺数不是零（2026-10-29 截图 badcase 一）：
         即使行内没有「没有数据」字样，同比语境里的 0 也要改口。"""
