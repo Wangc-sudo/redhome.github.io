@@ -134,10 +134,12 @@ def _total_line(columns, rows):
     return "合计：" + "、".join(parts) if parts else ""
 
 
-def render_table(rows, *, total_rows=None, max_rows=MAX_ROWS):
+def render_table(rows, *, total_rows=None, max_rows=MAX_ROWS,
+                 with_total=True):
     """行列表（dict）→ Markdown 数据块；空行/非 dict 行返回空串。
 
     total_rows：结果集总行数（截断时大于 len(rows)，此时不出合计）。
+    with_total：render_answer 场景合计由结论卡承载时置 False（不重复）。
     """
     if not rows:
         return ""
@@ -161,10 +163,120 @@ def render_table(rows, *, total_rows=None, max_rows=MAX_ROWS):
     if len(rows) > max_rows:
         notes.append(f"（仅显示前 {max_rows} 行，共 {len(rows)} 行）")
     complete = total_rows is None or total_rows <= len(rows)
-    if complete and len(rows) <= max_rows:
+    if with_total and complete and len(rows) <= max_rows:
         total = _total_line(columns, rows)
         if total:
             notes.append(total)
     if notes:
         block += "\n" + "\n".join(notes)
     return block
+
+
+# ---------------------------------------------------------------------------
+# 结论卡 + 期间过滤（2026-11-02 答复架构：数字只能来自同一份行数据）
+# ---------------------------------------------------------------------------
+
+def _row_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and len(value) >= 10:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def filter_period(rows, period):
+    """按问句期间过滤行（理解层 focus.Period）。
+
+    有日期列才过滤；无日期列原样返回（粒度不明不过滤，fail-open）。
+    解决「问昨天、表格合计却跨 4 天」的期间错位（2026-11-02 云上实测）。
+    """
+    if not period or not rows:
+        return list(rows or [])
+    columns = {key for row in rows for key in row}
+    date_col = next((c for c in columns if c in _DATE_COLUMNS), None)
+    if date_col is None:
+        return list(rows)
+    return [row for row in rows
+            if (day := _row_date(row.get(date_col))) is not None
+            and period.start <= day <= period.end]
+
+
+def summary_card(rows, *, complete=True):
+    """结论卡：区间 + 合计 + 日均 + 极值，全部代码计算、与表格同源。
+
+    不完整结果集 / 单行不出（与合计同口径）；无任何可述内容返回空串。
+    """
+    if not complete or not rows or len(rows) < 2:
+        return ""
+    columns = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    date_col = next((c for c in columns if c in _DATE_COLUMNS), None)
+    days = []
+    if date_col:
+        days = sorted({day for day in (_row_date(row.get(date_col))
+                                       for row in rows) if day})
+    range_text = ""
+    if days:
+        range_text = (days[0].isoformat() if len(days) == 1
+                      else f"{days[0].isoformat()}~{days[-1].isoformat()}")
+    total = _total_line(columns, rows)
+    metric = next((c for c in columns if c in _AMOUNT_COLUMNS), None)
+    if metric is None:
+        metric = next((c for c in columns if c in _QUANTITY_COLUMNS), None)
+    daily = ""
+    if metric in _AMOUNT_COLUMNS and len(days) > 1:
+        numbers = [n for n in (_as_number(metric, row.get(metric))
+                               for row in rows) if n is not None]
+        if numbers:
+            daily = f"日均 {_fmt_number(sum(float(n) for n in numbers) / len(days), 2)} 元"
+    extremes = ""
+    if metric:
+        valued = [(row, _as_number(metric, row.get(metric))) for row in rows]
+        valued = [(row, n) for row, n in valued if n is not None]
+        if len(valued) >= 2:
+            high = max(valued, key=lambda item: float(item[1]))
+            low = min(valued, key=lambda item: float(item[1]))
+            if float(high[1]) != float(low[1]):
+                unit = " 元" if metric in _AMOUNT_COLUMNS else " 件"
+                first_col = columns[0]
+
+                def _label(row):
+                    if date_col:
+                        day = _row_date(row.get(date_col))
+                        if day:
+                            return f"{day.month:02d}-{day.day:02d}"
+                    return str(row.get(first_col) or "")
+
+                extremes = (f"峰值 {_label(high[0])}"
+                            f"（{_fmt_value(metric, high[1])}{unit}）、"
+                            f"谷值 {_label(low[0])}"
+                            f"（{_fmt_value(metric, low[1])}{unit}）")
+    body = "；".join(part for part in (
+        "、".join(part for part in (total, daily) if part), extremes) if part)
+    if not body:
+        return ""
+    return f"{range_text}：{body}" if range_text else body
+
+
+def render_answer(rows, *, total_rows=None, period=None, max_rows=MAX_ROWS):
+    """答案块 = 结论卡 + 明细表（期间过滤后）；空行返回空串。
+
+    契约：结论卡与表格出自同一份（过滤后的）行数据，数字永不打架；
+    合计只在结论卡出现一次。
+    """
+    rows = filter_period(rows, period)
+    if not rows:
+        return ""
+    complete = total_rows is None or total_rows <= len(rows)
+    card = summary_card(rows, complete=complete)
+    table = render_table(rows, total_rows=total_rows, max_rows=max_rows,
+                         with_total=False)
+    return f"{card}\n{table}" if card else table

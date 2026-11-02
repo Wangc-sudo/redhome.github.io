@@ -8,10 +8,12 @@
 
 import json
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 from common.kb_qa import agent as agent_module
-from common.kb_qa.render import render_table
+from common.kb_qa.focus import Period
+from common.kb_qa.render import render_answer, render_table, summary_card
+from common.kb_qa.result import from_payload
 
 
 def _jz_rows():
@@ -124,6 +126,80 @@ def _sql_call():
     return {"content": None, "tool_calls": [{
         "id": "c1", "type": "function",
         "function": {"name": "query_sql", "arguments": '{"sql":"SELECT 1"}'}}]}
+
+
+class ResultSetTests(unittest.TestCase):
+    def test_payload_normalization(self):
+        result = from_payload("query_sql", {
+            "total_rows": 2, "rows": [{"qty": 1}, {"qty": 2}]})
+        self.assertEqual(2, len(result.rows))
+        self.assertTrue(result.complete)
+        self.assertIsNone(from_payload("query_sql", {"error": "x"}))
+        self.assertIsNone(from_payload("query_sql", {"rows": []}))
+        self.assertIsNone(from_payload(  # 单格标量探索锚点
+            "query_sql", {"rows": [{"max_time": "2026-11-02"}]}))
+
+    def test_incomplete_result_set(self):
+        result = from_payload("query_sql", {
+            "total_rows": 60, "rows": [{"qty": 1}, {"qty": 2}]})
+        self.assertFalse(result.complete)
+
+
+class SummaryCardTests(unittest.TestCase):
+    _ROWS = [
+        {"d": "2026-10-01", "qty": 31, "amt": 804.0},
+        {"d": "2026-10-02", "qty": 26, "amt": 808.0},
+    ]
+
+    def test_card_range_total_daily_extremes(self):
+        card = summary_card(self._ROWS)
+        self.assertIn("2026-10-01~2026-10-02", card)
+        self.assertIn("合计：销量 57 件、实付金额 1,612.00 元", card)
+        self.assertIn("日均 806.00 元", card)
+        self.assertIn("峰值 10-02（808.00 元）", card)
+        self.assertIn("谷值 10-01（804.00 元）", card)
+
+    def test_card_skipped_for_single_row_or_incomplete(self):
+        self.assertEqual("", summary_card(self._ROWS[:1]))
+        self.assertEqual("", summary_card(self._ROWS, complete=False))
+
+    def test_card_without_date_column(self):
+        card = summary_card([{"goods_name": "A", "qty": 3},
+                             {"goods_name": "B", "qty": 5}])
+        self.assertIn("合计：销量 8 件", card)
+        self.assertIn("峰值 B（5 件）", card)
+
+
+class PeriodFilterTests(unittest.TestCase):
+    _FOUR_DAYS = [
+        {"d": "2026-10-30", "qty": 130, "amt": 21816.35},
+        {"d": "2026-10-31", "qty": 18, "amt": 2933.12},
+        {"d": "2026-11-01", "qty": 16, "amt": 2656.47},
+        {"d": "2026-11-02", "qty": 1, "amt": 100.0},
+    ]
+
+    def test_yesterday_filters_rows_and_total(self):
+        # 问「昨天」：4 天行只留 11-01，合计与表格同范围（不再跨 4 天）
+        period = Period(date(2026, 11, 1), date(2026, 11, 1), "昨天")
+        block = render_answer(self._FOUR_DAYS, period=period)
+        self.assertIn("2026-11-01", block)
+        self.assertNotIn("2026-10-30", block)
+        self.assertNotIn("合计：销量 165 件", block)
+
+    def test_no_date_column_passthrough(self):
+        period = Period(date(2026, 11, 1), date(2026, 11, 1), "昨天")
+        block = render_answer([{"goods_name": "A", "qty": 3},
+                               {"goods_name": "B", "qty": 5}], period=period)
+        self.assertIn("合计：销量 8 件", block)
+
+    def test_empty_after_filter_returns_empty(self):
+        period = Period(date(2025, 1, 1), date(2025, 1, 1), "昨天")
+        self.assertEqual("", render_answer(self._FOUR_DAYS, period=period))
+
+    def test_answer_block_card_and_table_single_total(self):
+        block = render_answer(SummaryCardTests._ROWS)
+        self.assertEqual(1, block.count("合计："))  # 合计只在结论卡出现一次
+        self.assertIn("| 日期 | 销量(件) | 实付金额(元) |", block)
 
 
 class _SeqExecutor:
