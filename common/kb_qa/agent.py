@@ -50,14 +50,15 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 2. 产品手册/品牌工艺/卖点话术/售后流程/销售总结规划 → search_docs
 3. 某区域销售额/出货量/业绩/完成率/环比 → daily_sales
 4. 各渠道某日销售额汇总 → channel_sales（AI 表格日销口径）
-5. 渠道销售额同比/去年同期（含按店铺拆分）→ channel_yoy，
+5. 渠道/店铺的销售额同比/去年同期（含按店铺拆分）→ channel_yoy，
    必须使用 DB 订单行与 dim_channel_map 渠道映射，两期同源同口径；
    has_previous_data=false 时必须明示去年同期缺数，禁止改用 channel_sales
-   或静默改成环比
+   或静默改成环比；同比对象是商品/系列（如「金质」）时用 sku_sales
 6. 商品库统计（总数、按品牌/大类分布）→ product_stats
 7. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup；
    结果 requires_clarification=true 时列出候选请用户选择，不得猜属主
-8. 按单品/SKU/款 的销量、销售额、排行、哪款卖得好 → sku_sales
+8. 按单品/SKU/款/系列 的销量、销售额、排行、哪款卖得好 → sku_sales；
+   商品/系列销售额的同比也用它——本期与去年同期各调一次再对比
 9. 库存、可售天数、呆滞、缺货、在途 → sku_inventory（最新快照）
 10. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
    与 fact_stockout_line（trade_no/logistics_no），不要只做聚合；其他业务
@@ -1266,11 +1267,15 @@ def run_agent(llm, question, *, executor, history=None,
     """
     call = chat_with_tools or llm.chat_with_tools
     tools = TOOLS if tools is None else tools
-    # 同比问句的路由不能靠模型自由发挥：只 offering channel_yoy，
+    # 同比问句的路由不能靠模型自由发挥：只 offering channel_yoy + sku_sales，
     # 从协议面杜绝又走 AI 表格 channel_sales 或 query_sql 混口径。
+    # 同比的对象可能是渠道/店铺（→ channel_yoy），也可能是商品/系列
+    # （「金质今年9月销售额同比去年是多少」→ sku_sales，2026-11-02 真机
+    # badcase：只给 channel_yoy 时模型只能把商品名当店铺找，反问收场）。
     if _CHANNEL_YOY_RE.search(question or ""):
         yoy_tools = [t for t in tools
-                     if t.get("function", {}).get("name") == "channel_yoy"]
+                     if t.get("function", {}).get("name")
+                     in ("channel_yoy", "sku_sales")]
         if yoy_tools:
             tools = yoy_tools
     display_blocks = []
