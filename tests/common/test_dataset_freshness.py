@@ -374,35 +374,103 @@ class FreshnessAlertTests(TestCase):
             self.assertTrue(_freshness_alerts_enabled())
 
     def test_fresh_result_does_not_enqueue_alert(self):
-        from common.public_data.cli import _enqueue_freshness_alert
+        from common.public_data.cli import _enqueue_freshness_alerts
 
         outbox = _RecordingOutbox()
         result = SimpleNamespace(status="fresh")
-        self.assertFalse(_enqueue_freshness_alert(
-            outbox, contract(), result, created_at=NOW,
+        self.assertEqual(0, _enqueue_freshness_alerts(
+            outbox, [(contract(), result)], created_at=NOW,
         ))
         self.assertEqual([], outbox.calls)
 
     def test_abnormal_result_enqueues_safe_daily_deduped_alert(self):
-        from common.public_data.cli import _enqueue_freshness_alert
+        from common.public_data.cli import _enqueue_freshness_alerts
 
         outbox = _RecordingOutbox()
         result = SimpleNamespace(
             status="stale", latest_business_date=date(2026, 10, 27),
             error="exceeded_max_lag",
         )
-        self.assertTrue(_enqueue_freshness_alert(
-            outbox, contract(), result, created_at=NOW,
+        self.assertEqual(1, _enqueue_freshness_alerts(
+            outbox, [(contract(), result)], created_at=NOW,
         ))
         call = outbox.calls[0]
         self.assertEqual("ops", call["region"])
         self.assertEqual("alert", call["kind"])
         self.assertEqual(NOW.date(), call["business_date"])
-        self.assertEqual(
-            "freshness:sample_dataset:stale", call["dedupe_suffix"],
-        )
+        self.assertEqual("freshness:owner:ops", call["dedupe_suffix"])
         self.assertIn("exceeded_max_lag", call["body_md"])
+        self.assertIn("sample_dataset", call["body_md"])
         self.assertNotIn("run-1", call["body_md"])
+
+    def test_same_owner_findings_are_aggregated_into_one_alert(self):
+        """同一负责人的多个异常只发一条（防常驻项刷屏）。"""
+        from common.public_data.cli import _enqueue_freshness_alerts
+
+        outbox = _RecordingOutbox()
+        findings = [
+            (contract(), SimpleNamespace(
+                status="blocked", latest_business_date=None,
+                error="null_business_key",
+            )),
+            (contract(dataset_key="second_dataset"), SimpleNamespace(
+                status="stale", latest_business_date=date(2026, 10, 27),
+                error="exceeded_max_lag",
+            )),
+        ]
+        self.assertEqual(1, _enqueue_freshness_alerts(
+            outbox, findings, created_at=NOW,
+        ))
+        self.assertIn("异常数据集：2 个", outbox.calls[0]["body_md"])
+        self.assertIn("second_dataset", outbox.calls[0]["body_md"])
+
+    def test_unknown_status_is_silent_by_default(self):
+        """``unknown`` 是契约未就绪/未导入，非可行动 —— 默认不上群。"""
+        from common.public_data.cli import _enqueue_freshness_alerts
+
+        outbox = _RecordingOutbox()
+        result = SimpleNamespace(
+            status="unknown", latest_business_date=None,
+            error="no_quality_run",
+        )
+        self.assertEqual(0, _enqueue_freshness_alerts(
+            outbox, [(contract(), result)], created_at=NOW,
+        ))
+        self.assertEqual([], outbox.calls)
+
+    def test_alert_statuses_are_overridable_by_env(self):
+        from common.public_data.cli import _enqueue_freshness_alerts
+
+        outbox = _RecordingOutbox()
+        result = SimpleNamespace(
+            status="unknown", latest_business_date=None,
+            error="no_manual_import",
+        )
+        with patch.dict(os.environ, {"DATA_FRESHNESS_ALERT_STATUSES": "unknown"}):
+            self.assertEqual(1, _enqueue_freshness_alerts(
+                outbox, [(contract(), result)], created_at=NOW,
+            ))
+        self.assertEqual("freshness:owner:ops", outbox.calls[0]["dedupe_suffix"])
+
+    def test_distinct_owners_get_distinct_alerts(self):
+        from common.public_data.cli import _enqueue_freshness_alerts
+
+        outbox = _RecordingOutbox()
+        findings = [
+            (contract(), SimpleNamespace(
+                status="stale", latest_business_date=None, error="e1",
+            )),
+            (contract(owner="finance"), SimpleNamespace(
+                status="blocked", latest_business_date=None, error="e2",
+            )),
+        ]
+        self.assertEqual(2, _enqueue_freshness_alerts(
+            outbox, findings, created_at=NOW,
+        ))
+        self.assertEqual(
+            {"freshness:owner:ops", "freshness:owner:finance"},
+            {call["dedupe_suffix"] for call in outbox.calls},
+        )
 
 
 class BusinessFreshnessApiTests(TestCase):
