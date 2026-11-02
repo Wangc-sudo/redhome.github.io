@@ -3352,7 +3352,8 @@ class AuditObservabilityTests(unittest.TestCase):
                   "prompt_tokens": 800, "completion_tokens": 120,
                   "export_count": 2, "embedding_model": "embed-v1",
                   "embedding_dim": 2560, "index_version": "idx-1",
-                  "error_summary": "kb_doc_vector:degraded"},
+                  "error_summary": "kb_doc_vector:degraded",
+                  "reply_filter_diff": 42},
             reply="答案" * 300,  # 600 字 → 截 500
             latency_ms=1234)
         sql, params = conn.cursor_instance.executed[0]
@@ -3363,10 +3364,11 @@ class AuditObservabilityTests(unittest.TestCase):
         self.assertIn("`answer_excerpt`=%s", sql)
         self.assertIn("`prompt_tokens`=%s", sql)
         self.assertIn("`completion_tokens`=%s", sql)
+        self.assertIn("`reply_filter_diff`=%s", sql)
         self.assertEqual(
             ("agent", None, "text", "agent", "daily_sales,query_sql", 3,
              1234, "答案" * 250, 800, 120, 2, "embed-v1", 2560, "idx-1",
-             "kb_doc_vector:degraded", "m1"),
+             "kb_doc_vector:degraded", 42, "m1"),
             params)
 
     def test_finish_audit_empty_meta(self):
@@ -3377,7 +3379,8 @@ class AuditObservabilityTests(unittest.TestCase):
         _sql, params = conn.cursor_instance.executed[0]
         # recall_source/tool_used/rounds/latency/摘要/token 全部 None，不受影响
         self.assertEqual((CHITCHAT, None, "text", None, None, None, None,
-                          None, None, None, 0, None, None, None, None, "m2"), params)
+                          None, None, None, 0, None, None, None, None, None,
+                          "m2"), params)
 
     def test_answer_meta_recall_source_products(self):
         handler, _ = HandlerAnswerTests()._handler([[_product_row()]])
@@ -3896,6 +3899,36 @@ class BadcaseReportTests(unittest.TestCase):
         markdown = badcase.render_markdown(report)
         self.assertIn("置信度分布", markdown)
         self.assertIn("复合问答：param+wdt 1", markdown)
+
+    def test_filter_hit_aggregation(self):
+        """答复过滤观测（v5 列）：observe 期的「将被改写」分布进报表。"""
+        from common.kb_qa import badcase
+
+        rows = [
+            self._row(msg_id="m1", question="9月销售及同比",
+                      reply_filter_diff=120),
+            self._row(msg_id="m2", question="京东各店铺本月销售额",
+                      reply_filter_diff=30),
+            self._row(msg_id="m3", question="习酒箱规"),  # NULL=未过滤/无 diff
+        ]
+        report = badcase.collect_badcases(_FakeConn([rows]), days=7)
+        self.assertEqual(2, report["filter_rows"])
+        self.assertEqual(150, report["filter_chars"])
+        self.assertEqual("9月销售及同比",
+                         report["filter_top"][0]["question"])  # 按删减量降序
+        markdown = badcase.render_markdown(report)
+        self.assertIn("答复过滤：2 条会被改写", markdown)
+        self.assertIn("合计删减 150 字符", markdown)
+        self.assertIn("答复过滤命中 TOP", markdown)
+
+    def test_filter_hit_empty_when_no_diff(self):
+        from common.kb_qa import badcase
+
+        rows = [self._row(msg_id="m1"), self._row(msg_id="m2")]
+        report = badcase.collect_badcases(_FakeConn([rows]), days=7)
+        self.assertEqual(0, report["filter_rows"])
+        markdown = badcase.render_markdown(report)
+        self.assertNotIn("答复过滤", markdown)
 
 
 class LongImageTests(unittest.TestCase):
