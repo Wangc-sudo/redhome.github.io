@@ -83,6 +83,16 @@ class RenderTableTests(unittest.TestCase):
         self.assertIn("合计：销量 3 件", block)
 
 
+    def test_string_numbers_from_query_sql_normalized(self):
+        # query_sql 给 LLM 的值已 str() 化（云上验收实测 "804.0000"），
+        # 显示层必须归一，否则千分位与合计失效。
+        rows = [{"d": "2026-10-01", "qty": "31.0000", "amt": "804.0000"},
+                {"d": "2026-10-02", "qty": "26.0000", "amt": "808.0000"}]
+        block = render_table(rows)
+        self.assertIn("| 2026-10-01 | 31 | 804.00 |", block)
+        self.assertIn("合计：销量 57 件、实付金额 1,612.00 元", block)
+
+
 class _RowsExecutor:
     """按工具名返回预置 JSON 的替身。"""
 
