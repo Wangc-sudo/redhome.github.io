@@ -1379,15 +1379,40 @@ def _display_block(name, result_json):
     return render_table(rows, total_rows=total)
 
 
+#: 表格引用占位符（[[表N]]）：多查询场景由 LLM 选择与答案相关的表，
+#: 中间探索性查询的表不发出（2026-11-02 云上复验：渠道探索表/max_time
+#: 表被全量附上，违反「只答被问到的」答复纪律）。
+_PLACEHOLDER_RE = re.compile(r"\[\[表(\d+)\]\]")
+
+
 def _append_display(content, blocks):
-    """最终回复 = LLM 结论 + 显示层数据块；无数据块时行为与原先一致。"""
+    """最终回复 = LLM 结论 + 被引用的显示层数据块。
+
+    - 正文含 [[表N]] 占位符 → 替换为第 N 张表（1 起），未引用的一律不发；
+    - 无占位符：单表自动附末尾（最常见场景），多表不附（防中间探索表
+      噪音）；无数据块时行为与原先一致。
+    """
     text = (content or "").strip()
+    blocks = [block for block in blocks if block]
     if not blocks:
         return text or None
-    body = "\n\n".join(block for block in blocks if block)
-    if not body:
-        return text or None
-    return f"{text}\n\n{body}" if text else body
+    used = set()
+
+    def _sub(match):
+        index = int(match.group(1)) - 1
+        if 0 <= index < len(blocks):
+            used.add(index)
+            return "\n" + blocks[index] + "\n"
+        return ""
+
+    if text:
+        replaced = _PLACEHOLDER_RE.sub(_sub, text).strip()
+        if used:
+            return replaced
+        text = replaced  # 清掉无效占位符，不发给用户
+    if len(blocks) == 1:
+        return f"{text}\n\n{blocks[0]}" if text else blocks[0]
+    return text or None
 
 
 def run_agent(llm, question, *, executor, history=None,
@@ -1490,11 +1515,20 @@ def run_agent(llm, question, *, executor, history=None,
     # 必须加明确禁令——该推理版模型对复杂问题会在 reasoning 里继续设计
     # SQL 直到吃光 max_tokens（实测 reasoning_tokens=1024 全耗、content
     # 零产出、finish_reason=length）；指令「禁止再生成 SQL」让推理短路。
+    final_instruction = (
+        "以上工具结果已足够。请直接基于这些结果用中文给出最终"
+        "答案，不要再生成 SQL 或调用任何工具。数据表格与合计由"
+        "系统统一渲染，不要手写 Markdown 表格。")
+    if display_blocks:
+        labels = "、".join(f"表{i + 1}" for i in range(len(display_blocks)))
+        final_instruction += (
+            f"系统已把各次查询结果渲染成数据表（编号 {labels}，与工具调用"
+            "同序）。与答案相关的表，在正文相应位置写 [[表N]] 引用，系统会"
+            "替换为表格；中间探索过程等与答案无关的表不要引用，未被引用的"
+            "表不会发给用户。")
     messages.append({
         "role": "user",
-        "content": "以上工具结果已足够。请直接基于这些结果用中文给出最终"
-                   "答案，不要再生成 SQL 或调用任何工具。数据表格与合计由"
-                   "系统统一渲染附在末尾，不要手写 Markdown 表格。",
+        "content": final_instruction,
     })
     if meta is not None:
         meta["rounds"] += 1  # 轮尽作答也是一次 LLM 调用

@@ -126,7 +126,65 @@ def _sql_call():
         "function": {"name": "query_sql", "arguments": '{"sql":"SELECT 1"}'}}]}
 
 
+class _SeqExecutor:
+    """逐次调用返回不同结果的替身（探索查询 + 最终查询场景）。"""
+
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+        self.calls = []
+
+    def execute(self, name, arguments):
+        self.calls.append((name, arguments))
+        return json.dumps(self._payloads.pop(0), ensure_ascii=False)
+
+
 class AgentDisplayTests(unittest.TestCase):
+    _EXPLORE = {"total_rows": 1, "rows": [{"max_time": "2026-11-02 05:30:28"}]}
+    _FINAL = {"total_rows": 2,
+              "rows": [{"qty": 31, "amt": 804.0}, {"qty": 26, "amt": 808.0}]}
+
+    def test_multiple_blocks_only_referenced_is_sent(self):
+        executor = _SeqExecutor([self._EXPLORE, self._FINAL])
+        answer = agent_module.run_agent(
+            _llm([_sql_call(), _sql_call()], final="结论。[[表2]]"),
+            "q", executor=executor, max_rounds=2)
+        self.assertIn("合计：销量 57 件", answer)
+        self.assertNotIn("max_time", answer)
+        self.assertNotIn("[[表", answer)
+
+    def test_multiple_blocks_without_reference_not_sent(self):
+        # 探索性多表 + 模型未引用 → 一张都不发（防中间过程噪音）
+        executor = _SeqExecutor([self._EXPLORE, self._FINAL])
+        answer = agent_module.run_agent(
+            _llm([_sql_call(), _sql_call()], final="结论。"),
+            "q", executor=executor, max_rounds=2)
+        self.assertEqual("结论。", answer)
+
+    def test_invalid_placeholder_removed(self):
+        executor = _RowsExecutor({"query_sql": self._FINAL})
+        answer = agent_module.run_agent(
+            _llm([_sql_call()], final="见[[表9]]"), "q",
+            executor=executor, max_rounds=1)
+        self.assertNotIn("[[表9]]", answer)
+        self.assertIn("合计：销量 57 件", answer)  # 单表仍自动附
+
+    def test_final_instruction_lists_block_numbers(self):
+        seen = []
+
+        class _Llm:
+            def chat_with_tools(self, messages, *, tools, **kw):
+                return _sql_call()
+
+            def chat(self, messages, **kw):
+                seen.append(messages[-1]["content"])
+                return "结论。[[表1]]"
+
+        executor = _RowsExecutor({"query_sql": self._FINAL})
+        agent_module.run_agent(_Llm(), "q", executor=executor, max_rounds=1)
+        self.assertIn("编号 表1", seen[0])
+        self.assertIn("[[表N]]", seen[0])
+
+
     def test_query_sql_appends_rendered_block(self):
         executor = _RowsExecutor({"query_sql": {
             "total_rows": 2, "returned": 2,
