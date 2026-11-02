@@ -30,6 +30,7 @@ from common.kb_qa.focus import compress_rows, parse_focus
 from common.kb_qa.llm import LlmError
 from common.kb_qa.render import render_answer
 from common.kb_qa.result import from_payload
+from common.kb_qa.skills import compile_tools, validate_handlers
 
 #: 工具调用轮数上限（LLM 调用次数，含作答）。2 曾不够：「各区域完成
 #: 排名」要先查基准日期再算完成率——两轮全被工具占满，作答只能走轮尽
@@ -87,193 +88,7 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 
 {{history}}"""
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "查询商品资料：箱规/尺寸/重量/材质/条码/礼袋规格"
-                           "等参数，或按条件筛选商品",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string",
-                                "description": "商品名或筛选关键词"},
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_docs",
-            "description": "检索产品手册与业务文档（品牌工艺/卖点话术/售后"
-                           "流程/销售总结与规划）",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "检索问题"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "product_stats",
-            "description": "商品库统计：商品总数、按品牌/大类的数量分布"
-                           "（回答「有多少种商品」这类统计问题；找具体商品"
-                           "用 search_products）",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "daily_sales",
-            "description": "查询某区域某日销售：销售额、日环比、月目标完成率",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "scope": {"type": "string",
-                              "description": "区域标识（如 hangzhou）"},
-                    "date": {"type": "string",
-                             "description": "YYYY-MM-DD，缺省为最近一天"},
-                },
-                "required": ["scope"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "channel_sales",
-            "description": "按渠道汇总某日销售额（可指定单一渠道）",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "channel": {"type": "string",
-                                "description": "渠道名，留空为全部渠道"},
-                    "date": {"type": "string",
-                             "description": "YYYY-MM-DD，缺省为最近一天"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "channel_yoy",
-            "description": "按 DB 订单行计算渠道销售同比：本期与去年同期均查 "
-                           "fact_order_line.paid_amount，支持按店铺拆分；缺省"
-                           "日期为本月 1 日截至今天",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "channel": {"type": "string",
-                                "description": "渠道名（如京东），留空为全部渠道"},
-                    "start_date": {"type": "string",
-                                   "description": "本期开始日期 YYYY-MM-DD，"
-                                                  "需与 end_date 同时提供"},
-                    "end_date": {"type": "string",
-                                 "description": "本期结束日期 YYYY-MM-DD（含当天），"
-                                                "需与 start_date 同时提供"},
-                    "group_by": {"type": "string", "enum": ["channel", "store"],
-                                 "description": "channel 按渠道汇总；store 按店铺拆分"},
-                    "shop_name": {"type": "string",
-                                  "description": "只看某家店（模糊匹配店铺名），"
-                                                 "留空为全部店铺"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sku_sales",
-            "description": "按单品/SKU 查询销售：销售额与件数合计 + TOP N 单品"
-                           "（占比）。问「哪款卖得好」「各款销量」用它；问"
-                           "店铺/渠道汇总用 channel_sales/channel_yoy",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string",
-                                "description": "商品名或规格编码，留空为全部单品"},
-                    "start_date": {"type": "string",
-                                   "description": "开始日期 YYYY-MM-DD，"
-                                                  "需与 end_date 同时提供"},
-                    "end_date": {"type": "string",
-                                 "description": "结束日期 YYYY-MM-DD（含当天），"
-                                                "缺省为本月 1 日至今"},
-                    "channel": {"type": "string",
-                                "description": "渠道名（如京东），留空为全部"},
-                    "shop_name": {"type": "string",
-                                  "description": "店铺名（模糊），留空为全部"},
-                    "top_n": {"type": "integer",
-                              "description": "返回前 N 个单品，缺省 10，上限 30"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sku_inventory",
-            "description": "查询库存快照：可用库存、在途、可售天数、库存状态"
-                           "（紧急/超卖/呆滞）。问「还有多少货」「哪些呆滞」"
-                           "用它；结果为最新快照，务必带上快照日期",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string",
-                                "description": "商品名或规格编码，留空为三态"
-                                               "分布总览 + 各态 TOP 5"},
-                    "state": {"type": "string",
-                              "enum": ["URGENT", "OVERSOLD", "DEAD"],
-                              "description": "只看某一状态：紧急补货/超卖/呆滞"},
-                    "top_n": {"type": "integer",
-                              "description": "返回前 N 个单品，缺省 10，上限 30"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "phone_lookup",
-            "description": "查公司电信号码台账：手机号/尾号/姓名/平台账号 → "
-                           "实际持卡人、物理手机、绑定的平台账号。回答「尾号"
-                           "5690 是谁在用」「XX 店铺账号的验证码找谁要」",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string",
-                                "description": "手机号或尾号 / 姓名 / 平台账号名"},
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_sql",
-            "description": "受控 SQL 查询业务库（只读 SELECT，白名单表，"
-                           "自动 LIMIT，大表必须带日期过滤）。用于其他工具"
-                           "答不了的订单/出库/退款/库存/人员目标类问题。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {"type": "string",
-                            "description": "单条 SELECT 语句（MySQL 方言）"},
-                },
-                "required": ["sql"],
-            },
-        },
-    },
-]
+TOOLS = compile_tools()
 
 #: 工具结果给 LLM 的截断长度（控 token，防单行数据撑爆上下文）。
 _RESULT_LIMIT = 2000
@@ -1316,6 +1131,10 @@ class ToolExecutor:
             finally:
                 cursor.close()
         return self._channels
+
+
+# import 时校验：每个启用的技能都有对应 handler（cards 注册表同款模式）。
+validate_handlers(ToolExecutor)
 
 
 def _sync_phone_meta(executor, meta):
