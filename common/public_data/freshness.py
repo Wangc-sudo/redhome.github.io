@@ -134,7 +134,9 @@ class FreshnessChecker:
         return result
 
     def _check_business_dataset(self, contract, now, result):
-        summary = self._latest_summary(contract.dataset_key, "extract")
+        summary = self._latest_summary(
+            contract.summary_dataset or contract.dataset_key, "extract"
+        )
         if summary is None:
             result.error = "no_extract_summary"
             return

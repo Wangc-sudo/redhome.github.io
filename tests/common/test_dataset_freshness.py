@@ -132,6 +132,41 @@ class DatasetContractTests(TestCase):
         self.assertTrue(service_recovery_allowed("sync-wdt", "auto_replay"))
         self.assertTrue(service_recovery_allowed("unregistered-service", "auto_replay"))
 
+    def test_daily_report_offline_raw_uses_prefix_pattern(self):
+        # raw 按区域分片（_hangzhou/_shaoxing/_other/_vanke），精确写法恒
+        # no_raw_summary。
+        self.assertEqual(
+            "daily_report_offline%",
+            CONTRACT_BY_KEY["daily_report_offline"].raw_dataset,
+        )
+
+    def test_channel_monthly_target_tracks_the_ecom_people_extract_step(self):
+        # 月度目标由 load-channel-target 程序导入（非每日 sync），extract
+        # 摘要落在 ecom_people 步骤——直连 raw 或按 dataset_key 找摘要都会
+        # 让契约永久 unknown/stale。
+        item = CONTRACT_BY_KEY["channel_monthly_target"]
+        self.assertEqual("ecom_people", item.summary_dataset)
+        self.assertIsNone(item.raw_dataset)
+
+    def test_wdt_dim_product_mirror_has_no_raw_sync_leg(self):
+        # live manifest 无 wdt_goods_catalog 数据集，dim_product 由
+        # extract-mart 直接重建。
+        self.assertIsNone(CONTRACT_BY_KEY["wdt_dim_product_mirror"].raw_dataset)
+
+    def test_knowledge_contracts_refuse_auto_retry(self):
+        # 索引管道的 degraded 多由源数据缺陷驱动，重试不自愈；死信停车
+        # cron 会让一条坏记录连累整线（如 kb-sync-products 小时级同步）。
+        for item in list_contracts(kind="knowledge"):
+            self.assertFalse(item.auto_retry, item.dataset_key)
+            self.assertTrue(item.auto_catchup, item.dataset_key)
+        for service_id in (
+            "kb-sync-products", "kb-sync-wiki",
+            "rag-index-docs", "rag-index-products",
+        ):
+            self.assertFalse(
+                service_recovery_allowed(service_id, "auto_retry"), service_id,
+            )
+
 
 class FreshnessJsonTests(TestCase):
     def test_database_datetime_and_decimal_values_are_serializable(self):
@@ -293,6 +328,23 @@ class FreshnessStateTests(TestCase):
         result = checker.check(contract())
         self.assertEqual(STATUS_UNKNOWN, result.status)
         self.assertEqual("no_extract_summary", result.error)
+
+    def test_summary_dataset_alias_drives_the_extract_summary_lookup(self):
+        item = contract(
+            dataset_key="channel_monthly_target", summary_dataset="ecom_people",
+        )
+        checker = StubChecker()
+        seen = []
+        original = checker._latest_summary
+
+        def recording(dataset_key, source_name):
+            seen.append((dataset_key, source_name))
+            return original(dataset_key, source_name)
+
+        checker._latest_summary = recording
+        result = checker.check(item)
+        self.assertEqual(STATUS_FRESH, result.status)
+        self.assertIn(("ecom_people", "extract"), seen)
 
 
 class _RecordingOutbox:
