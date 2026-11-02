@@ -19,12 +19,14 @@ fail-open：LLM 异常/返回畸形/工具执行异常 → 返回 None，调用�
 （HELP_TEXT 或原有兜底），绝不把异常甩给客服。
 """
 
+import hashlib
 import json
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from common import cache_core
 from common.kb_qa.context import format_history
 from common.kb_qa.focus import compress_rows, parse_focus
 from common.kb_qa.llm import LlmError
@@ -298,13 +300,16 @@ class ToolExecutor:
     """白名单工具执行器。所有 SQL 为预定义形态，参数走占位符。"""
 
     def __init__(self, conn, *, doc_search=None, vector_search=None,
-                 now=None, focus=None, question=""):
+                 now=None, focus=None, question="", cache_store=None):
         self._conn = conn
         self._doc_search = doc_search
         self._vector_search = vector_search
         self._now = now
         self._scopes = None
         self._channels = None
+        #: R5 查询结果缓存（D4a）：None=不启用（测试与既有行为）；
+        #: 生产装配传 cache_core.store_from_environment()，TTL 60s。
+        self._cache_store = cache_store
         #: 问句焦点（focus.py，2026-11-02）：只用于「喂 LLM 的结果聚焦
         #: 压缩」，不影响任何 SQL 与取值；None 时行为与旧版完全一致。
         self._focus = focus
@@ -1062,6 +1067,19 @@ class ToolExecutor:
             sql = validate_sql(args.get("sql"))
         except SqlRejected as exc:
             return {"error": f"SQL 未通过安全检查: {exc}"}
+        if self._cache_store is None:
+            return self._query_sql_uncached(sql)
+        # R5（D4a）：同 SQL 60s 读穿缓存，命中时 EXPLAIN+SELECT 全省；
+        # 错误/空行结果不缓存（错误自修正与空库重试语义保留）。
+        key = "kbqa:qcache:" + hashlib.sha256(
+            sql.encode("utf-8")).hexdigest()[:32]
+        return cache_core.get_or_compute(
+            key, 60, lambda: self._query_sql_uncached(sql),
+            store=self._cache_store,
+            should_cache=lambda value: isinstance(value, dict)
+            and not value.get("error") and bool(value.get("rows")))
+
+    def _query_sql_uncached(self, sql):
         cursor = self._conn.cursor()
         try:
             # 成本预检：估算扫描行数超阈值直接拒（防全表/JOIN 放大）。

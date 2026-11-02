@@ -5,4 +5,5 @@ from common.cache_core.core import (  # noqa: F401
     MemoryStore,
     default_store,
     get_or_compute,
+    store_from_environment,
 )
