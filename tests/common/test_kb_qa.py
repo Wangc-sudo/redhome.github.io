@@ -3244,6 +3244,32 @@ class QuerySqlToolTests(unittest.TestCase):
                     " JOIN fact_stockout_line s ON o.trade_no=s.trade_no"}))
         self.assertIn("超阈值", result["error"])
 
+    def test_explain_rejection_hints_range_predicate(self):
+        # 2026-11-02 用户截图：LLM 用 DATE(trade_time) 包裹列 → 索引失效
+        # 全表 70 万估算被拒，模型修不对就把「分段跑」推给用户。报错必须
+        # 点破根因，给可执行的修正方向。
+        executor = self._executor([[{"rows": 700716}]])
+        result = json.loads(executor.execute(
+            "query_sql",
+            {"sql": "SELECT DATE(trade_time) AS d, SUM(paid_amount) AS amt"
+                    " FROM fact_order_line"
+                    " WHERE DATE(trade_time) BETWEEN '2026-10-01'"
+                    " AND '2026-10-21' GROUP BY d"}))
+        self.assertIn("范围谓词", result["error"])
+        self.assertIn("DATE(", result["error"])
+
+    def test_sql_tables_document_range_predicate(self):
+        order = agent_module._SQL_TABLES["fact_order_line"]
+        self.assertIn("范围谓词", order)
+        self.assertIn("禁止 DATE(trade_time)", order)
+        self.assertIn("84万", order)  # 回填后量级，不再是「约10万行」
+        stockout = agent_module._SQL_TABLES["fact_stockout_line"]
+        self.assertIn("禁止 DATE()", stockout)
+
+    def test_system_prompt_forbids_pushing_segmentation_to_user(self):
+        self.assertIn("分段", agent_module._SYSTEM_PROMPT)
+        self.assertIn("禁止把", agent_module._SYSTEM_PROMPT)
+
     def test_execution_error_returned_for_llm_self_correction(self):
         # 2026-10-21 实测：year_month 是 MySQL 保留字，LLM 不加反引号会
         # 1064——执行错误必须回喂（LLM 看到 near 位置会自己加反引号重试），

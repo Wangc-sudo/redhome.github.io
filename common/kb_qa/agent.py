@@ -28,6 +28,7 @@ from decimal import Decimal
 from common.kb_qa.context import format_history
 from common.kb_qa.focus import compress_rows
 from common.kb_qa.llm import LlmError
+from common.kb_qa.render import render_table
 
 #: 工具调用轮数上限（LLM 调用次数，含作答）。2 曾不够：「各区域完成
 #: 排名」要先查基准日期再算完成率——两轮全被工具占满，作答只能走轮尽
@@ -65,6 +66,9 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 - 用户只回"可以/好/嗯"等纯确认词时，只能执行紧邻上一轮助手结尾的
   提议；上一轮没有明确提议就问清用户要做什么，禁止从更早历史里挑任务
 - 口语化、客服可直接转发；数据类回答带上日期与单位
+- 查询被护栏拒绝或超时时，必须自行修正后重试：日期过滤改用范围谓词
+  （不要 DATE() 包裹列）、缩小日期范围或分段查询；禁止把「请回复分段跑」
+  这类补救动作推给用户，只有重试后仍拿不到才如实说明
 
 # 答复纪律（2026-11-02，客服群反馈"不相关的内容可以不输出吗"）
 - 只答被问到的对象与指标；未被索要的"其它店铺/供参考/顺便"数据一律不输出
@@ -74,6 +78,8 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 - 禁止输出内部字段名与协议词（has_previous_data、工具名等），禁止
   "问题理解：""AI 回答说明："这类自解释标题
 - 不要回显用户的问题；命中多个规格/店铺时列清单让用户确认，不猜不合并
+- 数据表格与合计由系统统一渲染附在回复末尾：正文不要手写 Markdown
+  表格、不要自行计算合计，只写结论与必要说明（2026-11-02 起显示层接管）
 
 # query_sql 可用表（含口径，别编造表与列）
 {{sql_tables}}
@@ -309,13 +315,19 @@ _SQL_TABLES = {
         " MAX(business_date) 锚点会落在未来的空行上（2026-10-21 实测"
         " 裸 MAX=10-31 而真实最新=10-20）**",
     "fact_order_line":
-        "订单行（约10万行，必须带 trade_time 日期过滤；按单号精确查询时用"
+        "订单行（约84万行，必须带 trade_time 日期过滤；按单号精确查询时用"
         " trade_no=%s 并保留合理日期范围）：trade_no 交易单号, trade_time 下单"
         "时间, buyer_nick 买家, shop_name 店铺, channel_name 渠道, goods_name"
         " 商品, brand_name 品牌, quantity 数量, paid_amount 实付(元),"
-        " trade_status 状态",
+        " trade_status 状态。"
+        " **日期过滤必须写范围谓词 trade_time>='YYYY-MM-DD' AND"
+        " trade_time<'YYYY-MM-DD'，禁止 DATE(trade_time) 包裹列——函数包裹会"
+        "让 idx_order_line_time 失效变全表扫描，被 EXPLAIN 护栏拒绝"
+        "（2026-11-02 实测：范围写法 21 天聚合 0.2s，DATE() 写法估算 70 万行"
+        "超阈值）**",
     "fact_stockout_line":
-        "出库行（约10万行，必须带 consign_time 日期过滤；可按 trade_no 或"
+        "出库行（大表，必须带 consign_time 日期过滤（同样禁止 DATE()"
+        "包裹列，用范围谓词）；可按 trade_no 或"
         " logistics_no 精确查询）：trade_no 交易单号, logistics_no 物流单号,"
         " logistics_name 物流公司, consign_time 发货时间, warehouse_name 仓,"
         " shop_name 店铺, channel_name 渠道, goods_name 商品, quantity 数量,"
@@ -361,7 +373,9 @@ _SQL_SCHEMA_RE = re.compile(
 _SQL_TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+`?([A-Za-z_]\w*)`?",
                            re.IGNORECASE)
 
-#: EXPLAIN 估算扫描行数阈值（行）；订单行/出库行全表 106k，JOIN 放大防到 50 万。
+#: EXPLAIN 估算扫描行数阈值（行）。订单行 2026-10 回填后全表约 84 万——
+#: 全表扫描必超阈值（正是要的效果）；范围谓词走 idx_order_line_time 的
+#: 21 天聚合估算仅约 7 万（2026-11-02 云上实测），阈值保持不变。
 _SQL_EXPLAIN_ROW_LIMIT = 500_000
 #: 语句超时（毫秒，SET SESSION MAX_EXECUTION_TIME）。
 _SQL_TIMEOUT_MS = 5000
@@ -1247,8 +1261,10 @@ class ToolExecutor:
                     continue
             if plan_rows > _SQL_EXPLAIN_ROW_LIMIT:
                 return {"error": f"查询估算扫描 {plan_rows} 行，超阈值 "
-                                 f"{_SQL_EXPLAIN_ROW_LIMIT}——请加日期过滤或"
-                                 " GROUP BY 聚合后重试"}
+                                 f"{_SQL_EXPLAIN_ROW_LIMIT}——请检查日期过滤写法："
+                                 "用 时间列>='…' AND 时间列<'…' 范围谓词，禁止"
+                                 " DATE(时间列) 包裹（函数包裹让索引失效变全表"
+                                 "扫描）；或缩小日期范围后重试"}
             cursor.execute(f"SET SESSION MAX_EXECUTION_TIME={_SQL_TIMEOUT_MS}")
             cursor.execute(sql)
             rows = cursor.fetchall()
@@ -1338,6 +1354,42 @@ def _sync_phone_meta(executor, meta):
         meta["error_summary"] = executor.export_error_summary
 
 
+#: 显示层接管的工具（2026-11-02）：业务查询结果含 rows，表格与合计改由
+#: render_table 统一渲染——LLM 手写表格出过列粘连（10/016）与合计裸数字
+#: 连读（155 14,907.39）两起用户误读事故。
+_DISPLAY_TOOLS = {"query_sql", "channel_sales"}
+
+
+def _display_block(name, result_json):
+    """工具结果 JSON → 显示层数据块；非显示工具/异常/无行返回 ""。"""
+    if name not in _DISPLAY_TOOLS:
+        return ""
+    try:
+        payload = json.loads(result_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return ""
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    if not all(isinstance(row, dict) for row in rows):
+        return ""
+    total = payload.get("total_rows", payload.get("count"))
+    return render_table(rows, total_rows=total)
+
+
+def _append_display(content, blocks):
+    """最终回复 = LLM 结论 + 显示层数据块；无数据块时行为与原先一致。"""
+    text = (content or "").strip()
+    if not blocks:
+        return text or None
+    body = "\n\n".join(block for block in blocks if block)
+    if not body:
+        return text or None
+    return f"{text}\n\n{body}" if text else body
+
+
 def run_agent(llm, question, *, executor, history=None,
               max_rounds=MAX_TOOL_ROUNDS, chat_with_tools=None, meta=None,
               tools=None):
@@ -1360,6 +1412,7 @@ def run_agent(llm, question, *, executor, history=None,
                      if t.get("function", {}).get("name") == "channel_yoy"]
         if yoy_tools:
             tools = yoy_tools
+    display_blocks = []
     if meta is not None:
         meta["tools"] = []
         meta["rounds"] = 0
@@ -1405,7 +1458,7 @@ def run_agent(llm, question, *, executor, history=None,
             content = content.strip()
             if has_dsml_residue(content):
                 return None  # 残留乱码绝不发给客服，降级由调用方决定
-            return content or None
+            return _append_display(content, display_blocks)
         messages.append({"role": "assistant",
                          "content": response.get("content") or "",
                          "tool_calls": tool_calls})
@@ -1424,6 +1477,9 @@ def run_agent(llm, question, *, executor, history=None,
                 result = json.dumps({"error": "tool execution failed"},
                                     ensure_ascii=False)
             _sync_phone_meta(executor, meta)
+            block = _display_block(name, result)
+            if block:
+                display_blocks.append(block)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_info.get("id") or "",
@@ -1437,7 +1493,8 @@ def run_agent(llm, question, *, executor, history=None,
     messages.append({
         "role": "user",
         "content": "以上工具结果已足够。请直接基于这些结果用中文给出最终"
-                   "答案，不要再生成 SQL 或调用任何工具。",
+                   "答案，不要再生成 SQL 或调用任何工具。数据表格与合计由"
+                   "系统统一渲染附在末尾，不要手写 Markdown 表格。",
     })
     if meta is not None:
         meta["rounds"] += 1  # 轮尽作答也是一次 LLM 调用
@@ -1447,4 +1504,4 @@ def run_agent(llm, question, *, executor, history=None,
         return None
     if has_dsml_residue(final):
         return None
-    return final or None
+    return _append_display(final, display_blocks)
