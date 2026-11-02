@@ -597,7 +597,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 " `agent_rounds`=%s, `latency_ms`=%s, `answer_excerpt`=%s,"
                 " `prompt_tokens`=%s, `completion_tokens`=%s, `export_count`=%s,"
                 " `embedding_model`=%s, `embedding_dim`=%s, `index_version`=%s,"
-                " `error_summary`=%s WHERE `msg_id`=%s",
+                " `error_summary`=%s, `reply_filter_diff`=%s WHERE `msg_id`=%s",
                 (
                     intent, matched, reply_kind,
                     meta.get("recall_source"),
@@ -612,6 +612,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                     meta.get("embedding_dim"),
                     meta.get("index_version"),
                     (meta.get("error_summary") or "")[:255] or None,
+                    meta.get("reply_filter_diff"),
                     msg_id,
                 ),
             )
@@ -1069,7 +1070,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: llm multi render failed")
         if truncated:
             reply += "\n\n还有其他问题，请分开发问；本次先回答前两类。"
-        reply = self._polish(question, reply)
+        reply = self._polish(question, reply, meta)
         if meta is not None:
             meta["recall_source"] = "multi:" + "+".join(sources)
             if pending:
@@ -1105,7 +1106,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         # 话术的行不应虚标召回通路，否则 badcase 聚类口径失真）。
         if answer and meta is not None:
             meta.setdefault("recall_source", "agent")
-        return self._polish(text, answer)
+        return self._polish(text, answer, meta)
 
     def _boundary_reply(self, conn, text):
         """边界直答；未命中 / 开关关闭 / 探针失败 → None（按现状跑工具）。"""
@@ -1118,17 +1119,18 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         except Exception:
             return None
 
-    def _polish(self, question, answer):
+    def _polish(self, question, answer, meta=None):
         """答复出口过滤（2026-11-02 方案 B3）：规则去无关段 + 表示规范化。
 
         规则模板通路（商品参数卡/澄清卡/号码卡）不走这里——它们本来就是
-        确定性渲染，过滤只有误伤风险。
+        确定性渲染，过滤只有误伤风险。meta 透传给过滤器回填
+        reply_filter_diff（observe 预览量），供审计落库。
         """
         if not answer:
             return answer
         from common.kb_qa.reply_filter import apply_reply_filter
 
-        return apply_reply_filter(question, answer, log=self._log)
+        return apply_reply_filter(question, answer, log=self._log, meta=meta)
 
     def _try_send_recalled_images(self, conn, question, conversation_id):
         """向量图召回兜底直发（文字搜图）。返回发出的图片对应的商品名
@@ -1254,12 +1256,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                                            history=history)
                 # 空串降摘录（同 _render_products 的推理版预算坑）。
                 if answer:
-                    return self._polish(question, answer), DOC_QA, None
+                    return self._polish(question, answer, meta), DOC_QA, None
                 self._log("kb qa: llm doc render empty")
             except LlmError:
                 self._log("kb qa: llm doc render failed")
         return self._polish(question,
-                            _render_doc_excerpt(chunks)), DOC_QA, None
+                            _render_doc_excerpt(chunks), meta), DOC_QA, None
 
     def _safe_reply(self, incoming, text, extra_at=()):
         conversation_id = getattr(incoming, "conversation_id", "") or ""

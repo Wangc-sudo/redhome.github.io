@@ -189,6 +189,28 @@ class ApplyModeTests(unittest.TestCase):
         self.assertEqual("", rf.apply_reply_filter("q", "",
                                                    mode=rf.MODE_ENFORCE))
 
+    def test_meta_records_diff_in_observe(self):
+        """observe 期把「如果 enforce 会删多少」回填 meta（审计落库用）。"""
+        meta = {}
+        out = rf.apply_reply_filter("杭州出货", self.REPLY,
+                                    mode=rf.MODE_OBSERVE, meta=meta)
+        self.assertEqual(self.REPLY, out)          # observe 不替换
+        self.assertEqual(len(self.REPLY) - len("杭州出货 12 万元。"),
+                         meta["reply_filter_diff"])
+
+    def test_meta_records_diff_in_enforce(self):
+        meta = {}
+        rf.apply_reply_filter("杭州出货", self.REPLY,
+                              mode=rf.MODE_ENFORCE, meta=meta)
+        self.assertGreater(meta["reply_filter_diff"], 0)
+
+    def test_meta_untouched_without_diff_or_off(self):
+        for mode in (rf.MODE_OBSERVE, rf.MODE_ENFORCE, rf.MODE_OFF):
+            meta = {}
+            rf.apply_reply_filter("杭州出货", "杭州出货 12 万元。",
+                                  mode=mode, meta=meta)
+            self.assertNotIn("reply_filter_diff", meta)
+
 
 if __name__ == "__main__":
     unittest.main()
