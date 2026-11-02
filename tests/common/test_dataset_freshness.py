@@ -303,6 +303,31 @@ class FreshnessStateTests(TestCase):
         self.assertEqual(STATUS_UNKNOWN, result.status)
         self.assertEqual("no_quality_run", result.error)
 
+    def test_missing_quality_run_does_not_mask_a_real_gap(self):
+        """无真实 DQ 运行不得把「真实断流」降级成 unknown。
+
+        实测：2026-11-01 渠道 T-1 零行，页面却显示 unknown/no_quality_run。
+        正确语义=确有缺口就如实暴露；unknown 只留给其它维度都健康的情况。
+        """
+        item = contract(dq_rules=("latest_quality_gate",))
+        checker = StubChecker()
+        checker.window = {
+            "required": True, "complete": False,
+            "reason": "missing_t1_business_date",
+        }
+        checker.latest_business_date = None
+        result = checker.check(item)
+        self.assertEqual(STATUS_STALE, result.status)
+        self.assertEqual("missing_t1_business_date", result.error)
+        self.assertEqual("no_quality_run", result.check_details["dq_confidence"])
+
+    def test_healthy_without_quality_run_stays_unknown(self):
+        """其它维度都健康时才降级为 unknown（置信度低、非可行动）。"""
+        item = contract(dq_rules=("latest_quality_gate",))
+        result = StubChecker().check(item)
+        self.assertEqual("no_quality_run", result.check_details["dq_confidence"])
+        self.assertEqual(STATUS_UNKNOWN, result.status)
+
     def test_unchanged_skipped_projection_can_still_be_fresh(self):
         checker = StubChecker()
         checker.summary.update(skipped=True, raw_records_written=0)
