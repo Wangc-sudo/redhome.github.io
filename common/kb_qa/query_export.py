@@ -25,6 +25,7 @@ from openpyxl.utils import get_column_letter
 
 DEFAULT_ALLOWED_TOOLS = (
     "daily_sales", "channel_sales", "channel_yoy", "query_sql", "product_stats",
+    "sku_sales", "sku_inventory",
 )
 
 
@@ -344,6 +345,18 @@ _FIELD_METADATA = {
     "yoy_rate": ("同比", "%", "与上年同期相比"),
     "order_count": ("订单数", "单", "订单数量"),
     "product_count": ("商品数", "款", "商品数量"),
+    "spec_no": ("规格编码", "", "WDT 规格编码"),
+    "goods_name": ("商品", "", "商品名称"),
+    "quantity": ("数量", "件", "销售/库存数量"),
+    "available_qty": ("可用库存", "件", "当前可用库存"),
+    "stock_qty": ("库存", "件", "账面库存"),
+    "purchase_intransit_qty": ("采购在途", "件", "采购在途数量"),
+    "qty_7days": ("近7天出库", "件", "近 7 天出库量"),
+    "qty_month": ("近30天出库", "件", "近 30 天出库量"),
+    "daily_avg": ("日均出库", "件", "日均出库量"),
+    "days_left": ("可售天数", "天", "按日均出库估算的可售天数"),
+    "stock_state": ("库存状态", "", "HEALTHY/URGENT/OVERSOLD/DEAD"),
+    "share": ("占比", "", "占同期合计的比例"),
     "brand": ("品牌", "", "商品品牌"),
     "category": ("类别", "", "商品类别"),
     "record_id": ("记录编号", "", "来源记录标识"),

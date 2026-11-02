@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from common.kb_qa.context import format_history
+from common.kb_qa.focus import compress_rows
 from common.kb_qa.llm import LlmError
 
 #: 工具调用轮数上限（LLM 调用次数，含作答）。2 曾不够：「各区域完成
@@ -51,17 +52,28 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 6. 商品库统计（总数、按品牌/大类分布）→ product_stats
 7. 公司手机号是谁在用/尾号查人/平台账号的验证码找谁要 → phone_lookup；
    结果 requires_clarification=true 时列出候选请用户选择，不得猜属主
-8. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
+8. 按单品/SKU/款 的销量、销售额、排行、哪款卖得好 → sku_sales
+9. 库存、可售天数、呆滞、缺货、在途 → sku_inventory（最新快照）
+10. 具体订单/交易单/物流单 → query_sql 精确查 fact_order_line（trade_no）
    与 fact_stockout_line（trade_no/logistics_no），不要只做聚合；其他业务
    数据问题（出库/退款/库存/人员目标等）也走 query_sql（只用白名单表，
    大表必须带日期过滤，结果超 100 行用 GROUP BY 聚合）
-9. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+11. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
 - 用户只回"可以/好/嗯"等纯确认词时，只能执行紧邻上一轮助手结尾的
   提议；上一轮没有明确提议就问清用户要做什么，禁止从更早历史里挑任务
 - 口语化、客服可直接转发；数据类回答带上日期与单位
+
+# 答复纪律（2026-11-02，客服群反馈"不相关的内容可以不输出吗"）
+- 只答被问到的对象与指标；未被索要的"其它店铺/供参考/顺便"数据一律不输出
+- 格式：结论一句 → 数据（带日期与单位）→ 注释限一句放末尾
+- 缺数一律表述为"无数据/—"，**禁止写成 0**；缺数说明一句话即可，不要
+  展开成多行「特别说明」
+- 禁止输出内部字段名与协议词（has_previous_data、工具名等），禁止
+  "问题理解：""AI 回答说明："这类自解释标题
+- 不要回显用户的问题；命中多个规格/店铺时列清单让用户确认，不猜不合并
 
 # query_sql 可用表（含口径，别编造表与列）
 {{sql_tables}}
@@ -163,6 +175,59 @@ TOOLS = [
                                                 "需与 start_date 同时提供"},
                     "group_by": {"type": "string", "enum": ["channel", "store"],
                                  "description": "channel 按渠道汇总；store 按店铺拆分"},
+                    "shop_name": {"type": "string",
+                                  "description": "只看某家店（模糊匹配店铺名），"
+                                                 "留空为全部店铺"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sku_sales",
+            "description": "按单品/SKU 查询销售：销售额与件数合计 + TOP N 单品"
+                           "（占比）。问「哪款卖得好」「各款销量」用它；问"
+                           "店铺/渠道汇总用 channel_sales/channel_yoy",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string",
+                                "description": "商品名或规格编码，留空为全部单品"},
+                    "start_date": {"type": "string",
+                                   "description": "开始日期 YYYY-MM-DD，"
+                                                  "需与 end_date 同时提供"},
+                    "end_date": {"type": "string",
+                                 "description": "结束日期 YYYY-MM-DD（含当天），"
+                                                "缺省为本月 1 日至今"},
+                    "channel": {"type": "string",
+                                "description": "渠道名（如京东），留空为全部"},
+                    "shop_name": {"type": "string",
+                                  "description": "店铺名（模糊），留空为全部"},
+                    "top_n": {"type": "integer",
+                              "description": "返回前 N 个单品，缺省 10，上限 30"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sku_inventory",
+            "description": "查询库存快照：可用库存、在途、可售天数、库存状态"
+                           "（紧急/超卖/呆滞）。问「还有多少货」「哪些呆滞」"
+                           "用它；结果为最新快照，务必带上快照日期",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string",
+                                "description": "商品名或规格编码，留空为三态"
+                                               "分布总览 + 各态 TOP 5"},
+                    "state": {"type": "string",
+                              "enum": ["URGENT", "OVERSOLD", "DEAD"],
+                              "description": "只看某一状态：紧急补货/超卖/呆滞"},
+                    "top_n": {"type": "integer",
+                              "description": "返回前 N 个单品，缺省 10，上限 30"},
                 },
             },
         },
@@ -205,6 +270,16 @@ TOOLS = [
 
 #: 工具结果给 LLM 的截断长度（控 token，防单行数据撑爆上下文）。
 _RESULT_LIMIT = 2000
+
+#: SKU 工具返回条数：缺省值与上限（2026-11-02 方案 §5）。
+_SKU_TOP_N_DEFAULT = 10
+_SKU_TOP_N_MAX = 30
+#: 库存三态口径（与投影层 extract_channel_ops 同源，答复必须带一句）。
+_STOCK_STATE_NOTE = (
+    "URGENT=可售天数<7 天（需补货）；OVERSOLD=可用库存为负（超卖）；"
+    "DEAD=近 30 天零出库（呆滞，与库存量无关）"
+)
+_STOCK_STATES = ("URGENT", "OVERSOLD", "DEAD")
 
 # ---------------------------------------------------------------------------
 # 受控 SQL（query_sql，2026-10-21 裁决方案 B：Text-to-SQL + 多层护栏）
@@ -255,6 +330,14 @@ _SQL_TABLES = {
     "fact_sales_daily":
         "每日销量（按规格编码）：business_date 日期, spec_no 规格编码,"
         " qty_sold 销量",
+    "fact_inventory_sku_daily":
+        "库存日快照（**只有最新 business_date 是当前库存，历史日是留档**，"
+        "先 MAX(business_date) 再查）：spec_no 规格编码, goods_name 商品,"
+        " warehouse_scope 仓范围(ALL=跨仓合并), available_qty 可用库存,"
+        " qty_7days 近7天出库, qty_month 近30天出库, purchase_intransit_qty"
+        " 采购在途, daily_avg 日均出库, days_left 可售天数, stock_state"
+        " 状态(HEALTHY 正常/URGENT 可售<7天/OVERSOLD 可用为负/DEAD 近30天"
+        "零出库——呆滞与库存量无关)",
     "dim_report_roster":
         "人员花名册：scope 区域, person_name 姓名, aliases 别名(json数组),"
         " channel 渠道, role 角色, enabled 是否启用",
@@ -385,13 +468,17 @@ class ToolExecutor:
     """白名单工具执行器。所有 SQL 为预定义形态，参数走占位符。"""
 
     def __init__(self, conn, *, doc_search=None, vector_search=None,
-                 now=None):
+                 now=None, focus=None, question=""):
         self._conn = conn
         self._doc_search = doc_search
         self._vector_search = vector_search
         self._now = now
         self._scopes = None
         self._channels = None
+        #: 问句焦点（focus.py，2026-11-02）：只用于「喂 LLM 的结果聚焦
+        #: 压缩」，不影响任何 SQL 与取值；None 时行为与旧版完全一致。
+        self._focus = focus
+        self._question = question or ""
         #: phone_lookup 命中后记录持卡人姓名（out-param：装配层据此把群
         #: 回复 @ 到持卡人，2026-10-26 用户裁决「小易要 @ 对应的人」）。
         self.phone_holders = []
@@ -421,6 +508,9 @@ class ToolExecutor:
             "daily_sales": ("pd_dataset_freshness", "dataset_key", "daily_report_offline"),
             "channel_sales": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
             "channel_yoy": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
+            "sku_sales": ("pd_dataset_freshness", "dataset_key", "wdt_order_line_fact"),
+            "sku_inventory": (
+                "pd_dataset_freshness", "dataset_key", "wdt_inventory_sku_daily"),
             "product_stats": (
                 "pd_knowledge_index_freshness", "index_key", "kb_product_structured",
             ),
@@ -459,7 +549,8 @@ class ToolExecutor:
         effective_params = result.pop("_export_params", None) or dict(args)
         if name == "query_sql":
             rows = rows if rows is not None else list(result.get("rows") or ())
-        elif name in {"channel_sales", "channel_yoy"}:
+        elif name in {"channel_sales", "channel_yoy", "sku_sales",
+                      "sku_inventory"}:
             rows = rows if rows is not None else list(result.get("rows") or ())
         elif name == "daily_sales":
             rows = [dict(result)] if result.get("found") else []
@@ -484,7 +575,8 @@ class ToolExecutor:
             "data_scope": {
                 key: value for key, value in effective_params.items() if key != "sql"
             },
-            "data_version": max(business_dates) if business_dates else None,
+            "data_version": (max(business_dates) if business_dates
+                             else result.get("snapshot_date")),
             "freshness_status": self._snapshot_freshness(name),
         })
 
@@ -698,6 +790,7 @@ class ToolExecutor:
         from common.public_data.channel_map import fetch_channel_map, resolve_channel
 
         channel = str(args.get("channel") or "").strip()
+        shop_filter = str(args.get("shop_name") or "").strip()
         group_by = str(args.get("group_by") or "channel").strip()
         if group_by not in ("channel", "store"):
             return {"error": "group_by must be channel or store"}
@@ -770,9 +863,16 @@ class ToolExecutor:
             "current": Decimal("0"), "previous": Decimal("0"),
             "current_rows": 0, "previous_rows": 0,
         })
+        known_shops = set()
         for source in source_rows:
             channel_key = resolve_channel(source, rules) or "未映射"
             if channel and channel_key != channel:
+                continue
+            shop = source.get("shop_name") or "未命名店铺"
+            known_shops.add(shop)
+            # 点名某店时只算该店（2026-11-02 方案 B1：问句只问一家店，
+            # 把全部店铺行喂给 LLM 的模型会顺手列出「其它店铺供参考」）。
+            if shop_filter and shop_filter not in shop:
                 continue
             identity = (channel_key if group_by == "channel"
                         else (channel_key, source.get("shop_name") or "未命名店铺"))
@@ -803,6 +903,14 @@ class ToolExecutor:
             })
             rows.append(row)
         rows.sort(key=lambda row: row["current_sales_amount"], reverse=True)
+        if shop_filter and not rows:
+            return {"error": f"未找到店铺: {shop_filter}",
+                    "shops": sorted(known_shops)[:20]}
+        # 聚焦压缩（2026-11-02 方案 B1）：喂 LLM 的只留问句点名的行 + 金额
+        # TOP 3，其余压成一条汇总。此前最多 50 行全喂，模型顺手列出
+        # 「其它店铺供参考」逐店清单（客服明确反馈的不相关内容来源）。
+        # 导出/快照仍用全量 rows，总量信息不丢。
+        fed_rows, omitted = compress_rows(rows, self._question, self._focus)
         result = {
             "source": "DB:fact_order_line",
             "channel_mapping": "dim_channel_map",
@@ -815,8 +923,13 @@ class ToolExecutor:
             "has_previous_data": any(
                 bucket["previous_rows"] for bucket in buckets.values()),
             "count": len(rows),
-            "rows": rows[:50],
+            "rows": fed_rows,
         }
+        if omitted:
+            result["others"] = omitted
+            result["others_hint"] = (
+                f"其余 {omitted['omitted']} 项合计 {omitted['total_amount']}"
+                " 元，未被问到，不要逐行列出")
         budget = _RESULT_LIMIT - 200
         while (result["rows"]
                and len(json.dumps(result, ensure_ascii=False,
@@ -831,6 +944,289 @@ class ToolExecutor:
                 "start": previous_start.isoformat(), "end": previous_end.isoformat(),
             },
         }
+        return result
+
+    # ------------------------------------------------------------------
+    # SKU 维度（2026-11-02，方案 §5 C1-C3）
+    #
+    # 粒度补齐：此前「某店 9 月按 SKU 卖了多少」只能按店铺口径作答
+    # （客服 2026-10-29 反馈「按照 SKU 维度没开发」）。两条工具都是预定义
+    # SQL + 占位符，延续「LLM 只选工具给参数」铁律。
+    # ------------------------------------------------------------------
+
+    def _resolve_sku(self, keyword):
+        """关键词 → (商品名过滤词, 多规格提示 or None)。
+
+        2026-11-02 云上实测修正：一个商品名对应多个 spec_no 是常态
+        （「习酒窖藏1988」在 2026-10 有 5 个规格在售），若命中多规格就
+        反问「是哪一个」，工具基本不可用。改为**按关键词 LIKE 检索、结果
+        按规格逐行列出并在结果里标注命中多个规格**——既不做规格合并
+        （合并出来的数字是错的），也不多绕一轮对话。
+        """
+        from common.kb_qa.products import find_products
+
+        try:
+            products = find_products(self._conn, keyword)
+        except Exception:
+            products = []
+        names = [row.get("name") for row in products if row.get("name")]
+        if len(names) == 1:
+            return names[0], None        # 唯一命中才用商品全名精确筛
+        extra = None
+        if len(names) > 1:
+            extra = {
+                "multiple_specs": True,
+                "candidates": [
+                    {"code": row.get("code"), "name": row.get("name")}
+                    for row in products if row.get("name")
+                ],
+                "hint": "该名称对应多个规格，结果按规格拆分列出，未合并计算",
+            }
+        return keyword, extra
+
+    @staticmethod
+    def _sku_period(args, now=None):
+        """期间解析：缺省本月 1 日至今（与 channel_yoy 同缺省口径）。"""
+        from datetime import datetime as _dt
+
+        start_text = str(args.get("start_date") or "").strip()
+        end_text = str(args.get("end_date") or "").strip()
+        if bool(start_text) != bool(end_text):
+            return None, {"error": "start_date 和 end_date 必须同时提供"}
+        try:
+            if start_text:
+                start = _dt.strptime(start_text, "%Y-%m-%d").date()
+                end = _dt.strptime(end_text, "%Y-%m-%d").date()
+            else:
+                end = (now or _dt.now)().date()
+                start = end.replace(day=1)
+            if start > end:
+                return None, {"error": "start_date 不能晚于 end_date"}
+        except ValueError:
+            return None, {"error": "date must be YYYY-MM-DD"}
+        return (start, end), None
+
+    @staticmethod
+    def _coerce_top_n(args):
+        try:
+            value = int(args.get("top_n") or _SKU_TOP_N_DEFAULT)
+        except (TypeError, ValueError):
+            value = _SKU_TOP_N_DEFAULT
+        return max(1, min(value, _SKU_TOP_N_MAX))
+
+    def _tool_sku_sales(self, args):
+        """按单品/SKU 的销售：合计 + TOP N（源 fact_order_line）。
+
+        口径与 channel_yoy 同源（paid_amount，已剔除取消/待付款/全额退款
+        关闭，部分退款不回扣），强制 trade_time 日期过滤。
+        """
+        from common.kb_qa.products import _like_escape
+
+        period, error = self._sku_period(args, now=self._now)
+        if error:
+            return error
+        start, end = period
+        keyword = str(args.get("keyword") or "").strip()
+        channel = str(args.get("channel") or "").strip()
+        shop_name = str(args.get("shop_name") or "").strip()
+        top_n = self._coerce_top_n(args)
+
+        goods_filter = None
+        multi_spec = None
+        if keyword:
+            goods_filter, multi_spec = self._resolve_sku(keyword)
+
+        conditions = ["`trade_time`>=%s", "`trade_time`<%s"]
+        params = [start, end + timedelta(days=1)]
+        if goods_filter:
+            conditions.append("(`goods_name` LIKE %s ESCAPE '\\\\'"
+                              " OR `spec_no`=%s)")
+            params.extend([f"%{_like_escape(goods_filter)}%", goods_filter])
+        if channel:
+            conditions.append("`channel_name`=%s")
+            params.append(channel)
+        if shop_name:
+            conditions.append("`shop_name` LIKE %s ESCAPE '\\\\'")
+            params.append(f"%{_like_escape(shop_name)}%")
+        where = " AND ".join(conditions)
+
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT COUNT(DISTINCT `trade_no`) AS `order_count`,"
+                " COALESCE(SUM(`quantity`),0) AS `quantity`,"
+                " COALESCE(SUM(`paid_amount`),0) AS `paid_amount`"
+                f" FROM `fact_order_line` WHERE {where}", params)
+            total = cursor.fetchone() or {}
+            cursor.execute(
+                "SELECT `spec_no`, `goods_name`,"
+                " COALESCE(SUM(`quantity`),0) AS `quantity`,"
+                " COALESCE(SUM(`paid_amount`),0) AS `paid_amount`"
+                f" FROM `fact_order_line` WHERE {where}"
+                " GROUP BY `spec_no`, `goods_name`"
+                " ORDER BY `paid_amount` DESC LIMIT %s",
+                (*params, top_n))
+            raw_rows = cursor.fetchall()
+        except Exception as exc:
+            return {"error": f"SKU 销售查询失败: {str(exc)[:160]}"}
+        finally:
+            cursor.close()
+
+        amount_total = float(total.get("paid_amount") or 0)
+        rows = []
+        for row in raw_rows:
+            amount = float(row.get("paid_amount") or 0)
+            rows.append({
+                "spec_no": row.get("spec_no"),
+                "goods_name": row.get("goods_name"),
+                "quantity": float(row.get("quantity") or 0),
+                "paid_amount": round(amount, 2),
+                "share": (round(amount / amount_total, 6)
+                          if amount_total else None),
+            })
+        result = {
+            "source": "DB:fact_order_line",
+            "metric": "paid_amount（已剔除取消/待付款/全额退款关闭，部分退款不回扣）",
+            "period": {"start": start.isoformat(), "end": end.isoformat()},
+            "keyword": keyword or None,
+            "total": {
+                "order_count": int(total.get("order_count") or 0),
+                "quantity": float(total.get("quantity") or 0),
+                "paid_amount": round(amount_total, 2),
+            },
+            "count": len(rows),
+            "rows": list(rows),
+            "snapshot_date": end.isoformat(),
+        }
+        if multi_spec:
+            result.update(multi_spec)
+        # 自我压缩到结果预算内（外层硬截会把 JSON 从中间切断）。
+        budget = _RESULT_LIMIT - 200
+        while (result["rows"]
+               and len(json.dumps(result, ensure_ascii=False,
+                                  default=str)) > budget):
+            result["rows"].pop()
+        result["returned"] = len(result["rows"])
+        result["_export_rows"] = rows
+        result["_export_params"] = {
+            **args,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+        }
+        return result
+
+    def _tool_sku_inventory(self, args):
+        """库存快照（fact_inventory_sku_daily 最新 business_date）。
+
+        无关键词时给三态分布总览 + 各态 TOP 5（「哪些呆滞」直接可答）。
+        """
+        from common.kb_qa.products import _like_escape
+
+        keyword = str(args.get("keyword") or "").strip()
+        state = str(args.get("state") or "").strip().upper()
+        if state and state not in _STOCK_STATES:
+            return {"error": f"unknown state: {state}",
+                    "valid_states": list(_STOCK_STATES)}
+        top_n = self._coerce_top_n(args)
+
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT MAX(`business_date`) AS `d`"
+                " FROM `fact_inventory_sku_daily`")
+            snapshot = (cursor.fetchone() or {}).get("d")
+            if not snapshot:
+                return {"error": "库存快照无数据"}
+        except Exception as exc:
+            return {"error": f"库存快照查询失败: {str(exc)[:160]}"}
+        finally:
+            cursor.close()
+        snapshot_date = getattr(snapshot, "isoformat", lambda: str(snapshot))()
+
+        goods_filter = None
+        multi_spec = None
+        if keyword:
+            goods_filter, multi_spec = self._resolve_sku(keyword)
+
+        conditions = ["`business_date`=%s"]
+        params = [snapshot]
+        if goods_filter:
+            conditions.append("(`goods_name` LIKE %s ESCAPE '\\\\'"
+                              " OR `spec_no`=%s)")
+            params.extend([f"%{_like_escape(goods_filter)}%", goods_filter])
+        if state:
+            conditions.append("`stock_state`=%s")
+            params.append(state)
+        where = " AND ".join(conditions)
+
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT `spec_no`, `goods_name`,"
+                " MAX(`stock_state`) AS `stock_state`,"
+                " COALESCE(SUM(`available_qty`),0) AS `available_qty`,"
+                " COALESCE(SUM(`purchase_intransit_qty`),0) AS"
+                " `purchase_intransit_qty`,"
+                " COALESCE(SUM(`qty_7days`),0) AS `qty_7days`,"
+                " COALESCE(SUM(`qty_month`),0) AS `qty_month`,"
+                " MAX(`daily_avg`) AS `daily_avg`,"
+                " MAX(`days_left`) AS `days_left`"
+                f" FROM `fact_inventory_sku_daily` WHERE {where}"
+                " GROUP BY `spec_no`, `goods_name`"
+                " ORDER BY `available_qty` DESC LIMIT %s",
+                (*params, top_n))
+            raw_rows = cursor.fetchall()
+            overview = None
+            if not goods_filter:
+                cursor.execute(
+                    "SELECT `stock_state`, COUNT(*) AS `sku_count`,"
+                    " COALESCE(SUM(`available_qty`),0) AS `available_qty`"
+                    " FROM `fact_inventory_sku_daily`"
+                    " WHERE `business_date`=%s GROUP BY `stock_state`",
+                    (snapshot,))
+                overview = [
+                    {"stock_state": row.get("stock_state"),
+                     "sku_count": int(row.get("sku_count") or 0),
+                     "available_qty": float(row.get("available_qty") or 0)}
+                    for row in cursor.fetchall()
+                ]
+        except Exception as exc:
+            return {"error": f"库存查询失败: {str(exc)[:160]}"}
+        finally:
+            cursor.close()
+
+        rows = [{
+            "spec_no": row.get("spec_no"),
+            "goods_name": row.get("goods_name"),
+            "stock_state": row.get("stock_state"),
+            "available_qty": float(row.get("available_qty") or 0),
+            "purchase_intransit_qty": float(
+                row.get("purchase_intransit_qty") or 0),
+            "qty_7days": float(row.get("qty_7days") or 0),
+            "qty_month": float(row.get("qty_month") or 0),
+            "daily_avg": float(row.get("daily_avg") or 0),
+            "days_left": (float(row.get("days_left"))
+                          if row.get("days_left") is not None else None),
+        } for row in raw_rows]
+        result = {
+            "source": "DB:fact_inventory_sku_daily",
+            "snapshot_date": snapshot_date,
+            "state_note": _STOCK_STATE_NOTE,
+            "keyword": keyword or None,
+            "overview": overview,
+            "count": len(rows),
+            "rows": list(rows),
+        }
+        if multi_spec:
+            result.update(multi_spec)
+        budget = _RESULT_LIMIT - 200
+        while (result["rows"]
+               and len(json.dumps(result, ensure_ascii=False,
+                                  default=str)) > budget):
+            result["rows"].pop()
+        result["returned"] = len(result["rows"])
+        result["_export_rows"] = rows
+        result["_export_params"] = {**args, "snapshot_date": snapshot_date}
         return result
 
     def _tool_query_sql(self, args):

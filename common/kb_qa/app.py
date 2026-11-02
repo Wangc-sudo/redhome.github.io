@@ -1056,6 +1056,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                 self._log("kb qa: llm multi render failed")
         if truncated:
             reply += "\n\n还有其他问题，请分开发问；本次先回答前两类。"
+        reply = self._polish(question, reply)
         if meta is not None:
             meta["recall_source"] = "multi:" + "+".join(sources)
             if pending:
@@ -1074,6 +1075,14 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         """agent loop 入口（fail-open：异常/无答案返回 None 由调用方降级）。"""
         if self._agent_runner is None:
             return None
+        # 数据边界直答（2026-11-02 方案 A2）：同比基期早于数据起点时一句
+        # 话说明、不跑工具——从根上消灭「同比：0 条」这类把缺数渲染成 0
+        # 的答复（2026-10-29 客服群截图 badcase 一）。
+        boundary = self._boundary_reply(conn, text)
+        if boundary:
+            if meta is not None:
+                meta.setdefault("recall_source", "boundary")
+            return boundary
         try:
             answer = self._agent_runner(conn, text, history, meta=meta)
         except Exception:
@@ -1083,7 +1092,30 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         # 话术的行不应虚标召回通路，否则 badcase 聚类口径失真）。
         if answer and meta is not None:
             meta.setdefault("recall_source", "agent")
-        return answer
+        return self._polish(text, answer)
+
+    def _boundary_reply(self, conn, text):
+        """边界直答；未命中 / 开关关闭 / 探针失败 → None（按现状跑工具）。"""
+        from common.kb_qa.focus import boundary_enabled, resolve_boundary_reply
+
+        if not boundary_enabled():
+            return None
+        try:
+            return resolve_boundary_reply(conn, text)
+        except Exception:
+            return None
+
+    def _polish(self, question, answer):
+        """答复出口过滤（2026-11-02 方案 B3）：规则去无关段 + 表示规范化。
+
+        规则模板通路（商品参数卡/澄清卡/号码卡）不走这里——它们本来就是
+        确定性渲染，过滤只有误伤风险。
+        """
+        if not answer:
+            return answer
+        from common.kb_qa.reply_filter import apply_reply_filter
+
+        return apply_reply_filter(question, answer, log=self._log)
 
     def _try_send_recalled_images(self, conn, question, conversation_id):
         """向量图召回兜底直发（文字搜图）。返回发出的图片对应的商品名
@@ -1209,11 +1241,12 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                                            history=history)
                 # 空串降摘录（同 _render_products 的推理版预算坑）。
                 if answer:
-                    return answer, DOC_QA, None
+                    return self._polish(question, answer), DOC_QA, None
                 self._log("kb qa: llm doc render empty")
             except LlmError:
                 self._log("kb qa: llm doc render failed")
-        return _render_doc_excerpt(chunks), DOC_QA, None
+        return self._polish(question,
+                            _render_doc_excerpt(chunks)), DOC_QA, None
 
     def _safe_reply(self, incoming, text, extra_at=()):
         conversation_id = getattr(incoming, "conversation_id", "") or ""
@@ -1299,10 +1332,13 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
     agent_runner = None
     if llm is not None:
         from common.kb_qa.agent import ToolExecutor, run_agent
+        from common.kb_qa.focus import parse_focus
 
         def agent_runner(conn, text, history, meta=None):
             executor = ToolExecutor(
-                conn, doc_search=search_docs, vector_search=vector_search)
+                conn, doc_search=search_docs, vector_search=vector_search,
+                # 问句焦点（2026-11-02）：只用于工具结果的聚焦压缩。
+                focus=parse_focus(text), question=text)
             answer = run_agent(llm, text, executor=executor, history=history,
                                meta=meta)
             # phone_lookup 命中持卡人 → 透出 meta，process 据此把群回复
