@@ -16,7 +16,7 @@ LLM 口算错误面。
 """
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 #: 列名 → 中文标签（未识别列保留原名）。
 _COLUMN_LABELS = {
@@ -55,6 +55,20 @@ def _fmt_number(value, digits):
     return f"{float(value):,.{digits}f}"
 
 
+def _as_number(column, value):
+    """数值列归一：query_sql 给 LLM 的值已 str() 化（"804.0000"），
+    显示层须把数值字符串转回数字，否则格式化与合计全部失效
+    （2026-11-02 云上验收实测）。无法解析返回 None。"""
+    if _is_number(value):
+        return value
+    if isinstance(value, str) and column in _ADDITIVE_COLUMNS:
+        try:
+            return Decimal(value.strip().replace(",", ""))
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
 def _fmt_value(column, value):
     if value is None:
         return "—"
@@ -64,13 +78,14 @@ def _fmt_value(column, value):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, date):
         return value.isoformat()
-    if _is_number(value):
+    number = _as_number(column, value) if column in _ADDITIVE_COLUMNS else None
+    if number is not None:
         if column in _AMOUNT_COLUMNS:
-            return _fmt_number(value, 2)
-        if column in _QUANTITY_COLUMNS | _COUNT_COLUMNS:
-            if float(value) == int(value):
-                return _fmt_number(value, 0)
-            return _fmt_number(value, 2)
+            return _fmt_number(number, 2)
+        if float(number) == int(number):
+            return _fmt_number(number, 0)
+        return _fmt_number(number, 2)
+    if _is_number(value):
         return _fmt_number(value, 2) if isinstance(
             value, (float, Decimal)) else f"{value:,}"
     text = str(value)
@@ -104,10 +119,11 @@ def _total_line(columns, rows):
     for column in columns:
         if column not in _ADDITIVE_COLUMNS:
             continue
-        values = [row.get(column) for row in rows]
-        if not any(_is_number(v) for v in values):
+        numbers = [n for n in (_as_number(column, row.get(column))
+                               for row in rows) if n is not None]
+        if not numbers:
             continue
-        total = sum(float(v) for v in values if _is_number(v))
+        total = sum(float(n) for n in numbers)
         label = _COLUMN_LABELS.get(column, column)
         if column in _AMOUNT_COLUMNS:
             parts.append(f"{label} {_fmt_number(total, 2)} 元")
