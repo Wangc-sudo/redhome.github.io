@@ -955,10 +955,13 @@ class ToolExecutor:
     # ------------------------------------------------------------------
 
     def _resolve_sku(self, keyword):
-        """关键词 → (商品名, 澄清载荷 or None)。
+        """关键词 → (商品名过滤词, 多规格提示 or None)。
 
-        命中多款同名/多规格时**列清单反问**，不猜不合并（方案 C1）：
-        不同规格的销售与库存合并计算出来的数字是错的。
+        2026-11-02 云上实测修正：一个商品名对应多个 spec_no 是常态
+        （「习酒窖藏1988」在 2026-10 有 5 个规格在售），若命中多规格就
+        反问「是哪一个」，工具基本不可用。改为**按关键词 LIKE 检索、结果
+        按规格逐行列出并在结果里标注命中多个规格**——既不做规格合并
+        （合并出来的数字是错的），也不多绕一轮对话。
         """
         from common.kb_qa.products import find_products
 
@@ -967,17 +970,19 @@ class ToolExecutor:
         except Exception:
             products = []
         names = [row.get("name") for row in products if row.get("name")]
+        if len(names) == 1:
+            return names[0], None        # 唯一命中才用商品全名精确筛
+        extra = None
         if len(names) > 1:
-            return None, {
-                "requires_clarification": True,
-                "keyword": keyword,
+            extra = {
+                "multiple_specs": True,
                 "candidates": [
                     {"code": row.get("code"), "name": row.get("name")}
                     for row in products if row.get("name")
                 ],
-                "hint": "命中多个规格，请让用户确认是哪一个；不同规格不合并计算",
+                "hint": "该名称对应多个规格，结果按规格拆分列出，未合并计算",
             }
-        return (names[0] if names else keyword), None
+        return keyword, extra
 
     @staticmethod
     def _sku_period(args, now=None):
@@ -1027,10 +1032,9 @@ class ToolExecutor:
         top_n = self._coerce_top_n(args)
 
         goods_filter = None
+        multi_spec = None
         if keyword:
-            goods_filter, clarification = self._resolve_sku(keyword)
-            if clarification:
-                return clarification
+            goods_filter, multi_spec = self._resolve_sku(keyword)
 
         conditions = ["`trade_time`>=%s", "`trade_time`<%s"]
         params = [start, end + timedelta(days=1)]
@@ -1094,6 +1098,8 @@ class ToolExecutor:
             "rows": list(rows),
             "snapshot_date": end.isoformat(),
         }
+        if multi_spec:
+            result.update(multi_spec)
         # 自我压缩到结果预算内（外层硬截会把 JSON 从中间切断）。
         budget = _RESULT_LIMIT - 200
         while (result["rows"]
@@ -1138,10 +1144,9 @@ class ToolExecutor:
         snapshot_date = getattr(snapshot, "isoformat", lambda: str(snapshot))()
 
         goods_filter = None
+        multi_spec = None
         if keyword:
-            goods_filter, clarification = self._resolve_sku(keyword)
-            if clarification:
-                return clarification
+            goods_filter, multi_spec = self._resolve_sku(keyword)
 
         conditions = ["`business_date`=%s"]
         params = [snapshot]
@@ -1212,6 +1217,8 @@ class ToolExecutor:
             "count": len(rows),
             "rows": list(rows),
         }
+        if multi_spec:
+            result.update(multi_spec)
         budget = _RESULT_LIMIT - 200
         while (result["rows"]
                and len(json.dumps(result, ensure_ascii=False,

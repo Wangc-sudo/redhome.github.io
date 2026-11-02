@@ -118,15 +118,29 @@ class SkuSalesTests(unittest.TestCase):
                        for p in params if isinstance(p, str) and "%" in p]
         self.assertTrue(any("习酒窖藏1988" in p for p in like_params))
 
-    def test_multi_spec_hit_asks_instead_of_guessing(self):
+    def test_multi_spec_listed_per_spec_not_blocked(self):
+        """命中多规格：不反问（云上实测「习酒窖藏1988」对应 5+ 规格），
+        按关键词检索并在结果里标注 multiple_specs，逐规格列出不合并。"""
         executor, conn = self._executor(
-            [], products=("习酒窖藏1988 500ml", "习酒窖藏1988 100ml"))
+            [{"spec_no": "S1", "goods_name": "习酒窖藏1988 500ml",
+              "quantity": 1, "paid_amount": 100}],
+            products=("习酒窖藏1988 500ml", "习酒窖藏1988 100ml"))
         result = executor._tool_sku_sales({"keyword": "习酒窖藏1988"})
-        self.assertTrue(result["requires_clarification"])
+        self.assertTrue(result["multiple_specs"])
         self.assertEqual(2, len(result["candidates"]))
-        self.assertIn("hint", result)
-        # 澄清时不查订单表（只查了商品表就停下）
-        self.assertFalse(any("fact_order_line" in sql for sql in conn.sqls))
+        self.assertEqual(1, len(result["rows"]))     # 仍给出答案
+        # 用原文 LIKE 检索（不是拿第一个商品名去猜）
+        like_params = [p for _, params in conn.executed
+                       for p in params if isinstance(p, str) and "%" in p]
+        self.assertTrue(any(p == "%习酒窖藏1988%" for p in like_params))
+
+    def test_single_product_uses_full_name(self):
+        executor, conn = self._executor(
+            [], products=("53°500ml*6习酒窖藏1988",))
+        executor._tool_sku_sales({"keyword": "习酒窖藏1988"})
+        like_params = [p for _, params in conn.executed
+                       for p in params if isinstance(p, str) and "%" in p]
+        self.assertTrue(any("53°500ml*6习酒窖藏1988" in p for p in like_params))
 
     def test_channel_and_shop_filters(self):
         executor, conn = self._executor([])
@@ -192,11 +206,12 @@ class SkuInventoryTests(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("URGENT", result["valid_states"])
 
-    def test_multi_spec_hit_asks_instead_of_guessing(self):
+    def test_multi_spec_listed_per_spec_not_blocked(self):
         executor = self._executor(
             [], products=("习酒窖藏1988 500ml", "习酒窖藏1988 100ml"))
         result = executor._tool_sku_inventory({"keyword": "习酒窖藏1988"})
-        self.assertTrue(result["requires_clarification"])
+        self.assertTrue(result["multiple_specs"])
+        self.assertEqual(2, len(result["candidates"]))
 
     def test_no_snapshot_fails_soft(self):
         conn = _RouterConn(lambda sql, params: [])
