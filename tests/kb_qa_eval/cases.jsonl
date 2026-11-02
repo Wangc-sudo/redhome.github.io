@@ -86,7 +86,7 @@
 {"question": "习酒窖藏1988 的箱规是多少，有多个规格吗", "expected_tools": ["search_products"], "must_contain": ["规格"], "must_not_contain": []}
 {"question": "第一个", "expected_tools": [], "must_contain": [], "must_not_contain": ["价格"]}
 {"question": "不对，不是这款", "expected_tools": [], "must_contain": [], "must_not_contain": []}
-{"question": "那就它吧", "expected_tools": [], "must_contain": ["什么"], "must_not_contain": []}
+{"question": "那就它吧", "expected_tools": [], "must_contain": ["哪"], "must_not_contain": []}
 {"question": "随便看看", "expected_tools": [], "must_contain": [], "must_not_contain": []}
 {"question": "你好", "expected_tools": [], "must_contain": ["你好"], "must_not_contain": []}
 {"question": "谢谢", "expected_tools": [], "must_contain": [], "must_not_contain": []}
