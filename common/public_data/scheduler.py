@@ -117,13 +117,20 @@ def _extract_entry(*extra):
     }
 
 
-def _data_quality_entry(dataset):
-    return {
-        "argv": [
-            "common.public_data.cli", "data-quality-check",
-            "--confirm-local-test-write", "--dataset", dataset,
-        ],
-    }
+def _data_quality_entry(dataset, window_days=None):
+    """DQ 检查命令；``window_days`` 非空时只查最近 N 个业务日。
+
+    渠道线传 7：DQ 的目的是守当期数据质量，全表扫描会把历史存量缺陷
+    （9 月缺店铺名、空业务日期空壳行）永久计入结论 —— 实测影子常年
+    blocked、真实闸门根本无法开启；收窄到 7 天后仅剩真实当期信号。
+    """
+    argv = [
+        "common.public_data.cli", "data-quality-check",
+        "--confirm-local-test-write", "--dataset", dataset,
+    ]
+    if window_days is not None:
+        argv += ["--window-days", str(window_days)]
+    return {"argv": argv}
 
 
 def _pages_entry(region, *extra):
@@ -206,7 +213,7 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
-    "dq-check-channel": _data_quality_entry("channel_daily_sales"),
+    "dq-check-channel": _data_quality_entry("channel_daily_sales", window_days=7),
     "dq-check-wdt": _data_quality_entry("wdt_order_line_fact"),
     # 渠道日销 T+1 采集窗口（10:31 补采 → 10:35 提取 → 10:40 到齐校验 →
     # 10:45 页面重算；方案 docs/渠道日销T+1采集与门店到齐催办方案-2026-09-28.md）。

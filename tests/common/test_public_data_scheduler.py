@@ -728,10 +728,14 @@ def test_build_argv_data_quality_checks():
     ):
         argv = build_argv(service_id, SETTINGS)
         assert argv[1:3] == ["-m", "common.public_data.cli"]
-        assert argv[3:] == [
+        expected = [
             "data-quality-check", "--confirm-local-test-write",
             "--dataset", dataset,
         ]
+        # 渠道线带滚动窗口（7 个业务日），避免历史存量缺陷永久计入结论
+        if service_id == "dq-check-channel":
+            expected += ["--window-days", "7"]
+        assert argv[3:] == expected
 
 
 def test_build_argv_data_quality_rerun_worker():

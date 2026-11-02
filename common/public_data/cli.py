@@ -11,7 +11,10 @@ import os
 import sys
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+_BEIJING = timezone(timedelta(hours=8))
 
 
 # ---------------------------------------------------------------------------
@@ -719,10 +722,18 @@ def _handle_data_quality_check(args):
             return
         runner = build_data_quality_runner(settings)
         runner.repository.seed_default_rules(actor="system")
+        #: 滚动窗口：DQ 的目的是守**当期**数据质量。全表扫描会把历史存量
+        #: 缺陷（如 9 月缺店铺名、空业务日期的空壳行）永久计入结论，导致
+        #: 影子常年 blocked、真实闸门根本无法开启。
+        window_start, window_end = args.window_start, args.window_end
+        if args.window_days and window_start is None and window_end is None:
+            today = datetime.now(_BEIJING).date()
+            window_start = today - timedelta(days=args.window_days)
+            window_end = today
         result = runner.run(
             args.dataset,
-            window_start=args.window_start,
-            window_end=args.window_end,
+            window_start=window_start,
+            window_end=window_end,
             requested_by=args.requested_by,
             reason=args.reason,
             batch_size=args.batch_size,
@@ -1532,6 +1543,11 @@ def main(argv=None):
     quality.add_argument("--dataset", required=True)
     quality.add_argument("--window-start", default=None)
     quality.add_argument("--window-end", default=None)
+    quality.add_argument(
+        "--window-days", type=int, default=None,
+        help="只检查最近 N 个业务日（北京日期口径，含今天）；"
+             "缺省=全表（历史存量缺陷会永久计入结论）",
+    )
     quality.add_argument("--batch-size", type=int, default=1000)
     quality.add_argument("--max-batch-bytes", type=int, default=32 * 1024 * 1024)
     quality.add_argument("--requested-by", default="scheduler")
