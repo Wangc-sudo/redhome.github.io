@@ -26,9 +26,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from common.kb_qa.context import format_history
-from common.kb_qa.focus import compress_rows
+from common.kb_qa.focus import compress_rows, parse_focus
 from common.kb_qa.llm import LlmError
-from common.kb_qa.render import render_table
+from common.kb_qa.render import render_answer
+from common.kb_qa.result import from_payload
 
 #: 工具调用轮数上限（LLM 调用次数，含作答）。2 曾不够：「各区域完成
 #: 排名」要先查基准日期再算完成率——两轮全被工具占满，作答只能走轮尽
@@ -78,8 +79,8 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
 - 禁止输出内部字段名与协议词（has_previous_data、工具名等），禁止
   "问题理解：""AI 回答说明："这类自解释标题
 - 不要回显用户的问题；命中多个规格/店铺时列清单让用户确认，不猜不合并
-- 数据表格与合计由系统统一渲染附在回复末尾：正文不要手写 Markdown
-  表格、不要自行计算合计，只写结论与必要说明（2026-11-02 起显示层接管）
+- 数据表格与结论卡由系统统一渲染：正文不要手写 Markdown 表格、不要
+  复述卡片中的合计与数字，只写业务解读与必要说明（2026-11-02 显示层）
 
 # query_sql 可用表（含口径，别编造表与列）
 {{sql_tables}}
@@ -1360,27 +1361,23 @@ def _sync_phone_meta(executor, meta):
 _DISPLAY_TOOLS = {"query_sql", "channel_sales"}
 
 
-def _display_block(name, result_json):
-    """工具结果 JSON → 显示层数据块；非显示工具/异常/无行返回 ""。"""
+def _display_block(name, result_json, question=""):
+    """工具结果 JSON → ResultSet → 答案块（结论卡+表格）。
+
+    非显示工具/异常/无行/探索锚点返回 ""；期间以理解层为准过滤行。
+    """
     if name not in _DISPLAY_TOOLS:
         return ""
     try:
         payload = json.loads(result_json)
     except (TypeError, ValueError):
         return ""
-    if not isinstance(payload, dict) or payload.get("error"):
+    result = from_payload(name, payload)
+    if result is None:
         return ""
-    rows = payload.get("rows")
-    if not isinstance(rows, list) or not rows:
-        return ""
-    if not all(isinstance(row, dict) for row in rows):
-        return ""
-    if len(rows) == 1 and len(rows[0]) == 1:
-        # 单格标量（max_time/latest 等日期锚点）是探索过程的副产物，
-        # 永远不该作为答案表格候选（2026-11-02 云上复验被误引用）。
-        return ""
-    total = payload.get("total_rows", payload.get("count"))
-    return render_table(rows, total_rows=total)
+    period = parse_focus(question).period if question else None
+    return render_answer(result.rows, total_rows=result.total_rows,
+                         period=period)
 
 
 #: 表格引用占位符（[[表N]]）：多查询场景由 LLM 选择与答案相关的表，
@@ -1506,7 +1503,7 @@ def run_agent(llm, question, *, executor, history=None,
                 result = json.dumps({"error": "tool execution failed"},
                                     ensure_ascii=False)
             _sync_phone_meta(executor, meta)
-            block = _display_block(name, result)
+            block = _display_block(name, result, question)
             if block:
                 display_blocks.append(block)
             messages.append({
