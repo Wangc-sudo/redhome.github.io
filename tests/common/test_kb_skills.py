@@ -85,6 +85,22 @@ class WhitelistDerivationTests(unittest.TestCase):
         self.assertIsNone(get_skill("query_sql").snapshot)
 
 
+class DateAnchorFilterTests(unittest.TestCase):
+    def test_pure_date_columns_filtered(self):
+        from common.kb_qa.result import from_payload
+
+        self.assertIsNone(from_payload("query_sql", {
+            "rows": [{"today": "2026-11-02", "yesterday": "2026-11-01"}]}))
+
+    def test_business_columns_kept(self):
+        from common.kb_qa.result import from_payload
+
+        result = from_payload("query_sql", {
+            "rows": [{"person_name": "余云涛", "monthly_target": 500000},
+                     {"person_name": "李树军", "monthly_target": 930000}]})
+        self.assertIsNotNone(result)
+
+
 class RegistryValidationTests(unittest.TestCase):
     def test_name_must_match_directory(self):
         import tempfile
