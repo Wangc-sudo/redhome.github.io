@@ -69,7 +69,9 @@ _INTERNAL_MAP = {
     "valid_scopes": "可选区域",
 }
 _ASSIGN_RE = re.compile(
-    r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s*[=:]\s*[^\s，。；、]+")
+    # 值字符集排除反引号——否则「`has_previous_data=false`」的右反引号被
+    # 吞进值里，掩蔽后只剩左反引号（2026-11-03 测试抓出）。
+    r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s*[=:]\s*[^\s，。；、`]+")
 _SNAKE_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 #: 删除/替换后残留的空括号与重复逗号。
 _PUNCT_CLEANUPS = (
@@ -77,6 +79,12 @@ _PUNCT_CLEANUPS = (
     (re.compile(r"[（(]\s*[，,；;]"), "（"),
     (re.compile(r"[，,；;]\s*[）)]"), "）"),
     (re.compile(r"[，,]{2,}"), "，"),
+    # 内部字段名被掩蔽/删除后的残留（2026-11-03 干跑 7 天真答复发现）：
+    # 「（fact_order_line…）」→「（）」空括号；「`has_previous_data=false`」
+    # →「`去年同期数据`」孤反引号（客服答复没有合法代码片段）。
+    (re.compile(r"[（(]\s*[）)]"), ""),
+    (re.compile(r"`([^`\n]*[\u4e00-\u9fff][^`\n]*)`"), r"\1"),
+    (re.compile(r"(?<!`)``(?!`)"), ""),   # 字段删光后的空 code span
 )
 
 _MISSING_WORDS = (
