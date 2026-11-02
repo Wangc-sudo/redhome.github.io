@@ -30,6 +30,13 @@ class ResultSet:
         return self.total_rows is None or self.total_rows <= len(self.rows)
 
 
+#: 日期锚点列名（这些列组成的表没有任何业务指标，只是日期对齐副产物）。
+_DATE_ANCHOR_COLUMNS = {
+    "d", "date", "business_date", "stat_date", "today", "yesterday",
+    "latest", "latest_date", "max_time", "min_time",
+}
+
+
 def from_payload(tool, payload):
     """工具结果 payload → ResultSet；非表格结果/错误/探索锚点返回 None。"""
     if not isinstance(payload, dict) or payload.get("error"):
@@ -41,6 +48,11 @@ def from_payload(tool, payload):
         return None
     if len(rows) == 1 and len(rows[0]) == 1:
         # 单格标量（max_time/latest 等日期锚点）是探索过程副产物。
+        return None
+    columns = {key for row in rows for key in row}
+    if columns and columns <= _DATE_ANCHOR_COLUMNS:
+        # 纯日期列结果（today/yesterday/latest_date 等）同样是锚点，
+        # 不含任何业务指标，不进候选（2026-11-02 云上复验实测）。
         return None
     total = payload.get("total_rows", payload.get("count"))
     return ResultSet(tool=tool, rows=rows, total_rows=total)
