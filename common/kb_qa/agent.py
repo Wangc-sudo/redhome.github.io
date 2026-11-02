@@ -334,20 +334,18 @@ class ToolExecutor:
             :_RESULT_LIMIT]
 
     def _snapshot_freshness(self, name):
-        mapping = {
-            "daily_sales": ("pd_dataset_freshness", "dataset_key", "daily_report_offline"),
-            "channel_sales": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
-            "channel_yoy": ("pd_dataset_freshness", "dataset_key", "channel_daily_sales"),
-            "sku_sales": ("pd_dataset_freshness", "dataset_key", "wdt_order_line_fact"),
-            "sku_inventory": (
-                "pd_dataset_freshness", "dataset_key", "wdt_inventory_sku_daily"),
-            "product_stats": (
-                "pd_knowledge_index_freshness", "index_key", "kb_product_structured",
-            ),
-        }
-        target = mapping.get(name)
-        if target is None:
+        # 新鲜度 mapping 由技能声明派生（Task 2）：snapshot=数据集/索引键，
+        # snapshot_kind=dataset|knowledge，新工具不再改这里的硬编码。
+        from common.kb_qa.skills import get_skill
+
+        skill = get_skill(name)
+        if skill is None or not skill.snapshot:
             return "unknown"
+        if skill.snapshot_kind == "knowledge":
+            target = ("pd_knowledge_index_freshness", "index_key",
+                      skill.snapshot)
+        else:
+            target = ("pd_dataset_freshness", "dataset_key", skill.snapshot)
         table, column, key = target
         cursor = self._conn.cursor()
         try:

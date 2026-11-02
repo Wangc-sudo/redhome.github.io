@@ -17,11 +17,7 @@ import uuid
 
 from common.kb_qa.context import DEFAULT_MAX_TURNS
 from common.kb_qa.focus import parse_focus
-
-#: 业务数据工具名（白名单外用户不可见）。
-_BUSINESS_TOOLS = frozenset(
-    ("daily_sales", "channel_sales", "channel_yoy", "query_sql",
-     "sku_sales", "sku_inventory"))
+from common.kb_qa.skills import business_tool_names
 
 
 #: 历史卫生（2026-10-30 对话状态层）：进入 LLM prompt 的轮次时间窗。
@@ -90,7 +86,7 @@ def tools_for(allow_business):
     if allow_business:
         return TOOLS
     return [t for t in TOOLS
-            if t.get("function", {}).get("name") not in _BUSINESS_TOOLS]
+            if t.get("function", {}).get("name") not in business_tool_names()]
 
 
 class KbWebService:

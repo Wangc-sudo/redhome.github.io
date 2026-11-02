@@ -5,6 +5,7 @@ tags: [knowledge]
 order: 3
 export: true
 snapshot: kb_product_structured
+snapshot_kind: knowledge
 parameters:
   type: object
   properties: {}
