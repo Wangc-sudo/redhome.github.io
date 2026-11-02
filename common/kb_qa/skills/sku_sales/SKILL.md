@@ -1,6 +1,6 @@
 ---
 name: sku_sales
-description: "按单品/SKU 查询销售：销售额与件数合计 + TOP N 单品（占比）。问「哪款卖得好」「各款销量」用它；问店铺/渠道汇总用 channel_sales/channel_yoy"
+description: "按单品/SKU 查询销售：销售额与件数合计 + TOP N 单品（占比）。问「哪款卖得好」「各款销量」「某商品/系列（如金质）卖了多少」用它；商品销售额的同比=本期与去年同期各调一次再对比；问店铺/渠道汇总用 channel_sales/channel_yoy"
 tags: [business]
 order: 7
 export: true

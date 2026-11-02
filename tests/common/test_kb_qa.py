@@ -2374,7 +2374,10 @@ class AgentLoopTests(unittest.TestCase):
                                         executor=self._Executor())
         self.assertIn("排名", answer)
 
-    def test_yoy_question_only_offers_channel_yoy(self):
+    def test_yoy_question_offers_channel_and_sku_tools(self):
+        """同比收窄 = channel_yoy + sku_sales（对象可能是渠道也可能是商品系列，
+        「金质今年9月销售额同比」2026-11-02 真机 badcase）；仍排除
+        channel_sales/query_sql 防口径混。"""
         offered = []
 
         class _Llm:
@@ -2383,8 +2386,13 @@ class AgentLoopTests(unittest.TestCase):
                 return {"content": "答", "tool_calls": []}
 
         agent_module.run_agent(
-            _Llm(), "京东本月销售额同比去年怎么样", executor=self._Executor())
-        self.assertEqual([["channel_yoy"]], offered)
+            _Llm(), "金质今年9月销售额同比去年是多少",
+            executor=self._Executor())
+        self.assertEqual(1, len(offered))
+        names = set(offered[0])
+        self.assertEqual({"channel_yoy", "sku_sales"}, names)
+        self.assertNotIn("query_sql", names)
+        self.assertNotIn("channel_sales", names)
 
     def test_history_enters_system_prompt(self):
         captured = []
