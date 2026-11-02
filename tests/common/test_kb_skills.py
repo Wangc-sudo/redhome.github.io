@@ -56,9 +56,11 @@ class WhitelistDerivationTests(unittest.TestCase):
     """Task 2：三处硬编码白名单收敛到注册表后的派生等价。"""
 
     def test_business_tools_match_legacy_set(self):
+        # 2026-11-02 +sales_report（运营报表，真机 badcase 驱动）
         self.assertEqual(
             {"daily_sales", "channel_sales", "channel_yoy", "query_sql",
-             "sku_sales", "sku_inventory"}, set(business_tool_names()))
+             "sku_sales", "sku_inventory", "sales_report"},
+            set(business_tool_names()))
 
     def test_export_tools_match_legacy_set(self):
         self.assertEqual(

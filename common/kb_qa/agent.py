@@ -64,7 +64,10 @@ _SYSTEM_PROMPT = """你是公司客服群的业务助手，可以调用工具获
    与 fact_stockout_line（trade_no/logistics_no），不要只做聚合；其他业务
    数据问题（出库/退款/库存/人员目标等）也走 query_sql（只用白名单表，
    大表必须带日期过滤，结果超 100 行用 GROUP BY 聚合）
-11. 不需要工具的闲聊 → 直接简短回答，不要调用工具
+11. 运营周报/月报/经营概览（「做个10月运营周报」「本期经营怎么样」）
+   → sales_report：总量+环比+渠道分布+TOP店铺+TOP单品+库存一次拿全，
+   禁止拆成多次 query_sql 自己拼
+12. 不需要工具的闲聊 → 直接简短回答，不要调用工具
 
 # 回答要求
 - 工具结果里没有的信息如实说"查不到"，禁止编造数字与参数
@@ -1061,6 +1064,222 @@ class ToolExecutor:
         result["returned"] = len(result["rows"])
         result["_export_rows"] = rows
         result["_export_params"] = {**args, "snapshot_date": snapshot_date}
+        return result
+
+    # ------------------------------------------------------------------
+    # 运营报表（2026-11-02，真机 badcase 驱动）
+    #
+    # 「帮我做一个10月份的运营周报」让 agent 连拼 7 次 query_sql、52 秒
+    # 轮尽后兜底「业务数据暂时不可用」（当日 audit 实证）。报表是已知
+    # 模式，不该靠模型自由拼 SQL——一次预定义查询拿全素材。
+    # ------------------------------------------------------------------
+
+    def _report_period(self, args):
+        """期间解析：month（YYYY-MM）优先，其次 start/end，缺省本月至今。
+
+        返回 ``((start, end), error)``。指定月份若就是当月，end 截到今天
+        （未到的日子不算进报表，也不拿去环比）。
+        """
+        from datetime import datetime as _dt
+
+        month_text = str(args.get("month") or "").strip()
+        if month_text:
+            try:
+                first = _dt.strptime(month_text, "%Y-%m").date()
+            except ValueError:
+                return None, {"error": "month must be YYYY-MM"}
+            if first.month == 12:
+                next_first = first.replace(year=first.year + 1, month=1)
+            else:
+                next_first = first.replace(month=first.month + 1)
+            today = (self._now or _dt.now)().date()
+            end = min(next_first - timedelta(days=1), today)
+            if first > end:
+                return None, {"error": f"{month_text} 还没有数据（还没开始）"}
+            return (first, end), None
+        return self._sku_period(args, now=self._now)
+
+    def _tool_sales_report(self, args):
+        """运营周报/月报素材：总量 + 环比 + 渠道分布 + TOP 店铺/单品 + 库存。
+
+        环比 = 紧邻的等长上一段（月报 vs 上月全月、MTD vs 上月同段）。
+        口径与 channel_yoy/sku_sales 同源（paid_amount，剔除取消/待付款/
+        全额退款关闭，部分退款不回扣）。
+        """
+        period, error = self._report_period(args)
+        if error:
+            return error
+        start, end = period
+        top_n = self._coerce_top_n(args)
+        prev_end = start - timedelta(days=1)
+        month_end = (start.replace(month=start.month + 1, day=1)
+                     if start.month < 12
+                     else start.replace(year=start.year + 1, month=1, day=1)
+                     ) - timedelta(days=1)
+        if start.day == 1 and end == month_end:
+            # 整月报表的环比对象=上一自然月（不是错位 31 天窗口）。
+            prev_start = prev_end.replace(day=1)
+        else:
+            span = (end - start).days + 1
+            prev_start = prev_end - timedelta(days=span - 1)
+        end_excl = end + timedelta(days=1)
+        prev_end_excl = prev_end + timedelta(days=1)
+
+        cursor = self._conn.cursor()
+        try:
+            # 1. 两期总量（单 SQL，CASE 分期；COUNT DISTINCT 忽略 NULL）
+            cursor.execute(
+                "SELECT"
+                " COALESCE(SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `paid_amount` END),0) AS `cur_amount`,"
+                " COALESCE(SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `paid_amount` END),0) AS `prev_amount`,"
+                " COALESCE(SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `quantity` END),0) AS `cur_qty`,"
+                " COALESCE(SUM(CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `quantity` END),0) AS `prev_qty`,"
+                " COUNT(DISTINCT CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `trade_no` END) AS `cur_orders`,"
+                " COUNT(DISTINCT CASE WHEN `trade_time`>=%s AND `trade_time`<%s"
+                "  THEN `trade_no` END) AS `prev_orders`"
+                " FROM `fact_order_line`"
+                " WHERE (`trade_time`>=%s AND `trade_time`<%s)"
+                " OR (`trade_time`>=%s AND `trade_time`<%s)",
+                (start, end_excl, prev_start, prev_end_excl,
+                 start, end_excl, prev_start, prev_end_excl,
+                 start, end_excl, prev_start, prev_end_excl,
+                 start, end_excl, prev_start, prev_end_excl))
+            totals_row = cursor.fetchone() or {}
+            # 2. 渠道分布（本期）：按抬头归集（与 channel_yoy 同一映射）
+            cursor.execute(
+                "SELECT `shop_name`, `buyer_nick`,"
+                " COALESCE(SUM(`paid_amount`),0) AS `amount`,"
+                " COUNT(DISTINCT `trade_no`) AS `orders`"
+                " FROM `fact_order_line`"
+                " WHERE `trade_time`>=%s AND `trade_time`<%s"
+                " GROUP BY `shop_name`, `buyer_nick`",
+                (start, end_excl))
+            channel_sources = cursor.fetchall()
+            # 3. TOP 店铺（本期）
+            cursor.execute(
+                "SELECT `shop_name`,"
+                " COUNT(DISTINCT `trade_no`) AS `orders`,"
+                " COALESCE(SUM(`quantity`),0) AS `quantity`,"
+                " COALESCE(SUM(`paid_amount`),0) AS `amount`"
+                " FROM `fact_order_line`"
+                " WHERE `trade_time`>=%s AND `trade_time`<%s"
+                " GROUP BY `shop_name` ORDER BY `amount` DESC LIMIT %s",
+                (start, end_excl, top_n))
+            store_rows = cursor.fetchall()
+            # 4. TOP 单品（本期）
+            cursor.execute(
+                "SELECT `spec_no`, `goods_name`,"
+                " COALESCE(SUM(`quantity`),0) AS `quantity`,"
+                " COALESCE(SUM(`paid_amount`),0) AS `amount`"
+                " FROM `fact_order_line`"
+                " WHERE `trade_time`>=%s AND `trade_time`<%s"
+                " GROUP BY `spec_no`, `goods_name`"
+                " ORDER BY `amount` DESC LIMIT %s",
+                (start, end_excl, top_n))
+            sku_rows = cursor.fetchall()
+        except Exception as exc:
+            return {"error": f"运营报表查询失败: {str(exc)[:160]}"}
+        finally:
+            cursor.close()
+
+        # 库存三态是辅信息，单独 fail-soft（缺表/无快照不拖垮整份报表）。
+        inventory = None
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT `stock_state`, COUNT(*) AS `sku_count`,"
+                " COALESCE(SUM(`available_qty`),0) AS `available_qty`"
+                " FROM `fact_inventory_sku_daily`"
+                " WHERE `business_date`="
+                "  (SELECT MAX(`business_date`) FROM `fact_inventory_sku_daily`)"
+                " GROUP BY `stock_state`")
+            inventory = [
+                {"stock_state": row.get("stock_state"),
+                 "sku_count": int(row.get("sku_count") or 0),
+                 "available_qty": float(row.get("available_qty") or 0)}
+                for row in cursor.fetchall()
+            ]
+        except Exception:
+            inventory = None
+        finally:
+            cursor.close()
+
+        from common.public_data.channel_map import (
+            fetch_channel_map, resolve_channel)
+
+        cur_amount = float(totals_row.get("cur_amount") or 0)
+        prev_amount = float(totals_row.get("prev_amount") or 0)
+
+        channels = defaultdict(lambda: {"amount": 0.0, "orders": 0})
+        rules = fetch_channel_map(self._conn)
+        for source in channel_sources:
+            key = resolve_channel(source, rules) if rules else None
+            bucket = channels[key or "未映射"]
+            bucket["amount"] += float(source.get("amount") or 0)
+            bucket["orders"] += int(source.get("orders") or 0)
+        channel_rows = [
+            {"channel_key": key, "order_count": bucket["orders"],
+             "paid_amount": round(bucket["amount"], 2),
+             "share": (round(bucket["amount"] / cur_amount, 6)
+                       if cur_amount else None)}
+            for key, bucket in sorted(
+                channels.items(), key=lambda kv: -kv[1]["amount"])
+        ]
+
+        result = {
+            "source": "DB:fact_order_line",
+            "metric": "paid_amount（已剔除取消/待付款/全额退款关闭，部分退款不回扣）",
+            "period": {"start": start.isoformat(), "end": end.isoformat()},
+            "compare_period": {"start": prev_start.isoformat(),
+                               "end": prev_end.isoformat(),
+                               "note": "环比：整月报表=上一自然月，否则=紧邻等长上一段"},
+            "totals": {
+                "order_count": int(totals_row.get("cur_orders") or 0),
+                "quantity": float(totals_row.get("cur_qty") or 0),
+                "paid_amount": round(cur_amount, 2),
+            },
+            "compare_totals": {
+                "order_count": int(totals_row.get("prev_orders") or 0),
+                "quantity": float(totals_row.get("prev_qty") or 0),
+                "paid_amount": round(prev_amount, 2),
+            },
+            "mom_rate": (round((cur_amount - prev_amount) / prev_amount, 6)
+                         if prev_amount else None),
+            "channels": channel_rows,
+            "top_stores": [
+                {"shop_name": row.get("shop_name"),
+                 "order_count": int(row.get("orders") or 0),
+                 "quantity": float(row.get("quantity") or 0),
+                 "paid_amount": round(float(row.get("amount") or 0), 2)}
+                for row in store_rows
+            ],
+            "top_skus": [
+                {"spec_no": row.get("spec_no"),
+                 "goods_name": row.get("goods_name"),
+                 "quantity": float(row.get("quantity") or 0),
+                 "paid_amount": round(float(row.get("amount") or 0), 2),
+                 "share": (round(float(row.get("amount") or 0) / cur_amount, 6)
+                           if cur_amount else None)}
+                for row in sku_rows
+            ],
+            "inventory_states": inventory,
+        }
+        # 自我压缩到结果预算内（两榜轮流行尾截断，总量与渠道不丢）。
+        budget = _RESULT_LIMIT - 200
+        while (len(json.dumps(result, ensure_ascii=False, default=str))
+               > budget):
+            if len(result["top_skus"]) >= len(result["top_stores"]) > 1:
+                result["top_skus"].pop()
+            elif len(result["top_stores"]) > 1:
+                result["top_stores"].pop()
+            else:
+                break
+        result["snapshot_date"] = end.isoformat()
         return result
 
     def _tool_query_sql(self, args):
