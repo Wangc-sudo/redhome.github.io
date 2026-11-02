@@ -30,7 +30,7 @@ class EchoAndNoteTests(unittest.TestCase):
         self.assertEqual("杭州昨天出货 12 万元。",
                          rf.filter_reply("杭州昨天出了多少货", reply))
 
-    def test_long_note_block_compressed_to_first_line(self):
+    def test_long_note_block_compressed_to_first_item(self):
         reply = (
             "杭州昨天出货 12 万元。\n"
             "⚠️ 两点特别说明：\n"
@@ -39,8 +39,20 @@ class EchoAndNoteTests(unittest.TestCase):
         )
         filtered = rf.filter_reply("杭州昨天出货", reply)
         self.assertIn("12 万元", filtered)
-        self.assertIn("⚠️ 两点特别说明", filtered)
+        self.assertIn("口径为实付金额", filtered)     # 首条留下
         self.assertNotIn("部分退款不回扣", filtered)
+        # 只剩一条时标题还写「两点」就不诚实 → 去条数
+        self.assertNotIn("两点", filtered)
+        self.assertIn("说明", filtered)
+
+    def test_orphan_note_header_dropped(self):
+        """说明段条目被判无关删光后，光杆标题「⚠️ 说明：」一并删掉
+        （2026-11-02 云上验收暴露：答复末尾只剩一个空标题）。"""
+        reply = ("9 月销售 120 万元。\n"
+                 "⚠️ 说明：\n"
+                 "其他渠道供参考：拼多多XX店 30 万元。")
+        self.assertEqual("9 月销售 120 万元。",
+                         rf.filter_reply("9月销售及同比", reply))
 
     def test_two_line_note_kept(self):
         reply = "出货 12 万元。\n注意：口径为实付金额"
@@ -93,6 +105,14 @@ class NormalizationTests(unittest.TestCase):
         filtered = rf.filter_reply("9月同比", reply)
         self.assertNotIn("0 条", filtered)
         self.assertIn("无数据", filtered)
+
+    def test_zero_in_compare_context_becomes_missing(self):
+        """「同比：0 条」是缺数不是零（2026-10-29 截图 badcase 一）：
+        即使行内没有「没有数据」字样，同比语境里的 0 也要改口。"""
+        filtered = rf.filter_reply("京东9月销售",
+                                   "京东 9 月销售 120 万元，去年同期 0 条。")
+        self.assertNotIn("0 条", filtered)
+        self.assertIn("去年同期 无数据", filtered)
 
     def test_real_zero_amount_untouched(self):
         # 真实 0 元（无缺数语境）不能被改写成「无数据」

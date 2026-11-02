@@ -39,6 +39,8 @@ _ECHO_RE = re.compile(
 _NOTE_HEAD_RE = re.compile(
     r"^\s*[-•*]?\s*(⚠️|⚠|注意|说明|提示|备注|特别说明|温馨提示|注)\s*[:：]?")
 _SUB_ITEM_RE = re.compile(r"^\s*(?:[-•*]|\d+[.、)])\s*\S")
+#: 说明段标题里的条数（「两点说明」「3 项提示」）：压缩后条数不再成立。
+_NOTE_COUNT_RE = re.compile(r"[两三四五六七八九十百\d]+\s*[点项条]")
 _REFERENCE_WORDS = (
     "供参考", "顺便", "另外", "其他店铺", "其它店铺", "其他渠道",
     "其它渠道", "其他商品", "其它商品", "其他区域", "其它区域",
@@ -81,6 +83,10 @@ _MISSING_WORDS = (
     "无数据", "没有数据", "暂无", "未提供", "未找到", "没查到", "查不到",
     "缺少", "缺失", "为空", "无记录",
 )
+#: 同比/对比语境：这里的 0 也是「缺数」而非「真的为零」（2026-10-29 截图
+#: badcase 一「同比：0 条」——基期根本没有数据，不是基期卖了 0 单）。
+_COMPARE_WORDS = ("同比", "去年同期", "同期", "上期", "去年同期", "基期",
+                  "环比", "对比")
 _ZERO_COUNT_RE = re.compile(r"(?<![\d.])0\s*(条|笔|单)")
 _ZERO_AMOUNT_RE = re.compile(r"(?<![\d.])0\s*元(?![\d])")
 _MISSING_TEXT = "无数据"
@@ -125,7 +131,9 @@ def _compress_notes(lines):
             else:
                 break
             cursor += 1
-        result.extend(block[:1] if len(block) > 2 else block)
+        # 保留标题 + 首条（只留标题会剩下「⚠️ 两点说明：」这种光杆标题，
+        # 比删掉更糟——2026-11-02 云上验收暴露）。
+        result.extend(block[:2] if len(block) > 2 else block)
         index = cursor
     return result
 
@@ -157,6 +165,38 @@ def _drop_unrelated_reference(lines, question):
     return kept
 
 
+def _note_header_body(line):
+    """说明段标题去掉标记/条数/冒号后的正文；为空即「光杆标题」。"""
+    text = _NOTE_COUNT_RE.sub("", line)
+    for marker in ("⚠️", "⚠", "特别说明", "温馨提示", "注意", "说明", "提示",
+                   "备注", "注"):
+        text = text.replace(marker, "")
+    return text.strip(" :：\t-•*")
+
+
+def _tidy_note_headers(lines):
+    """说明段标题收尾：去条数 + 删孤标题。
+
+    - 压缩后「⚠️ 两点说明：」只剩一条，条数就不诚实了 → 统一成「⚠️ 说明：」；
+    - 标题下的条目若被判与问句无关删光，标题本身也无信息 → 整行删掉。
+    """
+    result = []
+    for index, line in enumerate(lines):
+        if not _NOTE_HEAD_RE.match(line):
+            result.append(line)
+            continue
+        # 标题本身就带内容（「注意：口径为实付金额」）不是孤标题，原样保留。
+        if _note_header_body(line):
+            result.append(line)
+            continue
+        follower = next((item for item in lines[index + 1:] if item.strip()),
+                        "")
+        if not follower or _NOTE_HEAD_RE.match(follower):
+            continue
+        result.append(_NOTE_COUNT_RE.sub("", line).strip() or line)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 2. 表示规范化
 # ---------------------------------------------------------------------------
@@ -184,7 +224,9 @@ def _normalize_missing(text):
     """
     lines = []
     for line in text.splitlines():
-        if any(word in line for word in _MISSING_WORDS):
+        missing = (any(word in line for word in _MISSING_WORDS)
+                   or any(word in line for word in _COMPARE_WORDS))
+        if missing:
             already = _MISSING_TEXT in line
             line = _ZERO_COUNT_RE.sub("" if already else _MISSING_TEXT, line)
             line = _ZERO_AMOUNT_RE.sub("" if already else _MISSING_TEXT, line)
@@ -230,6 +272,7 @@ def filter_reply(question, reply, focus=None, *, llm=None):
     lines = _drop_echo(text.splitlines())
     lines = _compress_notes(lines)
     lines = _drop_unrelated_reference(lines, question or "")
+    lines = _tidy_note_headers(lines)
     text = _normalize_missing(_normalize_internals("\n".join(lines)))
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if llm is not None and len(text) > MAX_CHARS:
