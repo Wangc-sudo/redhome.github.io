@@ -75,9 +75,10 @@ class RegistrationTests(unittest.TestCase):
     def test_export_and_web_whitelist(self):
         self.assertIn("sku_sales", DEFAULT_ALLOWED_TOOLS)
         self.assertIn("sku_inventory", DEFAULT_ALLOWED_TOOLS)
-        from common.kb_web.service import _BUSINESS_TOOLS
-        self.assertIn("sku_sales", _BUSINESS_TOOLS)
-        self.assertIn("sku_inventory", _BUSINESS_TOOLS)
+        from common.kb_qa.skills import business_tool_names
+        business = business_tool_names()
+        self.assertIn("sku_sales", business)
+        self.assertIn("sku_inventory", business)
 
 
 class SkuSalesTests(unittest.TestCase):

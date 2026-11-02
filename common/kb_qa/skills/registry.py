@@ -37,6 +37,7 @@ class SkillDef:
     enabled: bool = True
     order: int = 100
     snapshot: str = None
+    snapshot_kind: str = "dataset"  # dataset=pd_dataset_freshness；knowledge=索引新鲜度
     export: bool = False
     body: str = ""
 
@@ -75,6 +76,9 @@ def _validate(meta, dirname, path):
     tags = tuple(meta.get("tags") or ())
     if not tags or any(tag not in TAGS for tag in tags):
         raise SkillRegistryError(f"{path} tags 必须取自 {sorted(TAGS)}")
+    snapshot_kind = meta.get("snapshot_kind", "dataset")
+    if snapshot_kind not in ("dataset", "knowledge"):
+        raise SkillRegistryError(f"{path} snapshot_kind 只能 dataset/knowledge")
     return SkillDef(
         name=name,
         description=description,
@@ -83,6 +87,7 @@ def _validate(meta, dirname, path):
         enabled=bool(meta.get("enabled", True)),
         order=int(meta.get("order", 100)),
         snapshot=meta.get("snapshot"),
+        snapshot_kind=snapshot_kind,
         export=bool(meta.get("export", False)),
     )
 
@@ -111,6 +116,23 @@ def compile_tools(enabled_only=True, directory=None):
                       "parameters": s.parameters}}
         for s in skills if s.enabled or not enabled_only
     ]
+
+
+def get_skill(name, directory=None):
+    return load_registry(directory).get(name)
+
+
+def business_tool_names(directory=None):
+    """business tag 技能名（Web 角色白名单收窄面，Task 2 派生真源）。"""
+    return frozenset(name for name, skill in load_registry(directory).items()
+                     if "business" in skill.tags)
+
+
+def export_tools(directory=None):
+    """export: true 的技能名（导出白名单，按 order 排序）。"""
+    return tuple(skill.name for skill in sorted(
+        load_registry(directory).values(), key=lambda s: (s.order, s.name))
+        if skill.export)
 
 
 def validate_handlers(executor_cls, directory=None):

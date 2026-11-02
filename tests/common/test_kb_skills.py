@@ -11,7 +11,8 @@ from pathlib import Path
 
 from common.kb_qa.agent import TOOLS, ToolExecutor
 from common.kb_qa.skills import (
-    SkillRegistryError, compile_tools, load_registry, validate_handlers)
+    SkillRegistryError, business_tool_names, compile_tools, export_tools,
+    get_skill, load_registry, validate_handlers)
 
 SNAPSHOT = Path(__file__).parent / "fixtures" / "kb_tools_snapshot.json"
 
@@ -49,6 +50,39 @@ class CompileEquivalenceTests(unittest.TestCase):
         validate_handlers(ToolExecutor)  # 不抛即通过
         for name in load_registry():
             self.assertTrue(hasattr(ToolExecutor, f"_tool_{name}"), name)
+
+
+class WhitelistDerivationTests(unittest.TestCase):
+    """Task 2：三处硬编码白名单收敛到注册表后的派生等价。"""
+
+    def test_business_tools_match_legacy_set(self):
+        self.assertEqual(
+            {"daily_sales", "channel_sales", "channel_yoy", "query_sql",
+             "sku_sales", "sku_inventory"}, set(business_tool_names()))
+
+    def test_export_tools_match_legacy_set(self):
+        self.assertEqual(
+            {"daily_sales", "channel_sales", "channel_yoy", "query_sql",
+             "product_stats", "sku_sales", "sku_inventory"},
+            set(export_tools()))
+
+    def test_tools_for_narrow_equals_non_business(self):
+        from common.kb_web.service import tools_for
+
+        narrow = {t["function"]["name"] for t in tools_for(False)}
+        expected = set(load_registry()) - set(business_tool_names())
+        self.assertEqual(expected, narrow)
+        full = {t["function"]["name"] for t in tools_for(True)}
+        self.assertEqual(set(load_registry()), full)
+
+    def test_snapshot_declarations(self):
+        self.assertEqual("daily_report_offline",
+                         get_skill("daily_sales").snapshot)
+        self.assertEqual("dataset", get_skill("daily_sales").snapshot_kind)
+        self.assertEqual("kb_product_structured",
+                         get_skill("product_stats").snapshot)
+        self.assertEqual("knowledge", get_skill("product_stats").snapshot_kind)
+        self.assertIsNone(get_skill("query_sql").snapshot)
 
 
 class RegistryValidationTests(unittest.TestCase):

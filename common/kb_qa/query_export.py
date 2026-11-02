@@ -23,10 +23,10 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-DEFAULT_ALLOWED_TOOLS = (
-    "daily_sales", "channel_sales", "channel_yoy", "query_sql", "product_stats",
-    "sku_sales", "sku_inventory",
-)
+from common.kb_qa.skills import export_tools
+
+#: 导出白名单 = 注册表 export: true 技能（Task 2：新工具只改 SKILL.md 一处）。
+DEFAULT_ALLOWED_TOOLS = export_tools()
 
 
 class ExportLimitError(ValueError):
