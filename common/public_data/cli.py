@@ -752,26 +752,73 @@ def _freshness_alerts_enabled():
     return os.environ.get("DATA_FRESHNESS_ALERT_ENABLE", "").strip() == "1"
 
 
-def _enqueue_freshness_alert(outbox, contract, result, *, created_at):
-    if result.status == "fresh":
-        return False
-    business_date = created_at.date()
-    latest_business_date = result.latest_business_date or business_date
-    return outbox.enqueue(
-        region="ops",
-        kind="alert",
-        business_date=business_date,
-        title="数据新鲜度告警",
-        body_md=(
-            f"- 数据集：`{contract.dataset_key}`\n"
-            f"- 负责人：{contract.owner}\n"
-            f"- 状态：**{result.status}**\n"
-            f"- 业务日期：{latest_business_date.isoformat()}\n"
-            f"- 错误码：`{result.error or result.status}`"
-        ),
-        created_at=created_at,
-        dedupe_suffix=f"freshness:{contract.dataset_key}:{result.status}",
-    )
+#: 默认告警状态白名单：**排除 ``unknown``** —— 它是契约未就绪 / 未导入类
+#: 状态（如财务空业务键、未导入的人工报表），非可行动信号，天天上群会把
+#: 告警变成噪音；这些在 ops-web 新鲜度页可见即可。
+DEFAULT_ALERT_STATUSES = ("stale", "blocked", "degraded")
+
+
+def _freshness_alert_statuses():
+    """告警状态白名单（env ``DATA_FRESHNESS_ALERT_STATUSES`` 逗号分隔覆盖）。"""
+    raw = os.environ.get("DATA_FRESHNESS_ALERT_STATUSES", "").strip()
+    if not raw:
+        return frozenset(DEFAULT_ALERT_STATUSES)
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _group_freshness_findings(findings, statuses):
+    """按负责人分组待告警发现（保持首次出现顺序，组内按数据集键排序）。"""
+    groups = {}
+    order = []
+    for contract, result in findings:
+        if result.status == "fresh" or result.status not in statuses:
+            continue
+        if contract.owner not in groups:
+            groups[contract.owner] = []
+            order.append(contract.owner)
+        groups[contract.owner].append((contract, result))
+    return [(owner, groups[owner]) for owner in order]
+
+
+def _enqueue_freshness_alerts(outbox, findings, *, created_at):
+    """按**负责人**聚合入队新鲜度告警。
+
+    同一负责人的多个异常数据集合并为一条：新鲜度告警的价值在「某条责任线
+    断了」而不是「第 N 个数据集断了」——逐数据集入队会让常驻项每天刷屏
+    （实测 24 契约里 11 条非 fresh，逐条发 = 每天 11 条），告警疲劳即等于
+    无告警。去重键编进 owner，故每人每天至多一条。
+    """
+    statuses = _freshness_alert_statuses()
+    enqueued = 0
+    for owner, items in _group_freshness_findings(findings, statuses):
+        lines = [
+            f"### 数据新鲜度告警 · 负责人 {owner}",
+            "",
+            f"- 异常数据集：{len(items)} 个",
+            "",
+        ]
+        for contract, result in items:
+            latest = getattr(result, "latest_business_date", None)
+            lines.append(
+                f"- `{contract.dataset_key}`：**{result.status}**"
+                f"（业务日期 {latest.isoformat() if latest else '—'}"
+                f"，错误码 `{result.error or result.status}`）"
+            )
+        lines.extend((
+            "",
+            "处置：按数据集排查对应管线 / 契约；问题消失后告警自然静默。",
+        ))
+        if outbox.enqueue(
+            region="ops",
+            kind="alert",
+            business_date=created_at.date(),
+            title=f"数据新鲜度告警 · {owner}",
+            body_md="\n".join(lines),
+            created_at=created_at,
+            dedupe_suffix=f"freshness:owner:{owner}",
+        ):
+            enqueued += 1
+    return enqueued
 
 
 def _handle_freshness_check(args):
@@ -824,6 +871,7 @@ def _handle_freshness_check(args):
             repository = FreshnessRepository(conn)
             knowledge_repository = KnowledgeIndexFreshnessRepository(conn)
             outbox = OutboxRepository(conn) if _freshness_alerts_enabled() else None
+            findings = []
             for contract in contracts:
                 if contract.kind == "knowledge":
                     item = knowledge_repository.check_sla(contract)
@@ -837,17 +885,21 @@ def _handle_freshness_check(args):
                 else:
                     result = checker.check(contract)
                     repository.upsert(result)
-                if outbox is not None:
-                    with transaction(conn):
-                        _enqueue_freshness_alert(
-                            outbox, contract, result, created_at=datetime.utcnow(),
-                        )
+                if outbox is not None and result.status != "fresh":
+                    findings.append((contract, result))
                 print(
                     f"dataset={result.dataset_key} status={result.status}"
                     f" lag_minutes={result.lag_minutes}"
                     f" latest_business_date={result.latest_business_date}"
                     f" error={result.error or ''}"
                 )
+            if outbox is not None and findings:
+                with transaction(conn):
+                    sent = _enqueue_freshness_alerts(
+                        outbox, findings, created_at=datetime.utcnow(),
+                    )
+                print(f"freshness alerts enqueued={sent} owners="
+                      f"{len({c.owner for c, _ in findings})}")
         finally:
             if manual_conn is not None:
                 manual_conn.close()

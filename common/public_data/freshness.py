@@ -194,9 +194,14 @@ class FreshnessChecker:
                 or "quality_gate_blocked"
             )
             return
-        if contract.dq_rules and quality is None:
-            result.error = "no_quality_run"
-            return
+        #: 契约要求 DQ 闸门、但还没有**真实**（``dry_run=0``）DQ 运行：
+        #: 不在此直接判 unknown —— 那会把真实断流降级成「契约未就绪」掩盖掉
+        #: （实测 2026-11-01 渠道 T-1 零行，页面却显示 unknown/no_quality_run）。
+        #: 改为先走时效 / 业务窗口判定，确有缺口就如实暴露；只在其它维度都
+        #: 健康时才降级为 unknown（置信度低、非可行动）。
+        missing_quality = bool(contract.dq_rules and quality is None)
+        if missing_quality:
+            result.check_details["dq_confidence"] = "no_quality_run"
         if diff.get("null_business_keys"):
             result.status = STATUS_BLOCKED
             result.error = "null_business_key"
@@ -235,6 +240,10 @@ class FreshnessChecker:
         if diff.get("record_count_matches") is False:
             result.status = STATUS_DEGRADED
             result.error = "source_target_count_mismatch"
+            return
+        if missing_quality:
+            result.status = STATUS_UNKNOWN
+            result.error = "no_quality_run"
             return
         result.status = STATUS_FRESH
 
