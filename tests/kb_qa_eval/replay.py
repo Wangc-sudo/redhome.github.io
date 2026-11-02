@@ -83,6 +83,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--start", type=int, default=0,
+                        help="跳过前 N 句（断点续跑，容器重启后从中断处继续）")
     parser.add_argument("--only", default=None, help="问题关键词过滤")
     parser.add_argument("--output", default=None, help="完整结果 JSON 输出路径")
     args = parser.parse_args()
@@ -90,6 +92,8 @@ def main():
     cases = list(load_cases(args.cases))
     if args.only:
         cases = [c for c in cases if args.only in c["question"]]
+    if args.start:
+        cases = cases[args.start:]
     if args.limit:
         cases = cases[:args.limit]
 
