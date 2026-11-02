@@ -1,0 +1,100 @@
+{"question": "致中和·京东店铺10月1号到10月21号的销售咋样？帮忙看看每天的销量", "expected_tools": [], "must_contain": ["致中和"], "must_not_contain": ["分段跑", "扫描量过大"]}
+{"question": "查一下金质昨天卖了多少", "expected_tools": [], "must_contain": ["金质"], "must_not_contain": ["155 14,907", "15514907"]}
+{"question": "拼多多店铺习酒习水村专卖店标题是那个", "expected_tools": [], "must_contain": ["习水村"], "must_not_contain": []}
+{"question": "习酒窖藏1988 质检报告", "expected_tools": [], "must_contain": ["质检"], "must_not_contain": []}
+{"question": "红习酱的质检报告", "expected_tools": [], "must_contain": ["质检"], "must_not_contain": []}
+{"question": "各渠道昨天销售额对比", "expected_tools": ["channel_sales"], "must_contain": [], "must_not_contain": ["供参考"]}
+{"question": "hangzhou 月完成率", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "9月销售及同比", "expected_tools": [], "must_contain": [], "must_not_contain": ["去年同期 0 条", "0 条"]}
+{"question": "2024年9月销售同比", "expected_tools": [], "must_contain": ["早于"], "must_not_contain": []}
+{"question": "查一下金质 10 月 30 号卖了多少", "expected_tools": [], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "习酒 包装 礼盒", "expected_tools": [], "must_contain": ["习酒"], "must_not_contain": []}
+{"question": "53°500ml*6 习酒窖藏1988 新包装 2025款 的质检报告", "expected_tools": [], "must_contain": ["质检"], "must_not_contain": []}
+{"question": "致中和京东店 10 月 1 日到 10 月 21 日每日销量", "expected_tools": [], "must_contain": ["致中和"], "must_not_contain": ["分段跑"]}
+{"question": "金质昨天的合计销量和销售额", "expected_tools": [], "must_contain": ["金质"], "must_not_contain": ["15514907"]}
+{"question": "帮我把致中和京东店 10/1-10/21 的数据分段跑一下", "expected_tools": [], "must_contain": [], "must_not_contain": ["扫描量过大"]}
+{"question": "哪款卖得最好", "expected_tools": ["sku_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "各款销量排行", "expected_tools": ["sku_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "金质习酒礼盒销量", "expected_tools": ["sku_sales"], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "习酒窖藏1988 各规格销量", "expected_tools": ["sku_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "还有多少金质的货", "expected_tools": ["sku_inventory"], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "哪些 SKU 呆滞", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "缺货清单", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "可售天数不足 7 天的有哪些", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "超卖的商品有哪些", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "习酒490 库存", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "金质昨天各规格销量", "expected_tools": ["sku_sales"], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "本月 SKU 销售额 TOP5", "expected_tools": ["sku_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "京东渠道哪款卖得好", "expected_tools": ["sku_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "库存三态分布总览", "expected_tools": ["sku_inventory"], "must_contain": [], "must_not_contain": []}
+{"question": "习酒金质 2026 款销量占比", "expected_tools": ["sku_sales"], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "杭州昨天销售额", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "绍兴今天出货多少", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "线下整体本月完成率", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "万科昨天销售", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "各渠道今天销售对比", "expected_tools": ["channel_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "京东昨天销售额", "expected_tools": ["channel_sales"], "must_contain": ["京东"], "must_not_contain": []}
+{"question": "拼多多本月 1 号到 7 号销售", "expected_tools": [], "must_contain": ["拼多多"], "must_not_contain": []}
+{"question": "杭州月目标完成率多少", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "京东渠道同比", "expected_tools": ["channel_yoy"], "must_contain": [], "must_not_contain": ["has_previous_data"]}
+{"question": "各渠道同比去年", "expected_tools": ["channel_yoy"], "must_contain": [], "must_not_contain": ["has_previous_data"]}
+{"question": "杭州和绍兴昨天谁卖得多", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "省内昨天销售汇总", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "昨天销售额最高的渠道", "expected_tools": ["channel_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "习水村拼多多店昨天销售", "expected_tools": [], "must_contain": ["习水村"], "must_not_contain": []}
+{"question": "线下整体日环比", "expected_tools": ["daily_sales"], "must_contain": [], "must_not_contain": []}
+{"question": "最近 7 天出库量", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": ["扫描量过大"]}
+{"question": "本周出库量多少", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "昨天退款金额", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "昨天退款多少单", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "上月采购入库量", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "昨天有多少订单行", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "京东昨天订单数", "expected_tools": ["query_sql"], "must_contain": ["京东"], "must_not_contain": []}
+{"question": "出库的物流公司有哪些", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "昨天销量最高的商品", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "本月退款原因分布", "expected_tools": ["query_sql"], "must_contain": [], "must_not_contain": []}
+{"question": "9月销售额", "expected_tools": [], "must_contain": [], "must_not_contain": ["分段跑"]}
+{"question": "上月销售总额", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "近 7 天销售趋势", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "今年销售额", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "2024 年 9 月同比", "expected_tools": [], "must_contain": ["早于"], "must_not_contain": []}
+{"question": "去年 9 月销售额", "expected_tools": [], "must_contain": [], "must_not_contain": ["早于"]}
+{"question": "金质去年同期销量", "expected_tools": [], "must_contain": [], "must_not_contain": ["去年同期 0 条"]}
+{"question": "10 月每天销量趋势", "expected_tools": [], "must_contain": [], "must_not_contain": ["分段跑"]}
+{"question": "本周和上周销售对比", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "2026 年 10 月销售额", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "习酒窖藏1988 箱规", "expected_tools": ["search_products"], "must_contain": ["箱规"], "must_not_contain": []}
+{"question": "金质礼盒的条码", "expected_tools": ["search_products"], "must_contain": [], "must_not_contain": []}
+{"question": "酱香酒有哪些", "expected_tools": ["search_products"], "must_contain": [], "must_not_contain": []}
+{"question": "商品总数多少", "expected_tools": ["product_stats"], "must_contain": [], "must_not_contain": []}
+{"question": "各品牌商品数量分布", "expected_tools": ["product_stats"], "must_contain": [], "must_not_contain": []}
+{"question": "习酒有多少个系列", "expected_tools": ["product_stats"], "must_contain": ["习酒"], "must_not_contain": []}
+{"question": "53 度 500ml 的酒有哪些", "expected_tools": ["search_products"], "must_contain": [], "must_not_contain": []}
+{"question": "礼袋规格", "expected_tools": ["search_products"], "must_contain": ["礼袋"], "must_not_contain": []}
+{"question": "金质习酒第四代重量", "expected_tools": ["search_products"], "must_contain": ["金质"], "must_not_contain": []}
+{"question": "窖藏 1988 尺寸", "expected_tools": ["search_products"], "must_contain": [], "must_not_contain": []}
+{"question": "售后退款处理流程", "expected_tools": ["search_docs"], "must_contain": ["售后"], "must_not_contain": []}
+{"question": "茅台酿造工艺", "expected_tools": ["search_docs"], "must_contain": [], "must_not_contain": []}
+{"question": "窖藏 1988 卖点话术", "expected_tools": ["search_docs"], "must_contain": [], "must_not_contain": []}
+{"question": "客服响应时效要求", "expected_tools": ["search_docs"], "must_contain": [], "must_not_contain": []}
+{"question": "销售总结规划", "expected_tools": ["search_docs"], "must_contain": [], "must_not_contain": []}
+{"question": "尾号 5579 谁在用", "expected_tools": ["phone_lookup"], "must_contain": ["屠秋文"], "must_not_contain": []}
+{"question": "尾号 5690 是谁在用", "expected_tools": ["phone_lookup"], "must_contain": [], "must_not_contain": []}
+{"question": "吴昱洁的手机号", "expected_tools": ["phone_lookup"], "must_contain": ["吴昱洁"], "must_not_contain": []}
+{"question": "拼多多店铺账号验证码找谁", "expected_tools": ["phone_lookup"], "must_contain": [], "must_not_contain": []}
+{"question": "习酒旗舰店账号谁负责", "expected_tools": ["phone_lookup"], "must_contain": [], "must_not_contain": []}
+{"question": "习酒窖藏1988 的箱规是多少，有多个规格吗", "expected_tools": ["search_products"], "must_contain": ["规格"], "must_not_contain": []}
+{"question": "第一个", "expected_tools": [], "must_contain": [], "must_not_contain": ["价格"]}
+{"question": "不对，不是这款", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "那就它吧", "expected_tools": [], "must_contain": ["什么"], "must_not_contain": []}
+{"question": "随便看看", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "你好", "expected_tools": [], "must_contain": ["你好"], "must_not_contain": []}
+{"question": "谢谢", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "你是谁", "expected_tools": [], "must_contain": [], "must_not_contain": []}
+{"question": "今天天气怎么样", "expected_tools": [], "must_contain": [], "must_not_contain": ["销售额"]}
+{"question": "讲个笑话", "expected_tools": [], "must_contain": [], "must_not_contain": ["销量"]}
+{"question": "金质昨天各规格明细", "expected_tools": [], "must_contain": ["金质"], "must_not_contain": ["155 14,907", "15514907"]}
+{"question": "致中和 10 月每日销量表", "expected_tools": [], "must_contain": ["致中和"], "must_not_contain": ["分段跑", "10/016"]}
+{"question": "各渠道昨天销售额表格对比", "expected_tools": ["channel_sales"], "must_contain": [], "must_not_contain": ["供参考"]}
+{"question": "金质昨天合计", "expected_tools": [], "must_contain": ["合计"], "must_not_contain": []}
+{"question": "致中和京东 21 天汇总", "expected_tools": [], "must_contain": ["致中和"], "must_not_contain": ["分段跑", "扫描量过大"]}
