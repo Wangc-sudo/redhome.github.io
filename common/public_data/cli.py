@@ -347,9 +347,16 @@ def build_service(settings, credentials, manifest, org_regions=(),
     org_gateways = ()
     if manifest.dingtalk_org is not None:
         if org_seeds:
-            org_gateways = build_org_gateways(credentials, org_seeds)
+            pairs = build_org_gateways(credentials, org_seeds)
+            # LiveSyncService 契约：org_gateways 以**凭据段名**（
+            # entry.credential）为键——_sync_org_dataset 按段名查找网关。
+            # 直接把 (entry, gateway) 对 dict() 化会以 entry 对象为键，
+            # 查段名恒 None（2026-10-25~11-02 sync-dingtalk 全败的根因）。
+            org_gateways = {
+                entry.credential: gateway for entry, gateway in pairs
+            }
             # 旧入参仍保留给单企业调用方，取第一个网关即可。
-            org_gateway = org_gateways[0][1] if org_gateways else None
+            org_gateway = pairs[0][1] if pairs else None
         else:
             org_gateway = build_org_gateway(credentials)
         org_repo = OrgRawRepository(dingtalk_conn)
