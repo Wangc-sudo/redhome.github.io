@@ -73,7 +73,7 @@ def collect_badcases(conn, days=7):
             "SELECT `msg_id`, `question`, `intent`, `sender_name`,"
             " `created_at`, `failed`, `reply_kind`, `recall_source`,"
             " `tool_used`, `latency_ms`, `answer_excerpt`,"
-            " `prompt_tokens`, `completion_tokens`, `reply_filter_diff`"
+            " `prompt_tokens`, `completion_tokens`"
             " FROM `kb_qa_audit`"
             " WHERE `created_at` >= DATE_SUB(NOW(), INTERVAL %s DAY)"
             " ORDER BY `created_at` DESC",
@@ -96,7 +96,6 @@ def collect_badcases(conn, days=7):
     prompt_tokens = 0
     completion_tokens = 0
     token_rows = 0
-    filter_hits = []
 
     for row in rows:
         intent = row.get("intent") or "(未回填)"
@@ -120,10 +119,6 @@ def collect_badcases(conn, days=7):
             tools.update(name for name in row["tool_used"].split(",") if name)
         if row.get("latency_ms") is not None:
             latencies.append(row["latency_ms"])
-        # 答复过滤观测（2026-11-02 v5 列）：observe 期收集「如果 enforce
-        # 会删多少」的真实分布，作为切换决策依据。
-        if row.get("reply_filter_diff") is not None:
-            filter_hits.append(row)
         category = classify_row(row)
         if category is None:
             continue
@@ -153,10 +148,6 @@ def collect_badcases(conn, days=7):
         "token_rows": token_rows,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "filter_rows": len(filter_hits),
-        "filter_chars": sum(r["reply_filter_diff"] for r in filter_hits),
-        "filter_top": sorted(filter_hits,
-                             key=lambda r: -r["reply_filter_diff"])[:10],
         "badcases": [
             {
                 "category": category,
@@ -213,11 +204,6 @@ def render_markdown(report):
         dist = "、".join(f"{name}×{count}"
                          for name, count in report["tools"].most_common())
         lines.append(f"- agent 工具调用：{dist}")
-    if report.get("filter_rows"):
-        lines.append(
-            f"- 答复过滤：{report['filter_rows']} 条会被改写，"
-            f"合计删减 {report['filter_chars']} 字符"
-            f"（observe 预览；列「无数据」即未启用或无 diff）")
 
     lines += ["", f"## 未命中聚类（{len(report['badcases'])} 组）", ""]
     if report["badcases"]:
@@ -230,16 +216,6 @@ def render_markdown(report):
                 f"| {item['latest_at']} | {item['sender'] or ''} |")
     else:
         lines.append("（无）")
-
-    if report.get("filter_top"):
-        lines += ["", f"## 答复过滤命中 TOP（{report['filter_rows']} 条）", ""]
-        lines.append("| 删减字符 | 问题 | 时间 |")
-        lines.append("| ---: | --- | --- |")
-        for row in report["filter_top"]:
-            lines.append(
-                f"| {row['reply_filter_diff']} "
-                f"| {(row.get('question') or '').strip()[:40]} "
-                f"| {row.get('created_at')} |")
 
     lines += ["", "## 失败流水（最近 20 条）", ""]
     if report["failed_rows"]:

@@ -11,7 +11,6 @@ from common.kb_qa.schema import (
     kb_audit_v2_ddl_statements,
     kb_audit_v3_ddl_statements,
     kb_audit_v4_ddl_statements,
-    kb_audit_v5_ddl_statements,
     kb_ddl_statements,
     kb_web_acl_ddl_statements,
 )
@@ -659,13 +658,6 @@ _MIGRATIONS = (
         "mart-ops-kb-qa-audit-v4",
         "mart",
         kb_audit_v4_ddl_statements(),
-    ),
-    (
-        # 答复过滤观测（2026-11-02 方案 B3 后续）：observe 期把「如果
-        # enforce 会删多少字符」落审计，切 enforce 的决策依据。
-        "mart-ops-kb-qa-audit-v5",
-        "mart",
-        kb_audit_v5_ddl_statements(),
     ),
     (
         # Web 通道角色白名单（2026-10-23 裁决）：kb_web_acl，在册用户才

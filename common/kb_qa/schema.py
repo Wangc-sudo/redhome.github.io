@@ -125,19 +125,6 @@ def kb_audit_v4_ddl_statements():
     return (_KB_QA_AUDIT_V4_DDL,)
 
 
-# 答复过滤观测（2026-11-02 方案 B3 后续）：observe 模式下过滤器「如果
-# enforce 会删多少字符」落审计——切 enforce 的决策依据不再是拍脑袋，
-# 而是「哪些问句会被改、改多少」的真实分布。NULL=答复未过过滤器
-# （模板通路）或过滤器无 diff。
-_KB_QA_AUDIT_V5_DDL = """ALTER TABLE `kb_qa_audit`
-  ADD COLUMN `reply_filter_diff` int NULL COMMENT '答复过滤删去的字符数（observe=预览，enforce=实删）；NULL=未过滤或无 diff'"""
-
-
-def kb_audit_v5_ddl_statements():
-    """mart-ops-kb-qa-audit-v5：答复过滤 diff 观测列。"""
-    return (_KB_QA_AUDIT_V5_DDL,)
-
-
 # Web 通道角色白名单（2026-10-23 裁决：业务数据按角色白名单）——
 # 小易 Web 前端用户默认只答商品/手册；行在册才开放日销/渠道/query_sql
 # 等经营数据工具。独立于 bi_authz（那是看板授权，语义不混用）。

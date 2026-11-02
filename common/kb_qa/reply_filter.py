@@ -281,13 +281,10 @@ def filter_reply(question, reply, focus=None, *, llm=None):
 
 
 def apply_reply_filter(question, reply, focus=None, *, mode=None, llm=None,
-                       log=None, environ=None, meta=None):
+                       log=None, environ=None):
     """按模式应用过滤；observe 只记 diff 不替换（fail-open）。
 
     mode 为 None 时读 ``KB_REPLY_FILTER_MODE``。返回最终发出的文本。
-    meta（审计埋点）：传入 dict 且过滤产生了 diff 时回填
-    ``reply_filter_diff``=将删去的字符数——observe 是「如果 enforce 会
-    删多少」的预览，enforce 是实删量；无 diff / off / 异常则不写键。
     """
     if not reply:
         return reply
@@ -300,8 +297,6 @@ def apply_reply_filter(question, reply, focus=None, *, mode=None, llm=None,
         return reply
     if filtered == reply or not filtered:
         return reply
-    if meta is not None:
-        meta["reply_filter_diff"] = len(reply) - len(filtered)
     if mode == MODE_OBSERVE:
         if log is not None:
             log(f"kb qa: reply filter diff -{len(reply) - len(filtered)} chars")
