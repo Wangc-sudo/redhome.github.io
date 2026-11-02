@@ -29,6 +29,8 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
+from common import cache_core
+from common.kb_qa import docs, throttle
 from common.kb_qa.assets import is_strong_asset_question, pick_asset
 from common.kb_qa.docs import search_docs
 from common.kb_qa.llm import (
@@ -386,7 +388,7 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
                  log=print, reply_client=None, robot_code=None, llm=None,
                  doc_search=None, vector_search=None, context_store=None,
                  agent_runner=None, asset_sender=None, image_search=None,
-                 wdt_search=None, export_sender=None):
+                 wdt_search=None, export_sender=None, throttle_store=None):
         super().__init__()
         self._connection_factory = connection_factory
         self._conversation_ids = conversation_ids
@@ -403,6 +405,8 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
         self._image_search = image_search
         self._wdt_search = wdt_search
         self._export_sender = export_sender
+        self._throttle_store = (throttle_store if throttle_store is not None
+                                else cache_core.MemoryStore())
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         # DB/LLM/向量均为同步客户端，整体移出 Stream 事件循环。
@@ -421,14 +425,23 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
             return AckMessage.STATUS_OK, "OK"
 
         msg_id = callback_message_id(callback)
+        sender_id = (getattr(incoming, "sender_staff_id", None)
+                     or getattr(incoming, "sender_nick", "") or "")
+        # D6：10s 短窗去重前移到 DB claim 之前；存储异常 fail-open。
+        if throttle.is_duplicate(
+                sender_id, msg_id, store=self._throttle_store):
+            self._log("kb qa: duplicate_message")
+            return AckMessage.STATUS_OK, "OK"
+        if throttle.below_min_interval(
+                sender_id, store=self._throttle_store):
+            self._log("kb qa: limited_message")
+            return AckMessage.STATUS_OK, "OK"
 
         # 对话层（2026-10-21）：同人同群的最近几轮历史，供指代/追问理解；
         # context_store 为 None 时行为与单轮完全一致。
         ctx_key = None
         history = None
         if self._context_store is not None:
-            sender_id = (getattr(incoming, "sender_staff_id", None)
-                         or getattr(incoming, "sender_nick", "") or "")
             ctx_key = self._context_store.key(conversation_id, sender_id)
             history = self._context_store.history(ctx_key)
 
@@ -1288,6 +1301,25 @@ def build_client(app_key, app_secret, handler, *, client_factory=None):
     return client
 
 
+def _prewarm_docs(connection_factory, *, log=print, environ=None):
+    """进程启动预暖文档索引；失败只记类型，不阻断问答服务启动。"""
+    env = os.environ if environ is None else environ
+    if (env.get("KB_PREWARM_ENABLE") or "1") != "1":
+        return
+    started = time.monotonic()
+    try:
+        conn = connection_factory()
+        try:
+            count = docs.prewarm(conn)
+        finally:
+            conn.close()
+    except Exception as exc:
+        log(f"kb qa: docs prewarm failed: {type(exc).__name__}")
+        return
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    log(f"kb qa: docs prewarm ok chunks={count} elapsed_ms={elapsed_ms}")
+
+
 def build_kb_handler(*, connection_factory, reply_client, robot_code,
                      conversation_ids, log=print):
     """KbStreamHandler 装配（2026-10-24 机器人合并抽取）。
@@ -1388,6 +1420,8 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
         log=log,
     )
 
+    _prewarm_docs(connection_factory, log=log)
+
     return KbStreamHandler(
         connection_factory=connection_factory,
         conversation_ids=conversation_ids,
@@ -1401,6 +1435,7 @@ def build_kb_handler(*, connection_factory, reply_client, robot_code,
         image_search=image_search,
         wdt_search=wdt_search,
         export_sender=export_sender,
+        throttle_store=throttle.shared_store(),
     )
 
 

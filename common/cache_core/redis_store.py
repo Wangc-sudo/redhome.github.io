@@ -27,6 +27,11 @@ class RedisStore:
             key, json.dumps(value, ensure_ascii=False, default=str),
             ex=int(ttl))
 
+    def set_nx(self, key, value, ttl, *, now=None):
+        """SET NX EX：不存在才写入，返回是否写入成功。"""
+        return bool(self._client.set(key, json.dumps(
+            value, ensure_ascii=False, default=str), nx=True, ex=int(ttl)))
+
     def delete(self, key):
         self._client.delete(key)
 

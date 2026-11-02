@@ -95,6 +95,12 @@ def search_docs(conn, query, *, k=3, now=None):
     return [chunks[i] for i, _ in index.topk(query, k=k)]
 
 
+def prewarm(conn, *, now=None):
+    """启动时加载文档切片并建立 BM25 索引，返回预热切片数。"""
+    chunks, _ = _index_for(conn, now=now)
+    return len(chunks)
+
+
 def reset_cache():
     """测试/重导后强制失效（当前版本键）。"""
     _store().delete(f"{_CACHE_KEY}:{_version()}")

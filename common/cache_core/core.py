@@ -42,6 +42,16 @@ class MemoryStore:
         with self._lock:
             self._data[key] = (now + ttl, value)
 
+    def set_nx(self, key, value, ttl, *, now=None):
+        """不存在才写入（原子），返回是否写入成功（D6 去重限流用）。"""
+        now = time.time() if now is None else now
+        with self._lock:
+            item = self._data.get(key)
+            if item is not None and now < item[0]:
+                return False
+            self._data[key] = (now + ttl, value)
+            return True
+
     def delete(self, key):
         with self._lock:
             self._data.pop(key, None)
