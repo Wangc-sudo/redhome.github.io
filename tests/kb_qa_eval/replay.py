@@ -21,6 +21,7 @@ from common.kb_qa import llm as llm_mod
 from common.kb_qa import rag_docs
 from common.kb_qa.agent import ToolExecutor, run_agent
 from common.kb_qa.docs import search_docs
+from common.kb_qa.focus import resolve_boundary_reply
 from common.public_data.db import connect
 from common.public_data.settings import Settings
 
@@ -37,21 +38,29 @@ def load_cases(path=None):
 
 
 def run_case(case, *, llm, conn, vector_search):
-    executor = ToolExecutor(conn, doc_search=search_docs,
-                            vector_search=vector_search)
-    meta = {}
     started = time.monotonic()
-    try:
-        answer = run_agent(llm, case["question"], executor=executor,
-                           meta=meta) or ""
-    except Exception as exc:  # 单句失败不中断回放，记为失败样本
-        return {
-            "question": case["question"], "pass": False,
-            "failures": [f"exception: {type(exc).__name__}"],
-            "tools": meta.get("tools") or [], "latency_ms": 0, "answer": "",
-        }
+    # 与 app._try_agent 入口一致：同比基期早于数据起点时直答不跑工具，
+    # 否则回放会把边界句误判成未直答（首轮实测 FAIL 即此缺口）。
+    boundary = resolve_boundary_reply(conn, case["question"])
+    tools = []
+    if boundary:
+        answer = boundary
+    else:
+        executor = ToolExecutor(conn, doc_search=search_docs,
+                                vector_search=vector_search)
+        meta = {}
+        try:
+            answer = run_agent(llm, case["question"], executor=executor,
+                               meta=meta) or ""
+        except Exception as exc:  # 单句失败不中断回放，记为失败样本
+            return {
+                "question": case["question"], "pass": False,
+                "failures": [f"exception: {type(exc).__name__}"],
+                "tools": meta.get("tools") or [], "latency_ms": 0,
+                "answer": "",
+            }
+        tools = meta.get("tools") or []
     failures = []
-    tools = meta.get("tools") or []
     if case["expected_tools"]:
         missing = [t for t in case["expected_tools"] if t not in tools]
         if missing:
