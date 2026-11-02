@@ -1375,6 +1375,10 @@ def _display_block(name, result_json):
         return ""
     if not all(isinstance(row, dict) for row in rows):
         return ""
+    if len(rows) == 1 and len(rows[0]) == 1:
+        # 单格标量（max_time/latest 等日期锚点）是探索过程的副产物，
+        # 永远不该作为答案表格候选（2026-11-02 云上复验被误引用）。
+        return ""
     total = payload.get("total_rows", payload.get("count"))
     return render_table(rows, total_rows=total)
 

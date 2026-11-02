@@ -143,18 +143,28 @@ class AgentDisplayTests(unittest.TestCase):
     _FINAL = {"total_rows": 2,
               "rows": [{"qty": 31, "amt": 804.0}, {"qty": 26, "amt": 808.0}]}
 
+    def test_single_scalar_anchor_not_a_candidate(self):
+        # max_time/latest 等单格锚点是探索副产物，不进候选表
+        executor = _RowsExecutor({"query_sql": self._EXPLORE})
+        answer = agent_module.run_agent(
+            _llm([_sql_call()], final="最新日期 11-01。"), "q",
+            executor=executor, max_rounds=1)
+        self.assertEqual("最新日期 11-01。", answer)
+
+    _EXPLORE2 = {"total_rows": 1, "rows": [{"channel": "京东", "cnt": 321}]}
+
     def test_multiple_blocks_only_referenced_is_sent(self):
-        executor = _SeqExecutor([self._EXPLORE, self._FINAL])
+        executor = _SeqExecutor([self._EXPLORE2, self._FINAL])
         answer = agent_module.run_agent(
             _llm([_sql_call(), _sql_call()], final="结论。[[表2]]"),
             "q", executor=executor, max_rounds=2)
         self.assertIn("合计：销量 57 件", answer)
-        self.assertNotIn("max_time", answer)
+        self.assertNotIn("cnt", answer)
         self.assertNotIn("[[表", answer)
 
     def test_multiple_blocks_without_reference_not_sent(self):
         # 探索性多表 + 模型未引用 → 一张都不发（防中间过程噪音）
-        executor = _SeqExecutor([self._EXPLORE, self._FINAL])
+        executor = _SeqExecutor([self._EXPLORE2, self._FINAL])
         answer = agent_module.run_agent(
             _llm([_sql_call(), _sql_call()], final="结论。"),
             "q", executor=executor, max_rounds=2)
