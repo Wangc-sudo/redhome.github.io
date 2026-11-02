@@ -31,6 +31,10 @@ class DatasetContract:
     version: int = 1
     target_table: Optional[str] = None
     raw_dataset: Optional[str] = None
+    #: extract 摘要名与 dataset_key 不同的数据集（如 channel_monthly_target
+    #: 由 ecom_people 步骤产出，sync_dataset_summary 里从来没有
+    #: 「channel_monthly_target」这条 extract 摘要）。
+    summary_dataset: Optional[str] = None
     required_window: Optional[str] = None
     expected_day: int = 1
     extra: dict = field(default_factory=dict)
@@ -42,7 +46,8 @@ def _t(hour, minute=0):
 
 def _contract(key, owner, source, target, *, expected=_t(7), lag=120,
               date_column=None, keys=(), raw=None, window=None, consumers=(),
-              dq=False, count=False, schedule="0 4,8,15,17 * * *", scope=None):
+              dq=False, count=False, schedule="0 4,8,15,17 * * *", scope=None,
+              summary=None):
     return DatasetContract(
         dataset_key=key,
         owner=owner,
@@ -54,6 +59,7 @@ def _contract(key, owner, source, target, *, expected=_t(7), lag=120,
         business_date_column=date_column,
         business_key_columns=tuple(keys),
         raw_dataset=raw,
+        summary_dataset=summary,
         required_window=window,
         expected_scope=scope or "all",
         downstream_consumers=tuple(consumers),
@@ -67,7 +73,10 @@ _BUSINESS_CONTRACTS = (
         "daily_report_offline", "offline_ops", "dingtalk",
         "fact_daily_report_offline", date_column="business_date",
         keys=("region", "responsible_person", "business_date"),
-        raw="daily_report_offline", window="t1",
+        # raw 数据集按区域分片（daily_report_offline_hangzhou/shaoxing/
+        # other/vanke），必须前缀匹配——精确写法的 LIKE 恒不命中，
+        # 该契约一度永久 unknown（no_raw_summary）。
+        raw="daily_report_offline%", window="t1",
         consumers=("pages-offline_all", "leaderboard-offline_all"), count=True,
         scope="regions:hangzhou,shaoxing,vanke,other",
     ),
@@ -83,7 +92,11 @@ _BUSINESS_CONTRACTS = (
     _contract(
         "channel_monthly_target", "channel_ops", "dingtalk",
         "fact_channel_store_target", expected=_t(10, 40), lag=60,
-        keys=("store_name", "channel"), raw="channel_monthly_target",
+        keys=("store_name", "channel"),
+        # raw 由 load-channel-target 程序导入（月度节奏），不走每日
+        # sync-dingtalk——挂 raw 会按日 SLA 恒 stale；extract 摘要由
+        # ecom_people 步骤产出（summary 里从无 channel_monthly_target）。
+        raw=None, summary="ecom_people",
         consumers=("pages-qudao", "channel_daily_sales"),
         schedule="35 10 * * *",
     ),
@@ -124,7 +137,10 @@ _BUSINESS_CONTRACTS = (
     ),
     _contract(
         "wdt_dim_product_mirror", "ecommerce_ops", "wdt", "dim_product",
-        keys=("spec_no",), raw="wdt_goods_catalog%",
+        keys=("spec_no",),
+        # live manifest 无 wdt_goods_catalog 数据集（dim_product 由
+        # extract-mart 直接重建），挂 raw 会恒 unknown（no_raw_summary）。
+        raw=None,
     ),
     _contract(
         "wdt_order_line_fact", "ecommerce_ops", "wdt", "fact_order_line",
@@ -208,31 +224,41 @@ _MANUAL_CONTRACTS = tuple(
 )
 
 
+# 知识索引契约统一 auto_retry=False（2026-11-02）：索引管道的「degraded」
+# 出口多由源数据缺陷驱动（缺品名记录、待删除文档、下载失败的图片），
+# 重试无法自愈；且失败达到上限进死信会**暂停该线 cron**——kb-sync-products
+# 小时级同步若被一条坏记录停车，会连累其余 800+ 商品的更新。这类线有
+# 自己的运行节奏，故障恢复靠下一自然窗口 + 人工处置源数据。
 _KNOWLEDGE_CONTRACTS = (
     DatasetContract(
         dataset_key="kb_doc_bm25", owner="kb_ops", source="wiki",
         schedule="17 3 * * *", expected_by=_t(4), max_lag_minutes=180,
         kind="knowledge", downstream_consumers=("kb-gateway",),
+        auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_doc_vector", owner="kb_ops", source="wiki",
         schedule="17 3 * * *", expected_by=_t(4), max_lag_minutes=180,
         kind="knowledge", downstream_consumers=("kb-gateway",),
+        auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_structured", owner="kb_ops", source="aitable",
         schedule="7 * * * *", expected_by=_t(1), max_lag_minutes=120,
         kind="knowledge", downstream_consumers=("kb-gateway",),
+        auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_text_vector", owner="kb_ops", source="aitable",
         schedule="47 3 * * *", expected_by=_t(4), max_lag_minutes=180,
         kind="knowledge", downstream_consumers=("kb-gateway",),
+        auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_image_vector", owner="kb_ops", source="aitable",
         schedule="47 3 * * *", expected_by=_t(4), max_lag_minutes=180,
         kind="knowledge", downstream_consumers=("kb-gateway",),
+        auto_retry=False,
     ),
 )
 
