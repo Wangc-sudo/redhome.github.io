@@ -801,33 +801,34 @@ class DocSearchTests(unittest.TestCase):
         self.assertEqual([], docs.search_docs(conn, "任意", now=1000.0))
 
     def test_cache_avoids_reload_within_ttl(self):
-        conn = _FakeConn([[]])
+        conn = _FakeConn([[self._chunk("d1", "手册", "售后退款")]])
         docs.search_docs(conn, "a", now=1000.0)
         docs.search_docs(conn, "b", now=1100.0)     # TTL 内：不重载
         self.assertEqual(1, len(conn.cursor_instance.executed))
         docs.search_docs(conn, "c", now=2000.0)     # TTL 过期：重载
         self.assertEqual(2, len(conn.cursor_instance.executed))
 
+    def test_empty_table_not_cached(self):
+        # cache_core 统一语义：空结果不写缓存，空库时每查询重试加载。
+        conn = _FakeConn([[]])
+        docs.search_docs(conn, "a", now=1000.0)
+        docs.search_docs(conn, "b", now=1100.0)
+        self.assertEqual(2, len(conn.cursor_instance.executed))
+
     def test_cache_rebuild_swaps_chunks_and_index_atomically(self):
         old_chunks = [self._chunk("old", "旧手册", "旧内容")]
-        old_cache = {"loaded_at": 0.0, "chunks": old_chunks, "index": "old"}
-        docs._cache = old_cache
         new_chunks = [self._chunk("new", "新手册", "新内容")]
-        observed = []
-
-        def build_index(_contents):
-            # 构造新索引期间，读者看到的仍是完整的旧快照。
-            observed.append(docs._cache)
-            return "new-index"
-
+        with mock.patch.object(docs, "_load", return_value=old_chunks):
+            docs._index_for(_FakeConn(), now=1000.0)  # 播种旧快照
         with mock.patch.object(docs, "_load", return_value=new_chunks), \
-             mock.patch.object(docs, "Bm25Index", side_effect=build_index):
-            chunks, index = docs._index_for(_FakeConn(), now=1000.0)
-        self.assertEqual([old_cache], observed)
+             mock.patch.object(docs, "Bm25Index", return_value="new-index"):
+            chunks, index = docs._index_for(_FakeConn(), now=1300.0)
         self.assertIs(new_chunks, chunks)
         self.assertEqual("new-index", index)
-        self.assertIs(new_chunks, docs._cache["chunks"])
-        self.assertEqual("new-index", docs._cache["index"])
+        from common import cache_core
+        cached = cache_core.default_store().get(docs._CACHE_KEY, now=1301.0)
+        self.assertIs(new_chunks, cached[0])
+        self.assertEqual("new-index", cached[1])
 
 
 class ChunkTextTests(unittest.TestCase):
