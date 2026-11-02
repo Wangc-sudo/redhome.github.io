@@ -366,6 +366,60 @@ class LiveSyncOrgCliTests(unittest.TestCase):
         self.assertEqual(build_service.call_args.kwargs["org_seeds"], ())
 
 
+class BuildServiceOrgGatewayWiringTests(unittest.TestCase):
+    """build_service → LiveSyncService 的 org_gateways 键契约钉住。
+
+    LiveSyncService._sync_org_dataset 按 ``entry.credential``（凭据段名
+    字符串）查网关；build_org_gateways 返回 (entry, gateway) 对，必须
+    转段名键——2026-10-25 起 sync-dingtalk 连续失败 8 天的根因就是
+    把对子原样传入导致 dict() 以 entry 对象为键。
+    """
+
+    def _build(self, org_seeds):
+        from common.public_data import cli
+
+        manifest = Mock(dingtalk_org=Mock())
+        settings = Mock(
+            dingtalk_database="raw_dingtalk",
+            wdt_database="raw_wdt",
+            mart_database="mart_ops",
+        )
+        credentials = {
+            "dingtalk": {
+                "app_key": "k", "app_secret": "s", "operator_id": "op",
+            },
+        }
+        with patch("common.public_data.db.connect",
+                   side_effect=[Mock(), Mock(), Mock()]), \
+             patch("common.public_data.live_migrations"
+                   ".apply_live_migrations"), \
+             patch("common.public_data.dingtalk_read.DingTalkReadGateway"), \
+             patch("common.public_data.org_read.OrgReadGateway") as org_cls, \
+             patch("common.public_data.live_sync.LiveSyncService") as svc_cls:
+            cli.build_service(settings, credentials, manifest,
+                              org_seeds=org_seeds)
+        return svc_cls.call_args.kwargs, org_cls
+
+    def test_multi_org_gateways_are_keyed_by_credential_section(self):
+        entry = OrgSeedEntry(
+            key="default", credential="dingtalk",
+            regions=(("hangzhou", (1049728636,)),),
+        )
+        kwargs, org_cls = self._build((entry,))
+
+        gateways = kwargs["org_gateways"]
+        self.assertEqual(set(gateways), {"dingtalk"})
+        self.assertIs(gateways["dingtalk"], org_cls.return_value)
+        self.assertIs(kwargs["org_gateway"], org_cls.return_value)
+        self.assertIsNotNone(kwargs["org_repository"])
+
+    def test_single_org_legacy_path_still_wraps_default_gateway(self):
+        kwargs, org_cls = self._build(())
+
+        self.assertEqual(kwargs["org_gateways"], ())
+        self.assertIs(kwargs["org_gateway"], org_cls.return_value)
+
+
 class PipelineGateCliTests(unittest.TestCase):
     """The registry enable gate around live-sync."""
 
