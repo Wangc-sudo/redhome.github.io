@@ -1,78 +1,79 @@
-# digital-ops（数字化运营机器人仓库）
+# digital-ops（数字化运营平台）
 
-钉钉相关运营机器人的统一纳管仓库。目录结构按「业务域 → 平台 → 功能」三层组织：
+统一的数字化运营仓库，承载钉钉机器人、数据采集与加工、经营看板、榜单页、知识库问答和运维管理面。
 
-```
-数字化/
-└── 钉钉/
-    ├── 杭州日报机器人/    # 杭州销售日报：报数监听/18:30提醒/20:00催办DING/组织同步/完成率榜单
-    ├── 渠道日报机器人/    # 渠道日报表群：热卖品/采购/销售达成/风控/库存预警 5 个每日播报
-    └── 榜单页面/          # 杭州销售完成率榜单托管页源（每日 8:30 生成后发布）
-```
+## 当前运行方式
 
-## 运行方式（当前：本机执行）
+生产环境已迁移到云主机，以 Docker 容器组运行；不再依赖办公电脑、本机 cron 或 QW Pages。
 
-- 运行环境：Windows + `miniconda3` Python；公共数据模块依赖 `requirements.txt` 中的 Python 包。
-- 调度：千问办公桌面端 cron 定时任务（5 个），路径指向本仓库
-- 页面发布：千问办公 QW Pages（每日 8:30 生成 HTML → 复制到 榜单页面/ → 发布）
-- 钉钉凭据：`config.json`（已 gitignore，模板见 `config.example.json`）
+| 服务 | 职责 |
+|---|---|
+| `dingtalk-gateway` | 日报机器人的钉钉 Stream 接入、报数与群消息投递 |
+| `dops-scheduler` | 定时任务调度、数据同步、提取加工、播报与知识库索引 |
+| `kb-gateway` | 小易知识库问答机器人，独立钉钉 Stream 连接 |
+| `dops-bi-web` | BI 看板与小易 Web 会话/API |
+| `dops-ops-web` | 运维管理面：管道、名册、组织编排、日历、授权与审计 |
+| `dops-pages-web` | 榜单页请求时渲染，带缓存与静态兜底 |
+| `dops-nginx` | 域名入口、反向代理、安全头与限流 |
+| `dops-ntp` | 云主机时间校准 |
 
-## 公共数据设置
+生产编排的版本受控真源是 `docker/cloud/docker-compose.dops.yml`，nginx 配置真源是 `docker/cloud/nginx-pages.conf`。服务器上的 `/opt/dops/` 文件是部署副本，不应绕过仓库单独维护。
 
-- 安装依赖请使用 `requirements.txt`。
-- 必须显式设置 `APP_ENV` 为 `test` 或 `production`；两者使用隔离的数据库组。
-- `TEST_MODE` 仅用于测试组路由，不能选择数据库。
-- 将 `common/public_data/config.example.json` 复制到 `config-local/public-data/`，并让 `PUBLIC_DATA_CONFIG` 指向这份本地契约文件。
-- 本地公共数据契约不得记录真实数据库连接信息、钉钉 Base/Sheet ID 或旺店通凭据。
+## 部署与变更流程
 
-### 受限读取网关（当前状态）
+1. `main` 是稳定部署分支；改动通过分支和 Pull Request 合入，不直接提交到 `main`。
+2. GitHub Actions 运行 Python 编译、集成测试和前端构建检查，质量门通过后才能合并。
+3. 云主机由 systemd timer 每两分钟触发 `ops/deploy.sh`，从配置的 Git 远端拉取 `main`。
+4. 部署脚本按需重建镜像、应用数据库迁移、重建长驻服务并执行健康检查；失败时回滚到部署前版本。
+5. 回滚代码变更使用 `git revert <commit>`，再按正常 PR 与部署链路发布。
 
-- `common.public_data.dingtalk_read.DingTalkReadGateway` 仅提供钉钉 AI 表的受限读取：OAuth 取 token、表/字段发现、schema 校验与记录分页；它不提供写表、群消息、DING 或 webhook 能力。
-- `common.public_data.org_read.OrgReadGateway` 仅提供钉钉通讯录的受限读取（部门子树 / 成员列表 / 成员详情），不含任何写方法；区域映射来自版本受控的 `docker/integration/org.seed.json`。
-- 单元验证使用注入的假 transport，不会访问真实钉钉或旺店通：`python -m unittest tests.common.test_public_data_dingtalk_read tests.common.test_public_data_org_read -v`。
-- `docker-compose.integration.yml` 只启动本地 Ubuntu 测试容器与本地 MySQL 8.4 测试库；运行 `docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from test-runner` 不会触发真实源同步或外部写入。
-- 已落地：WDT 受限读取、manifest 校验、raw/mart 迁移、按线同步编排（`sync-dingtalk` / `sync-wdt` / `project-mart`）、Nacos 管道注册表、提取层 `extract-mart`（raw → 业务事实表 + `dim_calendar` 工作日 + `dim_robot_member` 组织成员）。三条逻辑线的整体设计与阶段划分见 `docs/superpowers/specs/2026-09-10-three-lines-docker-decomposition.md`。
-- 尚未实施：真实源验收、业务线容器（`dingtalk-gateway` / `robot` / `pages-leaderboard`）与控制面（阶段 4/5）；现有机器人尚未切换运行路径。任何调度切换均须由运维人员另行确认。
+部署远端和分支可通过 `DOPS_REMOTE`、`DOPS_DEPLOY_BRANCH` 配置。灾备机使用 `DOPS_SYNC_ONLY=1`，只同步代码，不启动生产调度或 Stream 连接。
 
-### 受限实时同步验收
+## 配置与机密
 
-- 实时同步命令 `live-sync` 只能由运维人员在 Docker 宿主机上手动执行，不会随 `docker compose up` 自动启动。
-- 只写入本地测试数据库（`raw_dingtalk_test`、`raw_wdt_test`、`mart_ops_test`），不对外部系统做任何写入。
-- manifest 文件和凭据文件必须存放在仓库目录之外；凭据模板见 `docker/integration/live-source-credentials.example.json`。
-- 命令格式（按线运行：各线独立 run_id、独立成败，`sync-dingtalk` 只挂钉钉凭据、`sync-wdt` 只挂 WDT 凭据）：
+- Python 依赖见 `requirements.txt`；生产镜像定义见 `docker/cloud/Dockerfile`。
+- 必须显式设置 `APP_ENV=test` 或 `APP_ENV=production`，两套环境使用隔离的数据库配置。
+- 本地公共数据契约从 `common/public_data/config.example.json` 复制，并通过 `PUBLIC_DATA_CONFIG` 指向本地文件。
+- 密码、令牌、钉钉应用凭据和真实数据源配置不得提交到仓库。
+- 云上机密保存在仓库外的 `/opt/dops/app.env`、`/opt/dops/ops-web.env` 和 `/opt/dops/live/`。
+- 修改 `env_file` 后必须用 `docker compose up -d --force-recreate` 重建对应容器；单纯 `restart` 不会应用环境变量变化。
 
-```bash
-PUBLIC_DATA_LIVE_MANIFEST_PATH=/absolute/path/manifest.json \
-PUBLIC_DATA_LIVE_CREDENTIALS_PATH=/absolute/path/source-credentials.json \
-docker compose -f docker-compose.integration.yml --profile live-sync-dingtalk run --rm sync-dingtalk
+## 本地开发与测试
 
-PUBLIC_DATA_LIVE_MANIFEST_PATH=/absolute/path/manifest.json \
-PUBLIC_DATA_LIVE_CREDENTIALS_PATH=/absolute/path/source-credentials.json \
-docker compose -f docker-compose.integration.yml --profile live-sync-wdt run --rm sync-wdt
-```
-
-- 提取层（不读源、不挂凭据，把本地 raw 全量重放为业务表）：
+本地开发和集成测试不连接真实生产数据源，也不应向钉钉或生产库写入。
 
 ```bash
-docker compose -f docker-compose.integration.yml --profile extract run --rm extract-mart
+python -m pip install -r requirements.txt
+docker compose -f docker-compose.integration.yml run --rm --build test-runner
 ```
 
-- 验收标准：连续两次执行上述命令，各数据集的 `record_id_digest` 与 raw 表主键行数保持一致；`extract-mart` 重放结果一致。
-- 任何 `failed` 或 `projection_pending` 状态的 sync run 均视为验收失败，须排查后重试。
-- 管道注册表（关停 / 扩线）由 Nacos 承载（`--profile nacos` 启动），版本受控种子为 `docker/integration/pipelines.seed.yaml`；注册表不可用时按 fail-open 放行，绝不静默停摆。
+前端检查：
 
-## 分支与变更流程
+```bash
+cd frontend/bi-react
+npm ci
+npm run typecheck
+npm run test
+npm run build
+```
 
-- `main`：随时可运行的稳定版本，本机定时任务只执行 main
-- 改动流程：改代码 → 本地验证（见各模块 README）→ `git commit` 到 main
-- 回滚：`git revert <commit>`，次日定时任务自动生效；紧急时手动立即执行
+`common/ops_web/web` 的 Vue 前端修改后还需执行 `npm run build`，并将更新后的 `common/ops_web/static/dist` 一并提交。
 
-## 各模块说明
+## 目录说明
 
-详见各目录内 README：
-- `数字化/钉钉/杭州日报机器人/README.md`
-- `数字化/钉钉/渠道日报机器人/README_ECS部署指南.md`
+```text
+common/                 机器人、数据管线、BI、运维面和知识库问答后端
+frontend/bi-react/      BI 看板前端
+docker/cloud/           生产容器编排、镜像与 nginx 配置真源
+docker/integration/     集成测试及本地配置种子
+ops/                    拉模式部署脚本与 systemd 单元
+tests/                  Python 单元与集成测试
+docs/                   方案、运行记录与专项说明
+数字化/                 早期业务脚本与历史页面（非当前生产调度入口）
+```
 
-## 云迁移
+## 运维入口
 
-迁移到 GitHub + CI/CD 的步骤见 `docs/云迁移指南.md`。CI 配置已预置：`.github/workflows/ci.yml`。
+- 定时任务、名册、组织、日历和授权等日常管理优先使用 `dops-ops-web`。
+- 管道注册与运行状态由调度系统读取；手动触发、停用和审计均应在管理面留痕。
+- 真实源同步和提取命令具有显式写入确认参数，不能在未核对环境和目标库时直接执行。
