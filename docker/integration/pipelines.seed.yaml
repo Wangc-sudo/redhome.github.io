@@ -482,3 +482,20 @@ rag-index-docs:
   reads: []
   depends_on: [kb-sync-wiki]
   description: "RAG vector index for docs (DingTalk knowledge-base markdown -> embedding -> Milvus Lite)"
+# 猫超价格竞争力（2026-11-03 P0）：先手动影子验收，定时默认关闭。
+# Windows agent 单实例操作可见 Chrome；活跃任务唯一性由 DB 保证，scheduler
+# 的短生命周期锁只约束派发子进程，不承担 Windows 执行期防重。
+price-maochao-dispatch:
+  kind: apps
+  category: 同步
+  enabled: false
+  schedule: "*/10 * * * *"
+  reads: [mart_ops]
+  description: "create one Maochao price-collection job for the Windows edge agent"
+price-maochao-finalize:
+  kind: apps
+  category: 加工
+  enabled: false
+  schedule: "* * * * *"
+  reads: [mart_ops]
+  description: "expire Maochao agent leases/login waits and enqueue timeout alerts"

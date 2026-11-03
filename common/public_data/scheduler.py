@@ -236,6 +236,21 @@ _COMMAND_TABLE = {
             "--confirm-local-test-write",
         ],
     },
+    # 猫超价格竞争力（2026-11-03）：scheduler 只派发/治理，不操作浏览器。
+    # 派发命令需要 run_history_id 与 trigger_source 关联 pd_price_agent_job。
+    "price-maochao-dispatch": {
+        "argv": [
+            "common.price_agent.cli", "dispatch", "--live-read",
+            "--confirm-local-test-write",
+        ],
+        "pass_run_context": True,
+    },
+    "price-maochao-finalize": {
+        "argv": [
+            "common.price_agent.cli", "finalize", "--live-read",
+            "--confirm-local-test-write",
+        ],
+    },
     "channel-missing-check": _mart_cli_entry("channel-missing", region="qudao"),
     # 10:45 T+1 重算用默认日期（今天）：渠道板块锚定「business_date 之前
     # 最近有效日」= T-1，带 --date yesterday 反而退到 T-2（2026-09-28 裁决，
@@ -1283,6 +1298,11 @@ class Scheduler:
                 run_id = f"direct:{service_id}:{self._run_id_counter}"
                 self._run_states[run_id] = "running"
         history_id = self._record_start(service_id, trigger_type)
+        run_argv = argv
+        if (command_spec(service_id) or {}).get("pass_run_context"):
+            run_argv = [*argv, "--trigger-source", trigger_type]
+            if history_id is not None:
+                run_argv = [*run_argv, "--run-history-id", str(history_id)]
         returncode = None
         failure_kind = None
         started = False
@@ -1299,7 +1319,7 @@ class Scheduler:
             try:
                 with lock:
                     started = True
-                    returncode = self._runner(service_id, argv)
+                    returncode = self._runner(service_id, run_argv)
             except Exception:
                 failure_kind = "unknown_outcome" if started else "not_started"
                 logger.error(

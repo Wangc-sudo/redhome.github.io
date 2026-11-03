@@ -1,0 +1,31 @@
+version: 1
+enabled: true
+page_size: 100
+agent_poll_seconds: 5
+page_ready_timeout_seconds: 60
+subject_attempts: 2
+job_lease_seconds: 900
+heartbeat_interval_seconds: 15
+login_wait_seconds: 1800
+auth_poll_seconds: 15
+subjects:
+  - "110183794"
+  - "110342174"
+  - "110925450"
+  - "114567069"
+  - "115057440"
+  - "115379341"
+  - "115617823"
+  - "115619469"
+  - "115993131"
+  - "116734559"
+restore_subject: "110342174"
+notify:
+  enabled: true
+  region: ops
+  on_failure: true
+  on_result_change: true
+  full_rows_per_message: 10
+artifacts:
+  bucket: bucket-68cc
+  prefix: price-competition

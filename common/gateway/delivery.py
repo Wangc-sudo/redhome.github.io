@@ -44,6 +44,7 @@ _GROUP_KINDS = frozenset({
     "remind", "check", "leaderboard", "channel_daily",
     "offline_daily", "offline_weekly", "offline_monthly",
     "channel_missing", "target_remind", "calendar_watch", "alert",
+    "price_alert", "price_change",
 })
 
 #: 每种 kind 的非泄露错误码（写 outbox.last_error）。
@@ -59,6 +60,8 @@ _ERROR_CODES = {
     "target_remind": DeliveryErrorCode.GROUP_SEND_FAILED,
     "calendar_watch": DeliveryErrorCode.GROUP_SEND_FAILED,
     "alert": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "price_alert": DeliveryErrorCode.GROUP_SEND_FAILED,
+    "price_change": DeliveryErrorCode.GROUP_SEND_FAILED,
     "ding": DeliveryErrorCode.DING_SEND_FAILED,
 }
 

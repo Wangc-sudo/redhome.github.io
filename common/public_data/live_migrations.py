@@ -45,6 +45,7 @@ from common.public_data.ops_credential import (
 )
 from common.public_data.ops_token import ops_web_token_ddl_statements
 from common.public_data.phone_registry import phone_registry_ddl_statements
+from common.price_agent.schema import price_agent_ddl_statements
 from common.public_data.mart_extract_schema import (
     _AGG_OFFLINE_DAILY_DDL,
     _CHANNEL_SALES_ROBOT_INBOX_DDL,
@@ -880,6 +881,13 @@ _MIGRATIONS = (
         "mart-ops-kb-export-v2",
         "mart",
         query_export_v2_ddl_statements(),
+    ),
+    (
+        # 猫超价格竞争力（2026-11-03）：Windows job 状态机、价格快照与 ZOS
+        # 对象索引。独立版本，不改写任何已应用迁移。
+        "mart-ops-price-agent-v1",
+        "mart",
+        price_agent_ddl_statements(),
     ),
 )
 
