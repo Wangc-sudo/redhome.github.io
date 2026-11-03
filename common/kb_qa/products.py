@@ -6,6 +6,8 @@
 """
 
 import json
+import re
+from decimal import Decimal, InvalidOperation
 
 #: 展示列（中文名, 列名），按客服关心度排序。
 PARAM_COLUMNS = (
@@ -200,6 +202,42 @@ def _search(conn, kw, limit):
         return list(cursor.fetchall())
     finally:
         cursor.close()
+
+
+_CASE_WEIGHT_RE = re.compile(
+    r"(?:箱|件)[^，,；;？?]{0,8}"
+    r"(?:多重|重量|毛重|净重|多少斤|几斤|多少公斤|几千克|多少kg)",
+    re.IGNORECASE,
+)
+
+
+def _kg_text(value):
+    return format(value.normalize(), "f")
+
+
+def render_case_weight_answer(question, row):
+    """整箱重量问句：给条件化估算，不把通用重量字段冒充整箱毛重。
+
+    资料只有 ``weight_kg`` 与 ``box_qty``，未声明重量颗粒度。因此仅在
+    明确问整箱/整件重量时给出「若为单瓶重量」的乘法估算；字段缺失或
+    普通单瓶重量/箱规问题返回 None，交回原渲染链。
+    """
+    if not _CASE_WEIGHT_RE.search(question or ""):
+        return None
+    try:
+        box_qty = int(row.get("box_qty") or 0)
+        weight = Decimal(str(row.get("weight_kg") or ""))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if box_qty <= 0 or weight <= 0:
+        return None
+    weight_text = _kg_text(weight)
+    total_text = _kg_text(weight * box_qty)
+    return (
+        f"若重量 {weight_text}kg 指单瓶重量，按一箱 {box_qty} 瓶估算："
+        f"{weight_text} × {box_qty} = {total_text}kg（不含包装）。"
+        f"资料未注明整箱毛重。{_SOURCE_TAG}"
+    )
 
 
 def render_param_answer(row):
