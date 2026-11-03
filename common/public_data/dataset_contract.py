@@ -233,31 +233,31 @@ _KNOWLEDGE_CONTRACTS = (
     DatasetContract(
         dataset_key="kb_doc_bm25", owner="kb_ops", source="wiki",
         schedule="17 3 * * *", expected_by=_t(4), max_lag_minutes=180,
-        kind="knowledge", downstream_consumers=("kb-gateway",),
+        kind="knowledge", downstream_consumers=("xiaoyi-agent",),
         auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_doc_vector", owner="kb_ops", source="wiki",
         schedule="17 3 * * *", expected_by=_t(4), max_lag_minutes=180,
-        kind="knowledge", downstream_consumers=("kb-gateway",),
+        kind="knowledge", downstream_consumers=("xiaoyi-agent",),
         auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_structured", owner="kb_ops", source="aitable",
         schedule="7 * * * *", expected_by=_t(1), max_lag_minutes=120,
-        kind="knowledge", downstream_consumers=("kb-gateway",),
+        kind="knowledge", downstream_consumers=("xiaoyi-agent",),
         auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_text_vector", owner="kb_ops", source="aitable",
         schedule="47 3 * * *", expected_by=_t(4), max_lag_minutes=180,
-        kind="knowledge", downstream_consumers=("kb-gateway",),
+        kind="knowledge", downstream_consumers=("xiaoyi-agent",),
         auto_retry=False,
     ),
     DatasetContract(
         dataset_key="kb_product_image_vector", owner="kb_ops", source="aitable",
         schedule="47 3 * * *", expected_by=_t(4), max_lag_minutes=180,
-        kind="knowledge", downstream_consumers=("kb-gateway",),
+        kind="knowledge", downstream_consumers=("xiaoyi-agent",),
         auto_retry=False,
     ),
 )
