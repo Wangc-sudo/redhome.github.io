@@ -17,6 +17,7 @@ from common.price_agent.service import (
     dispatch_job,
     heartbeat_job,
     normalize_snapshot_row,
+    report_auth_expired,
     result_fingerprint,
     validate_completion,
 )
@@ -275,6 +276,23 @@ class StateMachineTests(unittest.TestCase):
         second = complete_job(connection, JOB_ID, payload, now=NOW)
         self.assertTrue(second["idempotent"])
         self.assertEqual(1, len(connection.facts))
+
+    def test_standalone_auth_expiry_enqueues_safe_group_alert(self):
+        connection = _Connection(_running_job())
+        result = report_auth_expired(connection, _config(), {
+            "agent_id": "windows-1",
+            "session_version": 3,
+            "checked_at": "2026-11-03T06:00:00+08:00",
+        }, now=NOW)
+        self.assertEqual("login_required", result["status"])
+        self.assertTrue(result["notified"])
+        self.assertEqual(1, len(connection.outbox))
+        outbox = connection.outbox[0]
+        self.assertEqual("ops", outbox[1])
+        self.assertEqual("price_alert", outbox[2])
+        self.assertIn("2026-11-03 06:00", outbox[5])
+        self.assertIn("Windows 可见 Chrome", outbox[5])
+        self.assertTrue(outbox[0].endswith("auth-check:windows-1:3:202611030600"))
 
     def test_login_required_alerts_once_and_recovery_requests_restart(self):
         connection = _Connection(_running_job())

@@ -1,11 +1,13 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
-from windows_agent.maochao.agent import WindowsMaochaoAgent
+from windows_agent.maochao.agent import WindowsMaochaoAgent, due_auth_check
 from windows_agent.maochao.artifacts import file_sha256, object_key
 from windows_agent.maochao.auth import (
+    BEIJING,
     LOGIN_REQUIRED,
     UNKNOWN,
     VALID,
@@ -50,6 +52,18 @@ class AuthTests(unittest.TestCase):
             self.assertEqual("profile-1", data["profile_id"])
 
 
+class AuthScheduleTests(unittest.TestCase):
+    def test_checks_at_six_and_twenty_without_window_duplicates(self):
+        morning = datetime(2026, 11, 3, 6, 5, tzinfo=BEIJING)
+        slot = due_auth_check(morning)
+        self.assertEqual(6, slot.hour)
+        self.assertIsNone(due_auth_check(morning, slot))
+        self.assertIsNone(due_auth_check(datetime(2026, 11, 3, 6, 11, tzinfo=BEIJING)))
+        self.assertIsNone(due_auth_check(datetime(2026, 11, 3, 5, 59, tzinfo=BEIJING)))
+        evening = due_auth_check(datetime(2026, 11, 3, 20, 0, tzinfo=BEIJING))
+        self.assertEqual(20, evening.hour)
+
+
 class ArtifactTests(unittest.TestCase):
     def test_object_key_is_job_scoped_and_sha_matches_file(self):
         from datetime import datetime
@@ -71,6 +85,7 @@ class _Session:
 
     def mark(self, state, *, recovered=False):
         self.marks.append((state, recovered))
+        self.auth_state = state
         if recovered:
             self.session_version += 1
 
@@ -88,6 +103,9 @@ class _Collector:
         from datetime import datetime, timezone
         return self.payload, [], datetime.now(timezone.utc)
 
+    def check_auth(self):
+        raise LoginRequiredError("expired")
+
     def wait_for_login_recovery(self, config, *, progress, should_stop):
         self.waits += 1
 
@@ -97,6 +115,11 @@ class _Client:
         self.heartbeats = []
         self.completed = []
         self.failed = []
+        self.auth_reports = []
+
+    def report_auth_expired(self, payload):
+        self.auth_reports.append(payload)
+        return {"status": LOGIN_REQUIRED, "notified": True}
 
     def heartbeat(self, job_id, payload):
         self.heartbeats.append(payload)
@@ -137,6 +160,23 @@ class AgentRecoveryTests(unittest.TestCase):
         self.assertTrue(any(
             item["auth_state"] == LOGIN_REQUIRED for item in client.heartbeats
         ))
+
+    def test_standalone_auth_check_reports_expiry_without_a_job(self):
+        client = _Client()
+        session = _Session()
+        agent = WindowsMaochaoAgent(
+            {
+                "base_url": "https://example.test", "token": "secret",
+                "agent_id": "windows-1", "profile_id": "profile-1", "oss": {},
+            },
+            client=client, collector=_Collector({}), session=session,
+        )
+        checked_at = datetime(2026, 11, 3, 6, 0, tzinfo=BEIJING)
+        result = agent.check_auth(checked_at=checked_at)
+        self.assertEqual(LOGIN_REQUIRED, result["status"])
+        self.assertEqual(LOGIN_REQUIRED, session.auth_state)
+        self.assertEqual("2026-11-03T06:00:00+08:00", client.auth_reports[0]["checked_at"])
+        self.assertEqual([], client.failed)
 
 
 if __name__ == "__main__":

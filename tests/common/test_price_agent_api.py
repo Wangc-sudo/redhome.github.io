@@ -82,6 +82,19 @@ class MachineAuthTests(unittest.TestCase):
 
 
 class RouteTests(unittest.TestCase):
+    def test_auth_expired_requires_machine_auth_and_uses_current_config(self):
+        client = TestClient(_app())
+        payload = {"agent_id": "windows-1", "checked_at": "2026-11-03T06:00:00+08:00"}
+        self.assertEqual(401, client.post("/price-agent/api/auth-expired", json=payload).status_code)
+        with mock.patch(
+            "common.price_agent.api.report_auth_expired",
+            return_value={"status": "login_required", "notified": True},
+        ) as report:
+            response = client.post("/price-agent/api/auth-expired", headers=_auth(), json=payload)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["notified"])
+        self.assertEqual(payload, report.call_args.args[2])
+
     def test_claim_uses_current_config_and_agent_id(self):
         client = TestClient(_app())
         with mock.patch("common.price_agent.api.claim_job", return_value={"status": "empty"}) as claim:

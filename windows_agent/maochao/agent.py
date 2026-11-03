@@ -7,10 +7,12 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from windows_agent.maochao.artifacts import ArtifactUploadError, upload_artifacts
 from windows_agent.maochao.auth import (
+    BEIJING,
     LOGIN_REQUIRED,
     VALID,
     ChromeSessionMetadata,
@@ -20,6 +22,23 @@ from windows_agent.maochao.client import PriceAgentApiError, PriceAgentClient
 from windows_agent.maochao.collector import CaptureFailedError, MaochaoCollector
 
 logger = logging.getLogger(__name__)
+AUTH_CHECK_HOURS = (6, 20)
+AUTH_CHECK_WINDOW = timedelta(minutes=10)
+
+
+def due_auth_check(now, last_slot=None):
+    """北京时间 6:00/20:00 起十分钟内执行；同窗口不重复。"""
+    local = now.astimezone(BEIJING)
+    slots = [
+        (local - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    ] + [
+        local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        for hour in AUTH_CHECK_HOURS
+    ]
+    due = max(slot for slot in slots if slot <= local)
+    if due == last_slot or local - due > AUTH_CHECK_WINDOW:
+        return None
+    return due
 
 
 @contextmanager
@@ -168,9 +187,33 @@ class WindowsMaochaoAgent:
             stopped.set()
             heartbeat.join(timeout=2)
 
+    def check_auth(self, *, checked_at):
+        """独立巡检登录态；只有确认失效才上报群告警。"""
+        try:
+            self.collector.check_auth()
+        except LoginRequiredError:
+            self.session.mark(LOGIN_REQUIRED)
+            return self.client.report_auth_expired({
+                "agent_id": self.agent_id,
+                "session_version": self.session.session_version,
+                "checked_at": checked_at.isoformat(),
+            })
+        recovered = getattr(self.session, "auth_state", None) == LOGIN_REQUIRED
+        self.session.mark(VALID, recovered=recovered)
+        return {"status": VALID}
+
     def run_forever(self, *, stop_event=None):
         stop_event = stop_event or threading.Event()
+        last_auth_check = None
         while not stop_event.is_set():
+            auth_slot = due_auth_check(datetime.now(BEIJING), last_auth_check)
+            if auth_slot is not None:
+                try:
+                    result = self.check_auth(checked_at=auth_slot)
+                    last_auth_check = auth_slot
+                    logger.info("price-agent scheduled auth check: %s", result["status"])
+                except Exception as exc:
+                    logger.warning("price-agent scheduled auth check failed: %s", type(exc).__name__)
             try:
                 claimed = self.client.claim(self.agent_id)
                 if claimed.get("status") == "claimed":

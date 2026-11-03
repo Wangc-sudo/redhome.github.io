@@ -333,6 +333,14 @@ class MaochaoCollector:
             progress(auth_state=VALID)
             return payload, local_artifacts, captured_at
 
+    def check_auth(self):
+        """只读取现有页面登录态；不导出 Cookie、不刷新、不切换主体。"""
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(self.cdp_url, timeout=15000)
+            page = self._find_page(browser)
+            self._find_frame(page)
+
     def wait_for_login_recovery(self, config, *, progress=None, should_stop=None):
         """不刷新、不抢焦点，等待运维在同一可见 Chrome 完成人工登录。"""
         progress = progress or (lambda **kwargs: None)
