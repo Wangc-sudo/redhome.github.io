@@ -1,6 +1,6 @@
 # digital-ops（数字化运营平台）
 
-统一的数字化运营仓库，承载钉钉机器人、数据采集与加工、经营看板、榜单页、知识库问答和运维管理面。
+统一的数字化运营仓库，承载钉钉报数机器人、数据采集与加工、经营看板、榜单页、知识数据生产和运维管理面。小易问答与 Web 由独立仓库 `xiaoyi-agent` 承载。
 
 ## 当前运行方式
 
@@ -10,8 +10,7 @@
 |---|---|
 | `dingtalk-gateway` | 日报机器人的钉钉 Stream 接入、报数与群消息投递 |
 | `dops-scheduler` | 定时任务调度、数据同步、提取加工、播报与知识库索引 |
-| `kb-gateway` | 小易知识库问答机器人，独立钉钉 Stream 连接 |
-| `dops-bi-web` | BI 看板与小易 Web 会话/API |
+| `dops-bi-web` | BI 看板与 BI 自有认证/API |
 | `dops-ops-web` | 运维管理面：管道、名册、组织编排、日历、授权与审计 |
 | `dops-pages-web` | 榜单页请求时渲染，带缓存与静态兜底 |
 | `dops-nginx` | 域名入口、反向代理、安全头与限流 |
@@ -62,7 +61,7 @@ npm run build
 ## 目录说明
 
 ```text
-common/                 机器人、数据管线、BI、运维面和知识库问答后端
+common/                 报数机器人、数据管线、BI、运维面和知识数据生产
 frontend/bi-react/      BI 看板前端
 docker/cloud/           生产容器编排、镜像与 nginx 配置真源
 docker/integration/     集成测试及本地配置种子

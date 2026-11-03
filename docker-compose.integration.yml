@@ -563,9 +563,6 @@ services:
       # Redis 后端。bi-web 对 redis 零 depends_on —— 缓存挂 ≠ 看板挂
       # （fail-open，miss 即 mart 直查），见 cache.py。
       PUBLIC_DATA_REDIS_URL: ${PUBLIC_DATA_REDIS_URL:-}
-      KB_EXPORT_ENABLE: "0"
-      KB_EXPORT_GROUP_ENABLE: "0"
-      KB_EXPORT_DIR: /tmp/kb-exports
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:18080:8080"

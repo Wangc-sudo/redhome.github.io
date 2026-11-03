@@ -451,12 +451,6 @@ kb-export-cleanup:
   schedule: "17 * * * *"
   reads: [mart_ops]
   description: "expire KB XLSX exports and remove expired files"
-kb-gateway:
-  kind: apps
-  category: 钉钉
-  enabled: true
-  reads: [mart_ops]
-  description: "knowledge-base QA robot (dedicated Stream app, customer-service group)"
 # --- RAG 向量索引（2026-10-12 第一期：商品+图片跨模态检索） ---
 # 2026-10-20 降频为每日一次：每小时全量重灌 825 行图文（每次数百次
 # embedding 调用、十几分钟）纯浪费——商品资料非高频变动，每日 03:47 足够；

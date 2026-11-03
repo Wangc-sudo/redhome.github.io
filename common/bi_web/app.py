@@ -124,10 +124,6 @@ _WEB_DIR = Path(__file__).parent / "web"
 #: (or simply removing the dist directory) rolls straight back to V0.
 _REACT_DIST_DIR = Path(__file__).parents[2] / "frontend" / "bi-react" / "dist"
 
-#: 小易 Web 对话前端产物（common/kb_web/web/dist，Vite 构建入库，
-#: ops-web 同款模式）。check_dir=False：未构建时 /kb 仅 API 可用。
-_KB_DIST_DIR = Path(__file__).parents[1] / "kb_web" / "web" / "dist"
-
 
 def _shell_index_html() -> Path:
     """Pick the ``/d/{id}`` shell: bi.html first, dist as fallback, else legacy.
@@ -687,8 +683,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
                seed_path=None, card_cache=None, session_secret=None,
                auth_client=None, viewer_resolver=None,
-               session_secure=False, corp_id=None, agent_id=None,
-               kb_web=None) -> FastAPI:
+               session_secure=False, corp_id=None, agent_id=None) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
@@ -813,19 +808,6 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     @app.get("/")
     def root():
         return RedirectResponse(f"/d/{_DEFAULT_DASHBOARD_ID}")
-
-    # 小易 Web 对话面（2026-10-23，方案 V1）：/kb/api/* 路由组。kb_web
-    # 为 register_kb_routes 的 kwargs dict；None=不挂载（缺配降级）。
-    # 认证只要求登录（HMAC session），业务数据工具收窄在 service 层
-    # 经 kb_web_acl 角色白名单做（与 bi_authz 看板授权语义不混用）。
-    if kb_web:
-        from common.kb_web.routes import register_kb_routes
-
-        register_kb_routes(app, **kb_web)
-        # SPA 静态壳挂在 API 之后（Starlette 按注册序匹配，/kb/api/*
-        # 已先注册不会被 mount 吞掉）。无客户端路由，html=True 即可。
-        app.mount("/kb", StaticFiles(directory=_KB_DIST_DIR, html=True,
-                                     check_dir=False), name="kb-web")
 
     @app.get("/healthz")
     def healthz():
@@ -1013,14 +995,6 @@ def main():
         ).strip().lower() in ("1", "true", "yes")
         dashboard_source = build_dashboard_config_source()
         seed_path = os.environ.get("PUBLIC_DATA_BI_SEED") or None
-        # 小易 Web 对话面依赖（fail-open：缺配/异常 → None 不挂载，
-        # 看板面不受影响）。
-        try:
-            from common.kb_web.bootstrap import build_kb_web_deps
-
-            kb_web = build_kb_web_deps(settings)
-        except Exception:
-            kb_web = None
         application = create_app(
             settings=settings,
             dashboard_source=dashboard_source,
@@ -1031,7 +1005,6 @@ def main():
             session_secure=session_secure,
             corp_id=corp_id,
             agent_id=agent_id,
-            kb_web=kb_web,
         )
     except Exception as exc:
         print(f"bi-web startup failed: invalid configuration ({type(exc).__name__})")
