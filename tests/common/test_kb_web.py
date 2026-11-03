@@ -283,6 +283,35 @@ class KbWebServiceTests(unittest.TestCase):
         self.assertIn("latency_ms", result["meta"])
         self.assertTrue(conn.committed)
 
+    def test_asset_link_uses_friendly_display_name(self):
+        raw = ("cspace_28439184510_214024480537_金钻习酒礼盒（双瓶装）_00.png"
+               "_0f900d5645117eedf3ed4c84f4d1e3dd")
+        row = dict(self._row(), attachments={"质检报告": [{"name": raw}]})
+        conn = _SvcConn([[row]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, log=lambda _: None)
+        result = service.answer("u1", "金钻质检报告", history_messages=[])
+        self.assertIn("证书图片如下，点击可查看原图", result["reply"])
+        self.assertNotIn("文件直发功能接入中", result["reply"])
+        self.assertEqual("金钻习酒礼盒（双瓶装）_00.png",
+                         result["attachments"][0]["name"])
+        self.assertEqual("image", result["attachments"][0]["kind"])
+        self.assertEqual("/kb/api/attachments/rec1/质检报告/0",
+                         result["attachments"][0]["url"])
+        self.assertEqual("报告.pdf",
+                         svc_module.attachment_display_name("报告.pdf"))
+        self.assertEqual("附件2", svc_module.attachment_display_name(None, 1))
+
+    def test_non_image_asset_keeps_download_link(self):
+        row = dict(self._row(), attachments={"素材包": [{"name": "金钻素材.zip"}]})
+        conn = _SvcConn([[row]])
+        service = svc_module.KbWebService(
+            connection_factory=lambda: conn, log=lambda _: None)
+        result = service.answer("u1", "金钻素材包", history_messages=[])
+        self.assertIn("点击下方附件即可下载", result["reply"])
+        self.assertEqual("file", result["attachments"][0]["kind"])
+        self.assertEqual("金钻素材.zip", result["attachments"][0]["name"])
+
     def test_failure_degrades_gracefully(self):
         class _BrokenConn:
             def cursor(self):

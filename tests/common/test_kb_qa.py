@@ -299,6 +299,31 @@ class ProductQueryTests(unittest.TestCase):
         rows = find_products(conn, "习酒窖藏1998新包装")
         self.assertEqual(1, len(rows))
 
+    def test_fuzzy_fallback_uses_attachment_metadata_for_packaging(self):
+        single = "53°500ml*6习酒金钻(2023)"
+        double = "53°500ml*2*3习酒金钻(双瓶礼盒)"
+        other = "53°500ml*6习酒醇钻"
+        conn = _FakeConn([
+            [], [], [],
+            [], [], [],
+            [
+                {"name": double, "attachments": json.dumps(
+                    {"质检报告": [{"name": "金钻习酒礼盒（双瓶装）_00.png"}]},
+                    ensure_ascii=False)},
+                {"name": other, "attachments": json.dumps(
+                    {"尺寸重量": [{"name": "产品规格-金钻习酒（单瓶）.jpg"}]},
+                    ensure_ascii=False)},
+                {"name": single, "attachments": json.dumps(
+                    {"素材包": [{"name": "金钻单瓶素材.zip"}]},
+                    ensure_ascii=False)},
+            ],
+            [_product_row(name=single)],
+        ])
+        rows = find_products(conn, "金钻单瓶")
+        self.assertEqual([single], [row["name"] for row in rows])
+        # 双瓶与低分醇钻均不得混入候选；只保留覆盖率 1.0 的最高分组。
+        self.assertEqual((single,), conn.cursor_instance.executed[-1][1])
+
     def test_fuzzy_fallback_rejects_unrelated(self):
         # 无关词零重合，不进结果、也不发第二次查询（宁缺毋滥）
         conn = _FakeConn([
