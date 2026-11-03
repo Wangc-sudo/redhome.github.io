@@ -14,6 +14,7 @@ from common.price_agent.service import (
     complete_job,
     fail_job,
     heartbeat_job,
+    report_auth_expired,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,18 @@ def register_price_agent_routes(app, *, db_connector, config_source, token_hash)
         try:
             config, digest = config_source.get_config()
             return {"status": "ok", "config": config, "config_hash": digest}
+        except Exception as exc:
+            raise failure(exc)
+
+    @app.post(_PREFIX + "/auth-expired")
+    async def auth_expired(request: Request):
+        require_agent(request)
+        try:
+            payload = await body(request)
+            config, _ = config_source.get_config()
+            with db_connector() as connection:
+                result = report_auth_expired(connection, config, payload)
+            return JSONResponse(result)
         except Exception as exc:
             raise failure(exc)
 

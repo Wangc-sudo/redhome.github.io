@@ -146,6 +146,7 @@ Nacos 只保存非敏感配置；凭据通过服务器 env 或 Windows ACL 保�
 
 经 `https://dt.yyhlzj.com/price-agent/api/` 反代至 ops-web 内部接口：
 
+- `POST /auth-expired`：独立登录态巡检确认失效后上报，按巡检窗口幂等入队群告警，不创建采集 job。
 - `POST /jobs/claim`：原子领取任务，返回 job、一次性租约明文、配置快照和哈希。
 - `POST /jobs/{job_id}/heartbeat`：校验 agent/租约并上报主体、页码、登录态和会话版本。
 - `POST /jobs/{job_id}/complete`：提交主体汇总、业务行和文件索引，同时携带 agent/租约。
@@ -234,6 +235,7 @@ Windows agent 不使用 Docker，依赖独立固定在 `windows_agent/maochao/re
 3. job 进入 `waiting_login`，暂停领取新任务但继续心跳；以 job/agent/会话版本发送一次告警。`login_wait_seconds` 到期后由 finalize 标记 `login_expired`。
 4. 运维在同一可见 Chrome 完成登录和滑块，Cookie 自动写回原 Profile，不人工复制粘贴。agent 不刷新、不抢焦点，检测到业务 frame 恢复后递增 `session_version`。
 5. 原 job 从头重采，保证失效前后数据不混行；无需修改 Nacos 或重启云端。
+6. 常驻 agent 每天北京时间 6:00、20:00 增加独立登录态巡检（窗口内去重），只检查现有页面，不刷新、不切换主体、不执行全量采集；正常不发群消息，确认失效才通过 `/auth-expired` 告警。人工恢复后无需更新配置，后续任务自动使用新登录态。
 
 原始 Cookie 不得进入 Nacos、Git、MySQL、日志、CSV/JSON、ZOS、API 或告警。元数据文件也只包含 `profile_id/session_version/auth_state/auth_checked_at`。
 

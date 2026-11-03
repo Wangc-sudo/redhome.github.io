@@ -53,6 +53,9 @@ class PriceAgentClient:
     def claim(self, agent_id):
         return self._request("POST", "/jobs/claim", {"agent_id": agent_id})
 
+    def report_auth_expired(self, payload):
+        return self._request("POST", "/auth-expired", payload)
+
     def heartbeat(self, job_id, payload):
         return self._request("POST", f"/jobs/{urllib.parse.quote(job_id, safe='')}/heartbeat", payload)
 

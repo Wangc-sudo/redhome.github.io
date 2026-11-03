@@ -375,6 +375,34 @@ def _enqueue_alert(connection, config, job_id, title, body, stamp, suffix):
     )
 
 
+def report_auth_expired(connection, config, payload, *, now=None):
+    """独立登录态巡检：不创建采集 job，失效时仅入队一条群告警。"""
+    stamp = now or utc_now()
+    agent_id = _text(payload.get("agent_id"), "agent_id", max_length=128, required=True)
+    session_version = _integer(
+        payload.get("session_version", 0), "session_version", maximum=1000000,
+    )
+    checked_at = _captured_at(payload.get("checked_at"))
+    checked_at_beijing = checked_at + timedelta(hours=8)
+    suffix = (
+        f"auth-check:{agent_id}:{session_version}:"
+        f"{checked_at_beijing.strftime('%Y%m%d%H%M')}"
+    )
+    body = (
+        "### 猫超登录态巡检：需要人工登录\n\n"
+        f"- 巡检时间：{checked_at_beijing.strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
+        f"- agent：`{agent_id}`\n\n"
+        "请到 Windows 可见 Chrome 完成猫超登录和滑块验证；恢复后无需更新配置，"
+        "后续任务会自动使用新登录态。若失效发生在任务中，原任务会从头重采。\n"
+        "原始 Cookie 仅保留在原 Chrome Profile，不会上传或写入告警。"
+    )
+    with transaction(connection):
+        notified = _enqueue_alert(
+            connection, config, agent_id, "猫超登录态失效", body, stamp, suffix,
+        )
+    return {"status": "login_required", "notified": notified}
+
+
 def heartbeat_job(connection, job_id, payload, *, now=None):
     stamp = now or utc_now()
     with transaction(connection):
