@@ -506,14 +506,14 @@ def complete_job(connection, job_id, payload, *, now=None):
             for row in rows:
                 cursor.execute(
                     "INSERT INTO `fact_maochao_price_snapshot` (`job_id`, `row_uid`, "
-                    "`business_date`, `subject_key`, `item_id`, `sku_id`, `product`, "
+                    "`business_date`, `subject_key`, `dept_level2`, `item_id`, `sku_id`, `product`, "
                     "`product_spec`, `market_source`, `market_product`, `market_spec`, "
                     "`market_price`, `current_price`, `suggested_price`, `price_gap`, "
                     "`page_status`, `page_number`, `row_index`, `captured_at`, `payload_hash`) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                    "%s, %s, %s, %s, %s, %s)",
+                    "%s, %s, %s, %s, %s, %s, %s)",
                     (job_id, row["row_uid"], row["business_date"], row["subject_key"],
-                     row["item_id"], row["sku_id"], row["product"], row["product_spec"],
+                     row["dept_level2"], row["item_id"], row["sku_id"], row["product"], row["product_spec"],
                      row["market_source"], row["market_product"], row["market_spec"],
                      row["market_price"], row["current_price"], row["suggested_price"],
                      row["price_gap"], row["page_status"], row["page_number"],

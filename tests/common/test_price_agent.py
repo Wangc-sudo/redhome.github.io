@@ -269,6 +269,7 @@ class StateMachineTests(unittest.TestCase):
         first = complete_job(connection, JOB_ID, payload, now=NOW)
         self.assertEqual("completed", first["status"])
         self.assertEqual(1, len(connection.facts))
+        self.assertEqual("代销", connection.facts[0][4])
         self.assertEqual(1, len(connection.artifacts))
         second = complete_job(connection, JOB_ID, payload, now=NOW)
         self.assertTrue(second["idempotent"])
