@@ -45,6 +45,7 @@ from common.kb_qa.llm import (
 from common.kb_qa.products import (
     HELP_TEXT,
     find_products,
+    render_case_weight_answer,
     render_clarify,
     render_filter_answer,
     render_not_found,
@@ -1180,11 +1181,15 @@ class KbStreamHandler(dingtalk_stream.ChatbotHandler):
     # ------------------------------------------------------------------
 
     def _render_products(self, question, rows, intent, history=None):
-        """命中行后的渲染：有 LLM 先试口语化答案，失败/无 LLM 降 P1 模板。
+        """命中行后的渲染：确定性计算优先，其余由 LLM 口语化、失败降模板。
 
         ``_answer`` 已拦下「多款 PARAM 反问」，这里只可能是单款 PARAM 或
         FILTER 列表，故降级分支与 P1 完全一致（多行列表 / 单行参数卡）。
         """
+        if len(rows) == 1:
+            answer = render_case_weight_answer(question, rows[0])
+            if answer:
+                return answer
         if self._llm is not None:
             try:
                 answer = render_product_answer(self._llm, question, rows,

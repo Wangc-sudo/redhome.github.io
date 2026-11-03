@@ -315,6 +315,24 @@ class ProductQueryTests(unittest.TestCase):
         self.assertIn("【商品资料】", text)
         self.assertNotIn("礼袋规格", text)
 
+    def test_render_case_weight_answer_is_conditional_estimate(self):
+        row = _product_row(weight_kg="0.400", box_qty=6)
+        text = products.render_case_weight_answer("习酒知交龙年，一箱多重", row)
+        self.assertIn("若重量 0.4kg 指单瓶重量", text)
+        self.assertIn("0.4 × 6 = 2.4kg", text)
+        self.assertIn("不含包装", text)
+        self.assertIn("整箱毛重", text)
+        self.assertIn("【商品资料】", text)
+
+    def test_case_weight_answer_requires_target_and_complete_fields(self):
+        row = _product_row(weight_kg="0.400", box_qty=6)
+        self.assertIsNone(products.render_case_weight_answer("单瓶多重", row))
+        self.assertIsNone(products.render_case_weight_answer("箱规多少", row))
+        self.assertIsNone(products.render_case_weight_answer(
+            "一箱多重", _product_row(weight_kg=None)))
+        self.assertIsNone(products.render_case_weight_answer(
+            "一箱多重", _product_row(box_qty=None)))
+
     def test_render_filter_and_clarify(self):
         rows = [_product_row(), _product_row(record_id="rec2", name="习酒窖藏1988")]
         self.assertIn("匹配到 2 款", render_filter_answer(rows, "习酒"))
@@ -1041,6 +1059,20 @@ class HandlerP2Tests(unittest.TestCase):
         self.assertEqual(PRODUCT_PARAM, intent)
         self.assertEqual("rec1", matched)
         self.assertIn("箱规是 6 瓶", reply)
+
+    def test_case_weight_uses_deterministic_answer_without_llm(self):
+        row = _product_row(name="53°500ml*6习酒知交酒(知交龙年)",
+                           weight_kg="0.400", box_qty=6)
+        llm = _ScriptedLlm("不该被调用")
+        handler, _ = self._handler([[row]], llm=llm)
+        reply, intent, matched = handler._answer(
+            handler._connection_factory(), "习酒知交龙年，一箱多重"
+        )
+        self.assertEqual(PRODUCT_PARAM, intent)
+        self.assertEqual("rec1", matched)
+        self.assertIn("0.4 × 6 = 2.4kg", reply)
+        self.assertIn("资料未注明整箱毛重", reply)
+        self.assertEqual([], llm.prompts)
 
     def test_product_llm_failure_falls_back_to_template(self):
         llm = _ScriptedLlm(LlmError("model_not_activated"))
