@@ -90,7 +90,7 @@ class PriceAgentMySQLIntegrationTests(unittest.TestCase):
             ],
             "rows": [{
                 "business_date": "2026-11-03", "subject_key": "110183794",
-                "item_id": "", "sku_id": "", "product": "集成测试商品",
+                "dept_level2": "代销", "item_id": "", "sku_id": "", "product": "集成测试商品",
                 "product_spec": "500ml", "market_source": "京东",
                 "market_product": "同款", "market_spec": "500ml",
                 "market_price": "100", "current_price": "101", "suggested_price": "99",

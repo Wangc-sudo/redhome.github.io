@@ -11,6 +11,7 @@ from common.price_agent.config import (
 )
 from common.price_agent.service import (
     PriceAgentProtocolError,
+    _result_message,
     claim_job,
     complete_job,
     dispatch_job,
@@ -39,6 +40,7 @@ def _row(**changes):
     value = {
         "business_date": "2026-11-03",
         "subject_key": "110183794",
+        "dept_level2": "代销",
         "item_id": "",
         "sku_id": "",
         "product": "习酒窖藏1988",
@@ -252,6 +254,14 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(_config()["subjects"], claimed["config"]["subjects"])
         self.assertEqual(config_hash(_config()), claimed["config_hash"])
         self.assertEqual(900, claimed["config"]["job_lease_seconds"])
+
+    def test_result_table_contains_department_status_and_price_gap(self):
+        rows, _, _ = validate_completion(_payload(), _config(), JOB_ID)
+        row = rows[0]
+        self.assertEqual("代销", row["dept_level2"])
+        message = _result_message(JOB_ID, [row], 10)
+        self.assertIn("| 商品 | 当前价 | 建议价 | 差额 | 状态 | 二级部门 |", message)
+        self.assertIn("| 101.0000 | 99.0000 | 1.0000 | 跟价成功 | 代销 |", message)
 
     def test_complete_is_atomic_and_repeat_returns_original(self):
         connection = _Connection(_running_job())

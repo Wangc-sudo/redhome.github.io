@@ -22,7 +22,7 @@ DEFAULT_PAGE_URL = (
     "ProductPriceForce%3FbizTypeShop%3DMAOCHAO"
 )
 CSV_FIELDS = (
-    "business_date", "subject_key", "item_id", "sku_id", "product", "product_spec",
+    "business_date", "subject_key", "dept_level2", "item_id", "sku_id", "product", "product_spec",
     "current_price", "market_price", "suggested_price", "price_gap", "page_status",
     "market_source", "market_product", "market_spec", "page_number", "row_index",
     "captured_at",
@@ -284,6 +284,10 @@ class MaochaoCollector:
                     try:
                         self._switch_subject(page, subject, timeout_ms)
                         subject_rows, summary = self._capture_subject(page, subject, config, progress)
+                        dept_level2 = subject.rsplit("-", 1)[-1].strip() if "-" in subject else ""
+                        for row in subject_rows:
+                            row["dept_level2"] = dept_level2
+                        summary["dept_level2"] = dept_level2
                         rows.extend(subject_rows)
                         summaries.append(summary)
                         break

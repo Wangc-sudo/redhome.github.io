@@ -117,6 +117,7 @@ def normalize_snapshot_row(row, config):
     normalized = {
         "business_date": _date(row.get("business_date")),
         "subject_key": subject,
+        "dept_level2": _text(row.get("dept_level2"), "dept_level2", max_length=128),
         "item_id": _text(row.get("item_id"), "item_id", max_length=64),
         "sku_id": _text(row.get("sku_id", row.get("sku")), "sku_id", max_length=64),
         "product": _text(row.get("product"), "product", max_length=512),
@@ -202,6 +203,7 @@ def validate_completion(payload, config, job_id):
             raise PriceAgentProtocolError("subject_incomplete")
         by_subject[key] = {
             "subject_key": key,
+            "dept_level2": _text(summary.get("dept_level2"), "dept_level2", max_length=128),
             "status": "completed",
             "row_count": row_count,
             "pages_captured": _integer(
@@ -436,14 +438,17 @@ def heartbeat_job(connection, job_id, payload, *, now=None):
 def _result_message(job_id, rows, limit):
     lines = [
         "### 猫超价格竞争力结果变化", "", f"- job：`{job_id}`", f"- 本轮：{len(rows)} 行", "",
-        "| 商品 | 当前价 | 市场价 | 建议价 |", "|---|---:|---:|---:|",
+        "| 商品 | 当前价 | 建议价 | 差额 | 状态 | 二级部门 |",
+        "|---|---:|---:|---:|---|---|",
     ]
     for row in rows[:limit]:
         product = (row["product"] or row["item_id"] or row["row_uid"][:8])
         product = " ".join(product.replace("|", "/").split())
+        dept = " ".join((row.get("dept_level2") or "—").replace("|", "/").split())
         lines.append(
-            f"| {product[:60]} | {row['current_price'] or '—'} | "
-            f"{row['market_price'] or '—'} | {row['suggested_price'] or '—'} |"
+            f"| {product[:50]} | {row['current_price'] or '—'} | "
+            f"{row['suggested_price'] or '—'} | {row['price_gap'] or '—'} | "
+            f"{row['page_status'] or '—'} | {dept} |"
         )
     if len(rows) > limit:
         lines.append(f"\n其余 {len(rows) - limit} 行按 job_id 查询。")

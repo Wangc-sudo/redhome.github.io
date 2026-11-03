@@ -102,3 +102,10 @@ _ARTIFACT_DDL = (
 
 def price_agent_ddl_statements() -> tuple[str, ...]:
     return (_JOB_DDL, _FACT_DDL, _ARTIFACT_DDL)
+
+
+def price_agent_dept_level2_ddl_statements() -> tuple[str, ...]:
+    return (
+        "ALTER TABLE `fact_maochao_price_snapshot` "
+        "ADD COLUMN `dept_level2` VARCHAR(128) NOT NULL DEFAULT '' AFTER `subject_key`",
+    )
