@@ -435,10 +435,16 @@ def heartbeat_job(connection, job_id, payload, *, now=None):
         return {"status": status, "action": action, "lease_expires_at": lease_expires.isoformat() + "Z"}
 
 
+def _price_yuan(value):
+    if not value:
+        return "—"
+    return format(Decimal(value).quantize(Decimal("0.01")), "f")
+
+
 def _result_message(job_id, rows, limit):
     lines = [
         "### 猫超价格竞争力结果变化", "", f"- job：`{job_id}`", f"- 本轮：{len(rows)} 行", "",
-        "| 商品 | 当前价 | 建议价 | 差额 | 状态 | 二级部门 |",
+        "| 商品 | 当前价(元) | 建议价(元) | 差额(元) | 状态 | 二级部门 |",
         "|---|---:|---:|---:|---|---|",
     ]
     for row in rows[:limit]:
@@ -446,8 +452,8 @@ def _result_message(job_id, rows, limit):
         product = " ".join(product.replace("|", "/").split())
         dept = " ".join((row.get("dept_level2") or "—").replace("|", "/").split())
         lines.append(
-            f"| {product[:50]} | {row['current_price'] or '—'} | "
-            f"{row['suggested_price'] or '—'} | {row['price_gap'] or '—'} | "
+            f"| {product[:50]} | {_price_yuan(row['current_price'])} | "
+            f"{_price_yuan(row['suggested_price'])} | {_price_yuan(row['price_gap'])} | "
             f"{row['page_status'] or '—'} | {dept} |"
         )
     if len(rows) > limit:

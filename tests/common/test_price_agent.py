@@ -260,8 +260,9 @@ class StateMachineTests(unittest.TestCase):
         row = rows[0]
         self.assertEqual("代销", row["dept_level2"])
         message = _result_message(JOB_ID, [row], 10)
-        self.assertIn("| 商品 | 当前价 | 建议价 | 差额 | 状态 | 二级部门 |", message)
-        self.assertIn("| 101.0000 | 99.0000 | 1.0000 | 跟价成功 | 代销 |", message)
+        self.assertIn("| 商品 | 当前价(元) | 建议价(元) | 差额(元) | 状态 | 二级部门 |", message)
+        self.assertIn("| 101.00 | 99.00 | 1.00 | 跟价成功 | 代销 |", message)
+        self.assertNotIn("101.0000", message)
 
     def test_complete_is_atomic_and_repeat_returns_original(self):
         connection = _Connection(_running_job())
