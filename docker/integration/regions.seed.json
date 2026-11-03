@@ -127,6 +127,21 @@
       "broadcastExclude": [],
       "leaderboardUrl": "<榜单页面地址>"
     },
+    "maochao": {
+      "_备注": "猫超-自动比价功能群（2026-11-03 用户指定）：价格巡检结果、异常与登录失效告警出口。非日报业务区域，无催办和榜单；真实群 CID 由运维发布 Nacos。",
+      "display": "猫超价格竞争力",
+      "tableUrl": "<无日报表：填群公告地址>",
+      "robotCode": "<机器人robotCode>",
+      "openConversationId": "<群openConversationId>",
+      "aliases": {},
+      "ccUserIds": [],
+      "remindHour": 18,
+      "checkHour": 20,
+      "deptOrder": ["猫超"],
+      "deptLabel": {},
+      "broadcastExclude": [],
+      "leaderboardUrl": ""
+    },
     "test": {
       "_备注": "测试区（2026-10-19 用户裁决）：承载播报改投——任何区域在画布开「播报改投测试区」后，该区群消息+DING 全部改投本区群（功能验证群），消息带 [测试→原区域] 前缀。非业务区域：无日报表/无催办/无榜单。robotCode/openConversationId 真值=运维发布 Nacos region-test.yaml（功能验证群，机器人 dingnlvj7z51xcoafbjl 已在群内）。",
       "display": "测试区",

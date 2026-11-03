@@ -61,7 +61,7 @@ class ShippedRegionSeedTests(unittest.TestCase):
         self.assertEqual(
             list(configs),
             ["hangzhou", "vanke", "shaoxing", "junpin", "qudao",
-             "offline_all", "ops", "test"],
+             "offline_all", "ops", "maochao", "test"],
         )
         cfg = configs["hangzhou"]
         self.assertEqual(cfg.display, "杭州")
