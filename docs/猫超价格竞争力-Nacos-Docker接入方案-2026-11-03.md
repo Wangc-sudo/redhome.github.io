@@ -174,7 +174,7 @@ Nacos 只保存非敏感配置；凭据通过服务器 env 或 Windows ACL 保�
    - 调度/手动来源、状态、优先级、租约哈希、心跳、attempt、配置快照/哈希、run_history_id、错误。
    - `auth_state/auth_checked_at/login_required_since/session_version` 只记录登录会话元数据，不记录 Cookie。
 2. `fact_maochao_price_snapshot`
-   - 业务日期、主体、ItemID、SkuID、商品、规格、市场来源、市场商品、市场价、当前价、建议价、价差、页面状态、采集时间。
+   - 业务日期、主体、二级部门、ItemID、SkuID、商品、规格、市场来源、市场商品、市场价、当前价、建议价、价差、页面状态、采集时间。二级部门取主体选择器完整名称的最后一段，不用主体 ID 代替部门名。
 3. `pd_price_agent_artifact`
    - 任务、主体、类型（页面截图/行证据/JSON/CSV）、ZOS bucket/key、SHA256、大小、上传状态。
 

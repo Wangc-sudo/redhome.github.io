@@ -45,7 +45,10 @@ from common.public_data.ops_credential import (
 )
 from common.public_data.ops_token import ops_web_token_ddl_statements
 from common.public_data.phone_registry import phone_registry_ddl_statements
-from common.price_agent.schema import price_agent_ddl_statements
+from common.price_agent.schema import (
+    price_agent_ddl_statements,
+    price_agent_dept_level2_ddl_statements,
+)
 from common.public_data.mart_extract_schema import (
     _AGG_OFFLINE_DAILY_DDL,
     _CHANNEL_SALES_ROBOT_INBOX_DDL,
@@ -888,6 +891,11 @@ _MIGRATIONS = (
         "mart-ops-price-agent-v1",
         "mart",
         price_agent_ddl_statements(),
+    ),
+    (
+        "mart-ops-price-agent-dept2-v2",
+        "mart",
+        price_agent_dept_level2_ddl_statements(),
     ),
 )
 
