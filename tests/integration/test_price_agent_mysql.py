@@ -124,10 +124,13 @@ class PriceAgentMySQLIntegrationTests(unittest.TestCase):
         self.assertTrue(second["idempotent"])
         with self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT COUNT(*) AS amount FROM `fact_maochao_price_snapshot` WHERE `job_id` = %s",
+                "SELECT COUNT(*) AS amount, MAX(`dept_level2`) AS dept_level2 "
+                "FROM `fact_maochao_price_snapshot` WHERE `job_id` = %s",
                 (job_id,),
             )
-            self.assertEqual(1, cursor.fetchone()["amount"])
+            fact = cursor.fetchone()
+            self.assertEqual(1, fact["amount"])
+            self.assertEqual("代销", fact["dept_level2"])
             cursor.execute(
                 "SELECT COUNT(*) AS amount FROM `robot_outbox` WHERE `dedupe_key` LIKE %s",
                 (f"%{job_id}%",),
