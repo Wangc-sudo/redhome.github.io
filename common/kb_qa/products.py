@@ -82,29 +82,34 @@ def _bigrams(text):
 
 
 def _search_fuzzy(conn, kw, limit):
-    """字符 bigram 相似度兜底：对错别字与口语多字残留容错。
+    """字符 bigram 相似度兜底：品名 + 附件元数据联合容错。
 
-    score = max(Dice, 关键词覆盖率)——Dice 治单字替换（两边长度相近时
-    重合度高）；关键词覆盖率（交集中 bigram 数 / 关键词 bigram 数）治
-    「关键词是品名片段或带少量残留」场景：关键词的 bigram 基本都能在
-    品名里找到 = 用户基本说对了名字。全表 825 行纯 Python 毫秒级。
+    score = max(Dice, 关键词覆盖率)——Dice 治单字替换；关键词覆盖率治
+    品名片段/少量残留。附件名也参与匹配：「金钻单瓶」的单瓶标识只在
+    「产品规格-金钻习酒（单瓶）.jpg」中，只搜品名会漏掉真正的单瓶款。
+    全表 825 行纯 Python 毫秒级。
     """
     kw_grams = _bigrams(kw)
     if not kw_grams:
         return []
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT `name` FROM `kb_products`")
-        names = [row["name"] for row in cursor.fetchall()]
+        cursor.execute("SELECT `name`, `attachments` FROM `kb_products`")
+        entries = cursor.fetchall()
         scored = []
-        for name in names:
-            name_grams = _bigrams(name)
-            if not name_grams:
+        for entry in entries:
+            name = entry["name"]
+            attachments = entry.get("attachments") or ""
+            if isinstance(attachments, dict):
+                attachments = json.dumps(attachments, ensure_ascii=False)
+            search_text = f"{name} {attachments}"
+            text_grams = _bigrams(search_text)
+            if not text_grams:
                 continue
-            overlap = len(kw_grams & name_grams)
+            overlap = len(kw_grams & text_grams)
             if not overlap:
                 continue
-            dice = 2 * overlap / (len(kw_grams) + len(name_grams))
+            dice = 2 * overlap / (len(kw_grams) + len(text_grams))
             kw_coverage = overlap / len(kw_grams)
             score = max(dice, kw_coverage)
             if score >= _FUZZY_MIN_SCORE:
@@ -112,7 +117,10 @@ def _search_fuzzy(conn, kw, limit):
         if not scored:
             return []
         scored.sort(reverse=True)
-        top_names = [name for _, name in scored[:limit]]
+        # 只保留最高分组：附件元数据扩大召回面后，低分同名/共享素材款
+        # 不能混入 clarify（实测「金钻单瓶」会带到 0.667 的醇钻）。
+        top_score = scored[0][0]
+        top_names = [name for score, name in scored if score == top_score][:limit]
         placeholders = ",".join(["%s"] * len(top_names))
         cursor.execute(
             f"SELECT * FROM `kb_products` WHERE `name` IN ({placeholders})",

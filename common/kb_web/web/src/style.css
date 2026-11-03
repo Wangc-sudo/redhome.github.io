@@ -244,6 +244,17 @@ body {
   background: #f0f2f5; color: #3b5bff; font-size: 13px;
   text-decoration: none;
 }
+.attach-image {
+  display: block; width: min(100%, 420px); color: #626975;
+  text-decoration: none;
+}
+.attach-image img {
+  display: block; width: 100%; max-height: 560px; object-fit: contain;
+  background: #fff; border: 1px solid #e5e9f0; border-radius: 10px;
+}
+.attach-image-name {
+  display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere;
+}
 
 .msg-meta {
   margin-top: 6px; font-size: 11px; color: #b3b8bf; text-align: right;

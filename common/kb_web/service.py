@@ -12,11 +12,13 @@ Web 通道只是新调用方——规则路由/商品/手册/agent/token 统计�
 agent_runner，不存共享可变状态。
 """
 
+import re
 import time
 import uuid
 
 from common.kb_qa.context import DEFAULT_MAX_TURNS
 from common.kb_qa.focus import parse_focus
+from common.kb_qa.media import is_image_name
 from common.kb_qa.skills import business_tool_names
 
 
@@ -29,6 +31,22 @@ HISTORY_TTL_SECONDS = 45 * 60
 #: 噪声轮意图（与群内 record 的 CHITCHAT 过滤同口径）：不进历史，
 #: 避免「你好/你能做什么」稀释有限轮次窗口、白白烧 token。
 _NOISE_INTENTS = frozenset(("CHITCHAT", "HELP"))
+
+_CSPACE_PREFIX_RE = re.compile(
+    r"^cspace_\d+_\d+_(?P<name>.+)$", re.IGNORECASE)
+_STORAGE_HASH_RE = re.compile(r"_[0-9a-f]{32}$", re.IGNORECASE)
+_GROUP_ASSET_PENDING = "文件直发功能接入中，请先到 AI 表「产品资料」对应行下载："
+_WEB_ASSET_DOWNLOAD = "点击下方附件即可下载："
+
+
+def attachment_display_name(name, index=0):
+    """附件链接显示名：剥离内部 cspace 前缀与哈希，保留下载元数据不变。"""
+    cleaned = (name or "").strip()
+    match = _CSPACE_PREFIX_RE.match(cleaned)
+    if match:
+        cleaned = _STORAGE_HASH_RE.sub("", match.group("name")).strip()
+    return cleaned or f"附件{index + 1}"
+
 
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -204,12 +222,22 @@ class KbWebService:
         attachments = []
         asset = meta.get("asset")
         if asset:
+            reply = (reply or "").replace(
+                _GROUP_ASSET_PENDING, _WEB_ASSET_DOWNLOAD)
             for index, name in enumerate(asset.get("names") or []):
+                display_name = attachment_display_name(name, index)
                 attachments.append({
-                    "name": name or f"附件{index + 1}",
+                    "name": display_name,
+                    "kind": "image" if is_image_name(display_name) else "file",
                     "url": (f"/kb/api/attachments/{asset['record_id']}"
                             f"/{asset['field']}/{index}"),
                 })
+            if attachments and all(a["kind"] == "image" for a in attachments):
+                caption = ("证书图片如下，点击可查看原图："
+                           if any(word in asset["field"] for word in
+                                  ("质检", "检测", "证书", "报告"))
+                           else "图片如下，点击可查看原图：")
+                reply = reply.replace(_WEB_ASSET_DOWNLOAD, caption)
         export_snapshot_id = None
         if audit:
             export_snapshot_id = self._write_audit(

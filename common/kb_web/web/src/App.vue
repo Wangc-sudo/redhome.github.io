@@ -78,8 +78,15 @@
             <template v-else>
               <div class="msg-md" v-html="renderMarkdown(m.content)"></div>
               <div v-if="m.attachments && m.attachments.length" class="attach-list">
-                <a v-for="(a, j) in m.attachments" :key="j" class="attach-chip"
-                   :href="a.url" target="_blank" rel="noopener">📎 {{ a.name }}</a>
+                <template v-for="(a, j) in m.attachments" :key="j">
+                  <a v-if="a.kind === 'image'" class="attach-image"
+                     :href="a.url" target="_blank" rel="noopener">
+                    <img :src="a.url" :alt="a.name" loading="lazy">
+                    <span class="attach-image-name">{{ a.name }}</span>
+                  </a>
+                  <a v-else class="attach-chip"
+                     :href="a.url" target="_blank" rel="noopener">📎 {{ a.name }}</a>
+                </template>
               </div>
               <div class="msg-meta">
                 <span v-if="m.meta && m.meta.latency_ms != null">
