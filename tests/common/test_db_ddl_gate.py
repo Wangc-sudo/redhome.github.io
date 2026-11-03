@@ -50,6 +50,8 @@ _DDL_WHITELIST = frozenset(
         # kb_products / kb_media_cache / kb_doc_chunks / kb_qa_audit；
         # 被 live_migrations 引用，同上引用关系）
         "common/kb_qa/schema.py",
+        # 猫超价格 agent schema（mart-ops-price-agent-v1 的 DDL 源）
+        "common/price_agent/schema.py",
         # 查询快照与 XLSX 导出任务 schema 定义模块
         # （mart-ops-kb-query-snapshot-v1 / mart-ops-kb-export-v1 的 DDL 源）
         "common/kb_qa/export_schema.py",

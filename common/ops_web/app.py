@@ -1336,7 +1336,8 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
                fleet_source=None, config_source=None,
                config_publisher=None, config_deleter=None,
                corp_id=None, agent_id=None, auth_disabled=False,
-               data_quality_source_connector=None) -> FastAPI:
+               data_quality_source_connector=None,
+               price_agent_config_source=None, price_agent_token_hash=None) -> FastAPI:
     """装配 ops-web；``session_secret`` 必填（ops-web 没有开放模式）。
 
     依赖全部可注入，测试不需要真实库与网络：``db_connector`` 喂
@@ -4630,6 +4631,16 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         ),
     )
 
+    # -- 猫超 Windows 机器 API（独立 Bearer 认证，GET 也不走匿名读直通）---
+    if price_agent_config_source is not None:
+        from common.price_agent.api import register_price_agent_routes
+        register_price_agent_routes(
+            app,
+            db_connector=db_connector,
+            config_source=price_agent_config_source,
+            token_hash=price_agent_token_hash,
+        )
+
     # -- SPA 单壳 catch-all（注册在最后：未匹配 GET 返回壳；API 等前缀 404）-
     @app.get("/{path:path}")
     def spa_fallback(request: Request, path: str):
@@ -4664,6 +4675,7 @@ def main():
             build_config_source,
         )
         from common.public_data.scheduler import build_fleet_source
+        from common.price_agent.config import build_config_source as build_price_agent_config
 
         settings = load_settings()
         session_secret = os.environ.get("BI_WEB_SESSION_SECRET") or None
@@ -4710,6 +4722,10 @@ def main():
             corp_id=corp_id,
             auth_disabled=auth_disabled,
             agent_id=agent_id,
+            price_agent_config_source=build_price_agent_config(),
+            price_agent_token_hash=(
+                os.environ.get("PRICE_AGENT_TOKEN_SHA256") or ""
+            ).strip().lower() or None,
         )
     except Exception as exc:
         print(f"ops-web startup failed: invalid configuration ({type(exc).__name__})")

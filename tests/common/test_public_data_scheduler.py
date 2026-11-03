@@ -1200,6 +1200,16 @@ def test_cron_fire_records_history_start_and_finish():
     assert history.finished == [(1, 0)]
 
 
+def test_price_dispatch_receives_run_history_and_trigger_context():
+    history = FakeRunHistoryStore()
+    scheduler = _history_scheduler(
+        {"price-maochao-dispatch": {"schedule": "*/10 * * * *"}}, history
+    )
+    scheduler.tick()
+    argv = scheduler._runner.calls[0][1]
+    assert argv[-4:] == ["--trigger-source", "cron", "--run-history-id", "1"]
+
+
 def test_nonzero_exit_recorded_as_failed_history():
     history = FakeRunHistoryStore()
     scheduler = _history_scheduler(

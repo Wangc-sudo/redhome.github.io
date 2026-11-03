@@ -57,6 +57,8 @@ SERVICE_CATEGORIES = {
     "scheduler": "平台",
     "ops-web": "平台",
     "fleet-audit": "平台",
+    "price-maochao-dispatch": "同步",
+    "price-maochao-finalize": "加工",
 }
 
 #: 家族前缀归类（新区域服务注册即自动归类，无需改代码）。
