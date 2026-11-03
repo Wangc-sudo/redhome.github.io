@@ -55,7 +55,8 @@ cd "$REPO_DIR"
 
 git fetch --quiet "$REMOTE" "$BRANCH"
 LOCAL_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git rev-parse "$REMOTE/$BRANCH")"
+# REMOTE 既支持具名远端，也支持带凭据的私有仓 URL；两者统一读 FETCH_HEAD。
+REMOTE_SHA="$(git rev-parse FETCH_HEAD)"
 
 if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
   exit 0  # 无变更，静默（不打日志噪音）
