@@ -1,7 +1,11 @@
 """Scheduler unit tests: no Nacos, MySQL or subprocesses -- all fakes."""
 
+import json
 import logging
+import tempfile
+import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from dataclasses import dataclass
 
@@ -14,6 +18,7 @@ from common.public_data.scheduler import (
     build_argv,
     build_child_env,
     command_spec,
+    filter_service_ids,
     has_command,
 )
 
@@ -997,6 +1002,38 @@ def test_nacos_service_ids_without_server_returns_empty():
     assert _nacos_service_ids({"PUBLIC_DATA_NACOS_SERVER": ""}) == ()
 
 
+# -- 发布线任务所有权（线上渠道独立 scheduler） -------------------------------
+
+class SchedulerOwnershipTests(unittest.TestCase):
+    def test_service_scope_filters_include_and_exclude_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "release.json"
+            manifest.write_text(json.dumps({
+                "scheduler_services": ["sync-channel-sales", "extract-channel"],
+            }), encoding="utf-8")
+            fleet = ("sync-channel-sales", "extract-channel", "sync-wdt")
+            self.assertEqual(filter_service_ids(fleet, {
+                "SCHEDULER_SERVICE_INCLUDE_FILE": str(manifest),
+            }), ("sync-channel-sales", "extract-channel"))
+            self.assertEqual(filter_service_ids(fleet, {
+                "SCHEDULER_SERVICE_EXCLUDE_FILE": str(manifest),
+            }), ("sync-wdt",))
+
+    def test_service_scope_rejects_invalid_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "release.json"
+            manifest.write_text('{"scheduler_services": "sync-channel-sales"}', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "scheduler_services 非法"):
+                filter_service_ids(("sync-channel-sales",), {
+                    "SCHEDULER_SERVICE_INCLUDE_FILE": str(manifest),
+                })
+            manifest.write_text('{"scheduler_services": []}', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "scheduler_services 非法"):
+                filter_service_ids(("sync-channel-sales",), {
+                    "SCHEDULER_SERVICE_INCLUDE_FILE": str(manifest),
+                })
+
+
 # -- 「立即运行一次」通道（pd_ops_run_request，ops-web 写入） ------------------
 
 @dataclass
@@ -1055,6 +1092,22 @@ def test_run_once_drains_pending_and_fires():
     assert store.finished == [(1, 0)]
     # 同步线不附 --force（幂等由数据层承载）
     assert "--force" not in scheduler._runner.calls[0][1]
+
+
+class SchedulerRunOnceOwnershipTests(unittest.TestCase):
+    def test_run_once_leaves_other_release_service_pending(self):
+        store = FakeRunRequestStore()
+        store.pending = [
+            _RunReq(20, "sync-channel-sales", "alice"),
+            _RunReq(21, "sync-wdt", "alice"),
+        ]
+        scheduler = _run_once_scheduler(
+            {"sync-wdt": {"schedule": "0 2 * * *"}}, store,
+        )
+        scheduler.tick()
+        self.assertEqual([sid for sid, _ in scheduler._runner.calls], ["sync-wdt"])
+        self.assertEqual(store.claims, [21])
+        self.assertEqual(store.rejected, [])
 
 
 # -- run-once --force（2026-10-08 裁决「手动触发不应该被幂等」） --------------
