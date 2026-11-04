@@ -59,7 +59,6 @@ sleeper) are injected, so unit tests need no Nacos, MySQL or subprocess.
 """
 
 import contextlib
-import json
 import logging
 import os
 import re
@@ -1138,10 +1137,6 @@ class Scheduler:
         """Fire due retries, re-checking enable/command/dependency gates."""
         for run_id, item in list(self._pending_recovery.items()):
             service_id = item["service_id"]
-            if service_id not in self._service_ids:
-                self._pending_recovery.pop(run_id, None)
-                self._run_states[run_id] = "cancelled"
-                continue
             if now < item["due"]:
                 continue
             if service_id in self._dead_letters:
@@ -1190,8 +1185,6 @@ class Scheduler:
             return
         for request in pending:
             service_id = request.service_id
-            if service_id not in self._service_ids and has_command(service_id):
-                continue  # 其他发布线所有：留 pending 给对应调度器认领
             if service_id in self._running:
                 continue  # 在途（含刚被 cron 点燃）：下 tick 再认领
             argv = with_run_force(build_argv(service_id, self._settings))
@@ -1369,53 +1362,6 @@ class Scheduler:
             self._sleeper(self._poll_seconds)
 
 
-def _scope_file_service_ids(path):
-    """读取发布清单中的 scheduler_services；坏配置必须拒绝启动。"""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        entries = payload["scheduler_services"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise RuntimeError(f"调度所有权清单不可读：{path}") from exc
-    if not isinstance(entries, list) or not entries or not all(
-        isinstance(service_id, str) and service_id.strip() for service_id in entries
-    ):
-        raise RuntimeError(f"调度所有权清单 scheduler_services 非法：{path}")
-    return frozenset(service_id.strip() for service_id in entries)
-
-
-def service_scope(environ=None):
-    """返回 (include, exclude)；文件与逗号列表可组合，空集合表示不限定。"""
-    env = os.environ if environ is None else environ
-    include = set()
-    exclude = set()
-    for env_name, target in (
-        ("SCHEDULER_SERVICE_INCLUDE", include),
-        ("SCHEDULER_SERVICE_EXCLUDE", exclude),
-    ):
-        target.update(
-            item.strip() for item in (env.get(env_name) or "").split(",")
-            if item.strip()
-        )
-    for env_name, target in (
-        ("SCHEDULER_SERVICE_INCLUDE_FILE", include),
-        ("SCHEDULER_SERVICE_EXCLUDE_FILE", exclude),
-    ):
-        path = (env.get(env_name) or "").strip()
-        if path:
-            target.update(_scope_file_service_ids(path))
-    return frozenset(include), frozenset(exclude)
-
-
-def filter_service_ids(service_ids, environ=None):
-    """按发布所有权过滤任务；同一任务不得由两个调度器同时持有。"""
-    include, exclude = service_scope(environ)
-    return tuple(
-        service_id for service_id in service_ids
-        if (not include or service_id in include) and service_id not in exclude
-    )
-
-
 def load_service_ids(environ=None):
     """Fleet enumeration: the seed keys (seed is always mounted)."""
     env = os.environ if environ is None else environ
@@ -1427,7 +1373,7 @@ def load_service_ids(environ=None):
     ids = tuple(load_seed(seed_path).keys())
     if not ids:
         raise RuntimeError(f"管道 seed 为空：{seed_path}")
-    return filter_service_ids(ids, env)
+    return ids
 
 
 def _nacos_service_ids(env):
@@ -1498,7 +1444,7 @@ def build_fleet_source(environ=None):
             if extra_id not in seen:
                 seen.add(extra_id)
                 ids.append(extra_id)
-        return filter_service_ids(ids, env)
+        return tuple(ids)
 
     return enumerate_fleet
 

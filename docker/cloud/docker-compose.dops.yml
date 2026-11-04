@@ -50,8 +50,6 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       PUBLIC_DATA_PRICE_AGENT_SEED: /opt/dops/repo/docker/integration/price-agent-maochao.yaml
-      # 线上渠道批处理由独立 channel-scheduler 发布与执行，主调度不得重复认领。
-      SCHEDULER_SERVICE_EXCLUDE_FILE: /opt/dops/repo/ops/channel-release.json
       # 业务开关与嵌入参数由 app.env 提供；不在 Compose 再设默认值覆盖 env_file。
       SCHEDULER_HEARTBEAT_PATH: /var/lib/dops-scheduler/heartbeat
     entrypoint: ["python3"]
