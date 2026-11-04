@@ -1,0 +1,10 @@
+[Unit]
+Description=online-channel CD poll timer (independent of dops main deploy)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

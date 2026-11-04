@@ -1,0 +1,11 @@
+[Unit]
+Description=online-channel pull-based CD (independent worktree -> channel scheduler -> health gate -> rollback)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/opt/dops/channel-deploy.env
+# 执行快照，避免 git reset 改写正在运行的脚本。
+ExecStart=/bin/bash -c 'tmp=$(mktemp /run/dops-channel-deploy.XXXXXX.sh); cp /opt/dops/channel-repo/ops/deploy-channel.sh "$tmp"; bash "$tmp"; rc=$?; rm -f "$tmp"; exit $rc'

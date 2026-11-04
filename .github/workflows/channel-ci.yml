@@ -1,0 +1,116 @@
+name: channel-ci
+
+# 线上渠道独立质量门。channel-gate 对所有 PR 都给出结论：渠道变更运行测试，
+# 无关变更显式 success(no-op)，避免 required check 因 paths skip 永久 pending。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: channel-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.filter.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            channel:
+              - '.github/workflows/channel-ci.yml'
+              - 'common/bi_web/cards.py'
+              - 'common/bi_web/queries.py'
+              - 'common/broadcast/qudao_panels.py'
+              - 'common/daily_robot/channel_daily.py'
+              - 'common/daily_robot/channel_missing.py'
+              - 'common/daily_robot/freshness_check.py'
+              - 'common/gateway/channel_intake.py'
+              - 'common/public_data/channel_*.py'
+              - 'common/public_data/cli.py'
+              - 'common/public_data/data_quality.py'
+              - 'common/public_data/extract_channel_ops.py'
+              - 'common/public_data/extract_ecom_people.py'
+              - 'common/public_data/extract_mart.py'
+              - 'common/public_data/live_migrations.py'
+              - 'common/public_data/live_sync.py'
+              - 'common/public_data/pipeline_config.py'
+              - 'common/public_data/scheduler.py'
+              - 'docker/cloud/Dockerfile'
+              - 'docker/cloud/docker-compose.channel.yml'
+              - 'docker/cloud/docker-compose.dops.yml'
+              - 'docker/integration/bi.seed.yaml'
+              - 'docker/integration/pipelines.seed.yaml'
+              - 'docker/integration/source-manifest.json'
+              - 'ops/channel*'
+              - 'ops/deploy-channel.sh'
+              - 'ops/deploy.sh'
+              - 'ops/dops-channel-deploy.*'
+              - 'requirements.txt'
+              - 'tests/common/test_bi_web_*.py'
+              - 'tests/common/test_channel_*.py'
+              - 'tests/common/test_data_quality.py'
+              - 'tests/common/test_extract_channel_ops.py'
+              - 'tests/common/test_extract_ecom_people.py'
+              - 'tests/common/test_freshness_check.py'
+              - 'tests/common/test_mart_cli.py'
+              - 'tests/common/test_public_data_channel_robot_inbox.py'
+              - 'tests/common/test_public_data_cli.py'
+              - 'tests/common/test_public_data_extract_mart.py'
+              - 'tests/common/test_public_data_live_migrations.py'
+              - 'tests/common/test_public_data_live_sync.py'
+              - 'tests/common/test_public_data_pipeline_config.py'
+              - 'tests/common/test_public_data_scheduler.py'
+              - 'tests/common/test_qudao_panels.py'
+              - 'tests/test_channel_release.py'
+
+  channel-tests:
+    needs: changes
+    if: needs.changes.outputs.channel == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 线上渠道独立测试集
+        run: bash ops/channel-tests.sh
+
+  channel-contract:
+    needs: changes
+    if: needs.changes.outputs.channel == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 发布脚本与清单契约
+        run: |
+          bash -n ops/channel-tests.sh ops/deploy-channel.sh
+          python -m unittest -v tests/test_channel_release.py
+
+  channel-gate:
+    if: always()
+    needs: [changes, channel-tests, channel-contract]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总渠道质量门
+        run: |
+          if [[ "${{ needs.changes.result }}" == "failure" || "${{ needs.changes.result }}" == "cancelled" ]]; then
+            echo "channel change detection failed"
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.channel }}" == "true" ]]; then
+            if [[ "${{ needs.channel-tests.result }}" != "success" || "${{ needs.channel-contract.result }}" != "success" ]]; then
+              echo "channel CI failed or was cancelled"
+              exit 1
+            fi
+            echo "channel CI green on ${GITHUB_REF} (${GITHUB_SHA})"
+          else
+            echo "channel CI success(no-op): no online-channel files changed"
+          fi

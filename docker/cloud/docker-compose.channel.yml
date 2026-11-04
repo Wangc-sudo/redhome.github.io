@@ -1,0 +1,43 @@
+# 线上渠道批处理独立运行单元。代码目录、镜像、心跳和发布状态均与主 dops 分离；
+# 共享 RDS/Nacos/robot_outbox，不新增钉钉 Stream，不复制 gateway/BI Web。
+name: dops-channel
+
+services:
+  channel-scheduler:
+    image: dops-channel-app:latest
+    container_name: dops-channel-scheduler
+    network_mode: host
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 1536m
+    pids_limit: 256
+    env_file: /opt/dops/app.env
+    working_dir: /opt/dops/channel-repo
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      PUBLIC_DATA_PIPELINE_SEED: /opt/dops/channel-repo/docker/integration/pipelines.seed.yaml
+      SCHEDULER_SERVICE_INCLUDE_FILE: /opt/dops/channel-repo/ops/channel-release.json
+      SCHEDULER_HEARTBEAT_PATH: /var/lib/dops-channel-scheduler/heartbeat
+    entrypoint: ["python3"]
+    command:
+      - -m
+      - common.public_data.scheduler
+    volumes:
+      - /opt/dops/channel-repo:/opt/dops/channel-repo:ro
+      - /opt/dops/config-local:/opt/dops/config-local:ro
+      - /opt/dops/live/source-credentials.json:/run/live-input/source-credentials.json:ro
+      - /opt/dops/live:/opt/dops/live:ro
+      - /opt/dops/pages-output:/output
+      - /opt/dops/channel-scheduler-state:/var/lib/dops-channel-scheduler:rw
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os,sys,time;sys.exit(0 if time.time()-os.path.getmtime('/var/lib/dops-channel-scheduler/heartbeat')<120 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
