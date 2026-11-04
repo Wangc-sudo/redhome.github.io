@@ -284,6 +284,18 @@ class MaochaoCollector:
                     try:
                         self._switch_subject(page, subject, timeout_ms)
                         subject_rows, summary = self._capture_subject(page, subject, config, progress)
+                        selected = config.get("selected_skus") or []
+                        if selected:
+                            allowed = {
+                                (item["subject_key"], item["item_id"], item["sku_id"])
+                                for item in selected
+                            }
+                            subject_rows = [
+                                row for row in subject_rows
+                                if (row["subject_key"], row["item_id"], row["sku_id"]) in allowed
+                            ]
+                            summary["row_count"] = len(subject_rows)
+                            summary["empty"] = not subject_rows
                         dept_level2 = subject.rsplit("-", 1)[-1].strip() if "-" in subject else ""
                         for row in subject_rows:
                             row["dept_level2"] = dept_level2

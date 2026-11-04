@@ -219,6 +219,15 @@ def validate_completion(payload, config, job_id):
     if not isinstance(raw_rows, list) or len(raw_rows) > _MAX_ROWS:
         raise PriceAgentProtocolError("rows_invalid")
     rows = [normalize_snapshot_row(row, config) for row in raw_rows]
+    selected = config.get("selected_skus") or []
+    if selected:
+        allowed = {
+            (item["subject_key"], item["item_id"], item["sku_id"])
+            for item in selected
+        }
+        actual = {(row["subject_key"], row["item_id"], row["sku_id"]) for row in rows}
+        if actual != allowed:
+            raise PriceAgentProtocolError("selected_skus_mismatch")
     row_keys = {(row["subject_key"], row["row_uid"]) for row in rows}
     if len(row_keys) != len(rows):
         raise PriceAgentProtocolError("row_uid_duplicate")
@@ -253,8 +262,10 @@ def result_fingerprint(rows):
     return _sha256_value(values)
 
 
-def dispatch_job(connection, config, digest, *, source, run_history_id=None, now=None):
-    if source not in ("cron", "run_once"):
+def dispatch_job(
+    connection, config, digest, *, source, run_history_id=None, parent_job_id=None, now=None
+):
+    if source not in ("cron", "run_once", "retry", "recollect"):
         raise PriceAgentProtocolError("source_invalid")
     if not config["enabled"]:
         return {"status": "disabled"}
@@ -269,16 +280,19 @@ def dispatch_job(connection, config, digest, *, source, run_history_id=None, now
                 cursor.execute(
                     "INSERT INTO `pd_price_agent_job` (`job_id`, `pipeline`, `source`, "
                     "`status`, `lease_expires_at`, `config_hash`, `config_snapshot`, "
-                    "`run_history_id`, `created_at`, `updated_at`) VALUES "
-                    "(%s, %s, %s, 'queued', %s, %s, %s, %s, %s, %s)",
+                    "`run_history_id`, `parent_job_id`, `created_at`, `updated_at`) VALUES "
+                    "(%s, %s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s)",
                     (job_id, PIPELINE, source, queue_expires, digest, snapshot,
-                     run_history_id, stamp, stamp),
+                     run_history_id, parent_job_id, stamp, stamp),
                 )
     except pymysql.err.IntegrityError as exc:
         if not exc.args or exc.args[0] != 1062:
             raise
         return {"status": "active", "job": fetch_active_job(connection)}
-    return {"status": "queued", "job_id": job_id, "config_hash": digest}
+    return {
+        "status": "queued", "job_id": job_id, "config_hash": digest,
+        "parent_job_id": parent_job_id,
+    }
 
 
 def fetch_active_job(connection):
@@ -321,10 +335,19 @@ def _verify_lease(job, payload):
 
 def claim_job(connection, agent_id, config, digest, *, now=None):
     agent_id = _text(agent_id, "agent_id", max_length=64, required=True)
-    if not config["enabled"]:
-        return {"status": "disabled"}
     stamp = now or utc_now()
     with transaction(connection):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO `pd_price_agent_status` "
+                "(`agent_id`, `last_seen_at`, `last_claim_at`, `created_at`, `updated_at`) "
+                "VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE "
+                "`last_seen_at` = VALUES(`last_seen_at`), "
+                "`last_claim_at` = VALUES(`last_claim_at`), `updated_at` = VALUES(`updated_at`)",
+                (agent_id, stamp, stamp, stamp, stamp),
+            )
+        if not config["enabled"]:
+            return {"status": "disabled"}
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT `job_id` FROM `pd_price_agent_job` WHERE `status` = 'queued' "
@@ -350,6 +373,11 @@ def claim_job(connection, agent_id, config, digest, *, now=None):
             )
             if cursor.rowcount != 1:
                 raise PriceAgentProtocolError("job_claim_conflict", status_code=409)
+            cursor.execute(
+                "UPDATE `pd_price_agent_status` SET `last_job_id` = %s, `updated_at` = %s "
+                "WHERE `agent_id` = %s",
+                (job["job_id"], stamp, agent_id),
+            )
         return {
             "status": "claimed",
             "job_id": job["job_id"],
@@ -630,14 +658,16 @@ def expire_jobs(connection, *, now=None):
             )
             jobs = [dict(row) for row in cursor.fetchall()]
         for job in jobs:
-            status = "login_expired" if job["status"] == "waiting_login" else "timed_out"
+            previous_status = job["status"]
+            status = "login_expired" if previous_status == "waiting_login" else "timed_out"
+            error_code = "queue_lease_expired" if previous_status == "queued" else status
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE `pd_price_agent_job` SET `status` = %s, `error_code` = %s, "
                     "`lease_token_hash` = NULL, `lease_expires_at` = NULL, "
                     "`finished_at` = %s, `updated_at` = %s WHERE `job_id` = %s "
                     "AND `status` = %s",
-                    (status, status, stamp, stamp, job["job_id"], job["status"]),
+                    (status, error_code, stamp, stamp, job["job_id"], previous_status),
                 )
                 if cursor.rowcount != 1:
                     continue

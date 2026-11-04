@@ -4629,9 +4629,22 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         ),
     )
 
-    # -- 猫超 Windows 机器 API（独立 Bearer 认证，GET 也不走匿名读直通）---
+    # -- 猫超-自动比价功能：人员会话管理面 + Windows 独立 Bearer 机器 API ---
     if price_agent_config_source is not None:
         from common.price_agent.api import register_price_agent_routes
+        from common.ops_web.price_agent import register_price_agent_console_routes
+
+        def require_price_agent_console(request: Request) -> authz.Viewer:
+            return require_capability(request, CAPABILITY_PIPELINES)
+
+        register_price_agent_console_routes(
+            app,
+            connector=db_connector,
+            require_capability=require_price_agent_console,
+            audit_writer=lambda conn, actor, action, service_id, detail: (
+                ops_control.insert_pipeline_audit(conn, actor, action, service_id, detail)
+            ),
+        )
         register_price_agent_routes(
             app,
             db_connector=db_connector,

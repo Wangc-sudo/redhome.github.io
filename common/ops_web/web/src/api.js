@@ -599,6 +599,34 @@ export function getDataQualityRerun(runId) {
   return request(`/api/data-quality/reruns/${encodeURIComponent(runId)}`);
 }
 
+// -- 猫超-自动比价功能 --------------------------------------------------------
+
+export function getPriceAgentOverview() {
+  return request('/api/price-agent/overview');
+}
+
+export function getPriceAgentJobs(params = {}) {
+  return request(`/api/price-agent/jobs${queryString(params)}`);
+}
+
+export function getPriceAgentJob(jobId) {
+  return request(`/api/price-agent/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function getPriceAgentResults(params = {}) {
+  return request(`/api/price-agent/results${queryString(params)}`);
+}
+
+export function retryPriceAgentJob(jobId) {
+  return post(`/api/price-agent/jobs/${encodeURIComponent(jobId)}/retry`, {});
+}
+
+export function recollectPriceAgentJob(jobId, selectedSkus) {
+  return post(`/api/price-agent/jobs/${encodeURIComponent(jobId)}/recollect`, {
+    selected_skus: selectedSkus,
+  });
+}
+
 // -- 数据与知识索引新鲜度 ------------------------------------------------------
 
 export function getDataFreshness(params = {}) {

@@ -46,6 +46,7 @@ from common.public_data.ops_credential import (
 from common.public_data.ops_token import ops_web_token_ddl_statements
 from common.public_data.phone_registry import phone_registry_ddl_statements
 from common.price_agent.schema import (
+    price_agent_console_ddl_statements,
     price_agent_ddl_statements,
     price_agent_dept_level2_ddl_statements,
 )
@@ -896,6 +897,11 @@ _MIGRATIONS = (
         "mart-ops-price-agent-dept2-v2",
         "mart",
         price_agent_dept_level2_ddl_statements(),
+    ),
+    (
+        "mart-price-agent-console-v1",
+        "mart",
+        price_agent_console_ddl_statements(),
     ),
 )
 
