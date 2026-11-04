@@ -10,9 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from common.public_data.scheduler import command_spec, load_service_ids
+from common.public_data.settings import Settings
 
 
 def main():
+    Settings.from_environment()  # 只读校验 RDS 配置、manifest 与全部 seed 路径。
     manifest = json.loads((ROOT / "ops" / "channel-release.json").read_text(encoding="utf-8"))
     expected = tuple(manifest["scheduler_services"])
     actual = load_service_ids()
