@@ -18,6 +18,10 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       PUBLIC_DATA_PIPELINE_SEED: /opt/dops/channel-repo/docker/integration/pipelines.seed.yaml
+      PUBLIC_DATA_CALENDAR_SEED: /opt/dops/channel-repo/docker/integration/calendar.seed.json
+      PUBLIC_DATA_ORG_SEED: /opt/dops/channel-repo/docker/integration/org.seed.json
+      PUBLIC_DATA_REGION_SEED: /opt/dops/channel-repo/docker/integration/regions.seed.json
+      PUBLIC_DATA_BI_SEED: /opt/dops/channel-repo/docker/integration/bi.seed.yaml
       SCHEDULER_SERVICE_INCLUDE_FILE: /opt/dops/channel-repo/ops/channel-release.json
       SCHEDULER_HEARTBEAT_PATH: /var/lib/dops-channel-scheduler/heartbeat
     entrypoint: ["python3"]

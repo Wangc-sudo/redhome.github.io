@@ -88,10 +88,22 @@ apply() {
       --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
       -f docker/cloud/Dockerfile .
   fi
-  # 用新代码的一次性容器补迁移，再启动调度；失败进入代码回滚，DB 不反向回滚。
+  # 先做无连接配置预检，避免 seed 路径等错误被 migrate 包装成 migration_error。
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
     --entrypoint python3 channel-scheduler \
-    -m common.public_data.cli migrate
+    -c 'from common.public_data.settings import Settings; Settings.from_environment()'
+  # migrate 的业务失败可能仍返回进程 0，必须同时识别 status=failed 回执。
+  local migration_output
+  if ! migration_output="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+      --entrypoint python3 channel-scheduler \
+      -m common.public_data.cli migrate 2>&1)"; then
+    printf '%s\n' "$migration_output" | tee -a "$LOG" >&2
+    return 1
+  fi
+  printf '%s\n' "$migration_output" | tee -a "$LOG" >&2
+  if grep -q 'status=failed' <<< "$migration_output"; then
+    return 1
+  fi
   docker compose -f "$COMPOSE_FILE" up -d --force-recreate channel-scheduler
 }
 

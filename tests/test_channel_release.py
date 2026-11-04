@@ -63,6 +63,11 @@ class ChannelReleaseContractTests(unittest.TestCase):
         self.assertIn("image: dops-channel-app:latest", channel_compose)
         self.assertIn("/opt/dops/channel-repo:/opt/dops/channel-repo:ro", channel_compose)
         self.assertIn("dops-channel-scheduler", channel_compose)
+        for seed in ("CALENDAR", "ORG", "REGION", "BI"):
+            self.assertIn(
+                f"PUBLIC_DATA_{seed}_SEED: /opt/dops/channel-repo/",
+                channel_compose,
+            )
         self.assertNotIn("with-stream", channel_compose)
         self.assertNotIn("kb-gateway:", channel_compose)
 
@@ -76,6 +81,8 @@ class ChannelReleaseContractTests(unittest.TestCase):
         self.assertIn('apply "$LOCAL_SHA"', script)
         self.assertIn("rebuild dops-channel-app:latest", script)
         self.assertIn("docker image inspect dops-channel-app:latest", script)
+        self.assertIn("Settings.from_environment()", script)
+        self.assertIn("status=failed", script)
         self.assertEqual(1, script.count("DEPS_CHANGED=0"))
         self.assertNotIn("publish-pipelines --", script)
         for unit in ("dops-channel-deploy.service", "dops-channel-deploy.timer"):
@@ -86,6 +93,7 @@ class ChannelReleaseContractTests(unittest.TestCase):
         self.assertIn("set(actual) != set(expected)", health)
         self.assertIn("command_spec", health)
         self.assertIn("SCHEDULER_HEARTBEAT_PATH", health)
+        self.assertIn("Settings.from_environment()", health)
         self.assertNotIn("confirm-local-test-write", health)
         self.assertNotRegex(health, r"(?i)\bINSERT\s+")
         self.assertNotRegex(health, r"(?i)\bUPDATE\s+")
