@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import Depends, HTTPException, Request
 
+from common.price_agent.config import build_config_source
 from common.price_agent.service import PriceAgentProtocolError, dispatch_job, utc_now
 
 RETRYABLE_STATUSES = frozenset({"failed", "login_expired", "timed_out"})
@@ -181,11 +182,12 @@ def register_price_agent_console_routes(app, *, connector, require_capability, a
                     "('queued','running','waiting_login') ORDER BY `created_at` DESC LIMIT 1"
                 )
                 active = cursor.fetchone()
+        config, _ = build_config_source().get_config()
         return {
             "agents": agents, "job_counts": job_counts,
             "active_job": _job_out(active) if active else None,
             "snapshots": snapshots, "artifacts": artifacts,
-            "notifications_enabled": False,
+            "notifications_enabled": bool((config.get("notify") or {}).get("enabled")),
         }
 
     @app.get("/api/price-agent/agents", dependencies=[Depends(require_capability)])
