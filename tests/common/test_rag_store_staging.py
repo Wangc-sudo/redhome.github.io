@@ -8,7 +8,7 @@ try:
 except ModuleNotFoundError:
     raise unittest.SkipTest("pymilvus is required for Milvus store contract tests")
 
-from common.rag import store
+from vector_kb.rag import store
 
 
 class _Milvus:

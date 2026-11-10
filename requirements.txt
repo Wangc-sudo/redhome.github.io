@@ -14,10 +14,12 @@ redis==5.2.1
 openpyxl==3.1.5
 # scheduler 服务的 cron 表达式解析（仅 common/public_data/scheduler.py 使用）。
 croniter==3.0.4
-# RAG 向量检索（common/rag/）：Milvus Lite 嵌入式向量库，版本以 dops-ci
+# RAG 唯一实现由 VKB 提供；Milvus Lite 嵌入式向量库，版本以 dops-ci
 # 实测冒烟（2026-10-12）为准；embedding 走 jina API 无需本地推理依赖。
 pymilvus==3.0.2
 milvus-lite==3.2.1
+# VKB 0.2.0（commit 8343caee）；随仓固定 wheel，禁止改回移动 master.zip。
+./vendor/wheels/vector_knowledge_base-0.2.0-py3-none-any.whl
 # 多图附件竖拼长图（common/kb_qa/long_image.py，2026-10-22 质检证书多图
 # 场景裁决）；惰性导入的可选依赖——镜像未重建时自动回退逐条发送。
 pillow==11.3.0

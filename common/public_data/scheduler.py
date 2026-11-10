@@ -185,7 +185,7 @@ _COMMAND_TABLE = {
     # jina-clip-v2 embed → Milvus Lite；数据层幂等（id 先 delete 后 insert）。
     "rag-index-products": {
         "argv": [
-            "common.rag.index_products",
+            "vector_kb.rag.index_products",
             "--live-read",
             "--confirm-local-test-write",
         ],
@@ -196,7 +196,7 @@ _COMMAND_TABLE = {
     # 静默 skipped。幂等（按 doc:{doc_id}: 前缀先清），手动触发无需 --force。
     "rag-index-docs": {
         "argv": [
-            "common.rag.index_docs",
+            "vector_kb.rag.index_docs",
             "--confirm-local-test-write",
         ],
     },

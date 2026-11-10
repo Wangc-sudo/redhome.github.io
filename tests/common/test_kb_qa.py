@@ -1281,7 +1281,7 @@ class VectorRecallTests(unittest.TestCase):
             DEFAULT_PATH="/x/rag.db",
         )
         return mock.patch.dict(sys.modules,
-                               {"common.rag.store": fake})
+                               {"vector_kb.rag.store": fake})
 
     def test_search_vector_closes_milvus_connection(self):
         # Milvus Lite LOCK 是排他 flock：kb-gateway 与 scheduler 灌库共享
@@ -1321,7 +1321,7 @@ class VectorRecallTests(unittest.TestCase):
              mock.patch.object(rag_docs.embed, "embed_text", return_value=[0.1]):
             result = rag_docs.search_vector(
                 "q", api_key="k", environ={"RAG_EMBED_PROVIDER": "ctaigw"})
-            fake_store = sys.modules["common.rag.store"]
+            fake_store = sys.modules["vector_kb.rag.store"]
         self.assertEqual(["阈值", "高分"], [hit["doc_title"] for hit in result])
         self.assertEqual("text", fake_store.search.call_args.kwargs["kind"])
         milvus.close.assert_called_once()
@@ -1337,7 +1337,7 @@ class VectorRecallTests(unittest.TestCase):
              mock.patch.object(rag_docs.embed, "embed_text", return_value=[0.1]):
             result = rag_docs.search_wdt(
                 "订单JY001", api_key="k", environ={"RAG_EMBED_PROVIDER": "ctaigw"})
-            fake_store = sys.modules["common.rag.store"]
+            fake_store = sys.modules["vector_kb.rag.store"]
         self.assertEqual("wdt", fake_store.search.call_args.kwargs["kind"])
         self.assertEqual(1, len(result))
         self.assertEqual("订单 JY001 已发货", result[0]["content"])
@@ -4163,7 +4163,7 @@ class SearchImagesTests(unittest.TestCase):
             connect=lambda path: _Milvus(), search=_search,
             DEFAULT_PATH="/x")
         with mock.patch.dict(sys.modules,
-                             {"common.rag.store": fake_store}), \
+                             {"vector_kb.rag.store": fake_store}), \
              mock.patch.object(rag_module.embed, "embed_text",
                                return_value=[0.1, 0.2]):
             hits = rag_module.search_images(

@@ -9,8 +9,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
+COPY vendor/wheels/vector_knowledge_base-0.2.0-py3-none-any.whl /tmp/vendor/wheels/vector_knowledge_base-0.2.0-py3-none-any.whl
 ARG PIP_INDEX_URL=""
-RUN if [ -n "$PIP_INDEX_URL" ]; then \
+RUN cd /tmp && if [ -n "$PIP_INDEX_URL" ]; then \
       python3 -m pip install --break-system-packages --no-cache-dir \
         -i "$PIP_INDEX_URL" -r /tmp/requirements.txt; \
     else \

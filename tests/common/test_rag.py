@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""common.rag 单元测试：embed / llm / 索引管道 / 检索编排，外部 API 全部打桩。"""
+"""vector_kb.rag 单元测试：embed / llm / 索引管道 / 检索编排，外部 API 全部打桩。"""
 
 import base64
 import json
@@ -8,8 +8,8 @@ import re
 import unittest
 from unittest import mock
 
-from common.kb_qa import media
-from common.rag import embed, freshness, index_docs, index_products, index_state, llm, qa
+from vector_kb.kb_qa import media
+from vector_kb.rag import embed, freshness, index_docs, index_products, index_state, llm, qa
 
 
 def _fake_post_factory(vectors, *, strict_count=False):
@@ -1196,6 +1196,17 @@ class QaTest(unittest.TestCase):
         self.assertEqual(embed_text.call_args_list[0].args[0], "习酒 图片")
         self.assertFalse(first["metrics"]["cache_hit"])
         self.assertTrue(second["metrics"]["cache_hit"])
+
+
+class RagSourceTests(unittest.TestCase):
+    def test_vector_rag_comes_from_vkb_not_a_repo_copy(self):
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[2]
+        source = Path(embed.__file__).resolve()
+        self.assertIn("vector_kb", source.parts)
+        self.assertNotIn(str(repo / "common"), str(source))
+        self.assertEqual([], list((repo / "common" / "rag").glob("*.py")))
 
 
 if __name__ == "__main__":

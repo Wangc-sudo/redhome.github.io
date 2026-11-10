@@ -15,7 +15,7 @@ from common.kb_qa.schema import (
     kb_ddl_statements,
     kb_web_acl_ddl_statements,
 )
-from common.rag.index_state import (
+from vector_kb.rag.index_state import (
     ddl_statements as rag_index_state_ddl_statements,
 )
 from common.public_data.bi_authz import bi_authz_ddl_statements
