@@ -35,43 +35,6 @@ services:
       - /opt/dops/live/gateway-credentials.json:/run/live-input/source-credentials.json:ro
       - /opt/dops/live:/opt/dops/live:ro
 
-  # 知识库问答机器人（2026-10-10，客服部门）：独立钉钉应用（复用原「提现
-  # 事项」小机器人凭据，AppKey dingnbp9wl6mt54n89hj）独立 Stream 连接，
-  # 与 gateway 报数面进程隔离、互不争抢事件。KB_* 凭据与 AI 表定位
-  # （KB_PRODUCTS_BASE_ID/SHEET_ID）走 app.env——scheduler 侧
-  # kb-sync-products 子进程同源读取，一处注入两处生效；改 app.env 必须
-  # up -d 重建（restart 不应用 env_file 变更）。
-  kb-gateway:
-    image: dops-app:latest
-    container_name: kb-gateway
-    network_mode: host
-    restart: unless-stopped
-    env_file: /opt/dops/app.env
-    working_dir: /opt/dops/repo
-    environment:
-      TZ: Asia/Shanghai
-      PYTHONDONTWRITEBYTECODE: "1"
-      # print() 结果日志走 stdout 块缓冲，不设 UNBUFFERED 时 docker logs
-      # 看不到 handler 的 reply sent/failed 行（2026-10-10 排障教训）。
-      PYTHONUNBUFFERED: "1"
-      PUBLIC_DATA_SERVICE_ID: kb-gateway
-    entrypoint: ["python3"]
-    command:
-      - -m
-      - common.kb_qa.app
-      - --live-send
-      - --confirm-local-test-write
-    volumes:
-      - /opt/dops/repo:/opt/dops/repo:ro
-      - /opt/dops/live:/opt/dops/live:ro
-      # 向量库（Milvus Lite rag.db）：DOC_QA 意图时向量召回与 BM25 合并。
-      # 必须可写——milvus-lite 打开库就要创建 LOCK 文件（2026-10-21 实测
-      # :ro 挂载下向量召回每次都被拒、静默降级纯 BM25，从未生效）。数据
-      # 写入侧仍只有 scheduler；kb-gateway 侧 search_vector 即用即 close
-      # （排他 flock 毫秒级持有），与凌晨灌库几乎零冲突窗口。
-      - /opt/vector:/opt/vector:rw
-      - /opt/dops/kb-exports:/opt/dops/kb-exports:rw
-
   scheduler:
     image: dops-app:latest
     container_name: dops-scheduler
@@ -153,7 +116,6 @@ services:
       - /opt/dops/repo:/opt/dops/repo:ro
       # Settings 启动即读 PUBLIC_DATA_CONFIG（source-manifest.json）
       - /opt/dops/live:/opt/dops/live:ro
-      - /opt/dops/kb-exports:/opt/dops/kb-exports:rw
     healthcheck:
       test:
         - CMD

@@ -68,15 +68,6 @@ class WhitelistDerivationTests(unittest.TestCase):
              "product_stats", "sku_sales", "sku_inventory"},
             set(export_tools()))
 
-    def test_tools_for_narrow_equals_non_business(self):
-        from common.kb_web.service import tools_for
-
-        narrow = {t["function"]["name"] for t in tools_for(False)}
-        expected = set(load_registry()) - set(business_tool_names())
-        self.assertEqual(expected, narrow)
-        full = {t["function"]["name"] for t in tools_for(True)}
-        self.assertEqual(set(load_registry()), full)
-
     def test_snapshot_declarations(self):
         self.assertEqual("daily_report_offline",
                          get_skill("daily_sales").snapshot)

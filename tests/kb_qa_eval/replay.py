@@ -5,8 +5,8 @@
 - expected_tools ⊆ 实际调用工具（空数组=不断言工具路由，LLM 有方差）；
 - must_contain 全部出现；must_not_contain 全部不出现。
 
-用法（云上 kb-gateway 容器，只读无写入）：
-  docker exec -i -e PYTHONPATH=/opt/dops/repo -w /opt/dops/repo kb-gateway \
+用法（云上独立小易 Web 容器，只读无写入；以小易仓 replay 实现为准）：
+  docker exec -i -e PYTHONPATH=/opt/xiaoyi-agent -w /opt/xiaoyi-agent xiaoyi-kb-web \
     python3 -m tests.kb_qa_eval.replay --limit 20 --output /tmp/eval.json
 
 抽样建议 --limit/--only 控制成本；全量 100 句约数十分钟，供夜间或发版前跑。
