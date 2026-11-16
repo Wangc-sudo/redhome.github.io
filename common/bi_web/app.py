@@ -393,11 +393,18 @@ class _TTLOptionSets:
 # Request guards
 # ---------------------------------------------------------------------------
 
-#: 公开看板保底集合（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网
-#: 榜单页不需要账号密码——群内散客直开）。运行集合 = 本常量 ∪
-#: bi_authz_grant（grant_type='public_dashboard'）——DB 是增量通道
-#: （ops-web 页面可增删），常量是 DB 故障时的可用性保底。加新区请评审
-#: 数据敏感度后再入列。
+#: 公开看板保底集合。运行集合 = 本常量 ∪ bi_authz_grant
+#: （grant_type='public_dashboard'）——DB 是增量通道（ops-web 页面可增删），
+#: 常量是 DB 故障时的可用性保底。
+#:
+#: 历史名单（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网榜单页不需要
+#: 账号密码——群内散客直开）：hz-offline-sales / sx-offline-sales /
+#: offline-all-sales。
+#:
+#: 2026-11-16 用户裁决：BI 看板全部公开、免登录，不再强制走钉钉工作台。
+#: ``_public_path`` 已改为对 ``_PUBLIC_PREFIXES`` 下所有路径直接放行，
+#: 本常量与 DB 增量通道暂保留作为「按看板粒度管控访问」的 FUTURE 钩子——
+#: 后续如需回收公开面、恢复到名单制，把 ``_public_path`` 的早返关掉即可。
 PUBLIC_DASHBOARD_IDS = frozenset({
     "hz-offline-sales", "sx-offline-sales", "offline-all-sales",
 })
@@ -433,14 +440,21 @@ def _public_dashboard_resolver(db_connector, now=time.monotonic):
 
 
 def _public_path(path, public_ids):
-    """路径属于公开看板（或其日期筛选值域）时返回 True。"""
+    """路径属于公开看板（或其日期筛选值域）时返回 True。
+
+    2026-11-16 用户裁决：BI 看板全部公开、免登录，``_PUBLIC_PREFIXES`` 下
+    所有路径直接放行，不再匹配 ``public_ids`` 名单。
+    """
     if path == "/api/v1/options/dates":
         return True
     for prefix in _PUBLIC_PREFIXES:
         if path.startswith(prefix):
-            rest = path[len(prefix):]
-            dashboard_id = rest.split("/", 1)[0]
-            return dashboard_id in public_ids
+            return True
+    # FUTURE(按看板粒度管控访问): 恢复下面的名单匹配逻辑即可回到
+    # 「常量 ∪ bi_authz_grant(public_dashboard)」的白名单制。
+    #     rest = path[len(prefix):]
+    #     dashboard_id = rest.split("/", 1)[0]
+    #     return dashboard_id in public_ids
     return False
 
 
@@ -465,18 +479,21 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure,
         request.state.userid = None
         request.state.viewer = None
         if session_secret:
-            # 公开看板（2026-10-26 用户裁决）：杭州/绍兴/线下整体的公网
-            # 榜单页面向群内散客直开，不需要账号密码。页面壳、看板定义、
-            # 卡片数据、日期筛选值域全部放行；其余看板与端点照旧走
+            # 公开路径（2026-11-16 用户裁决：BI 看板全部公开、免登录——
+            # 此前 2026-10-26 仅杭州/绍兴/线下整体公网榜单页直开）。页面壳、
+            # 看板定义、卡片数据、日期筛选值域全部放行；其余端点照旧走
             # 会话+准入门。**仅认证开启时才判定**——session 未配置=全开放
             # （旧默认），公开集合无意义且不该为一个必然放行的请求读 DB
             # （页面壳零连接契约不破）。
+            #
+            # 公开 ≠ 跳过 cookie 解析：已登录且 admitted 的用户仍要解析出
+            # viewer 供行级权限（region scope）注入使用；匿名 / cookie 无效 /
+            # denied viewer 在公开路径下按匿名放行，不再 302 跳登录页。
             public_ids = (
                 public_dashboards() if public_dashboards is not None
                 else PUBLIC_DASHBOARD_IDS
             )
-            if _public_path(request.url.path, public_ids):
-                return None
+            is_public = _public_path(request.url.path, public_ids)
             raw = request.cookies.get(auth.SESSION_COOKIE)
             if raw:
                 userid = auth.resolve_session_userid(raw, session_secret)
@@ -496,13 +513,20 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure,
                         if viewer_resolver is not None
                         else None
                     )
-                    if viewer is not None and not viewer.admitted:
-                        # deny-by-default 准入门（铁律 1）：认证通过但无
-                        # 任何 grant 记录——页面见提示页，API 拿 403。
-                        return ("unauthorized", 403)
-                    request.state.userid = userid
-                    request.state.viewer = viewer
-                    return None
+                    if viewer is None or viewer.admitted:
+                        # admitted（或无准入门）：设置 viewer 供 scope 注入。
+                        request.state.userid = userid
+                        request.state.viewer = viewer
+                        return None
+                    # deny-by-default 准入门（铁律 1）：认证通过但无任何
+                    # grant 记录——公开路径按匿名放行（不设置 viewer），
+                    # 非公开路径页面见提示页、API 拿 403。
+                    if is_public:
+                        return None
+                    return ("unauthorized", 403)
+            if is_public:
+                # 无 cookie / cookie 无效：公开路径按匿名放行。
+                return None
         if expected is None:
             # session 已启用但没带有效 cookie：不存在「开放」兜底。
             return ("login", 401) if session_secret else None

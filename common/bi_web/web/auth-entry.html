@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>访问提示 · BI 看板</title>
+<!--
+  FUTURE(钉钉工作台免登) — 2026-11-16 用户裁决：
+  BI 看板已改为全公开、免登录（见 common/bi_web/app.py 的 _public_path），
+  浏览器直开即可，不再强制走钉钉工作台。本页里的钉钉 UA 自动免登 IIFE
+  已用 DINGTALK_SSO_ENABLED=false 关停，代码原样保留——后续验证完成后
+  把开关改回 true 即可恢复钉钉容器内自动免登。
+  同时 jsapi-config / auth/dingtalk 后端端点也保留在 bi_web/app.py 中，
+  不删代码、不改路由。
+-->
 <style>
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center;
@@ -34,7 +43,7 @@
 <body>
 <div class="card">
   <h1 id="title">需要登录</h1>
-  <p id="message">请从钉钉工作台打开本看板。</p>
+  <p id="message">请使用工号与密码登录。</p>
   <!-- 浏览器登录：默认隐藏，仅当本端提供该通道时由脚本揭示（bi-web 无此
        路由，共享入口页对 bi-web 外观零变化）。
 
@@ -76,10 +85,10 @@
 <script>
   // reason 只切换固定文案，绝不回填到 DOM——提示页无反射面。
   var messages = {
-    login: ["需要登录", "请从钉钉工作台打开本看板。"],
+    login: ["需要登录", "请使用工号与密码登录。"],
     unauthorized: ["暂未授权", "您还没有看板访问权限，请联系管理员开通。"],
     forbidden: ["无权访问此页", "该看板需要额外权限，请联系管理员开通。"],
-    loggedout: ["已退出", "您已安全退出。重新访问请从钉钉工作台打开。"],
+    loggedout: ["已退出", "您已安全退出。重新访问请使用工号登录。"],
     // 读写分离（2026-10-26 ops-web）：查看匿名开放，写操作（开关/保存/
     // 修改）跳到本页——登录成功经 next 参数回到原页面。
     "write-login": ["写操作需要登录", "查看无需登录；开关、保存、修改等写操作需要登录身份。登录后自动回到刚才的页面。"]
@@ -90,10 +99,16 @@
   document.getElementById("title").textContent = entry[0];
   document.getElementById("message").textContent = entry[1];
 
+  // FUTURE(钉钉工作台免登) — 2026-11-16 用户裁决默认关闭：
+  // BI 看板已全公开、免登录，不再强制走钉钉工作台。把下面开关改为 true
+  // 即可恢复钉钉容器内自动免登（代码原样保留，未删一行）。
+  var DINGTALK_SSO_ENABLED = false;
+
   // M4 钉钉容器内自动免登（设计稿 §5.1）：仅未登录（reason=login）且
   // 运行在钉钉 UA 内时触发；unauthorized/forbidden/loggedout 不再自动
   // 尝试（已有身份被准入门拦、或刚登出——再登一次只会兜圈）。
   (function () {
+    if (!DINGTALK_SSO_ENABLED) return;
     if (reason !== "login") return;
     if (!/DingTalk/i.test(navigator.userAgent) || typeof dd === "undefined") return;
 
