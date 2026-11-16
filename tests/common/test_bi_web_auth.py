@@ -458,17 +458,14 @@ class AuthRouteTests(unittest.TestCase):
 class IdentityGateTests(unittest.TestCase):
     """session 通道启用后的身份闸三态：未登录 / 已登录已授权 / Bearer 兜底。"""
 
-    def test_no_credentials_page_redirects_to_entry(self):
+    def test_no_credentials_public_dashboard_opens(self):
+        # 2026-11-16 用户裁决：BI 看板全部公开、免登录——无 cookie 直开 200，
+        # 不再 302 跳 /auth/entry。
         client = TestClient(_session_app())
 
         response = client.get("/d/l1-cockpit", follow_redirects=False)
 
-        self.assertEqual(302, response.status_code)
-        # M4 免登：401 跳转携带回跳地址（提示页 JS 校验单斜杠后 location.href）
-        self.assertEqual(
-            "/auth/entry?reason=login&next=%2Fd%2Fl1-cockpit",
-            response.headers["location"],
-        )
+        self.assertEqual(200, response.status_code)
 
     def test_no_credentials_api_answers_401_json(self):
         client = TestClient(_session_app())
@@ -487,18 +484,17 @@ class IdentityGateTests(unittest.TestCase):
         self.assertEqual(200, client.get("/d/l1-cockpit").status_code)
         self.assertEqual(200, client.get("/api/v1/dashboards").status_code)
 
-    def test_deny_by_default_session_without_grants_sees_the_hint_page(self):
-        # 铁律 1：认证通过但 grant 表无记录——页面 302 提示页，API 403。
+    def test_deny_by_default_public_page_open_non_public_api_403(self):
+        # 铁律 1 + 2026-11-16 公开裁决：认证通过但 grant 表无记录——公开
+        # 看板页面（/d/*）按匿名放行 200；非公开端点（导航列表 /api/v1/
+        # dashboards）仍走准入门，403。
         client = TestClient(
             _session_app(viewer_resolver=_StaticViewerResolver())
         )
         _login(client, "u-nobody")
 
         page = client.get("/d/l1-cockpit", follow_redirects=False)
-        self.assertEqual(302, page.status_code)
-        self.assertEqual(
-            "/auth/entry?reason=unauthorized", page.headers["location"]
-        )
+        self.assertEqual(200, page.status_code)
         api = client.get("/api/v1/dashboards")
         self.assertEqual(403, api.status_code)
         self.assertEqual({"detail": "forbidden"}, api.json())
@@ -524,13 +520,15 @@ class IdentityGateTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual([], resolver.calls)
 
-    def test_wrong_bearer_with_session_enabled_redirects_pages(self):
+    def test_wrong_bearer_public_page_still_opens(self):
+        # 2026-11-16 公开裁决：错 Bearer 不影响公开看板的匿名放行——公开
+        # 页面 200（Bearer 是机器通道，公开路径根本不进 Bearer 校验）。
         client = TestClient(_session_app(token="t"))
 
         response = client.get("/d/l1-cockpit", headers={"Authorization": "Bearer x"},
                               follow_redirects=False)
 
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(200, response.status_code)
 
     def test_garbage_session_cookie_falls_back_to_denied(self):
         client = TestClient(_session_app())
@@ -646,21 +644,23 @@ class PublicDashboardTests(unittest.TestCase):
             200, client.get("/api/v1/dashboards/hz-offline-sales").status_code)
         self.assertEqual(200, client.get("/api/v1/options/dates").status_code)
 
-    def test_non_public_dashboard_still_gated(self):
+    def test_all_dashboards_public_but_navigation_still_gated(self):
+        # 2026-11-16 用户裁决：所有看板路径公开（不再区分"非公开看板"），
+        # 导航列表仍走会话+准入门（公网页无顶栏，设计内）。
         client = self._client()
         page = client.get("/d/l1-cockpit", follow_redirects=False)
-        self.assertEqual(302, page.status_code)
+        self.assertEqual(200, page.status_code)
         api = client.get("/api/v1/dashboards/l1-cockpit")
-        self.assertEqual(401, api.status_code)
+        self.assertEqual(200, api.status_code)
         # 导航列表不放行（公网页无顶栏，设计内）
         self.assertEqual(401, client.get("/api/v1/dashboards").status_code)
 
-    def test_public_prefix_never_matches_unknown_ids(self):
+    def test_unknown_dashboard_id_returns_404(self):
         client = self._client()
-        # 未知看板 id 不在公开集合 → 不放行：未登录先被认证拦（302），
-        # 公开前缀不构成旁路。
+        # 未知看板 id：公开前缀放行后由路由层判 404（2026-11-16 之前是
+        # 被认证拦 302；现在公开直通，未知 id 由 dashboard_source 判不存在）。
         response = client.get("/d/not-a-dashboard", follow_redirects=False)
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(404, response.status_code)
 
     def test_db_granted_dashboard_opens_without_login(self):
         """DB 增量通道（2026-10-26 权威源迁 DB）：bi_authz_grant 里
