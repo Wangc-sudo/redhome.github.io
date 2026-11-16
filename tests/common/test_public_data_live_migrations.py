@@ -123,6 +123,23 @@ class LiveMigrationTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS `sync_runs`", mart_sql)
         self.assertNotIn("from_manifest", dingtalk_sql + wdt_sql + mart_sql)
 
+    def test_robot_member_mobile_is_an_independent_indexed_migration(self):
+        from common.public_data.live_migrations import _MIGRATIONS
+
+        versions = [version for version, _, _ in _MIGRATIONS]
+        self.assertLess(
+            versions.index("mart-ops-robot-member-job-number-v1"),
+            versions.index("mart-ops-robot-member-mobile-v1"),
+        )
+        statements = next(
+            sql for version, _, sql in _MIGRATIONS
+            if version == "mart-ops-robot-member-mobile-v1"
+        )
+        self.assertEqual(1, len(statements))
+        self.assertIn("ADD COLUMN `mobile` VARCHAR(32) DEFAULT NULL", statements[0])
+        self.assertIn("ADD KEY `idx_mobile` (`mobile`)", statements[0])
+        self.assertNotIn("UNIQUE", statements[0])
+
     def test_rejects_checksum_drift_before_running_changed_schema(self):
         connection = FakeConnection()
         with self.assertRaisesRegex(LiveMigrationError, "checksum"):
