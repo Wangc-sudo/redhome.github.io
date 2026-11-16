@@ -82,53 +82,6 @@ services:
       retries: 3
       start_period: 20s
 
-  # 业务线 bi-web（2026-09-23 上云）：只读 mart_ops 的 L1 驾驶舱。
-  # 与 host 网络三件套不同，本服务走桥接 + 端口映射——uvicorn 端口
-  # 代码内固定 8080（app.serve），映射宿主机 18080。暴露面演进：
-  # 阶段 1（09-23 下午）sg-dops-app 18080 仅 VPC 内网；
-  # 阶段 1.5（09-23 晚，运维裁决「公网开放但限公司公网地址」）SG 加
-  # 18080 ← 36.20.86.193/32（sgrule-hzfonalec3），公网入口
-  # http://203.205.91.241:18080 仅公司办公网可达，其余公网 SG 丢弃。
-  # 免登凭据（BI_WEB_SESSION_SECRET/BI_DINGTALK_APPKEY/APPSECRET）
-  # 未注入前身份层为全开放（auth 设计既定行为），暴露控制完全依赖
-  # SG 源地址白名单——公司出口 IP 变更必须同步改该规则，否则即断
-  # 或误放。阶段 2（ICP 备案 + 域名 + 免登凭据到位）再加 nginx 反代
-  # 并把 BI_WEB_SESSION_SECURE 置 1。Redis 缓存由 app.env 的
-  # PUBLIC_DATA_REDIS_URL 注入，fail-open（缓存挂 ≠ 看板挂）。
-  bi-web:
-    image: dops-app:latest
-    container_name: dops-bi-web
-    restart: unless-stopped
-    env_file: /opt/dops/app.env
-    working_dir: /opt/dops/repo
-    environment:
-      TZ: Asia/Shanghai
-      PYTHONDONTWRITEBYTECODE: "1"
-      # 注册表门控服务 id（pipelines.seed 的 bi-web 条目，Nacos 可整站 503）
-      PUBLIC_DATA_SERVICE_ID: bi-web
-      # seed 启动校验 + Nacos 不可达时的 fallback（bi.seed 已发布 BI 组）
-      PUBLIC_DATA_BI_SEED: /opt/dops/repo/docker/integration/bi.seed.yaml
-    entrypoint: ["python3"]
-    command:
-      - -m
-      - common.bi_web.app
-    ports:
-      - "18080:8080"
-    volumes:
-      - /opt/dops/repo:/opt/dops/repo:ro
-      # Settings 启动即读 PUBLIC_DATA_CONFIG（source-manifest.json）
-      - /opt/dops/live:/opt/dops/live:ro
-    healthcheck:
-      test:
-        - CMD
-        - python3
-        - -c
-        - "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=5).status==200 else 1)"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
   # 运维系统（2026-09-30 上云）：权限管理 + 定时任务管理（管道列表/开关/
   # 新增/立即运行一次）。双闸——网络层经 SG 收紧到运维来源（见下）、应用层
   # admin scope 校验（require_admin）；不是面向全员的服务。与 bi-web 同款桥接
