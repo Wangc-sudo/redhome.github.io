@@ -26,10 +26,10 @@ HEALTH_URL="${DOPS_HEALTH_URL:-http://127.0.0.1:18080/healthz}"
 HEALTH_TIMEOUT="${DOPS_HEALTH_TIMEOUT:-90}"
 PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）。
-# ops-web 与 bi-web 同为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：
-# 漏在本列表时 git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进
-# main 后不生效（#57/#58/#59 实测，2026-10-12 补齐）。
-CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web pages-web}"
+# ops-web 为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：漏在本列表时
+# git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进 main 后不生效
+# （#57/#58/#59 实测，2026-10-12 补齐）。BI 已由独立仓 dops-bi 部署。
+CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler ops-web pages-web}"
 # 灾备/CI 模式（DOPS_SYNC_ONLY=1，如 dops-ci）：只 git 同步代码到部署分支，
 # 不重建镜像、不重启服务——避免灾备机与生产机重复跑 cron / 抢占 DingTalk stream。
 SYNC_ONLY="${DOPS_SYNC_ONLY:-0}"
@@ -140,9 +140,9 @@ health_gate() {
       # 不误伤部署门）。2026-10-26：8300 软下线为 301 跳域名，探针改走
       # 80（榜单页本体端口）。
       if curl -fsS --max-time 5 http://127.0.0.1:80/hangzhou.html >/dev/null 2>&1; then
-        # 关键长驻容器均在 Up（bi-web/ops-web/pages-web 另看各自的 healthz）
+        # 关键长驻容器均在 Up（独立 BI/ops-web/pages-web 另看各自的 healthz）
         if [ -z "$(docker ps \
-            --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
+            --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-independent \
             --filter name=dops-ops-web --filter name=dops-pages-web \
             --format '{{.Status}}' | grep -v Up)" ]; then
           return 0
