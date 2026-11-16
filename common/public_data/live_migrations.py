@@ -385,6 +385,19 @@ def _build_mart_robot_member_job_number_ddl() -> tuple[str, ...]:
     return (_DIM_ROBOT_MEMBER_JOB_NUMBER_DDL,)
 
 
+# 通讯录手机号只读投影：普通索引支持完整号码及尾号反查，不设唯一键，
+# 同一手机号可能由多名成员使用。独立迁移避免历史版本校验和漂移。
+_DIM_ROBOT_MEMBER_MOBILE_DDL = (
+    "ALTER TABLE `dim_robot_member`\n"
+    "  ADD COLUMN `mobile` VARCHAR(32) DEFAULT NULL AFTER `job_number`,\n"
+    "  ADD KEY `idx_mobile` (`mobile`)"
+)
+
+
+def _build_mart_robot_member_mobile_ddl() -> tuple[str, ...]:
+    return (_DIM_ROBOT_MEMBER_MOBILE_DDL,)
+
+
 # 年度目标维度（版本受控种子 docker/integration/target.seed.json 整体重放：
 # load-target 先 DELETE 全表再 INSERT，表内容永远与种子一致）。
 _DIM_TARGET_DDL = (
@@ -902,6 +915,11 @@ _MIGRATIONS = (
         "mart-price-agent-console-v1",
         "mart",
         price_agent_console_ddl_statements(),
+    ),
+    (
+        "mart-ops-robot-member-mobile-v1",
+        "mart",
+        _build_mart_robot_member_mobile_ddl(),
     ),
 )
 
