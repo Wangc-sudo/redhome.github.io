@@ -26,7 +26,7 @@ HEALTH_URL="${DOPS_HEALTH_URL:-http://127.0.0.1:18080/healthz}"
 HEALTH_TIMEOUT="${DOPS_HEALTH_TIMEOUT:-90}"
 # 缺省用国内源：空值曾让 pip 落到官方源，在国内网络下直接超时（构建失败）。
 # 要回官方源请显式设 DOPS_PIP_INDEX_URL=https://pypi.org/simple。
-PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 # 公共基座镜像（gitee dops-docker 仓构建，部署机本地需预置；见该仓 README）
 BASE_IMAGE="${DOPS_BASE_IMAGE:-dops-base-python312:2026.11.1}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）。

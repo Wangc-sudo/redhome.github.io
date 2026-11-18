@@ -15,7 +15,7 @@ FROM ${BASE_IMAGE}
 
 # 默认值固定为国内源：部署脚本传与不传都不再击穿 pip 层缓存；
 # 显式传空串仍回退官方源（兼容旧调用）。
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt /tmp/requirements.txt
 # BuildKit 缓存挂载：wheel 常驻构建机，requirements 变更只下载新增包。

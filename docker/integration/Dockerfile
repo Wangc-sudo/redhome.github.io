@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 # apt 源固定国内镜像（可用 --build-arg APT_MIRROR 覆盖）
-ARG APT_MIRROR=mirrors.aliyun.com
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 RUN set -eux; \
     for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
       if [ -f "$f" ]; then \
@@ -18,7 +18,7 @@ RUN set -eux; \
 
 COPY requirements.txt /tmp/requirements.txt
 # 默认值固定为国内源 + BuildKit pip 缓存挂载（显式传空串仍回退官方源）。
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ -n "$PIP_INDEX_URL" ]; then \
       python3 -m pip install --break-system-packages \
