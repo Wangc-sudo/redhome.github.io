@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -7,14 +9,26 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPOSITORY_ROOT / "docker-compose.integration.yml"
+CLOUD_COMPOSE_FILE = REPOSITORY_ROOT / "docker" / "cloud" / "docker-compose.dops.yml"
 DOCKERFILE = REPOSITORY_ROOT / "docker" / "integration" / "Dockerfile"
 DOCKERIGNORE_FILE = REPOSITORY_ROOT / ".dockerignore"
 RUNNER_SCRIPT = REPOSITORY_ROOT / "docker" / "integration" / "run-tests.sh"
+
+# 取证靠 `docker compose config`（归一化 profile 生效面、${...:-} 默认值、
+# 端口/挂载形态）。它只需 docker CLI，不连 daemon —— 因此「有没有 docker」
+# 是能否取证的充分条件，容器内的 test-runner 恰恰没有它。
+_DOCKER_CLI = shutil.which("docker")
 
 
 @unittest.skipIf(
     os.environ.get("INTEGRATION_TEST_RUNNER") == "1",
     "Compose contracts are verified from the Docker host.",
+)
+@unittest.skipIf(
+    _DOCKER_CLI is None and os.environ.get("INTEGRATION_CONTRACT_REQUIRED") != "1",
+    "docker CLI 不在 PATH：本机取不到 compose 归一化真值，无法取证。"
+    "契约由 CI 的 compose-contracts job 在 docker 主机上强制校验（不跳过）；"
+    "发布前自检可设 INTEGRATION_CONTRACT_REQUIRED=1 让 CLI 缺失直接变失败。",
 )
 class IntegrationEnvironmentContractTests(unittest.TestCase):
     def test_compose_defines_isolated_ubuntu_runner_and_persistent_mysql(self):
@@ -566,6 +580,48 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # compose service without them could never boot.  The zero-raw rule
         # is enforced at the code level instead: the default db_connector
         # only ever passes settings.mart_database to connect().
+
+
+class ComposeReferenceContractTests(unittest.TestCase):
+    """编排静态引用契约：纯文件读取，任何环境（含无 docker 的容器内）都能跑。
+
+    与上面那类分开，是因为它不需要 docker CLI 取证，属于「随时可执行」的
+    低成本防复发网 —— 拆分组件时漏改编排的那类事故先在这里红。
+    """
+
+    PATTERN = re.compile(
+        r"^\s*-\s*(common\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\s*$",
+        re.MULTILINE,
+    )
+
+    def test_every_compose_module_reference_resolves(self):
+        # 2026-11-18 拆分教训：编排里留着 `-m common.pages_web.app` 这类已迁走
+        # 的模块时，`docker compose config` 照样绿（config 不校验模块是否存在），
+        # 一运行就是 module not found，健康门随即整次回滚——「契约绿、运行红」。
+        # 故把「编排声明的 python3 -m 模块必须在仓内可定位」钉成契约，集成编排
+        # 与云上生产编排两份真源都覆盖。
+        for compose_file in (COMPOSE_FILE, CLOUD_COMPOSE_FILE):
+            with self.subTest(
+                compose=compose_file.relative_to(REPOSITORY_ROOT).as_posix()
+            ):
+                modules = {
+                    match.group(1)
+                    for match in self.PATTERN.finditer(
+                        compose_file.read_text(encoding="utf-8")
+                    )
+                }
+                # 解析规则若失去匹配（形态改成字符串 command 等），这里先红，
+                # 免得契约静默退化为什么都没检查。
+                self.assertTrue(
+                    modules, "no `python3 -m <module>` line found in compose command"
+                )
+                for module in sorted(modules):
+                    target = REPOSITORY_ROOT.joinpath(*module.split("."))
+                    self.assertTrue(
+                        target.with_suffix(".py").is_file()
+                        or (target / "__main__.py").is_file(),
+                        f"{compose_file.name} references missing module {module}",
+                    )
 
 
 if __name__ == "__main__":
