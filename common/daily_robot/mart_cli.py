@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-"""日报机器人 mart 版 CLI（阶段 4 ``robot`` 容器入口）。
+"""线上渠道 mart CLI（渠道日报/到齐检查/日历看门/新鲜度看门入口）。
 
 只读 ``mart_ops``（+ 写 ``robot_outbox``）：不碰 ``raw_*``、不碰源、
 不挂钉钉凭据、不发任何外部请求。消息由 ``dingtalk-gateway`` 投递。
 
 用法（cron 触发）::
 
-    python -m common.daily_robot.mart_cli once --confirm-local-test-write
-    python -m common.daily_robot.mart_cli remind --confirm-local-test-write
-    python -m common.daily_robot.mart_cli check --confirm-local-test-write [--date 2026-09-11]
+    python -m common.daily_robot.mart_cli channel-daily --confirm-local-test-write
+    python -m common.daily_robot.mart_cli channel-missing --confirm-local-test-write
+    python -m common.daily_robot.mart_cli calendar-watch --confirm-local-test-write
+    python -m common.daily_robot.mart_cli freshness-check --confirm-local-test-write
 
-``once`` 按当前小时分流（region 配置的 ``remindHour`` / ``checkHour``），
-与现行 cron 约定（``0 18,20 * * *``）一致。
+线下业务线的提醒/催办/榜单/目标结转命令（``once`` / ``remind`` / ``check`` /
+``leaderboard`` / ``leaderboard-html`` / ``offline-*`` / ``target-*``）已于
+2026-11-18 随线下仓剥离迁到 offline-branch（``common.daily_robot.offline_cli``）。
 """
 
 import argparse
@@ -44,13 +46,6 @@ def build_pipeline_config_source():
 def resolve_service_id(override=None):
     from common.public_data.pipeline_config import resolve_service_id as _resolve
     return _resolve(override=override)
-
-
-def resolve_leaderboard_url(region, stored_url=""):
-    """榜单页 URL（2026-10-26 基址 env 化裁决）：PUBLIC_PAGES_BASE 已配 →
-    模板派生；未配 → 库存值兜底。包装为模块级以便测试 patch。"""
-    from common.region_config import leaderboard_url_for
-    return leaderboard_url_for(region, stored_url)
 
 
 def load_region_configs(seed_path, connection=None):
@@ -91,78 +86,14 @@ def connect_mart(settings):
     return connect(settings.mart_database)
 
 
-def run_remind_task(conn, outbox, **kwargs):
-    from common.daily_robot.mart_tasks import run_remind
-    return run_remind(conn, outbox, **kwargs)
-
-
-def run_check_task(conn, outbox, **kwargs):
-    from common.daily_robot.mart_tasks import run_check
-    return run_check(conn, outbox, **kwargs)
-
-
 def build_outbox(conn):
     from common.public_data.outbox_repository import OutboxRepository
     return OutboxRepository(conn)
 
 
-def run_offline_daily_task(conn, outbox, **kwargs):
-    from common.daily_robot.offline_summary import run_daily_summary
-    return run_daily_summary(conn, outbox, **kwargs)
-
-
-def run_target_rollover_task(conn, **kwargs):
-    from common.daily_robot.target_rollover import run_rollover
-    return run_rollover(conn, **kwargs)
-
-
-def run_target_remind_task(conn, outbox, **kwargs):
-    from common.daily_robot.target_rollover import run_remind
-    return run_remind(conn, outbox, **kwargs)
-
-
 def run_calendar_watch_task(conn, outbox, **kwargs):
     from common.daily_robot.calendar_watch import run_watch
     return run_watch(conn, outbox, **kwargs)
-
-
-def mart_collect_data(conn, *, region, business_date):
-    from common.daily_robot.mart_leaderboard import mart_collect
-    return mart_collect(conn, region=region, business_date=business_date)
-
-
-def collect_offline_all_data(conn, *, business_date):
-    """线下整体播报采集：多区合并（与榜单页同口径）。"""
-    from common.daily_robot.offline_summary import collect_offline_all_people
-    return collect_offline_all_people(conn, business_date=business_date)
-
-
-def elapsed_day_numbers(workdays, *, today):
-    from common.metrics.daily_report import elapsed_workdays
-    return sorted({d.day for d in elapsed_workdays(workdays, today=today)})
-
-
-def build_view(region_cfg, workdays, *, year, month):
-    from common.daily_robot.mart_leaderboard import build_leaderboard_view
-    return build_leaderboard_view(region_cfg, workdays, year=year, month=month)
-
-
-def render_bc(region, calendar, now, elapsed, people, url=None,
-              dept_overrides=None):
-    from common.daily_robot.leaderboard import render_bc_markdown
-    return render_bc_markdown(
-        region, calendar, now, elapsed, people, url=url,
-        dept_overrides=dept_overrides,
-    )
-
-
-def build_html_page(view, now, elapsed, people, extra_panels=None,
-                    dept_overrides=None, date_nav=None):
-    from common.daily_robot.leaderboard import build_html
-    return build_html(
-        view, now, elapsed, people, extra_panels=extra_panels,
-        dept_overrides=dept_overrides, date_nav=date_nav,
-    )
 
 
 def channel_dept_overrides(conn, region, data):
@@ -191,47 +122,6 @@ def channel_monthly_targets(conn, region, cfg):
     return fetch_channel_monthly_targets(conn) or cfg.monthly_targets
 
 
-def build_offline_all_page(conn, cfg, *, business_date, now):
-    from common.daily_robot.offline_summary import build_offline_all_html
-    return build_offline_all_html(conn, cfg, business_date=business_date, now=now)
-
-
-def build_date_nav_panel(**kwargs):
-    from common.daily_robot.page_calendar import build_date_nav_panel as _build
-    return _build(**kwargs)
-
-
-def archive_name(stem, day):
-    from common.daily_robot.page_calendar import archive_name as _name
-    return _name(stem, day)
-
-
-_ARCHIVE_NAME_RE = re.compile(
-    r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})\.html$")
-
-
-def scan_archive_dates(directory, stem):
-    """输出目录里 ``<stem>-YYYY-MM-DD.html`` 存档页的日期集合（只读扫描）。
-
-    目录不存在/不可读 → 空集（fail-open：月历只少几个可点日期，不影响
-    页面产出）。
-    """
-    dates = set()
-    try:
-        candidates = Path(directory).glob(f"{stem}-*.html")
-        for path in candidates:
-            match = _ARCHIVE_NAME_RE.match(path.name)
-            if not match or match.group("stem") != stem:
-                continue
-            try:
-                dates.add(date.fromisoformat(match.group("day")))
-            except ValueError:
-                continue
-    except OSError:
-        pass
-    return dates
-
-
 def run_channel_missing_task(conn, outbox, **kwargs):
     from common.daily_robot.channel_missing import run_channel_missing
     return run_channel_missing(conn, outbox, **kwargs)
@@ -256,15 +146,6 @@ def _pipeline_enabled(service_id):
         return True
 
 
-def route_by_hour(hour, region_config):
-    """``once`` 的分流：提醒小时 → remind，催办小时 → check，否则空。"""
-    if hour == region_config.remind_hour:
-        return ("remind",)
-    if hour == region_config.check_hour:
-        return ("check",)
-    return ()
-
-
 def _resolve_region(args):
     region = getattr(args, "region", None) or (
         os.environ.get("ROBOT_REGION") or ""
@@ -274,6 +155,20 @@ def _resolve_region(args):
 
 def _print_failure(code):
     print(f"status=failed code={code}")
+
+
+def _resolve_business_date(args, now):
+    """``--date`` 解析：YYYY-MM-DD，或特殊值 ``yesterday``（= 今天 -1 天）。
+
+    cron 无法表达「昨天」，T+1 窗口（渠道到齐检查/日报）依赖该字面值锚定
+    前一业务日；缺省仍为今天。
+    """
+    raw = (getattr(args, "date", None) or "").strip()
+    if not raw:
+        return now.date()
+    if raw.lower() == "yesterday":
+        return now.date() - timedelta(days=1)
+    return date.fromisoformat(raw)
 
 
 def _force_suffix(args, now):
@@ -288,186 +183,9 @@ def _force_suffix(args, now):
     return f"manual-{now:%Y%m%d%H%M%S}"
 
 
-def _resolve_business_date(args, now):
-    """``--date`` 解析：YYYY-MM-DD，或特殊值 ``yesterday``（= 今天 -1 天）。
-
-    cron 无法表达「昨天」，T+1 窗口（10:31 采集 / 10:45 页面重算）
-    依赖该字面值锚定前一业务日；缺省仍为今天。
-    """
-    raw = (getattr(args, "date", None) or "").strip()
-    if not raw:
-        return now.date()
-    if raw.lower() == "yesterday":
-        return now.date() - timedelta(days=1)
-    return date.fromisoformat(raw)
-
-
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
-
-def _handle(args, kind=None):
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        region = _resolve_region(args)
-        if not region:
-            _print_failure("region_required")
-            sys.exit(1)
-
-        seed_path = getattr(settings, "region_seed_path", None)
-        if seed_path is None:
-            _print_failure("region_seed_required")
-            sys.exit(1)
-        configs = load_region_configs(seed_path)
-        cfg = configs.get(region)
-        if cfg is None:
-            _print_failure("unknown_region")
-            sys.exit(1)
-
-        now = datetime.now()
-        business_date = _resolve_business_date(args, now)
-        dedupe_suffix = _force_suffix(args, now)
-
-        kinds = (kind,) if kind else route_by_hour(now.hour, cfg)
-        if not kinds:
-            print(
-                f"service={service_id} region={region} "
-                f"status=no_task hour={now.hour}"
-            )
-            return
-
-        conn = connect_mart(settings)
-        outbox = build_outbox(conn)
-        for current_kind in kinds:
-            if current_kind == "remind":
-                outcome = run_remind_task(
-                    conn, outbox,
-                    region=region, display=cfg.display,
-                    table_url=cfg.table_url,
-                    business_date=business_date, now=now,
-                    aliases=cfg.aliases,
-                    dedupe_suffix=dedupe_suffix,
-                )
-            else:
-                outcome = run_check_task(
-                    conn, outbox,
-                    region=region, display=cfg.display,
-                    table_url=cfg.table_url,
-                    business_date=business_date, now=now,
-                    cc_user_ids=cfg.cc_user_ids, aliases=cfg.aliases,
-                    dedupe_suffix=dedupe_suffix,
-                )
-            conn.commit()
-            print(
-                f"service={service_id} region={region} kind={current_kind} "
-                f"status={outcome.status} unfilled={len(outcome.unfilled)}"
-            )
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
-
-def _handle_leaderboard(args):
-    """每日榜单播报：mart 采集 → 群播报 markdown → outbox（kind='leaderboard'）。"""
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        region = _resolve_region(args)
-        if not region:
-            _print_failure("region_required")
-            sys.exit(1)
-
-        seed_path = getattr(settings, "region_seed_path", None)
-        if seed_path is None:
-            _print_failure("region_seed_required")
-            sys.exit(1)
-        configs = load_region_configs(seed_path)
-        cfg = configs.get(region)
-        if cfg is None:
-            _print_failure("unknown_region")
-            sys.exit(1)
-
-        now = datetime.now()
-        business_date = _resolve_business_date(args, now)
-
-        conn = connect_mart(settings)
-        if region == "offline_all":
-            # 线下整体无 region=offline_all 事实行：与榜单页同口径走
-            # OFFLINE_PEOPLE_REGIONS 多区合并（2026-10-10 修复播报恒 0.0%——
-            # 此前直接 mart_collect('offline_all') 恒为空表）。
-            people, workdays = collect_offline_all_data(
-                conn, business_date=business_date
-            )
-            view = build_view(
-                cfg, workdays,
-                year=business_date.year, month=business_date.month,
-            )
-            body = render_bc(
-                view["region"], view["calendar"], now,
-                elapsed_day_numbers(workdays, today=business_date), people,
-                url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
-            )
-        else:
-            data = mart_collect_data(
-                conn, region=region, business_date=business_date
-            )
-            view = build_view(
-                cfg, data.workdays,
-                year=business_date.year, month=business_date.month,
-            )
-            people = list(data.people)
-            body = render_bc(
-                view["region"], view["calendar"], now,
-                list(data.elapsed), people,
-                url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
-                dept_overrides=channel_dept_overrides(conn, region, data),
-            )
-
-        outbox = build_outbox(conn)
-        enqueued = outbox.enqueue(
-            region=region,
-            kind="leaderboard",
-            business_date=business_date,
-            title="销售完成率榜",
-            body_md=body,
-            created_at=now,
-            dedupe_suffix=f"{now:%H%M}",
-        )
-        conn.commit()
-        print(
-            f"service={service_id} region={region} kind=leaderboard "
-            f"status={'enqueued' if enqueued else 'already_sent'} "
-            f"people={len(people)}"
-        )
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
 
 def fetch_channel_month_facts(connection, *, year, month):
     from common.daily_robot.channel_daily import (
@@ -535,34 +253,35 @@ def _handle_channel_daily(args):
         business_date = _resolve_business_date(args, now)
 
         conn = connect_mart(settings)
-        data = mart_collect_data(conn, region=region, business_date=business_date)
-        view = build_view(
-            cfg, data.workdays,
-            year=business_date.year, month=business_date.month,
-        )
-        people_body = render_bc(
-            view["region"], view["calendar"], now,
-            list(data.elapsed), list(data.people),
-            url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
-            dept_overrides=channel_dept_overrides(conn, region, data),
-        )
 
         # 渠道日销段：业务日 = 昨日（含）之前最近一个有渠道数据的工作日
         # （店铺后台导出存在时滞，预填空行日自动回退，不报 0 元假数据）。
-        section = ""
+        #
+        # 2026-11-18 线下业务线剥离：原「人员榜单段」由线下仓的
+        # mart_leaderboard / leaderboard 渲染，本仓不再内嵌——渠道日报只发
+        # 渠道段；人员榜在榜单页/群播报（线下仓）里呈现。
         month_facts = fetch_channel_month_facts(
             conn, year=business_date.year, month=business_date.month
         )
         # 按日合计非零判定有效数据日（预填 0 值行不算，防止"0 元假日报"）
         channel_date = resolve_channel_date(month_facts, business_date)
-        if channel_date is not None:
-            section = build_channel_section(
-                month_facts=month_facts,
-                business_date=channel_date,
-                workdays=data.workdays,
-                monthly_targets=channel_monthly_targets(conn, region, cfg),
-            )
-        body = f"{section}\n\n{people_body}" if section else people_body
+        if channel_date is None:
+            print("status=skipped reason=no_channel_data")
+            return
+        # 环比基准需要播报日集合：真源 dim_calendar（全播报口径 + 人工休息日
+        # override）；当月无覆盖行时回退自然日全集。
+        from common.public_data.calendar_store import fetch_month_days
+        from common.calendar_utils import month_days
+        rows = fetch_month_days(conn, business_date.year, business_date.month)
+        workdays = [row[0] for row in rows if row[1]] or month_days(
+            business_date.year, business_date.month
+        )
+        body = build_channel_section(
+            month_facts=month_facts,
+            business_date=channel_date,
+            workdays=workdays,
+            monthly_targets=channel_monthly_targets(conn, region, cfg),
+        )
 
         outbox = build_outbox(conn)
         enqueued = outbox.enqueue(
@@ -580,69 +299,6 @@ def _handle_channel_daily(args):
             f"status={'enqueued' if enqueued else 'already_sent'} "
             f"section={'channel' if section else 'people_only'} "
             f"people={len(data.people)}"
-        )
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
-
-def _handle_offline_summary(args, *, period):
-    """线下整体汇总（offline_all 群）：daily/weekly/monthly 三周期 → outbox。
-
-    kind 与业务日：daily=当日；weekly=上周周一；monthly=上月 1 日——
-    幂等键自带周期唯一性，重跑不重复发。
-    """
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        region = _resolve_region(args)
-        if not region:
-            _print_failure("region_required")
-            sys.exit(1)
-
-        seed_path = getattr(settings, "region_seed_path", None)
-        if seed_path is None:
-            _print_failure("region_seed_required")
-            sys.exit(1)
-        configs = load_region_configs(seed_path)
-        cfg = configs.get(region)
-        if cfg is None:
-            _print_failure("unknown_region")
-            sys.exit(1)
-
-        now = datetime.now()
-        reference = (
-            date.fromisoformat(args.date) if getattr(args, "date", None)
-            else now.date()
-        )
-
-        conn = connect_mart(settings)
-        outbox = build_outbox(conn)
-        dedupe_suffix = _force_suffix(args, now)
-        # 周报/月报已取消（2026-10-20 用户裁决：只保留日报），period 恒为 daily
-        status = run_offline_daily_task(
-            conn, outbox, business_date=reference, now=now,
-            dedupe_suffix=dedupe_suffix,
-            # 线下整体 BI 看板链接（2026-10-19 用户裁决附在日报末尾；
-            # 2026-10-26 起基址 env 派生优先，库存值兜底）
-            bi_url=resolve_leaderboard_url(region, cfg.leaderboard_url) or None,
-        )
-        conn.commit()
-        print(
-            f"service={service_id} region={region} kind=offline_{period} "
-            f"status={status}"
         )
     except SystemExit:
         raise
@@ -726,104 +382,6 @@ def _handle_channel_missing(args):
             f"service={service_id} region={region} kind=channel_missing "
             f"status={outcome.status} missing={len(outcome.unfilled)}"
         )
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
-
-def _handle_target_rollover(args):
-    """月目标结转（每月 1 日 06:00）：上月 dim_report_target 幂等结转到当月。
-
-    跨区域数据任务（不绑 region、不发消息）；``--dry`` 只打印将结转/
-    将跳过的名单，不写库（人工已录入的键永不覆盖）。
-    """
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        now = datetime.now()
-        anchor = (
-            date.fromisoformat(args.date)
-            if getattr(args, "date", None) else now.date()
-        )
-
-        conn = connect_mart(settings)
-        result = run_target_rollover_task(conn, anchor_date=anchor,
-                                          apply=not args.dry)
-        print(
-            f"service={service_id} kind=target_rollover "
-            f"from={result['from_month']} to={result['to_month']} "
-            f"inserted={len(result['inserted'])} "
-            f"skipped={len(result['skipped'])} "
-            f"status={'dry' if args.dry else 'carried'}"
-        )
-        for scope, name in result["inserted"]:
-            print(f"  {'would-carry' if args.dry else 'carried'} "
-                  f"{scope} | {name}")
-        for scope, name in result["skipped"]:
-            print(f"  kept-manual {scope} | {name}")
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
-
-def _handle_target_remind(args):
-    """月目标核对提醒（每月 28 日 10:00）：当月有目标的区域群各一条。
-
-    跨区域播报（region 来自各 scope 自身，不需要 ROBOT_REGION）。
-    """
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        seed_path = getattr(settings, "region_seed_path", None)
-        if seed_path is None:
-            _print_failure("region_seed_required")
-            sys.exit(1)
-        configs = load_region_configs(seed_path)
-
-        now = datetime.now()
-        anchor = (
-            date.fromisoformat(args.date)
-            if getattr(args, "date", None) else now.date()
-        )
-
-        conn = connect_mart(settings)
-        outbox = build_outbox(conn)
-        results = run_target_remind_task(
-            conn, outbox, region_configs=configs, anchor_date=anchor, now=now,
-            dedupe_suffix=_force_suffix(args, now),
-        )
-        conn.commit()
-        sent = sum(1 for _, status in results if status == "enqueued")
-        print(
-            f"service={service_id} kind=target_remind "
-            f"scopes={len(results)} enqueued={sent}"
-        )
-        for scope, status in results:
-            print(f"  {status} {scope}")
     except SystemExit:
         raise
     except Exception:
@@ -919,122 +477,6 @@ def _handle_freshness_check(args):
         sys.exit(1)
 
 
-def render_leaderboard_page(conn, *, region, cfg, business_date, now, output):
-    """渲染并双写 current+archive 榜单页；返回 ``(page_html, stats)``。
-
-    渲染核心（2026-10-13 pages-web 解耦）：不含 pipeline 开关/确认闸——
-    那是 cron 通道职责，pages-web 请求时渲染恒走本函数。仍引用本模块
-    的 lazy wrapper（test_mart_cli 按模块属性 patch，勿迁出本模块）。
-    """
-    output = Path(output)
-    archive_stem = output.stem
-    # 日期选择月历（2026-10-09 运维裁决「日历点日期，蓝为工作日」）：
-    # 存档页 <stem>-YYYY-MM-DD.html 与榜单同目录，可点日期 = 已存在
-    # 存档的工作日（含本页）；offline_all 走独立构建器，只写存档不
-    # 嵌月历（其页内已有日/周/月维度）。
-    available_dates = scan_archive_dates(output.parent, archive_stem)
-    available_dates.add(business_date)
-    if region == "offline_all":
-        # 线下整体无 region=offline_all 的事实行：板块榜由
-        # offline_summary 聚合生成（杭州/绍兴/省外/总经办/李树军为行）。
-        page = build_offline_all_page(
-            conn, cfg, business_date=business_date, now=now
-        )
-        stats = "scopes=5"
-    else:
-        data = mart_collect_data(conn, region=region, business_date=business_date)
-        view = build_view(
-            cfg, data.workdays,
-            year=business_date.year, month=business_date.month,
-        )
-        date_nav = build_date_nav_panel(
-            page_date=business_date,
-            workday_dates=data.workdays,
-            available_dates=available_dates,
-            archive_stem=archive_stem,
-        )
-
-        # 渠道播报板块（2026-09-23：qudao 群日报类播报并入页面、停单独
-        # 播报）。板块生成 fail-open：任一板块失败只降级为占位，整页必须
-        # 照常产出（详见 common.broadcast.qudao_panels）。
-        extra_panels = None
-        if region in _PANEL_REGIONS:
-            extra_panels = build_qudao_panels_html(
-                conn,
-                business_date=business_date,
-                now=now,
-                workdays=data.workdays,
-                monthly_targets=channel_monthly_targets(conn, region, cfg),
-            )
-        page = build_html_page(
-            view, now, list(data.elapsed), list(data.people),
-            extra_panels=extra_panels,
-            dept_overrides=channel_dept_overrides(conn, region, data),
-            date_nav=date_nav,
-        )
-        stats = f"people={len(data.people)}" + (
-            f" panels={len(extra_panels)}" if extra_panels is not None else ""
-        )
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(page, encoding="utf-8")
-    archive_path = output.with_name(archive_name(archive_stem, business_date))
-    if archive_path != output:
-        archive_path.write_text(page, encoding="utf-8")
-    return page, stats
-
-
-def _handle_leaderboard_html(args):
-    """榜单页面：mart 采集 → 既有 HTML 构建 → 写文件（cron 通道）。"""
-    if not args.confirm_local_test_write:
-        sys.exit(1)
-
-    try:
-        settings = load_settings()
-        require_business_run(
-            settings, confirm_local_test_write=args.confirm_local_test_write
-        )
-        service_id = resolve_service_id(getattr(args, "service", None))
-        if not _pipeline_enabled(service_id):
-            print(f"service={service_id} status=skipped reason=disabled")
-            return
-
-        region = _resolve_region(args)
-        if not region:
-            _print_failure("region_required")
-            sys.exit(1)
-
-        seed_path = getattr(settings, "region_seed_path", None)
-        if seed_path is None:
-            _print_failure("region_seed_required")
-            sys.exit(1)
-        configs = load_region_configs(seed_path)
-        cfg = configs.get(region)
-        if cfg is None:
-            _print_failure("unknown_region")
-            sys.exit(1)
-
-        now = datetime.now()
-        business_date = _resolve_business_date(args, now)
-
-        conn = connect_mart(settings)
-        output = Path(args.output)
-        _page, stats = render_leaderboard_page(
-            conn, region=region, cfg=cfg, business_date=business_date,
-            now=now, output=output,
-        )
-        archive_path = output.with_name(archive_name(output.stem, business_date))
-        print(
-            f"service={service_id} region={region} kind=leaderboard-html "
-            f"status=written archive={archive_path.name} {stats}"
-        )
-    except SystemExit:
-        raise
-    except Exception:
-        _print_failure("robot_error")
-        sys.exit(1)
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1047,12 +489,7 @@ def main(argv=None):
     subparsers = parser.add_subparsers(dest="command")
 
     for name, help_text in (
-        ("remind", "Enqueue the 18:30 reminder into robot_outbox"),
-        ("check", "Enqueue the 20:00 check + DING into robot_outbox"),
-        ("once", "Route to remind/check by the current hour"),
-        ("leaderboard", "Enqueue the daily leaderboard broadcast"),
         ("channel-daily", "Enqueue the ecom channel daily report (qudao composite)"),
-        ("offline-daily", "Enqueue the offline-all daily summary (20:30)"),
     ):
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument(
@@ -1072,16 +509,6 @@ def main(argv=None):
             help="business date override (YYYY-MM-DD or 'yesterday', "
                  "default: today)",
         )
-        if name in (
-            "remind", "check", "once",
-            "offline-daily",
-        ):
-            sub.add_argument(
-                "--force", action="store_true", default=False,
-                help="bypass the daily dedupe and resend (run-once 手动触发 "
-                     "由调度器自动附加；leaderboard/channel-daily 自带时分 "
-                     "后缀天然可重跑，无此 flag)",
-            )
 
     # -- channel-missing --------------------------------------------------------
     missing_sub = subparsers.add_parser(
@@ -1110,53 +537,6 @@ def main(argv=None):
         help="print roster/missing/zero/@ lists only; nothing enqueued",
     )
     missing_sub.add_argument(
-        "--force", action="store_true", default=False,
-        help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
-    )
-
-    # -- target-rollover -------------------------------------------------------
-    rollover_sub = subparsers.add_parser(
-        "target-rollover",
-        help="Carry last month's dim_report_target into the current month "
-             "(1st 06:00, idempotent, manual entries win)",
-    )
-    rollover_sub.add_argument(
-        "--confirm-local-test-write", action="store_true", default=False
-    )
-    rollover_sub.add_argument(
-        "--service", default=None,
-        help="pipeline service id for the registry enable gate "
-             "(default: $PUBLIC_DATA_SERVICE_ID)",
-    )
-    rollover_sub.add_argument(
-        "--date", default=None,
-        help="anchor date override (YYYY-MM-DD, default: today); "
-             "its month is the carry target",
-    )
-    rollover_sub.add_argument(
-        "--dry", action="store_true", default=False,
-        help="print the would-be carry/skip lists only; nothing written",
-    )
-
-    # -- target-remind ---------------------------------------------------------
-    target_remind_sub = subparsers.add_parser(
-        "target-remind",
-        help="Month-end target verification reminder to region groups "
-             "(28th 10:00)",
-    )
-    target_remind_sub.add_argument(
-        "--confirm-local-test-write", action="store_true", default=False
-    )
-    target_remind_sub.add_argument(
-        "--service", default=None,
-        help="pipeline service id for the registry enable gate "
-             "(default: $PUBLIC_DATA_SERVICE_ID)",
-    )
-    target_remind_sub.add_argument(
-        "--date", default=None,
-        help="anchor date override (YYYY-MM-DD, default: today)",
-    )
-    target_remind_sub.add_argument(
         "--force", action="store_true", default=False,
         help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
@@ -1214,50 +594,16 @@ def main(argv=None):
         help="bypass the daily dedupe and resend (run-once 手动触发由调度器自动附加)",
     )
 
-    # -- leaderboard-html ------------------------------------------------------
-    html_sub = subparsers.add_parser(
-        "leaderboard-html", help="Render the leaderboard HTML page to a file"
-    )
-    html_sub.add_argument(
-        "--confirm-local-test-write", action="store_true", default=False
-    )
-    html_sub.add_argument(
-        "--region", default=None,
-        help="business region (default: $ROBOT_REGION)",
-    )
-    html_sub.add_argument(
-        "--service", default=None,
-        help="pipeline service id for the registry enable gate "
-             "(default: $PUBLIC_DATA_SERVICE_ID)",
-    )
-    html_sub.add_argument(
-        "--date", default=None,
-        help="business date override (YYYY-MM-DD, default: today)",
-    )
-    html_sub.add_argument("--output", required=True)
-
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         sys.exit(1)
 
-    if args.command == "leaderboard":
-        _handle_leaderboard(args)
-        return
     if args.command == "channel-daily":
         _handle_channel_daily(args)
         return
-    if args.command == "offline-daily":
-        _handle_offline_summary(args, period="daily")
-        return
     if args.command == "channel-missing":
         _handle_channel_missing(args)
-        return
-    if args.command == "target-rollover":
-        _handle_target_rollover(args)
-        return
-    if args.command == "target-remind":
-        _handle_target_remind(args)
         return
     if args.command == "calendar-watch":
         _handle_calendar_watch(args)
@@ -1265,11 +611,6 @@ def main(argv=None):
     if args.command == "freshness-check":
         _handle_freshness_check(args)
         return
-    if args.command == "leaderboard-html":
-        _handle_leaderboard_html(args)
-        return
-
-    _handle(args, kind=None if args.command == "once" else args.command)
 
 
 if __name__ == "__main__":

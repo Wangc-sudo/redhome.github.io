@@ -1662,12 +1662,13 @@ class PipelineRunOnceTests(unittest.TestCase):
         _login(client)
         with store.patch_pending(), store.patch_insert():
             response = client.post(
-                "/api/pipelines/run-once", json={"service_id": "robot-hangzhou"}
+                "/api/pipelines/run-once",
+                json={"service_id": "channel-missing-check"},
             )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(42, response.json()["request_id"])
-        self.assertEqual([("robot-hangzhou", ADMIN_USERID)], store.inserted)
+        self.assertEqual([("channel-missing-check", ADMIN_USERID)], store.inserted)
 
     def test_run_once_rejects_without_command_template(self):
         store = _PipelineStore()

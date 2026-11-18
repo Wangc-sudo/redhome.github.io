@@ -134,30 +134,10 @@ def _data_quality_entry(dataset, window_days=None):
     return {"argv": argv}
 
 
-def _pages_entry(region, *extra):
-    return _mart_cli_entry(
-        "leaderboard-html",
-        "--output", f"{{output_dir}}/{region}.html",
-        *extra,
-        region=region,
-    )
-
-
-#: 日报机器人区域（robot-<region> → mart_cli remind 填报提醒；
-#: robot-check-<region> → mart_cli check 催办未填人+DING，
-#: 2026-10-07 裁决：check 从 once 小时分流拆出，独立注册/调度/可手动运行）
-_ROBOT_REGIONS = ("hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all")
-
-#: 榜单页区域（pages-<region> → mart_cli leaderboard-html）
-_PAGES_REGIONS = (
-    "hangzhou", "vanke", "shaoxing", "junpin", "qudao", "offline_all",
-)
-
-#: 榜单群播报区域（leaderboard-<region> → mart_cli leaderboard）。
-#: 上云切换漏配（2026-10-07 查实）：mart_cli leaderboard 子命令一直存在，
-#: 但旧 Windows cron「8:30 榜单」停后无任何注册线触发，09-23 起五区域
-#: 榜单群播报全停；此处补齐，播报时间由 ops-web 注册表单线调整。
-_LEADERBOARD_REGIONS = ("hangzhou", "shaoxing", "vanke", "qudao", "offline_all")
+#: 线下区域列表（robot-* / robot-check-* / pages-* / leaderboard-* 四条
+#: 家族线）已随线下业务线迁出到 offline-branch 仓：主仓不再注册这四族
+#: 服务 id，调度器也不再泛化解析它们（见 offline-branch 的
+#: ``docker/integration/pipelines.seed.yaml``）。
 
 _COMMAND_TABLE = {
     "sync-dingtalk": _sync_entry("--source", "dingtalk"),
@@ -257,23 +237,9 @@ _COMMAND_TABLE = {
     # 最近有效日」= T-1，带 --date yesterday 反而退到 T-2（2026-09-28 裁决，
     # 偏离执行提示词 §2.4——其 yesterday 前提与 resolve_channel_business_date
     # 的既有锚定语义冲突）。
-    "pages-qudao-t1": _pages_entry("qudao"),
-    **{f"robot-{r}": _mart_cli_entry("remind", region=r) for r in _ROBOT_REGIONS},
-    **{
-        f"robot-check-{r}": _mart_cli_entry("check", region=r)
-        for r in _ROBOT_REGIONS
-    },
+    # 线下四族（robot-/robot-check-/pages-/leaderboard-）与线下整体日报、
+    # 月目标双管道已迁 offline-branch 仓，主仓不再注册。
     "channel-daily-qudao": _mart_cli_entry("channel-daily", region="qudao"),
-    **{f"pages-{r}": _pages_entry(r) for r in _PAGES_REGIONS},
-    **{
-        f"leaderboard-{r}": _mart_cli_entry("leaderboard", region=r)
-        for r in _LEADERBOARD_REGIONS
-    },
-    "offline-daily-summary": _mart_cli_entry("offline-daily", region="offline_all"),
-    # 月目标双管道（2026-10-09 裁决「结转+月度提醒」）：跨区域任务，
-    # 不注入 ROBOT_REGION；remind 的投递 region 由各 scope 自身决定。
-    "target-rollover": _mart_cli_entry("target-rollover"),
-    "target-remind": _mart_cli_entry("target-remind"),
     # 工作日历覆盖看门（2026-10-10 三层防线 B 层）：跨区域告警，
     # 不注入 ROBOT_REGION（投递 region 固定 offline_all）。
     "calendar-watch": _mart_cli_entry("calendar-watch"),
@@ -309,37 +275,20 @@ _COMMAND_TABLE = {
 #: (parameterized repair tool, see module docstring).
 _UNSCHEDULABLE = ("project-mart",)
 
-#: robot-/pages- 家族泛化解析的 region 后缀形态（小写字母/数字/下划线，
-#: 字母或数字开头——拒绝中划线，避免 pages-qudao-t1 这类显式条目被
-#: 家族规则误吞；显式表永远优先）。
+#: region 后缀形态（小写字母/数字/下划线，字母或数字开头）。当前无家族
+#: 泛化规则使用它，保留给后续平台级 family 注册；显式表永远优先。
 _REGION_SUFFIX_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 
 
 def command_spec(service_id):
-    """调度命令模板：显式命令表优先，robot-/pages- 家族按后缀泛化解析。
+    """调度命令模板：查显式命令表。
 
-    泛化（2026-09-30，ops-web「可添加」A 方案）：``robot-<region>`` →
-    ``mart_cli remind``、``robot-check-<region>`` → ``mart_cli check``
-    （2026-10-07 拆分）、``pages-<region>`` → ``leaderboard-html``，新区域
-    注册即可调度、无需改代码；region 合法性由 mart_cli 运行时校验
-    （未知 region 子进程非零退出，日志可观测）。无模板返回 None。
+    2026-11-18 线下业务线剥离后，``robot-<region>`` / ``robot-check-<region>``
+    / ``pages-<region>`` / ``leaderboard-<region>`` 四族泛化解析已经随线下仓
+    迁出——主仓不再为这些服务 id 生成命令（注册到 Nacos 也不会被本仓调度），
+    线下区域的调度由 offline-branch 仓自己的调度器承担。无模板返回 None。
     """
-    spec = _COMMAND_TABLE.get(service_id)
-    if spec is not None:
-        return spec
-    for prefix, builder in (
-        # robot-check- 必须先于 robot-（同前缀，长者优先）。
-        ("robot-check-", lambda region: _mart_cli_entry("check", region=region)),
-        ("robot-", lambda region: _mart_cli_entry("remind", region=region)),
-        ("pages-", _pages_entry),
-        ("leaderboard-", lambda region: _mart_cli_entry("leaderboard", region=region)),
-    ):
-        if service_id.startswith(prefix):
-            region = service_id[len(prefix):]
-            if _REGION_SUFFIX_RE.match(region):
-                return builder(region)
-            return None
-    return None
+    return _COMMAND_TABLE.get(service_id)
 
 
 def has_command(service_id):
@@ -467,9 +416,7 @@ def build_argv(service_id, settings):
 #: leaderboard / channel-daily 自带 HHMM 后缀天然可重跑，leaderboard-html
 #: 写页面文件无去重语义，同步/加工线幂等由数据层承载，均不在列。
 _FORCEABLE_MART_SUBCOMMANDS = frozenset({
-    "remind", "check", "once",
-    "offline-daily",
-    "channel-missing", "target-remind", "calendar-watch", "freshness-check",
+    "channel-missing", "calendar-watch", "freshness-check",
 })
 
 

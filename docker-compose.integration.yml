@@ -272,74 +272,14 @@ services:
       PUBLIC_DATA_SERVICE_ID: extract-mart
       INTEGRATION_TEST_RUNNER: "1"
 
-  # 业务线 robot（阶段 4）：只读 mart_ops + 写 robot_outbox。零凭据、零外呼
-  # ——它不挂任何 live-input，命令里也没有 --live-* 旗标，由合约测试把守。
-  # 一镜像多区域：复制本服务改 ROBOT_REGION / PUBLIC_DATA_SERVICE_ID 即可。
-  robot-hangzhou:
-    profiles:
-      - robot
-    build:
-      context: .
-      dockerfile: docker/integration/Dockerfile
-    entrypoint: ["python3"]
-    depends_on:
-      mysql:
-        condition: service_healthy
-    command:
-      - -m
-      - common.daily_robot.mart_cli
-      - once
-      - --confirm-local-test-write
-    environment:
-      <<: *nacos-env
-      APP_ENV: test
-      PUBLIC_DATA_RDS_HOST: mysql
-      PUBLIC_DATA_RDS_PORT: "3306"
-      PUBLIC_DATA_RDS_USER: public_data_test
-      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
-      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
-      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
-      PUBLIC_DATA_MART_DATABASE: mart_ops_test
-      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
-      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
-      PUBLIC_DATA_SERVICE_ID: robot-hangzhou
-      ROBOT_REGION: hangzhou
-      TZ: Asia/Shanghai
-      INTEGRATION_TEST_RUNNER: "1"
-
-  # 万科&大莲花&团购（无 AI 日报表区域）：报数直接 Stream 落库，月目标
-  # 由 Nacos region-vanke.yaml 的 monthlyTargets 承载。
-  robot-vanke:
-    profiles:
-      - robot
-    build:
-      context: .
-      dockerfile: docker/integration/Dockerfile
-    entrypoint: ["python3"]
-    depends_on:
-      mysql:
-        condition: service_healthy
-    command:
-      - -m
-      - common.daily_robot.mart_cli
-      - once
-      - --confirm-local-test-write
-    environment:
-      <<: *nacos-env
-      APP_ENV: test
-      PUBLIC_DATA_RDS_HOST: mysql
-      PUBLIC_DATA_RDS_PORT: "3306"
-      PUBLIC_DATA_RDS_USER: public_data_test
-      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
-      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
-      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
-      PUBLIC_DATA_MART_DATABASE: mart_ops_test
-      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
-      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
-      PUBLIC_DATA_SERVICE_ID: robot-vanke
-      ROBOT_REGION: vanke
-      TZ: Asia/Shanghai
-      INTEGRATION_TEST_RUNNER: "1"
+  # 线下业务线（robot-*/pages-*）已于 2026-11-18 剥离到 offline-branch 仓：
+  # ``common.daily_robot.mart_cli`` 在本仓只剩渠道四命令（channel-daily /
+  # channel-missing / calendar-watch / freshness-check），``once`` 与
+  # ``leaderboard-html`` 随提醒催办、榜单页一并迁出。原 robot-hangzhou /
+  # robot-vanke / pages-hangzhou / pages-vanke 四个服务若保留，profile 一跑
+  # 就是 argparse 退出码 2（模块存在、子命令不存在）。对应契约改钉住「已退役」，
+  # 线下侧的容器编排与探针由 offline-branch 的 docker-compose.yml /
+  # deploy-offline.sh 自证。
 
   # apps 线 dingtalk-gateway（阶段 4）：轮询 robot_outbox 并投递到钉钉。
   # 唯一持钉钉凭据的业务相关容器；region 配置走种子 + Nacos 覆盖。
@@ -384,83 +324,9 @@ services:
         target: /run/live-input/source-credentials.json
         read_only: true
 
-  # 业务线 pages-leaderboard（阶段 4）：只读 mart_ops 生成榜单 HTML 到挂载
-  # 目录；发布通道（QW Pages）维持现状由运维执行。零凭据。
-  pages-hangzhou:
-    profiles:
-      - pages
-    build:
-      context: .
-      dockerfile: docker/integration/Dockerfile
-    entrypoint: ["python3"]
-    depends_on:
-      mysql:
-        condition: service_healthy
-    command:
-      - -m
-      - common.daily_robot.mart_cli
-      - leaderboard-html
-      - --confirm-local-test-write
-      - --output
-      - /output/hangzhou.html
-    environment:
-      <<: *nacos-env
-      APP_ENV: test
-      PUBLIC_DATA_RDS_HOST: mysql
-      PUBLIC_DATA_RDS_PORT: "3306"
-      PUBLIC_DATA_RDS_USER: public_data_test
-      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
-      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
-      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
-      PUBLIC_DATA_MART_DATABASE: mart_ops_test
-      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
-      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
-      PUBLIC_DATA_SERVICE_ID: pages-hangzhou
-      ROBOT_REGION: hangzhou
-      TZ: Asia/Shanghai
-      INTEGRATION_TEST_RUNNER: "1"
-    volumes:
-      - type: bind
-        source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
-        target: /output
-
-  pages-vanke:
-    profiles:
-      - pages
-    build:
-      context: .
-      dockerfile: docker/integration/Dockerfile
-    entrypoint: ["python3"]
-    depends_on:
-      mysql:
-        condition: service_healthy
-    command:
-      - -m
-      - common.daily_robot.mart_cli
-      - leaderboard-html
-      - --confirm-local-test-write
-      - --output
-      - /output/vanke.html
-    environment:
-      <<: *nacos-env
-      APP_ENV: test
-      PUBLIC_DATA_RDS_HOST: mysql
-      PUBLIC_DATA_RDS_PORT: "3306"
-      PUBLIC_DATA_RDS_USER: public_data_test
-      PUBLIC_DATA_RDS_PASSWORD: public-data-test-password
-      PUBLIC_DATA_DINGTALK_DATABASE: raw_dingtalk_test
-      PUBLIC_DATA_WDT_DATABASE: raw_wdt_test
-      PUBLIC_DATA_MART_DATABASE: mart_ops_test
-      PUBLIC_DATA_CONFIG: /app/docker/integration/public-data-test-config.json
-      PUBLIC_DATA_REGION_SEED: /app/docker/integration/regions.seed.json
-      PUBLIC_DATA_SERVICE_ID: pages-vanke
-      ROBOT_REGION: vanke
-      TZ: Asia/Shanghai
-      INTEGRATION_TEST_RUNNER: "1"
-    volumes:
-      - type: bind
-        source: ${PAGES_OUTPUT_DIR:-./docker/integration/pages-output}
-        target: /output
+  # 榜单页渲染（pages-*）同样已迁 offline-branch（pages_web 随仓）：主仓
+  # integration 编排不再提供 pages profile，``--profile pages`` 应为空集合，
+  # 由契约测试钉住。
 
   # 调度器：常驻容器，按注册表（Nacos/seed）里各管道的 cron 定时触发对应
   # 一次性命令，取代宿主机 Windows 计划任务/手动 docker compose run。

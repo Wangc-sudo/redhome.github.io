@@ -5,7 +5,6 @@ from datetime import date, datetime
 from unittest.mock import Mock, patch
 
 from common.broadcast import qudao_panels
-from common.daily_robot.leaderboard import build_html
 
 _WORKDAYS = {date(2026, 9, d) for d in range(1, 24)}
 
@@ -628,28 +627,6 @@ class BuildHtmlSlotTests(unittest.TestCase):
                        "deptLabel": {}, "broadcastExclude": []},
             "calendar": {"month": 9, "restDays": []},
         }
-
-    def test_extra_panels_inserted_before_tabs(self):
-        people = [{"name": "张三", "dept": "渠道", "target": 1000,
-                   "completed": 500.0, "unfilled": 0, "rate": 0.5}]
-        page = build_html(
-            self._view(), datetime(2026, 9, 23, 8, 30), [1, 2], people,
-            extra_panels=['<div class="panel">\n  <h2>🛒 测试板块</h2>\n</div>'],
-        )
-        self.assertIn("🛒 测试板块", page)
-        # 插在「每日播报」之后、榜单 tabs 之前
-        self.assertLess(page.index("每日播报（部门维度）"), page.index("🛒 测试板块"))
-        self.assertLess(page.index("🛒 测试板块"), page.index('<div class="tabs">'))
-
-    def test_no_extra_panels_keeps_page_identical_shape(self):
-        people = [{"name": "张三", "dept": "渠道", "target": 1000,
-                   "completed": 500.0, "unfilled": 0, "rate": 0.5}]
-        with_panels = build_html(
-            self._view(), datetime(2026, 9, 23, 8, 30), [1, 2], people,
-        )
-        self.assertIn("每日播报（部门维度）", with_panels)
-        self.assertNotIn("🛒", with_panels)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Stream 报数入口 handler（spec §9：单连接按群路由多 region）。
+"""Stream 渠道填报入口 handler（单连接按群路由多 region）。
 
 一个 ``dingtalk-gateway`` 进程只建**一条** Stream 长连接（同一钉钉应用
 多连接会争抢事件、串错 handler），所有群的消息都到这里，再按
 ``conversationId`` 路由到对应区域处理——本类就是那个路由点。
 
-职责边界（薄）：解析消息 → 路由 → 委托 :func:`handle_report` → 回执。
-所有业务判断都在 :mod:`common.gateway.report_intake`，本类不含口径。
+2026-11-18 线下业务线剥离后，本类只承接**线上渠道日销填报**
+（``channel_intake``）；线下网点报数（实名门禁、代填、辅助指令、榜单回执）
+已迁至 offline-branch 仓，由该仓自己的 Stream 进程接管。同一钉钉应用
+仍只能有一条长连接，切换顺序见 offline-branch 的 README「部署」。
 
 异常处理沿用非泄露约定：日志与回执都不含异常原文；连接由
 *connection_factory* 按消息创建，成功 commit、异常 rollback。
@@ -17,22 +19,18 @@ from datetime import datetime
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
-from common.gateway.card_menu import is_menu_request, send_menu_card
 from common.gateway.channel_intake import handle_channel_fill
-from common.gateway.report_intake import (
+from common.gateway.intake_common import (
     build_error_reply,
-    handle_report,
     region_for_conversation,
 )
 
 
-def build_stream_client(app_key, app_secret, handler, *, client_factory=None,
-                        card_handler=None):
-    """构造**单连接** Stream client 并注册报数 handler（spec §9）。
+def build_stream_client(app_key, app_secret, handler, *, client_factory=None):
+    """构造**单连接** Stream client 并注册渠道填报 handler。
 
-    与现行 listener 的接法一致（``Credential`` + ``register_callback_handler``
-    + 调用方 ``start_forever``）；*client_factory* 仅供测试注入。
-    *card_handler*：互动卡片按钮回调 handler（同一连接加注册卡片 topic）。
+    与现行接法一致（``Credential`` + ``register_callback_handler`` +
+    调用方 ``start_forever``）；*client_factory* 仅供测试注入。
     """
     credential = dingtalk_stream.Credential(app_key, app_secret)
     factory = client_factory or dingtalk_stream.DingTalkStreamClient
@@ -40,22 +38,18 @@ def build_stream_client(app_key, app_secret, handler, *, client_factory=None,
     client.register_callback_handler(
         dingtalk_stream.chatbot.ChatbotMessage.TOPIC, handler
     )
-    if card_handler is not None:
-        client.register_callback_handler(
-            dingtalk_stream.Card_Callback_Router_Topic, card_handler
-        )
     return client
 
 
-class StreamReportHandler(dingtalk_stream.ChatbotHandler):
-    """按群路由的报数 handler。所有依赖注入，测试无需 Stream 连接。"""
+class StreamChannelHandler(dingtalk_stream.ChatbotHandler):
+    """按群路由的渠道填报 handler。所有依赖注入，测试无需 Stream 连接。"""
 
     def __init__(self, *, region_configs, connection_factory,
-                 report_handler=None, now=None, log=print):
+                 fill_handler=None, now=None, log=print):
         super().__init__()
         self._region_configs = region_configs
         self._connection_factory = connection_factory
-        self._report_handler = report_handler or handle_report
+        self._fill_handler = fill_handler or handle_channel_fill
         self._now = now or datetime.now
         self._log = log
 
@@ -84,45 +78,22 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
             self._log("unrouted conversation")
             return AckMessage.STATUS_OK, "OK"
 
-        # 互动卡片菜单（PoC）：/菜单 发按钮卡片；失败降级为文字提示。
-        if is_menu_request(text):
-            try:
-                send_menu_card(self, incoming)
-            except Exception:
-                self._log("menu card send failed")
-                self._safe_reply(
-                    incoming, "菜单卡片发送失败，可直接发 /帮助 使用文字指令。"
-                )
-            return AckMessage.STATUS_OK, "OK"
-
         conn = self._connection_factory()
         try:
-            if region_cfg.region == "qudao":
-                # 渠道日销机器人填报（2026-09-29 方案）：群成员即可填、
-                # 落 inbox，不走线下报数的实名门禁。
-                outcome = handle_channel_fill(
-                    conn,
-                    region_cfg=region_cfg,
-                    text=text,
-                    sender_uid=sender_uid,
-                    sender_name=getattr(incoming, "sender_nick", None),
-                    conversation_id=conversation_id,
-                    now=self._now(),
-                    is_admin=bool(getattr(incoming, "is_admin", False)),
-                )
-            else:
-                outcome = self._report_handler(
-                    conn,
-                    region_cfg=region_cfg,
-                    text=text,
-                    sender_uid=sender_uid,
-                    now=self._now(),
-                    all_region_cfgs=tuple(self._region_configs.values()),
-                )
+            outcome = self._fill_handler(
+                conn,
+                region_cfg=region_cfg,
+                text=text,
+                sender_uid=sender_uid,
+                sender_name=getattr(incoming, "sender_nick", None),
+                conversation_id=conversation_id,
+                now=self._now(),
+                is_admin=bool(getattr(incoming, "is_admin", False)),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
-            self._log("report intake failed")
+            self._log("channel fill failed")
             self._safe_reply(incoming, build_error_reply())
             return AckMessage.STATUS_OK, "OK"
 
@@ -134,4 +105,4 @@ class StreamReportHandler(dingtalk_stream.ChatbotHandler):
         try:
             self.reply_text(text, incoming)
         except Exception:
-            self._log("report reply failed")
+            self._log("channel reply failed")

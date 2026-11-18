@@ -180,24 +180,17 @@ def build_worker(outbox, deliverer):
 
 
 def build_stream_handler(*, region_configs, connection_factory):
-    from common.gateway import StreamReportHandler
-    return StreamReportHandler(
+    # 线下报数已迁 offline-branch 仓；主仓 Stream 只接线上渠道填报。
+    from common.gateway import StreamChannelHandler
+    return StreamChannelHandler(
         region_configs=region_configs,
         connection_factory=connection_factory,
     )
 
 
-def build_stream_client(app_key, app_secret, handler, *, card_handler=None):
+def build_stream_client(app_key, app_secret, handler):
     from common.gateway.stream_handler import build_stream_client as _build
-    return _build(app_key, app_secret, handler, card_handler=card_handler)
-
-
-def build_card_callback_handler(*, region_configs, connection_factory):
-    from common.gateway.card_menu import MenuCardCallbackHandler
-    return MenuCardCallbackHandler(
-        region_configs=region_configs,
-        connection_factory=connection_factory,
-    )
+    return _build(app_key, app_secret, handler)
 
 
 def publish_regions(source_path, *, if_missing=False):
@@ -271,10 +264,6 @@ def _handle_run(args):
                 credentials["dingtalk"]["app_key"],
                 credentials["dingtalk"]["app_secret"],
                 handler,
-                card_handler=build_card_callback_handler(
-                    region_configs=region_configs,
-                    connection_factory=lambda: connect_mart(settings),
-                ),
             )
             threading.Thread(
                 target=worker.run_forever,

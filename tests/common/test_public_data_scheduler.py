@@ -123,9 +123,9 @@ def test_build_argv_mirrors_compose_sync_wdt():
     ]
 
 
-def test_build_argv_pages_output_dir():
-    argv = build_argv("pages-vanke", SETTINGS)
-    assert argv[-1] == "/out/vanke.html"
+def test_build_argv_offline_pages_line_retired():
+    # 2026-11-18 线下业务线剥离：pages-* 由 offline-branch 仓调度，主仓无模板
+    assert build_argv("pages-vanke", SETTINGS) is None
 
 
 def test_build_argv_unknown_service_returns_none():
@@ -134,10 +134,11 @@ def test_build_argv_unknown_service_returns_none():
 
 
 def test_child_env_carries_line_identity_and_region():
-    env = build_child_env("robot-hangzhou", {"FOO": "1"})
+    # 渠道到齐检查仍带 ROBOT_REGION（渠道域未迁出），线下 robot-* 已迁出
+    env = build_child_env("channel-missing-check", {"FOO": "1"})
     assert env["FOO"] == "1"
-    assert env["PUBLIC_DATA_SERVICE_ID"] == "robot-hangzhou"
-    assert env["ROBOT_REGION"] == "hangzhou"
+    assert env["PUBLIC_DATA_SERVICE_ID"] == "channel-missing-check"
+    assert env["ROBOT_REGION"] == "qudao"
 
 
 # -- dependencies (DAG) --------------------------------------------------------
@@ -648,7 +649,7 @@ def test_auto_catchup_replays_latest_bounded_window_once_without_force(tmp_path)
         auto_catchup_max_age_seconds=3600,
     )
     scheduler = make_scheduler(
-        {"robot-check-hangzhou": {"schedule": "0 * * * *"}},
+        {"channel-missing-check": {"schedule": "0 * * * *"}},
         clock=clock, settings=settings,
     )
     scheduler.tick()
@@ -657,7 +658,7 @@ def test_auto_catchup_replays_latest_bounded_window_once_without_force(tmp_path)
     _, argv = scheduler._runner.calls[0]
     assert "--force" not in argv  # 自动通道不得绕开 outbox 去重/既有命令门禁
     run_id = next(iter(scheduler._run_states))
-    assert run_id.startswith("cron:robot-check-hangzhou:2026-09-21T02:00:00")
+    assert run_id.startswith("cron:channel-missing-check:2026-09-21T02:00:00")
 
 
 def test_auto_catchup_refuses_window_older_than_age_limit(tmp_path):
@@ -759,11 +760,13 @@ def test_build_argv_channel_missing_check():
     assert env["PUBLIC_DATA_SERVICE_ID"] == "channel-missing-check"
 
 
-def test_build_argv_pages_qudao_t1_uses_default_date():
-    # 默认日期（今天）即锚定 T-1；--date yesterday 会退到 T-2（见 scheduler 注释）
-    argv = build_argv("pages-qudao-t1", SETTINGS)
-    assert argv[1:4] == ["-m", "common.daily_robot.mart_cli", "leaderboard-html"]
-    assert "/out/qudao.html" in argv
+def test_build_argv_channel_daily_uses_default_date():
+    """渠道日报（T+1 口径）不显式传 --date：缺省按今天锚定。
+
+    原 pages-qudao-t1 已随线下页面线迁出；同等「默认日期」语义由渠道日报覆盖。
+    """
+    argv = build_argv("channel-daily-qudao", SETTINGS)
+    assert argv[1:4] == ["-m", "common.daily_robot.mart_cli", "channel-daily"]
     assert "--date" not in argv
 
 
@@ -932,52 +935,27 @@ def test_registered_or_injected_dependency_probe_exception_fails_closed():
 
 # -- 命令模板泛化（ops-web「可添加」A 方案，2026-09-30） --------------------
 
-def test_command_spec_robot_family_generalizes_region():
-    spec = command_spec("robot-hangzhou")
-    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "remind"]
-    assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
+def test_command_spec_offline_families_retired():
+    """线下四族泛化已随线下仓迁出：主仓不再为任何 region 生成模板。"""
+    for service_id in (
+        "robot-hangzhou",
+        "robot-check-hangzhou",
+        "pages-qudao",
+        "pages-qudao-t1",
+        "leaderboard-hangzhou",
+        "robot-qudao-t1",
+        "pages-foo-bar",
+        "robot-",
+        "leaderboard-",
+    ):
+        assert command_spec(service_id) is None
 
 
-def test_command_spec_robot_check_family_maps_to_check():
-    """robot-check-<region> → mart_cli check（2026-10-07 拆分：催办未填+DING 独立成线）。"""
-    spec = command_spec("robot-check-hangzhou")
-    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "check"]
-    assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
-
-
-def test_command_spec_pages_family_generalizes_region():
-    spec = command_spec("pages-qudao")
-    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "leaderboard-html"]
+def test_command_spec_channel_lines_still_mapped():
+    """渠道线仍在主仓：显式表命中，且带 ROBOT_REGION。"""
+    spec = command_spec("channel-missing-check")
+    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "channel-missing"]
     assert spec["extra_env"] == {"ROBOT_REGION": "qudao"}
-
-
-def test_command_spec_leaderboard_family_generalizes_region():
-    # 榜单群播报（上云漏配补登，2026-10-07）：leaderboard-<region> → mart_cli leaderboard
-    spec = command_spec("leaderboard-hangzhou")
-    assert spec["argv"][0:2] == ["common.daily_robot.mart_cli", "leaderboard"]
-    assert spec["extra_env"] == {"ROBOT_REGION": "hangzhou"}
-
-
-def test_command_spec_explicit_wins_over_family():
-    # pages-qudao-t1 在显式表，不应被 pages- 家族吞掉
-    spec = command_spec("pages-qudao-t1")
-    assert "--output" in spec["argv"]
-    assert spec["extra_env"] == {"ROBOT_REGION": "qudao"}
-
-
-def test_command_spec_rejects_dash_in_family_region():
-    # 家族 region 不允许中划线（显式表已优先）
-    assert command_spec("robot-qudao-t1") is None
-    assert command_spec("robot-check-qudao-t1") is None
-    assert command_spec("pages-foo-bar") is None
-    assert command_spec("leaderboard-qudao-t1") is None
-
-
-def test_command_spec_empty_region_is_none():
-    assert command_spec("robot-") is None
-    assert command_spec("robot-check-") is None
-    assert command_spec("pages-") is None
-    assert command_spec("leaderboard-") is None
 
 
 def test_command_spec_unknown_is_none():
@@ -986,11 +964,10 @@ def test_command_spec_unknown_is_none():
 
 
 def test_has_command_mirrors_command_spec():
-    assert has_command("robot-hangzhou") is True
-    assert has_command("robot-check-hangzhou") is True
-    assert has_command("pages-qudao") is True
-    assert has_command("leaderboard-hangzhou") is True
+    assert has_command("channel-missing-check") is True
     assert has_command("sync-wdt") is True
+    assert has_command("robot-hangzhou") is False  # 线下线已迁出
+    assert has_command("pages-qudao") is False
     assert has_command("bi-web") is False
     assert has_command("mystery") is False
 
@@ -1115,23 +1092,24 @@ class SchedulerRunOnceOwnershipTests(unittest.TestCase):
 def test_with_run_force_appends_only_for_outbox_mart_lines():
     from common.public_data.scheduler import with_run_force
 
-    check_argv = [
-        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli", "check",
-        "--confirm-local-test-write",
-    ]
-    assert with_run_force(check_argv)[-1] == "--force"
-    # leaderboard / channel-daily 自带 HHMM 后缀天然可重跑，不附加
-    lb_argv = [
-        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli", "leaderboard",
-        "--confirm-local-test-write",
-    ]
-    assert "--force" not in with_run_force(lb_argv)
-    # 页面生成写文件无去重语义，不附加
-    pages_argv = [
+    # 渠道到齐检查走 outbox 去重线：手动触发附 --force
+    missing_argv = [
         "/usr/bin/python3", "-m", "common.daily_robot.mart_cli",
-        "leaderboard-html", "--output", "x.html",
+        "channel-missing", "--confirm-local-test-write",
     ]
-    assert "--force" not in with_run_force(pages_argv)
+    assert with_run_force(missing_argv)[-1] == "--force"
+    # channel-daily 自带 HHMM 后缀天然可重跑，不附加
+    daily_argv = [
+        "/usr/bin/python3", "-m", "common.daily_robot.mart_cli",
+        "channel-daily", "--confirm-local-test-write",
+    ]
+    assert "--force" not in with_run_force(daily_argv)
+    # 线下命令已迁出本仓：offline_cli 不再被识别（不附加）
+    retired_argv = [
+        "/usr/bin/python3", "-m", "common.daily_robot.offline_cli", "check",
+        "--confirm-local-test-write",
+    ]
+    assert "--force" not in with_run_force(retired_argv)
     # 同步线不附加
     sync_argv = [
         "/usr/bin/python3", "-m", "common.public_data.cli", "live-sync",
@@ -1141,31 +1119,44 @@ def test_with_run_force_appends_only_for_outbox_mart_lines():
     assert with_run_force(None) is None
 
 
-def test_run_once_appends_force_for_robot_check():
-    """手动触发 robot-check-<region>：argv 末位附 --force（绕开当日去重）。"""
+def test_run_once_appends_force_for_channel_missing():
+    """手动触发 channel-missing-check：argv 末位附 --force（绕开当日去重）。"""
     store = FakeRunRequestStore()
-    store.pending = [_RunReq(11, "robot-check-hangzhou", "admin")]
+    store.pending = [_RunReq(11, "channel-missing-check", "admin")]
     scheduler = _run_once_scheduler(
-        {"robot-check-hangzhou": {"schedule": "0 20 * * *"}}, store,
+        {"channel-missing-check": {"schedule": "40 10 * * *"}}, store,
     )
     scheduler.tick()
     calls = scheduler._runner.calls
-    assert [sid for sid, _ in calls] == ["robot-check-hangzhou"]
+    assert [sid for sid, _ in calls] == ["channel-missing-check"]
+
     assert calls[0][1][-1] == "--force"
-    assert calls[0][1][2:4] == ["common.daily_robot.mart_cli", "check"]
+    assert calls[0][1][2:4] == ["common.daily_robot.mart_cli", "channel-missing"]
 
 
-def test_run_once_leaderboard_not_forced():
-    """leaderboard 线自带 HHMM 去重后缀，run-once 不附 --force。"""
+def test_run_once_channel_daily_not_forced():
+    """channel-daily 线自带 HHMM 去重后缀，run-once 不附 --force。"""
     store = FakeRunRequestStore()
-    store.pending = [_RunReq(12, "leaderboard-hangzhou", "admin")]
+    store.pending = [_RunReq(12, "channel-daily-qudao", "admin")]
     scheduler = _run_once_scheduler(
-        {"leaderboard-hangzhou": {"schedule": "30 8 * * *"}}, store,
+        {"channel-daily-qudao": {"schedule": "30 8 * * *"}}, store,
     )
     scheduler.tick()
     calls = scheduler._runner.calls
-    assert [sid for sid, _ in calls] == ["leaderboard-hangzhou"]
+    assert [sid for sid, _ in calls] == ["channel-daily-qudao"]
     assert "--force" not in calls[0][1]
+
+
+def test_run_once_rejects_retired_offline_line():
+    """线下线已迁出：注册表里仍留的 robot-* 请求被拒（无命令模板）。"""
+    store = FakeRunRequestStore()
+    store.pending = [_RunReq(13, "robot-hangzhou", "admin")]
+    scheduler = _run_once_scheduler(
+        {"robot-hangzhou": {"schedule": "0 18 * * *"}}, store,
+    )
+    scheduler.tick()
+    assert scheduler._runner.calls == []
+    assert store.rejected == [(13, "无调度命令映射")]
 
 
 def test_run_once_rejects_service_without_command():

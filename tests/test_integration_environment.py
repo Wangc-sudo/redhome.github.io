@@ -92,11 +92,16 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
         ]
         self.assertEqual(1, len(code_services))
-        for service in ("gateway", "scheduler", "bi-web", "ops-web"):
+        for service in ("gateway", "scheduler", "ops-web"):
             self.assertIn(service, code_services[0])
+        # BI 已迁独立仓 dops-bi（2026-11-18）：主仓不再重建 bi-web，否则
+        # force-recreate 会用主仓镜像盖掉独立仓容器。
+        self.assertNotIn("bi-web", code_services[0])
 
         # 健康门须覆盖同一批长驻容器：force-recreate 后起不来要能触发回滚。
         self.assertIn("--filter name=dops-ops-web", text)
+        # BI 容器由独立仓部署，但同宿主共用盘古线路：主仓部署门仍观测它。
+        self.assertIn("--filter name=dops-bi-independent", text)
 
     def test_deploy_script_applies_migrations_before_recreating_services(self):
         deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
@@ -117,23 +122,25 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
         text = deploy_script.read_text(encoding="utf-8")
 
-        # pages-web 是长驻 uvicorn（代码 bind-mount 只读挂载）：不列入
-        # CODE_SERVICES 时部署只更新磁盘代码、进程不重载（#57-#59 同款坑）。
+        # pages-web 随线下仓迁出（2026-11-18，common/pages_web 已不在主仓）：
+        # 主仓若仍把它列进 CODE_SERVICES，force-recreate 会拉一个 module
+        # not found 的容器，健康门随即回滚整次部署。容器归 offline-branch
+        # 的 deploy-offline.sh 自证，主仓只管 nginx 侧的同端口切流。
         code_services = [
             line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
         ]
         self.assertEqual(1, len(code_services))
-        self.assertIn("pages-web", code_services[0])
+        self.assertNotIn("pages-web", code_services[0])
+        self.assertNotIn("--filter name=dops-pages-web", text)
 
-        # 健康门覆盖 pages-web 容器 + 榜单页发布链探针（80；8300 已于
-        # 2026-10-26 软下线为 301 跳域名。@static 静态兜底使探针在
-        # pages-web 故障时仍 200，不误伤部署门）。
-        self.assertIn("--filter name=dops-pages-web", text)
+        # 榜单页发布链探针保留（80；8300 已于 2026-10-26 软下线为 301 跳
+        # 域名）：@static 静态兜底使探针在渲染服务故障时仍 200，不误伤部署门，
+        # 且切换前后（主仓 pages-web → dops-offline-pages-web）语义不变。
         self.assertIn("80/hangzhou.html", text)
 
         # nginx conf 真源同步 + HUP 平滑重载：conf 只落 repo 不拷贝到
         # /opt/dops/nginx/ 时 nginx 永远跑旧配置；且须在 force-recreate
-        # 长驻服务之前完成（先拉起 pages-web 再切流量）。
+        # 长驻服务之前完成（先切好流量再重建服务，避免窗口内 502）。
         # 真源唯一（2026-10-23）：docker/cloud/nginx-pages.conf——此前同步源是
         # integration/pages-cloud.conf 而修复都写进 cloud 版，双真源漂移使
         # listen 80 三次被部署回退丢失（全站断）。
@@ -328,37 +335,27 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)
 
-    def test_robot_runner_is_opt_in_and_credential_free(self):
-        configuration = self._compose_config("robot")
-        robot = configuration["services"]["robot-hangzhou"]
-
-        self.assertEqual(robot.get("profiles"), ["robot"])
-        self.assertEqual(
-            "service_healthy", robot["depends_on"]["mysql"]["condition"]
+    def test_offline_runners_are_retired_from_main_compose(self):
+        # 2026-11-18 线下业务线剥离：robot-*（提醒/催办/once）与 pages-*
+        # （榜单页 HTML）的实现迁 offline-branch，主仓 mart_cli 只剩渠道四条
+        # 命令。原 robot/pages profile 若继续留在编排里，服务能过 config 校验
+        # 却一跑就 argparse 退出码 2 —— 正是「契约绿、运行红」的形态。故此处
+        # 反向钉住：两个 profile 都不再产出任何服务。
+        retired = (
+            "robot-hangzhou",
+            "robot-vanke",
+            "pages-hangzhou",
+            "pages-vanke",
         )
-        self.assertNotIn("ports", robot)
-
-        command = robot.get("command", [])
-        parts = command.split() if isinstance(command, str) else list(command)
-        self.assertIn("common.daily_robot.mart_cli", parts)
-        self.assertIn("once", parts)
-        self.assertIn("--confirm-local-test-write", parts)
-
-        # Business line (spec section 7): no source credentials, no external
-        # calls -- no live flags, no mounts at all.
-        self.assertNotIn("--live-read", parts)
-        self.assertNotIn("--live-send", parts)
-        self.assertFalse(robot.get("volumes"))
-
-        environment = robot["environment"]
-        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_SERVICE_ID"), "robot-hangzhou"
-        )
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_REGION_SEED"),
-            "/app/docker/integration/regions.seed.json",
-        )
+        for profile in (None, "robot", "pages"):
+            configuration = (
+                self._compose_config()
+                if profile is None
+                else self._compose_config(profile)
+            )
+            with self.subTest(profile=profile):
+                for service_id in retired:
+                    self.assertNotIn(service_id, configuration["services"])
 
     def test_gateway_runner_mounts_only_dingtalk_credentials(self):
         configuration = self._compose_config("dingtalk-gateway")
@@ -393,38 +390,6 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(
             environment.get("PUBLIC_DATA_REGION_SEED"),
             "/app/docker/integration/regions.seed.json",
-        )
-
-    def test_pages_runner_is_opt_in_and_credential_free(self):
-        configuration = self._compose_config("pages")
-        pages = configuration["services"]["pages-hangzhou"]
-
-        self.assertEqual(pages.get("profiles"), ["pages"])
-        self.assertEqual(
-            "service_healthy", pages["depends_on"]["mysql"]["condition"]
-        )
-        self.assertNotIn("ports", pages)
-
-        command = pages.get("command", [])
-        parts = command.split() if isinstance(command, str) else list(command)
-        self.assertIn("common.daily_robot.mart_cli", parts)
-        self.assertIn("leaderboard-html", parts)
-        self.assertIn("--confirm-local-test-write", parts)
-        self.assertNotIn("--live-read", parts)
-        self.assertNotIn("--live-send", parts)
-
-        # Business line (spec section 7): no credentials; the only mount is
-        # the HTML output directory.
-        targets = {
-            v.get("target", "") if isinstance(v, dict) else ""
-            for v in pages.get("volumes", [])
-        }
-        self.assertEqual(targets, {"/output"})
-
-        environment = pages["environment"]
-        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_SERVICE_ID"), "pages-hangzhou"
         )
 
     def test_scheduler_is_opt_in_persistent_and_carries_union_mounts(self):
