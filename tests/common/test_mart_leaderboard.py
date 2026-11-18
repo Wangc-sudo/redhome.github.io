@@ -9,6 +9,7 @@ from common.daily_robot.leaderboard import (
 )
 from common.daily_robot.mart_leaderboard import (
     build_leaderboard_view,
+    fetch_store_groups,
     mart_collect,
 )
 from common.daily_robot.mart_tasks import MartTaskError
@@ -23,6 +24,10 @@ class _RouterCursor:
         self._conn.queries.append((sql, params))
         if "dim_calendar" in sql:
             self._rows = self._conn.workday_rows
+        elif "dim_report_roster" in sql:
+            self._rows = self._conn.roster_rows
+        elif "dim_report_target" in sql:
+            self._rows = self._conn.target_rows
         elif "dim_robot_member" in sql and "`user_id` IN" in sql:
             # 归位覆盖的移入在职校验：默认可注入，缺省全在职
             self._rows = self._conn.active_rows
@@ -42,12 +47,14 @@ class _RouterCursor:
 
 class _RouterConn:
     def __init__(self, *, workdays=(), facts=(), members=(), overrides=(),
-                 actives=()):
+                 actives=(), roster=(), targets=()):
         self.workday_rows = [{"business_date": d} for d in workdays]
         self.fact_rows = list(facts)
         self.member_rows = list(members)
         self.override_rows = list(overrides)
         self.active_rows = [{"user_id": u} for u in actives]
+        self.roster_rows = list(roster)
+        self.target_rows = list(targets)
         self.queries = []
 
     def cursor(self):
@@ -180,6 +187,100 @@ class MartCollectTests(unittest.TestCase):
     def test_include_today(self):
         data = self._collect(include_today=True)
         self.assertIn(11, data.elapsed)
+
+
+def _roster(key, *names):
+    return [{"entity_key": key, "person_name": name} for name in names]
+
+
+def _zhuji_facts():
+    return [
+        _fact("郑洁佩", "诸暨项目部", 1, 5000, None),
+        _fact("郑洁佩", "诸暨项目部", 2, 6000, None),
+        _fact("宣卓萍", "诸暨项目部", 1, 0, None),
+    ]
+
+
+class StoreMergeTests(unittest.TestCase):
+    """门店合并展示（2026-11-18 用户裁决，诸暨门店 3 人轮班案例）。"""
+
+    def _collect(self, *, facts, roster, targets, region="shaoxing"):
+        conn = _RouterConn(
+            workdays=_WORKDAYS, facts=facts, roster=roster, targets=targets)
+        return mart_collect(conn, region=region, business_date=_DAY)
+
+    def test_multi_person_store_merges_into_one_row(self):
+        data = self._collect(
+            facts=_zhuji_facts(),
+            roster=(_roster("诸暨门店", "蒋丽兰", "宣卓萍", "郑洁佩")
+                    + _roster("诸暨项目部", "周亚平")),
+            targets=[{"person_name": "诸暨门店", "monthly_target": 14.6}],
+        )
+        people = {p["name"]: p for p in data.people}
+        self.assertNotIn("郑洁佩", people)
+        self.assertNotIn("宣卓萍", people)
+        row = people["诸暨门店"]
+        self.assertEqual(row["completed"], 11000.0)
+        self.assertEqual(row["target"], 146000.0)  # 万元 → 元
+        self.assertAlmostEqual(row["rate"], 11000 / 146000)
+        self.assertEqual(row["dept"], "诸暨项目部")
+        self.assertEqual(row["unfilled"], 7)  # 组内最小（轮班任一人填即算填）
+        self.assertEqual(row["merged_members"], 2)
+
+    def test_department_group_is_not_merged(self):
+        """部门型名册（entity_key=部门名）没有部门级目标行 → 逐人不变。"""
+        data = self._collect(
+            facts=_fixture_facts(),
+            roster=_roster("杭中", "张三", "李四"),
+            targets=[{"person_name": "张三", "monthly_target": 0.3}],
+            region="hangzhou",
+        )
+        names = [p["name"] for p in data.people]
+        self.assertIn("张三", names)
+        self.assertIn("李四", names)
+        self.assertNotIn("杭中", names)
+
+    def test_zero_target_store_is_not_merged(self):
+        data = self._collect(
+            facts=_zhuji_facts(),
+            roster=_roster("诸暨门店", "蒋丽兰", "郑洁佩"),
+            targets=[{"person_name": "诸暨门店", "monthly_target": 0}],
+        )
+        names = [p["name"] for p in data.people]
+        self.assertIn("郑洁佩", names)
+        self.assertNotIn("诸暨门店", names)
+
+    def test_store_without_facts_does_not_add_ghost_row(self):
+        data = self._collect(
+            facts=[_fact("周亚平", "诸暨项目部", 1, 100, 100)],
+            roster=_roster("诸暨门店", "蒋丽兰", "宣卓萍", "郑洁佩"),
+            targets=[{"person_name": "诸暨门店", "monthly_target": 14.6}],
+        )
+        self.assertEqual([p["name"] for p in data.people], ["周亚平"])
+
+    def test_single_person_store_stays_person_row(self):
+        data = self._collect(
+            facts=[_fact("韩志燕", "绍兴项目部", 1, 100, 200)],
+            roster=_roster("绍兴门店", "韩志燕"),
+            targets=[{"person_name": "绍兴门店", "monthly_target": 0}],
+        )
+        self.assertEqual([p["name"] for p in data.people], ["韩志燕"])
+
+    def test_fetch_store_groups_requires_positive_target(self):
+        conn = _RouterConn(
+            roster=(_roster("诸暨门店", "蒋丽兰", "宣卓萍", "郑洁佩")
+                    + _roster("绍兴门店", "韩志燕")
+                    + _roster("诸暨项目部", "周亚平")),
+            targets=[
+                {"person_name": "诸暨门店", "monthly_target": 14.6},
+                {"person_name": "绍兴门店", "monthly_target": 0},
+            ],
+        )
+        groups = fetch_store_groups(conn, region="shaoxing", year_month="2026-09")
+        self.assertEqual(set(groups), {"诸暨门店"})
+        self.assertEqual(groups["诸暨门店"]["target"], 146000.0)
+        self.assertEqual(
+            set(groups["诸暨门店"]["members"]), {"蒋丽兰", "宣卓萍", "郑洁佩"})
 
 
 class LeaderboardViewTests(unittest.TestCase):
