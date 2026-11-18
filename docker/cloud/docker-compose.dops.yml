@@ -25,7 +25,10 @@ services:
       - run
       - --live-send
       - --confirm-local-test-write
-      - --with-stream
+      # 2026-11-18 换流：同一钉钉应用（dingnlvj7z51xcoafbjl）只允许一条
+      # Stream 长连接，线下报数已由 dops-offline-gateway 接管，本进程只保留
+      # robot_outbox → 钉钉 的投递职责。恢复渠道 Stream 时把这一行加回，
+      # 并确认 offline 侧报数进程已停（两条连接会互相抢事件）。
       - --live-read
       - --source-credentials
       - /run/live-input/source-credentials.json
@@ -52,6 +55,13 @@ services:
       PUBLIC_DATA_PRICE_AGENT_SEED: /opt/dops/repo/docker/integration/price-agent-maochao.yaml
       # 线上渠道批处理由独立 channel-scheduler 发布与执行，主调度不得重复认领。
       SCHEDULER_SERVICE_EXCLUDE_FILE: /opt/dops/repo/ops/channel-release.json
+      # 线下业务线已剥离到 offline-branch 仓（2026-11-18）：区域报数/名册目标/
+      # 人员榜单/提醒催办/线下整体日报/榜单页渲染的调度所有权移交
+      # dops-offline-scheduler（其编排用 SCHEDULER_SERVICE_INCLUDE_FILE 只认领
+      # 这 22 条）。本调度器不得重复认领，否则双播报、双写 robot_outbox。
+      # 清单真源 = offline-branch 仓 ops/offline-release.json 的 scheduler_services；
+      # 与上面的渠道清单文件取并集（common.public_data.scheduler.service_scope）。
+      SCHEDULER_SERVICE_EXCLUDE: leaderboard-hangzhou,leaderboard-shaoxing,leaderboard-vanke,leaderboard-offline_all,offline-daily-summary,pages-hangzhou,pages-junpin,pages-offline_all,pages-shaoxing,pages-vanke,robot-hangzhou,robot-junpin,robot-offline_all,robot-shaoxing,robot-vanke,robot-check-hangzhou,robot-check-junpin,robot-check-offline_all,robot-check-shaoxing,robot-check-vanke,target-remind,target-rollover
       # 业务开关与嵌入参数由 app.env 提供；不在 Compose 再设默认值覆盖 env_file。
       SCHEDULER_HEARTBEAT_PATH: /var/lib/dops-scheduler/heartbeat
     entrypoint: ["python3"]
