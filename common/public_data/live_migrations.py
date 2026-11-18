@@ -46,6 +46,7 @@ from common.public_data.ops_credential import (
 from common.public_data.ops_token import ops_web_token_ddl_statements
 from common.public_data.phone_registry import phone_registry_ddl_statements
 from common.price_agent.schema import (
+    price_agent_console_ddl_statements,
     price_agent_ddl_statements,
     price_agent_dept_level2_ddl_statements,
 )
@@ -382,6 +383,19 @@ _DIM_ROBOT_MEMBER_JOB_NUMBER_DDL = (
 
 def _build_mart_robot_member_job_number_ddl() -> tuple[str, ...]:
     return (_DIM_ROBOT_MEMBER_JOB_NUMBER_DDL,)
+
+
+# 通讯录手机号只读投影：普通索引支持完整号码及尾号反查，不设唯一键，
+# 同一手机号可能由多名成员使用。独立迁移避免历史版本校验和漂移。
+_DIM_ROBOT_MEMBER_MOBILE_DDL = (
+    "ALTER TABLE `dim_robot_member`\n"
+    "  ADD COLUMN `mobile` VARCHAR(32) DEFAULT NULL AFTER `job_number`,\n"
+    "  ADD KEY `idx_mobile` (`mobile`)"
+)
+
+
+def _build_mart_robot_member_mobile_ddl() -> tuple[str, ...]:
+    return (_DIM_ROBOT_MEMBER_MOBILE_DDL,)
 
 
 # 年度目标维度（版本受控种子 docker/integration/target.seed.json 整体重放：
@@ -896,6 +910,16 @@ _MIGRATIONS = (
         "mart-ops-price-agent-dept2-v2",
         "mart",
         price_agent_dept_level2_ddl_statements(),
+    ),
+    (
+        "mart-price-agent-console-v1",
+        "mart",
+        price_agent_console_ddl_statements(),
+    ),
+    (
+        "mart-ops-robot-member-mobile-v1",
+        "mart",
+        _build_mart_robot_member_mobile_ddl(),
     ),
 )
 

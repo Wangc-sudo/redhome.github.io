@@ -9,6 +9,7 @@ const loaders = {
   PhonesPage: () => import('../pages/PhonesPage.vue'),
   FreshnessPage: () => import('../pages/FreshnessPage.vue'),
   DataQualityPage: () => import('../pages/DataQualityPage.vue'),
+  PriceAgentPage: () => import('../pages/PriceAgentPage.vue'),
   PipelinesPage: () => import('../pages/PipelinesPage.vue'),
   BroadcastBoardPage: () => import('../pages/BroadcastBoardPage.vue'),
   PipelinesHistoryPage: () => import('../pages/PipelinesHistoryPage.vue'),

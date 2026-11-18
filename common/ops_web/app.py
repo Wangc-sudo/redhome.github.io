@@ -541,7 +541,6 @@ _SERVICE_LABELS = {
     "calendar-watch": "播报日历覆盖看门（每月 25 日查当月/下月日历，零行缺口 → 线下整体群告警）",
     "dingtalk-gateway": "钉钉网关（outbox 投递 + 互动回调，常驻）",
     "kb-sync-products": "知识库商品同步（AI 表「产品资料」→ kb_products，小时级）",
-    "kb-gateway": "知识库问答机器人（客服群，独立 Stream 应用，常驻）",
     "fleet-audit": "舰队月检（每月 2 日四节体检快照 → 治理抽屉，不发群播报）",
     "bi-web": "BI 看板（L1/L2，只读 mart_ops，常驻）",
     "scheduler": "调度器（按注册表定时触发各管道，自身无定时，常驻）",
@@ -736,7 +735,6 @@ _SERVICE_NAMES = {
     "target-rollover": "月目标自动结转",
     "dingtalk-gateway": "钉钉网关",
     "kb-sync-products": "知识库商品同步",
-    "kb-gateway": "知识库问答机器人",
     "fleet-audit": "舰队月检",
     "bi-web": "BI 看板",
     "scheduler": "调度器",
@@ -4631,9 +4629,22 @@ def create_app(*, settings, session_secret, db_connector=None, auth_client=None,
         ),
     )
 
-    # -- 猫超 Windows 机器 API（独立 Bearer 认证，GET 也不走匿名读直通）---
+    # -- 猫超-自动比价功能：人员会话管理面 + Windows 独立 Bearer 机器 API ---
     if price_agent_config_source is not None:
         from common.price_agent.api import register_price_agent_routes
+        from common.ops_web.price_agent import register_price_agent_console_routes
+
+        def require_price_agent_console(request: Request) -> authz.Viewer:
+            return require_capability(request, CAPABILITY_PIPELINES)
+
+        register_price_agent_console_routes(
+            app,
+            connector=db_connector,
+            require_capability=require_price_agent_console,
+            audit_writer=lambda conn, actor, action, service_id, detail: (
+                ops_control.insert_pipeline_audit(conn, actor, action, service_id, detail)
+            ),
+        )
         register_price_agent_routes(
             app,
             db_connector=db_connector,

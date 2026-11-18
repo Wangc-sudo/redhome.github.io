@@ -38,7 +38,6 @@ SERVICE_CATEGORIES = {
     "kb-sync-wiki": "同步",
     "rag-index-products": "同步",
     "rag-index-docs": "同步",
-    "kb-gateway": "钉钉",
     "project-mart": "加工",
     "extract-mart": "加工",
     "extract-channel": "加工",

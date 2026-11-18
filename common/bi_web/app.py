@@ -124,10 +124,6 @@ _WEB_DIR = Path(__file__).parent / "web"
 #: (or simply removing the dist directory) rolls straight back to V0.
 _REACT_DIST_DIR = Path(__file__).parents[2] / "frontend" / "bi-react" / "dist"
 
-#: 小易 Web 对话前端产物（common/kb_web/web/dist，Vite 构建入库，
-#: ops-web 同款模式）。check_dir=False：未构建时 /kb 仅 API 可用。
-_KB_DIST_DIR = Path(__file__).parents[1] / "kb_web" / "web" / "dist"
-
 
 def _shell_index_html() -> Path:
     """Pick the ``/d/{id}`` shell: bi.html first, dist as fallback, else legacy.
@@ -397,11 +393,18 @@ class _TTLOptionSets:
 # Request guards
 # ---------------------------------------------------------------------------
 
-#: 公开看板保底集合（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网
-#: 榜单页不需要账号密码——群内散客直开）。运行集合 = 本常量 ∪
-#: bi_authz_grant（grant_type='public_dashboard'）——DB 是增量通道
-#: （ops-web 页面可增删），常量是 DB 故障时的可用性保底。加新区请评审
-#: 数据敏感度后再入列。
+#: 公开看板保底集合。运行集合 = 本常量 ∪ bi_authz_grant
+#: （grant_type='public_dashboard'）——DB 是增量通道（ops-web 页面可增删），
+#: 常量是 DB 故障时的可用性保底。
+#:
+#: 历史名单（2026-10-26 用户裁决：杭州/绍兴/线下整体的公网榜单页不需要
+#: 账号密码——群内散客直开）：hz-offline-sales / sx-offline-sales /
+#: offline-all-sales。
+#:
+#: 2026-11-16 用户裁决：BI 看板全部公开、免登录，不再强制走钉钉工作台。
+#: ``_public_path`` 已改为对 ``_PUBLIC_PREFIXES`` 下所有路径直接放行，
+#: 本常量与 DB 增量通道暂保留作为「按看板粒度管控访问」的 FUTURE 钩子——
+#: 后续如需回收公开面、恢复到名单制，把 ``_public_path`` 的早返关掉即可。
 PUBLIC_DASHBOARD_IDS = frozenset({
     "hz-offline-sales", "sx-offline-sales", "offline-all-sales",
 })
@@ -437,14 +440,21 @@ def _public_dashboard_resolver(db_connector, now=time.monotonic):
 
 
 def _public_path(path, public_ids):
-    """路径属于公开看板（或其日期筛选值域）时返回 True。"""
+    """路径属于公开看板（或其日期筛选值域）时返回 True。
+
+    2026-11-16 用户裁决：BI 看板全部公开、免登录，``_PUBLIC_PREFIXES`` 下
+    所有路径直接放行，不再匹配 ``public_ids`` 名单。
+    """
     if path == "/api/v1/options/dates":
         return True
     for prefix in _PUBLIC_PREFIXES:
         if path.startswith(prefix):
-            rest = path[len(prefix):]
-            dashboard_id = rest.split("/", 1)[0]
-            return dashboard_id in public_ids
+            return True
+    # FUTURE(按看板粒度管控访问): 恢复下面的名单匹配逻辑即可回到
+    # 「常量 ∪ bi_authz_grant(public_dashboard)」的白名单制。
+    #     rest = path[len(prefix):]
+    #     dashboard_id = rest.split("/", 1)[0]
+    #     return dashboard_id in public_ids
     return False
 
 
@@ -469,18 +479,21 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure,
         request.state.userid = None
         request.state.viewer = None
         if session_secret:
-            # 公开看板（2026-10-26 用户裁决）：杭州/绍兴/线下整体的公网
-            # 榜单页面向群内散客直开，不需要账号密码。页面壳、看板定义、
-            # 卡片数据、日期筛选值域全部放行；其余看板与端点照旧走
+            # 公开路径（2026-11-16 用户裁决：BI 看板全部公开、免登录——
+            # 此前 2026-10-26 仅杭州/绍兴/线下整体公网榜单页直开）。页面壳、
+            # 看板定义、卡片数据、日期筛选值域全部放行；其余端点照旧走
             # 会话+准入门。**仅认证开启时才判定**——session 未配置=全开放
             # （旧默认），公开集合无意义且不该为一个必然放行的请求读 DB
             # （页面壳零连接契约不破）。
+            #
+            # 公开 ≠ 跳过 cookie 解析：已登录且 admitted 的用户仍要解析出
+            # viewer 供行级权限（region scope）注入使用；匿名 / cookie 无效 /
+            # denied viewer 在公开路径下按匿名放行，不再 302 跳登录页。
             public_ids = (
                 public_dashboards() if public_dashboards is not None
                 else PUBLIC_DASHBOARD_IDS
             )
-            if _public_path(request.url.path, public_ids):
-                return None
+            is_public = _public_path(request.url.path, public_ids)
             raw = request.cookies.get(auth.SESSION_COOKIE)
             if raw:
                 userid = auth.resolve_session_userid(raw, session_secret)
@@ -500,13 +513,20 @@ def _build_auth_gate(token, session_secret, viewer_resolver, session_secure,
                         if viewer_resolver is not None
                         else None
                     )
-                    if viewer is not None and not viewer.admitted:
-                        # deny-by-default 准入门（铁律 1）：认证通过但无
-                        # 任何 grant 记录——页面见提示页，API 拿 403。
-                        return ("unauthorized", 403)
-                    request.state.userid = userid
-                    request.state.viewer = viewer
-                    return None
+                    if viewer is None or viewer.admitted:
+                        # admitted（或无准入门）：设置 viewer 供 scope 注入。
+                        request.state.userid = userid
+                        request.state.viewer = viewer
+                        return None
+                    # deny-by-default 准入门（铁律 1）：认证通过但无任何
+                    # grant 记录——公开路径按匿名放行（不设置 viewer），
+                    # 非公开路径页面见提示页、API 拿 403。
+                    if is_public:
+                        return None
+                    return ("unauthorized", 403)
+            if is_public:
+                # 无 cookie / cookie 无效：公开路径按匿名放行。
+                return None
         if expected is None:
             # session 已启用但没带有效 cookie：不存在「开放」兜底。
             return ("login", 401) if session_secret else None
@@ -687,8 +707,7 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
                token=None, gate=None, db_connector=None,
                seed_path=None, card_cache=None, session_secret=None,
                auth_client=None, viewer_resolver=None,
-               session_secure=False, corp_id=None, agent_id=None,
-               kb_web=None) -> FastAPI:
+               session_secure=False, corp_id=None, agent_id=None) -> FastAPI:
     """Assemble the bi-web application with every dependency injected.
 
     ``settings`` feeds only the default ``db_connector`` (mart); the
@@ -813,19 +832,6 @@ def create_app(*, settings, dashboard_source, registry=REGISTRY,
     @app.get("/")
     def root():
         return RedirectResponse(f"/d/{_DEFAULT_DASHBOARD_ID}")
-
-    # 小易 Web 对话面（2026-10-23，方案 V1）：/kb/api/* 路由组。kb_web
-    # 为 register_kb_routes 的 kwargs dict；None=不挂载（缺配降级）。
-    # 认证只要求登录（HMAC session），业务数据工具收窄在 service 层
-    # 经 kb_web_acl 角色白名单做（与 bi_authz 看板授权语义不混用）。
-    if kb_web:
-        from common.kb_web.routes import register_kb_routes
-
-        register_kb_routes(app, **kb_web)
-        # SPA 静态壳挂在 API 之后（Starlette 按注册序匹配，/kb/api/*
-        # 已先注册不会被 mount 吞掉）。无客户端路由，html=True 即可。
-        app.mount("/kb", StaticFiles(directory=_KB_DIST_DIR, html=True,
-                                     check_dir=False), name="kb-web")
 
     @app.get("/healthz")
     def healthz():
@@ -1013,14 +1019,6 @@ def main():
         ).strip().lower() in ("1", "true", "yes")
         dashboard_source = build_dashboard_config_source()
         seed_path = os.environ.get("PUBLIC_DATA_BI_SEED") or None
-        # 小易 Web 对话面依赖（fail-open：缺配/异常 → None 不挂载，
-        # 看板面不受影响）。
-        try:
-            from common.kb_web.bootstrap import build_kb_web_deps
-
-            kb_web = build_kb_web_deps(settings)
-        except Exception:
-            kb_web = None
         application = create_app(
             settings=settings,
             dashboard_source=dashboard_source,
@@ -1031,7 +1029,6 @@ def main():
             session_secure=session_secure,
             corp_id=corp_id,
             agent_id=agent_id,
-            kb_web=kb_web,
         )
     except Exception as exc:
         print(f"bi-web startup failed: invalid configuration ({type(exc).__name__})")

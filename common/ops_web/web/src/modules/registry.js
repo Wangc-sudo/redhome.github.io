@@ -73,6 +73,12 @@ export const modules = [
     api_router: 'pipelines', scheduler: 'scheduler', audit: 'pipeline',
   }),
   declaration({
+    module_key: 'price-agent', workspace: 'admin', title: '猫超-自动比价功能', route: 'price-agent',
+    nav_group: '任务与运行', nav_order: 35, component: 'PriceAgentPage', capability: 'pipelines',
+    api_router: 'price-agent', migration: 'mart-price-agent-console-v1',
+    scheduler: 'price-maochao-dispatch', tests: ['test_price_agent_console.py'], audit: 'price_agent',
+  }),
+  declaration({
     module_key: 'broadcast', workspace: 'admin', title: '播报编排', route: 'broadcast',
     nav_group: '任务与运行', nav_order: 40, component: 'BroadcastBoardPage', capability: 'pipelines',
     api_router: 'pipelines', audit: 'pipeline',

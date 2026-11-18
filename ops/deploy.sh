@@ -24,13 +24,20 @@ LOCK_FILE="${DOPS_LOCK_FILE:-/var/run/dops-deploy.lock}"
 STATUS_FILE="${DOPS_STATUS_FILE:-/opt/dops/deploy-status.json}"
 HEALTH_URL="${DOPS_HEALTH_URL:-http://127.0.0.1:18080/healthz}"
 HEALTH_TIMEOUT="${DOPS_HEALTH_TIMEOUT:-90}"
-PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
+# 缺省用国内源：空值曾让 pip 落到官方源，在国内网络下直接超时（构建失败）。
+# 要回官方源请显式设 DOPS_PIP_INDEX_URL=https://pypi.org/simple。
+PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+# 公共基座镜像（gitee dops-docker 仓构建，部署机本地需预置；见该仓 README）
+BASE_IMAGE="${DOPS_BASE_IMAGE:-dops-base-python312:2026.11.1}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）。
-# ops-web 与 bi-web 同为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：
-# 漏在本列表时 git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进
-# main 后不生效（#57/#58/#59 实测，2026-10-12 补齐）。kb-gateway 同为长驻
-# Stream 进程 + 只读挂载，漏列时 KB P2 合并后不重载（2026-10-13 补齐）。
-CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler bi-web ops-web pages-web kb-gateway}"
+# ops-web 为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：漏在本列表时
+# git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进 main 后不生效
+# （#57/#58/#59 实测，2026-10-12 补齐）。
+# 不在本列表的两个长驻服务各归其仓（2026-11-18 拆分）：
+#   * bi-web / dops-bi-independent —— dops-bi 独立仓部署；
+#   * pages-web / dops-pages-web —— offline-branch 部署（common/pages_web
+#     已不在本仓，主仓重建只会拉起 module not found 的容器）。
+CODE_SERVICES="${DOPS_CODE_SERVICES:-gateway scheduler ops-web}"
 # 灾备/CI 模式（DOPS_SYNC_ONLY=1，如 dops-ci）：只 git 同步代码到部署分支，
 # 不重建镜像、不重启服务——避免灾备机与生产机重复跑 cron / 抢占 DingTalk stream。
 SYNC_ONLY="${DOPS_SYNC_ONLY:-0}"
@@ -56,7 +63,8 @@ cd "$REPO_DIR"
 
 git fetch --quiet "$REMOTE" "$BRANCH"
 LOCAL_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git rev-parse "$REMOTE/$BRANCH")"
+# REMOTE 既支持具名远端，也支持带凭据的私有仓 URL；两者统一读 FETCH_HEAD。
+REMOTE_SHA="$(git rev-parse FETCH_HEAD)"
 
 if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
   exit 0  # 无变更，静默（不打日志噪音）
@@ -82,7 +90,7 @@ if [ "$SYNC_ONLY" = "1" ]; then
 fi
 
 DEPS_CHANGED=0
-git diff --quiet "$LOCAL_SHA" "$REMOTE_SHA" -- requirements.txt || DEPS_CHANGED=1
+git diff --quiet "$LOCAL_SHA" "$REMOTE_SHA" -- requirements.txt docker/cloud/Dockerfile || DEPS_CHANGED=1
 
 apply() {
   git reset --hard "$1"
@@ -91,14 +99,15 @@ apply() {
     cp docker/cloud/docker-compose.dops.yml "$COMPOSE_FILE"
   fi
   if [ "$DEPS_CHANGED" = "1" ]; then
-    log "requirements.txt changed -> rebuild dops-app image"
+    log "requirements.txt/Dockerfile changed -> rebuild dops-app image (base=$BASE_IMAGE)"
     docker build -t dops-app:latest \
+      --build-arg "BASE_IMAGE=$BASE_IMAGE" \
       --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
       -f docker/cloud/Dockerfile .
   fi
   # 应用 compose/env 变更（nginx/ntp 等不强制重建）
   docker compose -f "$COMPOSE_FILE" up -d
-  # nginx conf 真源同步 + 平滑重载（2026-10-13 pages-web cutover）：conf
+  # nginx conf 真源同步 + 平滑重载（2026-10-13 榜单页请求时渲染 cutover）：conf
   # 此前只落 repo，/opt/dops/nginx/pages.conf 不会被更新，nginx 永远跑旧
   # 配置。落盘前先备份 → 再 nginx -t 校验 → 通过才 HUP；校验失败回滚旧
   # conf 并告警（2026-10-13 实测：正则含 {} 未加引号使 nginx -t emerg 失败，
@@ -140,10 +149,13 @@ health_gate() {
       # 不误伤部署门）。2026-10-26：8300 软下线为 301 跳域名，探针改走
       # 80（榜单页本体端口）。
       if curl -fsS --max-time 5 http://127.0.0.1:80/hangzhou.html >/dev/null 2>&1; then
-        # 关键长驻容器均在 Up（bi-web/ops-web/pages-web 另看各自的 healthz）
+        # 关键长驻容器均在 Up：主仓三件 + 独立仓 BI（同宿主共用盘古线路，
+        # 它挂了看板就没了）。pages-web 容器归 offline-branch 自证，主仓
+        # 只看上面的 80 页面链探针——切换前后容器名从 dops-pages-web 变为
+        # dops-offline-pages-web，探针语义不变、无需跟着改。
         if [ -z "$(docker ps \
-            --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-web \
-            --filter name=dops-ops-web --filter name=dops-pages-web --filter name=kb-gateway \
+            --filter name=dingtalk-gateway --filter name=dops-scheduler --filter name=dops-bi-independent \
+            --filter name=dops-ops-web \
             --format '{{.Status}}' | grep -v Up)" ]; then
           return 0
         fi
@@ -153,6 +165,14 @@ health_gate() {
   done
   return 1
 }
+
+# 基座镜像预检（2026-11-18 基座化）：缺镜像时 docker build 会以晦涩的
+# "pull access denied" 失败并连带回滚整次部署，这里提前给出可操作提示。
+if [ "$DEPS_CHANGED" = "1" ] && ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+  log "ERROR: base image $BASE_IMAGE missing -> build it first (gitee dops-docker: ./build.sh python312)"
+  write_status error "$LOCAL_SHA" "$REMOTE_SHA" "base image missing: $BASE_IMAGE"
+  exit 1
+fi
 
 if apply "$REMOTE_SHA" && health_gate; then
   log "DEPLOY OK: $(git rev-parse --short HEAD)"

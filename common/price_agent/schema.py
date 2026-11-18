@@ -109,3 +109,22 @@ def price_agent_dept_level2_ddl_statements() -> tuple[str, ...]:
         "ALTER TABLE `fact_maochao_price_snapshot` "
         "ADD COLUMN `dept_level2` VARCHAR(128) NOT NULL DEFAULT '' AFTER `subject_key`",
     )
+
+
+def price_agent_console_ddl_statements() -> tuple[str, ...]:
+    return (
+        "ALTER TABLE `pd_price_agent_job` "
+        "ADD COLUMN `parent_job_id` VARCHAR(36) DEFAULT NULL AFTER `run_history_id`, "
+        "MODIFY COLUMN `source` ENUM('cron','run_once','retry','recollect') NOT NULL, "
+        "ADD KEY `idx_price_agent_parent` (`parent_job_id`)",
+        "CREATE TABLE IF NOT EXISTS `pd_price_agent_status` (\n"
+        "  `agent_id` VARCHAR(64) NOT NULL,\n"
+        "  `last_seen_at` DATETIME(6) NOT NULL,\n"
+        "  `last_claim_at` DATETIME(6) DEFAULT NULL,\n"
+        "  `last_job_id` VARCHAR(36) DEFAULT NULL,\n"
+        "  `created_at` DATETIME(6) NOT NULL,\n"
+        "  `updated_at` DATETIME(6) NOT NULL,\n"
+        "  PRIMARY KEY (`agent_id`),\n"
+        "  KEY `idx_price_agent_seen` (`last_seen_at`)\n"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    )

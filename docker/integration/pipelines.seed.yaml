@@ -63,31 +63,6 @@ dq-rerun-worker:
 # robot 一拆二（2026-10-07 裁决）：robot-<区域>=填报提醒(18:00)，
 # robot-check-<区域>=催办未填人+DING(20:00)，独立注册/调度/可手动运行，
 # 手动触发不再受 mart_cli once 的小时分流限制。
-robot-hangzhou:
-  kind: business
-  category: 催办
-  # 运行态调整待运维补注：Nacos 侧 enabled=false 且 schedule 改为 30 18
-  # （2026-10-13 对账发现，git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "30 18 * * *"
-  reads: [mart_ops]
-  description: "hangzhou daily-report remind (mart_ops -> robot_outbox)"
-robot-check-hangzhou:
-  kind: business
-  category: 催办
-  enabled: true
-  schedule: "0 20 * * *"
-  sla: "20:45"
-  reads: [mart_ops]
-  description: "hangzhou unfilled check + DING (mart_ops -> robot_outbox)"
-pages-hangzhou:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "hangzhou leaderboard HTML page generation"
 channel-daily-qudao:
   kind: business
   category: 播报
@@ -95,62 +70,6 @@ channel-daily-qudao:
   schedule: "30 8 * * *"
   reads: [mart_ops]
   description: "qudao channel daily report broadcast - 已并入 qudao 榜单页（渠道日销快报板块），2026-09-23 停单独播报"
-robot-vanke:
-  kind: business
-  category: 催办
-  # 2026-09-30 关停：催办口径错配（fact 按单元名、名单按人名 → 恒判 6 人全未填，
-  # 每天 18:00 @6 + 20:00 check + DING 全员；吴金澎 7 天被 @ 12 次）。Nacos 同步置 false。
-  # 数据通道不受影响（sync-dingtalk / 报数流 / pages-vanke 榜单照常）。
-  enabled: false
-  schedule: "0 18 * * *"
-  reads: [mart_ops]
-  description: "vanke daily-report remind (mart_ops -> robot_outbox)"
-robot-check-vanke:
-  kind: business
-  category: 催办
-  # 随 robot-vanke 一并关停（同一口径错配根因）。
-  enabled: false
-  schedule: "0 20 * * *"
-  reads: [mart_ops]
-  description: "vanke unfilled check + DING (mart_ops -> robot_outbox)"
-pages-vanke:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "vanke leaderboard HTML page generation"
-pages-shaoxing:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "shaoxing leaderboard HTML page generation"
-pages-junpin:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "junpin leaderboard HTML page generation"
-pages-qudao:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  # 运行态调整待运维补注：Nacos 侧 schedule 为 30 19 * * *（2026-10-13
-  # 对账发现，git 无对应记录），enabled=false 与 seed 一致；seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "30 19 * * *"
-  reads: [mart_ops]
-  description: "qudao leaderboard HTML page generation (渠道播报板块已并入，08:30/15:30/17:30 再生)"
-# --- 渠道日销 T+1 采集与门店到齐催办（2026-09-28 方案） ---
-# 2026-10-13 放行（用户批准）：前三条 Nacos 定点启用，明日 10:31 首播；
-# pages-qudao-t1 维持停用（qudao.html 已切 BI 桥，本线 cron 产出静态文件
-# 无路由消费 = 空跑，T+1 数据需求由 extract-channel 覆盖）。
 sync-channel-sales:
   kind: apps
   category: 同步
@@ -222,89 +141,6 @@ freshness-check:
   # 告警口径（ops-web「告警设置」可改；真源落 Nacos 本条目 params）：
   params: {alert_threshold: warning, alert_cooldown_hours: 24}
   description: "L3 数据新鲜度看门狗：渠道两表缺 T-1 行即告警（region=ops）"
-pages-qudao-t1:
-  kind: business
-  category: 页面
-  # 2026-10-13 Nacos 定点停用（此前 Nacos=true 每天 10:45 空跑）：
-  # qudao.html 已是 nginx→BI 桥，本线 leaderboard-html 产出静态文件无路由消费。
-  enabled: false
-  schedule: "45 10 * * *"
-  reads: [mart_ops]
-  depends_on: [extract-channel]
-  description: "qudao 榜单页 T+1 重算（leaderboard-html --date yesterday）"
-pages-offline_all:
-  kind: business
-  category: 页面
-  # 2026-10-13 起 pages-web 请求时渲染，cron 从页面链路退场（Nacos 侧同步停用）。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "offline_all scope leaderboard HTML page generation"
-# --- 榜单群播报（mart_cli leaderboard，kind='leaderboard'） ---
-# 上云切换漏配补登（2026-10-07）：旧 Windows cron「8:30 榜单」停后无注册线
-# 触发，09-23 起五区域榜单群播报全停。默认 08:30 随 pages 同批次，
-# 播报时间由 ops-web 定时任务（管道注册表）单线调整，Nacos 为准。
-leaderboard-hangzhou:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "30 8 * * *"
-  sla: "09:15"
-  reads: [mart_ops]
-  description: "hangzhou leaderboard group broadcast (mart_ops -> robot_outbox)"
-leaderboard-shaoxing:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "30 8 * * *"
-  sla: "09:15"
-  reads: [mart_ops]
-  description: "shaoxing leaderboard group broadcast (mart_ops -> robot_outbox)"
-leaderboard-vanke:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "30 8 * * *"
-  sla: "09:15"
-  reads: [mart_ops]
-  description: "vanke leaderboard group broadcast (mart_ops -> robot_outbox)"
-leaderboard-qudao:
-  kind: business
-  category: 播报
-  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
-  # git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "qudao leaderboard group broadcast (mart_ops -> robot_outbox)"
-leaderboard-offline_all:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "30 8 * * *"
-  reads: [mart_ops]
-  description: "offline_all leaderboard group broadcast (mart_ops -> robot_outbox)"
-offline-daily-summary:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "30 20 * * *"
-  reads: [mart_ops]
-  description: "offline_all daily aggregation summary (scopes + dod/wow + mtd)"
-# 周报/月报已取消（2026-10-20 用户裁决：线下整体只保留日报），
-# offline-weekly-summary / offline-monthly-summary 条目删除。
-# 月目标双管道（2026-10-09 运维裁决「结转+月度提醒」）：dim_report_target
-# 按月键控、翻月无行会静默走 Nacos 旧值兜底——1 日结转 + 28 日提醒核对。
-target-remind:
-  kind: business
-  category: 播报
-  enabled: true
-  schedule: "0 10 28 * *"
-  reads: [mart_ops]
-  description: "month-end target verification reminder to region groups (next-month carry-over notice)"
-# 工作日历覆盖看门（2026-10-10 三层防线 B 层）：种子只登记到 2026-12，
-# 翻年旧行为是 dim_calendar 空 → 全线静默失败；A 层规则兜底（周六日全休）
-# 保不死后，本管道把「兜底在用/覆盖缺口」显式告警到线下整体群。
 calendar-watch:
   kind: business
   category: 播报
@@ -312,17 +148,6 @@ calendar-watch:
   schedule: "0 10 25 * *"
   reads: [mart_ops]
   description: "workday-calendar coverage watch (current+next month gap / rule_fallback alert)"
-target-rollover:
-  kind: business
-  category: 加工
-  enabled: true
-  schedule: "0 6 1 * *"
-  reads: [mart_ops]
-  description: "monthly target carry-over (prev month -> current month, idempotent, manual entries win)"
-# 舰队月检（2026-10-17 治理 P2）：四节体检（停用盘点/僵尸/装饰依赖/
-# cron 堆积）快照落 pd_ops_fleet_audit，产出只进 ops-web 治理抽屉——
-# 用户裁决：治理产出不发群播报。每月 2 日跑（1 日 target-rollover 之后，
-# 避开月末/月初播报高峰）。
 fleet-audit:
   kind: business
   category: 平台
@@ -330,71 +155,6 @@ fleet-audit:
   schedule: "0 7 2 * *"
   reads: [mart_ops]
   description: "monthly fleet governance audit snapshot (disabled/zombie/decorative-deps/pileup -> pd_ops_fleet_audit, ops-web drawer only)"
-robot-shaoxing:
-  kind: business
-  category: 催办
-  enabled: true
-  schedule: "0 18 * * *"
-  reads: [mart_ops]
-  description: "shaoxing daily-report remind (mart_ops -> robot_outbox)"
-robot-check-shaoxing:
-  kind: business
-  category: 催办
-  enabled: true
-  schedule: "0 20 * * *"
-  sla: "20:45"
-  reads: [mart_ops]
-  description: "shaoxing unfilled check + DING (mart_ops -> robot_outbox)"
-robot-junpin:
-  kind: business
-  category: 催办
-  # 运行态调整待运维补注：Nacos 侧 schedule 为 30 18（2026-10-13 对账
-  # 发现，git 无对应记录；enabled=true 一致）。seed 镜像 Nacos 真值。
-  enabled: true
-  schedule: "30 18 * * *"
-  reads: [mart_ops]
-  description: "junpin daily-report remind (mart_ops -> robot_outbox)"
-robot-check-junpin:
-  kind: business
-  category: 催办
-  # 运行态调整待运维补注：Nacos 侧 schedule 为 0 22（2026-10-13 对账
-  # 发现，git 无对应记录；enabled=true 一致）。seed 镜像 Nacos 真值。
-  enabled: true
-  schedule: "0 22 * * *"
-  reads: [mart_ops]
-  description: "junpin unfilled check + DING (mart_ops -> robot_outbox)"
-robot-qudao:
-  kind: business
-  category: 催办
-  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
-  # git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "0 18 * * *"
-  reads: [mart_ops]
-  description: "qudao daily-report remind (mart_ops -> robot_outbox)"
-robot-check-qudao:
-  kind: business
-  category: 催办
-  # 运行态调整待运维补注：Nacos 侧 enabled=false（2026-10-13 对账发现，
-  # git 无对应记录）。seed 镜像 Nacos 真值。
-  enabled: false
-  schedule: "0 20 * * *"
-  reads: [mart_ops]
-  description: "qudao unfilled check + DING (mart_ops -> robot_outbox)"
-robot-offline_all:
-  kind: business
-  category: 催办
-  enabled: true
-  schedule: "0 18 * * *"
-  reads: [mart_ops]
-  description: "offline_all daily-report remind (mart_ops -> robot_outbox)"
-robot-check-offline_all:
-  kind: business
-  category: 催办
-  enabled: true
-  schedule: "0 20 * * *"
-  reads: [mart_ops]
-  description: "offline_all unfilled check + DING (mart_ops -> robot_outbox)"
 dingtalk-gateway:
   kind: apps
   category: 钉钉
@@ -451,12 +211,6 @@ kb-export-cleanup:
   schedule: "17 * * * *"
   reads: [mart_ops]
   description: "expire KB XLSX exports and remove expired files"
-kb-gateway:
-  kind: apps
-  category: 钉钉
-  enabled: true
-  reads: [mart_ops]
-  description: "knowledge-base QA robot (dedicated Stream app, customer-service group)"
 # --- RAG 向量索引（2026-10-12 第一期：商品+图片跨模态检索） ---
 # 2026-10-20 降频为每日一次：每小时全量重灌 825 行图文（每次数百次
 # embedding 调用、十几分钟）纯浪费——商品资料非高频变动，每日 03:47 足够；

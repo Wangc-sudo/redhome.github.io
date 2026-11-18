@@ -33,9 +33,60 @@ from decimal import Decimal
 
 from common.bi_web import derived, fin_derived
 from common.calendar_utils import month_days
-from common.daily_robot.mart_leaderboard import mart_collect
-from common.daily_robot.mart_tasks import MartTaskError
 from common.metrics.daily_report import elapsed_workdays, fetch_workdays
+
+# 2026-11-18 线下业务线剥离：人员榜单/催办采集已迁 offline-branch 仓。
+# 主仓 BI 只剩线上渠道与财务口径的看板；线下看板（hz/sx/offline-all/l2-*）
+# 由 dops-bi 仓提供。此处按可选依赖导入——线下采集不在场时相关卡片函数
+# 返回空表（不抛异常、不打挂整个 BI 模块导入）。
+try:  # pragma: no cover - 环境相关
+    from common.daily_robot.mart_leaderboard import mart_collect
+    from common.daily_robot.mart_tasks import MartTaskError
+except ImportError:  # 线下业务线已独立成仓
+    mart_collect = None
+
+    class MartTaskError(Exception):
+        """占位异常类型（线下采集不在场时的空实现）。"""
+
+
+def _mart_collect(connection, **kwargs):
+    """人员榜单采集（线下仓提供）；不在场时返回 ``None`` 走空表降级。"""
+    if mart_collect is None:
+        return None
+    return mart_collect(connection, **kwargs)
+
+
+def _offline_summary_module():
+    """线下汇总模块（不在场时返回 None——相关卡片降级空表）。"""
+    try:
+        from common.daily_robot import offline_summary
+    except ImportError:
+        return None
+    return offline_summary
+
+
+def _fetch_member_dept_map(connection, regions):
+    module = _offline_summary_module()
+    if module is None:
+        return {}
+    return module.fetch_member_dept_map(connection, regions)
+
+
+def _collect_offline_all_people(connection, *, anchor):
+    module = _offline_summary_module()
+    if module is None:
+        return [], frozenset()
+    return module.collect_offline_all_people(
+        connection, business_date=anchor, include_today=True
+    )
+
+
+def _unfilled_rows(connection, region, anchor, scope):
+    try:
+        from common.daily_robot.mart_tasks import _unfilled
+    except ImportError:
+        return []
+    return _unfilled(connection, region, anchor, scope)
 
 #: Money unit for every chart payload (元; the front end formats 万).
 _UNIT = "元"
@@ -995,8 +1046,7 @@ def department_mtd_ranking(connection, *, region=None, first_day, last_day,
     dept_map = {}
     row_regions = tuple({row["region"] for row in rows if row.get("region")})
     if row_regions:
-        from common.daily_robot.offline_summary import fetch_member_dept_map
-        dept_map = fetch_member_dept_map(connection, row_regions)
+        dept_map = _fetch_member_dept_map(connection, row_regions)
     bucket = {}
     for row in rows:
         dept = (
@@ -1378,13 +1428,15 @@ def _people_as_of(month):
 def _people_for_region(connection, region, month):
     """单区域人员行；dim_calendar 缺行（MartTaskError）降级为空列表。"""
     try:
-        data = mart_collect(
+        data = _mart_collect(
             connection,
             region=region,
             business_date=_people_as_of(month),
             include_today=True,
         )
     except MartTaskError:
+        return []
+    if data is None:
         return []
     return list(data.people)
 
@@ -3233,10 +3285,8 @@ def _unfilled_payload(connection, region, anchor, scope=None):
     aliases 是机器人通道的表内用名补丁（2026-10-08 已清零），BI 卡
     不挂区域配置。
     """
-    from common.daily_robot.mart_tasks import _unfilled
-
     members = (
-        _unfilled(connection, region, anchor, {})
+        _unfilled_rows(connection, region, anchor, {})
         if _scope_allows_regions(scope, region) else []
     )
     rows = [
@@ -3277,7 +3327,7 @@ def _people_progress_payload(connection, region, anchor, scope=None):
         data = None  # 行级 scope 门：钉死区域不授权，整表空（fail-closed）
     else:
         try:
-            data = mart_collect(
+            data = _mart_collect(
                 connection, region=region, business_date=anchor,
                 include_today=True,
             )
@@ -3549,13 +3599,10 @@ def _oa_people(connection, anchor, scope=None):
     该区人员），故 scope 非 None 时要求三区全在 scope 内，否则整表空；
     ``offline_all`` 授权先经 :func:`_oa_effective_scope` 展开为三区并集。
     """
-    from common.daily_robot.offline_summary import collect_offline_all_people
     if not _scope_allows_regions(_oa_effective_scope(scope), *_OA_MERGED_REGIONS):
         return [], frozenset()
     try:
-        return collect_offline_all_people(
-            connection, business_date=anchor, include_today=True
-        )
+        return _collect_offline_all_people(connection, anchor=anchor)
     except MartTaskError:
         return [], frozenset()
 
@@ -3617,7 +3664,7 @@ def _region_dept_progress(connection, region, anchor, scope=None):
         data = None
     else:
         try:
-            data = mart_collect(
+            data = _mart_collect(
                 connection, region=region, business_date=anchor,
                 include_today=True,
             )
@@ -3626,8 +3673,7 @@ def _region_dept_progress(connection, region, anchor, scope=None):
     rows = []
     if data is not None and data.workdays:
         progress = len(data.elapsed) / len(data.workdays)
-        from common.daily_robot.offline_summary import fetch_member_dept_map
-        dept_map = fetch_member_dept_map(connection, (region,))
+        dept_map = _fetch_member_dept_map(connection, (region,))
         people = []
         for person in data.people:
             people.append({
@@ -3786,17 +3832,24 @@ def run_table_oa_scopes(connection, params) -> dict:
     自然日；周/月列锚定锚点日（BI 实时口径含当天，静态页 T-1 刻意
     不同）。本月全板块零填报 → 空行降级。
     """
-    from common.daily_robot.offline_summary import (
-        AGG_SCOPES,
-        TOTAL_LABEL,
-        TOTAL_SCOPE_KEY,
-        compute_overview_row,
-        fetch_scope_daily_facts,
-        fetch_scope_month_target,
-        merge_facts,
-        merge_targets,
-        previous_month,
-    )
+    offline_summary = _offline_summary_module()
+    if offline_summary is None:
+        # 线下业务线已独立成仓：板块总览由该仓/dops-bi 提供，本仓降级空表。
+        return {
+            "chart": "table",
+            "columns": _OA_SCOPE_COLUMNS,
+            "rows": [],
+            "date": _hz_anchor(params).isoformat(),
+        }
+    AGG_SCOPES = offline_summary.AGG_SCOPES
+    TOTAL_LABEL = offline_summary.TOTAL_LABEL
+    TOTAL_SCOPE_KEY = offline_summary.TOTAL_SCOPE_KEY
+    compute_overview_row = offline_summary.compute_overview_row
+    fetch_scope_daily_facts = offline_summary.fetch_scope_daily_facts
+    fetch_scope_month_target = offline_summary.fetch_scope_month_target
+    merge_facts = offline_summary.merge_facts
+    merge_targets = offline_summary.merge_targets
+    previous_month = offline_summary.previous_month
     from common.metrics.daily_report import achievement_rate
 
     anchor = _hz_anchor(params)

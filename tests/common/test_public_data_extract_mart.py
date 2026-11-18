@@ -832,6 +832,8 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         self.assertIn("FROM `dingtalk_org_member`", sql)
         self.assertIn("ORDER BY `synced_at` DESC LIMIT 1", sql)
         self.assertIn("`sync_run_id` = (", sql)
+        self.assertIn("'$.mobile'", sql)
+        self.assertIn("NULLIF(TRIM(", sql)
 
     def test_dept_names_prefer_catalog_table(self):
         # 目录表有行 → 用目录，不再查成员表（2026-10-24 部门目录采集）
@@ -887,7 +889,7 @@ class OrgMemberRepositoryTests(unittest.TestCase):
         # job_number（2026-10-19 登录用户名真源）落在 union_id 之后。
         self.assertIn("`job_number`", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", None, None, "hangzhou", "1049728636", "杭中",
+            "u1", "张三", None, None, None, "hangzhou", "1049728636", "杭中",
             1, _NOW, _RUN_ID,
         )])
 
@@ -972,6 +974,7 @@ class OrgMemberExtractTests(unittest.TestCase):
     def _service(self, org_rows):
         self.repository = Mock()
         self.repository.read_org_members.return_value = list(org_rows)
+        self.repository.has_dim_robot_member_mobile.return_value = False
         # 领导投影（2026-10-24）：Mock 默认返回值是 truthy 的 Mock 会触发
         # 领导提取——显式置空，保持既有用例只关注成员维度。
         self.repository.read_org_leader_payloads.return_value = []
@@ -997,6 +1000,7 @@ class OrgMemberExtractTests(unittest.TestCase):
             "region": "hangzhou",
             "dept_id": "1049728636",
             "dept_name": "杭中",
+            "mobile": "13800000000",
         }])
         result = service.extract()
 
@@ -1037,6 +1041,50 @@ class OrgMemberExtractTests(unittest.TestCase):
 
         self.mart_repository.mark_projection_pending.assert_called_once()
         self.mart_repository.mark_completed.assert_not_called()
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_empty_mobiles_do_not_overwrite_existing_valid_data(self, _lock, _txn):
+        service = self._service([{
+            "user_id": "u1", "name": "张三", "region": "hangzhou",
+            "mobile": None,
+        }])
+        self.repository.has_dim_robot_member_mobile.return_value = True
+
+        with self.assertLogs(
+            "common.public_data.extract_mart", level="ERROR"
+        ) as captured, self.assertRaises(MartExtractError):
+            service.extract()
+
+        self.repository.upsert_dim_robot_member.assert_not_called()
+        self.repository.replace_dim_robot_member.assert_not_called()
+        self.mart_repository.mark_failed.assert_called_once()
+        self.assertTrue(any("拒绝覆盖" in line for line in captured.output))
+
+    @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
+    @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
+    def test_mobile_change_updates_org_digest(self, _lock, _txn):
+        first = self._service([{
+            "user_id": "u1", "name": "张三", "region": "hangzhou",
+            "mobile": "13800000000",
+        }])
+        first.extract()
+        digest = self.mart_repository.save_dataset_summary.call_args.kwargs[
+            "record_id_digest"
+        ]
+
+        second = self._service([{
+            "user_id": "u1", "name": "张三", "region": "hangzhou",
+            "mobile": "13900000000",
+        }])
+        self.repository.last_summary_digest.return_value = digest
+        second.extract()
+
+        self.repository.upsert_dim_robot_member.assert_called_once()
+        new_digest = self.mart_repository.save_dataset_summary.call_args.kwargs[
+            "record_id_digest"
+        ]
+        self.assertNotEqual(digest, new_digest)
 
 
 # ---------------------------------------------------------------------------
@@ -1180,8 +1228,9 @@ class IncrementalRepositoryTests(unittest.TestCase):
         self.assertIn("INSERT INTO `dim_robot_member`", insert_sql)
         self.assertIn("ON DUPLICATE KEY UPDATE", insert_sql)
         self.assertIn("`job_number` = VALUES(`job_number`)", insert_sql)
+        self.assertIn("`mobile` = VALUES(`mobile`)", insert_sql)
         self.assertEqual(sequence, [(
-            "u1", "张三", None, None, "hangzhou", "1049728636", "杭中",
+            "u1", "张三", None, None, None, "hangzhou", "1049728636", "杭中",
             1, _NOW, _RUN_ID,
         )])
         delete_sql, delete_params = self.mart.cursor_instance.executed[0]
@@ -1431,6 +1480,7 @@ class IncrementalOrgMemberTests(unittest.TestCase):
         "region": "hangzhou",
         "dept_id": "1049728636",
         "dept_name": "杭中",
+        "mobile": "13800000000",
     }]
 
     def _service(self, *, previous_digest=None):
@@ -1456,10 +1506,9 @@ class IncrementalOrgMemberTests(unittest.TestCase):
     @patch("common.public_data.extract_mart.transaction", return_value=_Ctx())
     @patch("common.public_data.extract_mart.named_lock", return_value=_Ctx())
     def test_unchanged_org_snapshot_skips_the_write(self, _lock, _txn):
-        # digest 形态含 job_number（2026-10-19 登录用户名真源）：末段为
-        # 空即该员工在通讯录里没有工号。
+        # digest 覆盖工号和手机号，任一变化都需重新投影。
         digest = MartExtractService._content_digest(
-            ["u1|张三|hangzhou|1049728636|杭中||"]
+            ["u1|张三|hangzhou|1049728636|杭中|||13800000000"]
         )
         service = self._service(previous_digest=digest)
 

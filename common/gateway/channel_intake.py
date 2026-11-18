@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from common.daily_robot.channel_missing import parse_owner_entries
-from common.gateway.report_intake import IntakeOutcome, _fmt_amount
+from common.gateway.intake_common import IntakeOutcome, fmt_amount
 from common.metrics.daily_report import fetch_channel_dept_rollup
 from common.public_data import channel_robot_inbox as inbox_mod
 
@@ -547,7 +547,7 @@ def _fmt_wan(value):
     number = float(value)
     if abs(number) >= 10000:
         return f"{number / 10000:.1f}万"
-    return _fmt_amount(number)
+    return fmt_amount(number)
 
 
 def build_fill_reply(*, entries, rejects, progress_lines, roster):
@@ -565,12 +565,12 @@ def build_fill_reply(*, entries, rejects, progress_lines, roster):
             )
         line = (
             f"{entry.business_date.month}/{entry.business_date.day} "
-            f"{entry.channel}·{store_disp}：{_fmt_amount(entry.amount)}"
+            f"{entry.channel}·{store_disp}：{fmt_amount(entry.amount)}"
         )
         if entry.recognized_from:
             line += f"（识别：{entry.recognized_from}）"
         if prev is not None and float(prev) != float(entry.amount):
-            line += f"（🔁 覆盖旧值 {_fmt_amount(prev)}）"
+            line += f"（🔁 覆盖旧值 {fmt_amount(prev)}）"
         lines.append(line)
     lines.extend(progress_lines)
     if rejects:

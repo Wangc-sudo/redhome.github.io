@@ -29,7 +29,7 @@ import json
 import logging
 from datetime import timedelta
 
-from common.daily_robot.mart_tasks import TaskOutcome
+from common.public_data.task_types import TaskOutcome
 from common.public_data.extract_ecom_people import channel_fallback_owners
 from common.public_data.recipient_override import merge_recipient_overrides
 

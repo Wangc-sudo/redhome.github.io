@@ -875,7 +875,9 @@ class MartExtractRepository:
                    JSON_UNQUOTE(JSON_EXTRACT(`payload_json`, '$.unionid'))
                        AS `union_id`,
                    JSON_UNQUOTE(JSON_EXTRACT(`payload_json`, '$.job_number'))
-                       AS `job_number`
+                       AS `job_number`,
+                   NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(
+                       `payload_json`, '$.mobile'))), '') AS `mobile`
             FROM `dingtalk_org_member`
             WHERE `sync_run_id` = (
               SELECT `sync_run_id` FROM `dingtalk_org_member`
@@ -974,16 +976,17 @@ class MartExtractRepository:
             if rows:
                 cursor.executemany(
                     "INSERT INTO `dim_robot_member` "
-                    "(`user_id`, `name`, `union_id`, `job_number`, `region`, "
-                    "`dept_id`, `dept_name`, `is_active`, `synced_at`, "
-                    "`sync_run_id`) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "(`user_id`, `name`, `union_id`, `job_number`, `mobile`, "
+                    "`region`, `dept_id`, `dept_name`, `is_active`, "
+                    "`synced_at`, `sync_run_id`) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     [
                         (
                             row["user_id"],
                             row["name"],
                             row.get("union_id"),
                             row.get("job_number"),
+                            row.get("mobile"),
                             row["region"],
                             row.get("dept_id"),
                             row.get("dept_name"),
@@ -1052,14 +1055,15 @@ class MartExtractRepository:
                 textwrap.dedent(
                     """\
                     INSERT INTO `dim_robot_member`
-                    (`user_id`, `name`, `union_id`, `job_number`, `region`,
-                     `dept_id`, `dept_name`, `is_active`, `synced_at`,
+                    (`user_id`, `name`, `union_id`, `job_number`, `mobile`,
+                     `region`, `dept_id`, `dept_name`, `is_active`, `synced_at`,
                      `sync_run_id`)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                       `name` = VALUES(`name`),
                       `union_id` = VALUES(`union_id`),
                       `job_number` = VALUES(`job_number`),
+                      `mobile` = VALUES(`mobile`),
                       `region` = VALUES(`region`),
                       `dept_id` = VALUES(`dept_id`),
                       `dept_name` = VALUES(`dept_name`),
@@ -1073,6 +1077,7 @@ class MartExtractRepository:
                         row["name"],
                         row.get("union_id"),
                         row.get("job_number"),
+                        row.get("mobile"),
                         row["region"],
                         row.get("dept_id"),
                         row.get("dept_name"),
@@ -1089,6 +1094,16 @@ class MartExtractRepository:
                 f"WHERE `user_id` NOT IN ({placeholders})",
                 tuple(row["user_id"] for row in rows),
             )
+
+    def has_dim_robot_member_mobile(self):
+        """目标维度是否已有可用手机号，用于阻止空快照覆盖有效数据。"""
+        with contextlib.closing(self._mart.cursor()) as cursor:
+            cursor.execute(
+                "SELECT 1 AS `present` FROM `dim_robot_member` "
+                "WHERE `mobile` IS NOT NULL AND `mobile` <> '' LIMIT 1"
+            )
+            rows = cursor.fetchall()
+        return bool(rows)
 
     def last_extract_started_at(self, dataset_name):
         """最近一次为该数据集写过摘要的 extract run 的 ``started_at``。
@@ -1734,11 +1749,22 @@ class MartExtractService:
         if not rows:
             return None
 
+        if (
+            not any(str(row.get("mobile") or "").strip() for row in rows)
+            and self._repository.has_dim_robot_member_mobile()
+        ):
+            logger.error(
+                "dataset=%s 最新快照手机号全为空，拒绝覆盖已有有效手机号",
+                DIM_ROBOT_MEMBER,
+            )
+            raise MartExtractError("org member mobile projection is empty")
+
         digest = self._content_digest(
-            "{}|{}|{}|{}|{}|{}|{}".format(
+            "{}|{}|{}|{}|{}|{}|{}|{}".format(
                 row["user_id"], row["name"], row["region"],
                 row.get("dept_id") or "", row.get("dept_name") or "",
                 row.get("union_id") or "", row.get("job_number") or "",
+                row.get("mobile") or "",
             )
             for row in rows
         )

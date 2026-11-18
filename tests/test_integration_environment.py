@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -7,14 +9,26 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPOSITORY_ROOT / "docker-compose.integration.yml"
+CLOUD_COMPOSE_FILE = REPOSITORY_ROOT / "docker" / "cloud" / "docker-compose.dops.yml"
 DOCKERFILE = REPOSITORY_ROOT / "docker" / "integration" / "Dockerfile"
 DOCKERIGNORE_FILE = REPOSITORY_ROOT / ".dockerignore"
 RUNNER_SCRIPT = REPOSITORY_ROOT / "docker" / "integration" / "run-tests.sh"
+
+# 取证靠 `docker compose config`（归一化 profile 生效面、${...:-} 默认值、
+# 端口/挂载形态）。它只需 docker CLI，不连 daemon —— 因此「有没有 docker」
+# 是能否取证的充分条件，容器内的 test-runner 恰恰没有它。
+_DOCKER_CLI = shutil.which("docker")
 
 
 @unittest.skipIf(
     os.environ.get("INTEGRATION_TEST_RUNNER") == "1",
     "Compose contracts are verified from the Docker host.",
+)
+@unittest.skipIf(
+    _DOCKER_CLI is None and os.environ.get("INTEGRATION_CONTRACT_REQUIRED") != "1",
+    "docker CLI 不在 PATH：本机取不到 compose 归一化真值，无法取证。"
+    "契约由 CI 的 compose-contracts job 在 docker 主机上强制校验（不跳过）；"
+    "发布前自检可设 INTEGRATION_CONTRACT_REQUIRED=1 让 CLI 缺失直接变失败。",
 )
 class IntegrationEnvironmentContractTests(unittest.TestCase):
     def test_compose_defines_isolated_ubuntu_runner_and_persistent_mysql(self):
@@ -92,26 +106,16 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
             line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
         ]
         self.assertEqual(1, len(code_services))
-        for service in ("gateway", "scheduler", "bi-web", "ops-web"):
+        for service in ("gateway", "scheduler", "ops-web"):
             self.assertIn(service, code_services[0])
+        # BI 已迁独立仓 dops-bi（2026-11-18）：主仓不再重建 bi-web，否则
+        # force-recreate 会用主仓镜像盖掉独立仓容器。
+        self.assertNotIn("bi-web", code_services[0])
 
         # 健康门须覆盖同一批长驻容器：force-recreate 后起不来要能触发回滚。
         self.assertIn("--filter name=dops-ops-web", text)
-
-    def test_deploy_script_covers_kb_gateway_for_reload_and_health_gate(self):
-        deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
-        text = deploy_script.read_text(encoding="utf-8")
-
-        # kb-gateway 同为长驻 Stream 进程（代码 bind-mount 只读）：不列入
-        # CODE_SERVICES 时合并 main 后 KB P2 代码不重载（2026-10-13 实测）。
-        code_services = [
-            line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
-        ]
-        self.assertEqual(1, len(code_services))
-        self.assertIn("kb-gateway", code_services[0])
-
-        # 同受健康门约束：force-recreate 后起不来要能触发回滚。
-        self.assertIn("--filter name=kb-gateway", text)
+        # BI 容器由独立仓部署，但同宿主共用盘古线路：主仓部署门仍观测它。
+        self.assertIn("--filter name=dops-bi-independent", text)
 
     def test_deploy_script_applies_migrations_before_recreating_services(self):
         deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
@@ -132,23 +136,25 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         deploy_script = REPOSITORY_ROOT / "ops" / "deploy.sh"
         text = deploy_script.read_text(encoding="utf-8")
 
-        # pages-web 是长驻 uvicorn（代码 bind-mount 只读挂载）：不列入
-        # CODE_SERVICES 时部署只更新磁盘代码、进程不重载（#57-#59 同款坑）。
+        # pages-web 随线下仓迁出（2026-11-18，common/pages_web 已不在主仓）：
+        # 主仓若仍把它列进 CODE_SERVICES，force-recreate 会拉一个 module
+        # not found 的容器，健康门随即回滚整次部署。容器归 offline-branch
+        # 的 deploy-offline.sh 自证，主仓只管 nginx 侧的同端口切流。
         code_services = [
             line for line in text.splitlines() if line.startswith("CODE_SERVICES=")
         ]
         self.assertEqual(1, len(code_services))
-        self.assertIn("pages-web", code_services[0])
+        self.assertNotIn("pages-web", code_services[0])
+        self.assertNotIn("--filter name=dops-pages-web", text)
 
-        # 健康门覆盖 pages-web 容器 + 榜单页发布链探针（80；8300 已于
-        # 2026-10-26 软下线为 301 跳域名。@static 静态兜底使探针在
-        # pages-web 故障时仍 200，不误伤部署门）。
-        self.assertIn("--filter name=dops-pages-web", text)
+        # 榜单页发布链探针保留（80；8300 已于 2026-10-26 软下线为 301 跳
+        # 域名）：@static 静态兜底使探针在渲染服务故障时仍 200，不误伤部署门，
+        # 且切换前后（主仓 pages-web → dops-offline-pages-web）语义不变。
         self.assertIn("80/hangzhou.html", text)
 
         # nginx conf 真源同步 + HUP 平滑重载：conf 只落 repo 不拷贝到
         # /opt/dops/nginx/ 时 nginx 永远跑旧配置；且须在 force-recreate
-        # 长驻服务之前完成（先拉起 pages-web 再切流量）。
+        # 长驻服务之前完成（先切好流量再重建服务，避免窗口内 502）。
         # 真源唯一（2026-10-23）：docker/cloud/nginx-pages.conf——此前同步源是
         # integration/pages-cloud.conf 而修复都写进 cloud 版，双真源漂移使
         # listen 80 三次被部署回退丢失（全站断）。
@@ -343,37 +349,27 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)
 
-    def test_robot_runner_is_opt_in_and_credential_free(self):
-        configuration = self._compose_config("robot")
-        robot = configuration["services"]["robot-hangzhou"]
-
-        self.assertEqual(robot.get("profiles"), ["robot"])
-        self.assertEqual(
-            "service_healthy", robot["depends_on"]["mysql"]["condition"]
+    def test_offline_runners_are_retired_from_main_compose(self):
+        # 2026-11-18 线下业务线剥离：robot-*（提醒/催办/once）与 pages-*
+        # （榜单页 HTML）的实现迁 offline-branch，主仓 mart_cli 只剩渠道四条
+        # 命令。原 robot/pages profile 若继续留在编排里，服务能过 config 校验
+        # 却一跑就 argparse 退出码 2 —— 正是「契约绿、运行红」的形态。故此处
+        # 反向钉住：两个 profile 都不再产出任何服务。
+        retired = (
+            "robot-hangzhou",
+            "robot-vanke",
+            "pages-hangzhou",
+            "pages-vanke",
         )
-        self.assertNotIn("ports", robot)
-
-        command = robot.get("command", [])
-        parts = command.split() if isinstance(command, str) else list(command)
-        self.assertIn("common.daily_robot.mart_cli", parts)
-        self.assertIn("once", parts)
-        self.assertIn("--confirm-local-test-write", parts)
-
-        # Business line (spec section 7): no source credentials, no external
-        # calls -- no live flags, no mounts at all.
-        self.assertNotIn("--live-read", parts)
-        self.assertNotIn("--live-send", parts)
-        self.assertFalse(robot.get("volumes"))
-
-        environment = robot["environment"]
-        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_SERVICE_ID"), "robot-hangzhou"
-        )
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_REGION_SEED"),
-            "/app/docker/integration/regions.seed.json",
-        )
+        for profile in (None, "robot", "pages"):
+            configuration = (
+                self._compose_config()
+                if profile is None
+                else self._compose_config(profile)
+            )
+            with self.subTest(profile=profile):
+                for service_id in retired:
+                    self.assertNotIn(service_id, configuration["services"])
 
     def test_gateway_runner_mounts_only_dingtalk_credentials(self):
         configuration = self._compose_config("dingtalk-gateway")
@@ -408,38 +404,6 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         self.assertEqual(
             environment.get("PUBLIC_DATA_REGION_SEED"),
             "/app/docker/integration/regions.seed.json",
-        )
-
-    def test_pages_runner_is_opt_in_and_credential_free(self):
-        configuration = self._compose_config("pages")
-        pages = configuration["services"]["pages-hangzhou"]
-
-        self.assertEqual(pages.get("profiles"), ["pages"])
-        self.assertEqual(
-            "service_healthy", pages["depends_on"]["mysql"]["condition"]
-        )
-        self.assertNotIn("ports", pages)
-
-        command = pages.get("command", [])
-        parts = command.split() if isinstance(command, str) else list(command)
-        self.assertIn("common.daily_robot.mart_cli", parts)
-        self.assertIn("leaderboard-html", parts)
-        self.assertIn("--confirm-local-test-write", parts)
-        self.assertNotIn("--live-read", parts)
-        self.assertNotIn("--live-send", parts)
-
-        # Business line (spec section 7): no credentials; the only mount is
-        # the HTML output directory.
-        targets = {
-            v.get("target", "") if isinstance(v, dict) else ""
-            for v in pages.get("volumes", [])
-        }
-        self.assertEqual(targets, {"/output"})
-
-        environment = pages["environment"]
-        self.assertEqual(environment.get("ROBOT_REGION"), "hangzhou")
-        self.assertEqual(
-            environment.get("PUBLIC_DATA_SERVICE_ID"), "pages-hangzhou"
         )
 
     def test_scheduler_is_opt_in_persistent_and_carries_union_mounts(self):
@@ -616,6 +580,48 @@ class IntegrationEnvironmentContractTests(unittest.TestCase):
         # compose service without them could never boot.  The zero-raw rule
         # is enforced at the code level instead: the default db_connector
         # only ever passes settings.mart_database to connect().
+
+
+class ComposeReferenceContractTests(unittest.TestCase):
+    """编排静态引用契约：纯文件读取，任何环境（含无 docker 的容器内）都能跑。
+
+    与上面那类分开，是因为它不需要 docker CLI 取证，属于「随时可执行」的
+    低成本防复发网 —— 拆分组件时漏改编排的那类事故先在这里红。
+    """
+
+    PATTERN = re.compile(
+        r"^\s*-\s*(common\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\s*$",
+        re.MULTILINE,
+    )
+
+    def test_every_compose_module_reference_resolves(self):
+        # 2026-11-18 拆分教训：编排里留着 `-m common.pages_web.app` 这类已迁走
+        # 的模块时，`docker compose config` 照样绿（config 不校验模块是否存在），
+        # 一运行就是 module not found，健康门随即整次回滚——「契约绿、运行红」。
+        # 故把「编排声明的 python3 -m 模块必须在仓内可定位」钉成契约，集成编排
+        # 与云上生产编排两份真源都覆盖。
+        for compose_file in (COMPOSE_FILE, CLOUD_COMPOSE_FILE):
+            with self.subTest(
+                compose=compose_file.relative_to(REPOSITORY_ROOT).as_posix()
+            ):
+                modules = {
+                    match.group(1)
+                    for match in self.PATTERN.finditer(
+                        compose_file.read_text(encoding="utf-8")
+                    )
+                }
+                # 解析规则若失去匹配（形态改成字符串 command 等），这里先红，
+                # 免得契约静默退化为什么都没检查。
+                self.assertTrue(
+                    modules, "no `python3 -m <module>` line found in compose command"
+                )
+                for module in sorted(modules):
+                    target = REPOSITORY_ROOT.joinpath(*module.split("."))
+                    self.assertTrue(
+                        target.with_suffix(".py").is_file()
+                        or (target / "__main__.py").is_file(),
+                        f"{compose_file.name} references missing module {module}",
+                    )
 
 
 if __name__ == "__main__":

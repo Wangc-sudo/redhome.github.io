@@ -27,6 +27,9 @@ jobs:
       - name: 语法编译检查（common / tests / 数字化）
         run: |
           python -m compileall -q "common" "tests" "数字化"
+      - name: 部署脚本语法检查
+        run: |
+          bash -n ops/deploy.sh
       - name: 配置模板校验
         run: |
           python - <<'EOF'
@@ -53,6 +56,22 @@ jobs:
       - name: 清理 compose 资源
         if: always()
         run: docker compose -f docker-compose.integration.yml down -v --remove-orphans
+
+  # 部署契约（compose / 部署脚本 / nginx conf）必须在 docker 主机上跑：
+  # 这类用例靠 `docker compose config --format json` 取编排的归一化真值
+  # （profile 生效面、${...:-} 默认值、端口与挂载形态），而 test-runner 容器
+  # 内没有 docker CLI（INTEGRATION_TEST_RUNNER=1 会整类跳过）。2026-11-18
+  # 拆分整改发现：这些契约此前在 CI 里从未真正执行过，只在装了 docker 的
+  # 开发机上偶然跑过 —— 等于没有闸门。本 job 补上这个闸门，且用
+  # INTEGRATION_CONTRACT_REQUIRED=1 保证「取不到 docker」时是失败而非跳过。
+  compose-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 部署契约（compose config / 部署脚本 / nginx conf / 模块引用）
+        env:
+          INTEGRATION_CONTRACT_REQUIRED: "1"
+        run: python3 -m unittest tests.test_integration_environment -v
 
   frontend:
     runs-on: ubuntu-latest
@@ -100,7 +119,7 @@ jobs:
   # 后续若加 push 式 CD / 部署回执，从这里挂。
   gate:
     runs-on: ubuntu-latest
-    needs: [python-lint, python-tests, frontend, ops-web-frontend]
+    needs: [python-lint, python-tests, compose-contracts, frontend, ops-web-frontend]
     steps:
       - name: 质量门汇总
         run: echo "CI green on ${GITHUB_REF} (${GITHUB_SHA}) — 合并 main 即部署意图"

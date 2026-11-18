@@ -152,42 +152,6 @@ class _Conn:
         return self.cursor_instance
 
 
-class QuerySqlCacheTests(unittest.TestCase):
-    """R5：同 SQL 60s 读穿，命中时 EXPLAIN+SELECT 全省。"""
-
-    def test_repeat_sql_served_from_cache(self):
-        from common.kb_qa.agent import ToolExecutor
-
-        cursor = _Cursor([[{"rows": 1}], [], [{"d": "2026-11-01", "qty": 5}]])
-        conn = _Conn(cursor)
-        store = MemoryStore()
-        executor = ToolExecutor(conn, cache_store=store)
-        sql = ("SELECT DATE(trade_time) AS d, SUM(quantity) AS qty"
-               " FROM fact_order_line WHERE trade_time>='2026-11-01'"
-               " AND trade_time<'2026-11-02' GROUP BY d")
-        import json
-        first = json.loads(executor.execute("query_sql", {"sql": sql}))
-        second = json.loads(executor.execute("query_sql", {"sql": sql}))
-        self.assertEqual(1, len(first["rows"]))
-        self.assertEqual(first["rows"], second["rows"])
-        self.assertEqual(1, conn.calls)  # 第二次零数据库访问
-        self.assertEqual(3, len(cursor.executed))  # EXPLAIN/SET/SELECT 仅一轮
-
-    def test_error_result_not_cached(self):
-        from common.kb_qa.agent import ToolExecutor
-
-        cursor = _Cursor([[{"rows": 999999}]])  # EXPLAIN 超阈值 → error
-        conn = _Conn(cursor)
-        store = MemoryStore()
-        executor = ToolExecutor(conn, cache_store=store)
-        sql = "SELECT paid_amount FROM fact_order_line LIMIT 10"
-        import json
-        first = json.loads(executor.execute("query_sql", {"sql": sql}))
-        self.assertIn("error", first)
-        executor.execute("query_sql", {"sql": sql})
-        self.assertEqual(2, conn.calls)  # 错误不缓存，第二次重新执行
-
-
 class _FakeRedisClient:
     def __init__(self):
         self.data = {}
