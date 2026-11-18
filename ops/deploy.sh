@@ -24,7 +24,11 @@ LOCK_FILE="${DOPS_LOCK_FILE:-/var/run/dops-deploy.lock}"
 STATUS_FILE="${DOPS_STATUS_FILE:-/opt/dops/deploy-status.json}"
 HEALTH_URL="${DOPS_HEALTH_URL:-http://127.0.0.1:18080/healthz}"
 HEALTH_TIMEOUT="${DOPS_HEALTH_TIMEOUT:-90}"
-PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-}"
+# 缺省用国内源：空值曾让 pip 落到官方源，在国内网络下直接超时（构建失败）。
+# 要回官方源请显式设 DOPS_PIP_INDEX_URL=https://pypi.org/simple。
+PIP_INDEX_URL="${DOPS_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+# 公共基座镜像（gitee dops-docker 仓构建，部署机本地需预置；见该仓 README）
+BASE_IMAGE="${DOPS_BASE_IMAGE:-dops-base-python312:2026.11.1}"
 # 代码经 bind-mount 进容器的长驻服务（代码变更需 force-recreate 才重载）。
 # ops-web 为长驻 uvicorn（serve() 无 --reload）、代码只读挂载：漏在本列表时
 # git reset 只更新磁盘代码、进程不重载，ops-web 改动合并进 main 后不生效
@@ -86,7 +90,7 @@ if [ "$SYNC_ONLY" = "1" ]; then
 fi
 
 DEPS_CHANGED=0
-git diff --quiet "$LOCAL_SHA" "$REMOTE_SHA" -- requirements.txt || DEPS_CHANGED=1
+git diff --quiet "$LOCAL_SHA" "$REMOTE_SHA" -- requirements.txt docker/cloud/Dockerfile || DEPS_CHANGED=1
 
 apply() {
   git reset --hard "$1"
@@ -95,8 +99,9 @@ apply() {
     cp docker/cloud/docker-compose.dops.yml "$COMPOSE_FILE"
   fi
   if [ "$DEPS_CHANGED" = "1" ]; then
-    log "requirements.txt changed -> rebuild dops-app image"
+    log "requirements.txt/Dockerfile changed -> rebuild dops-app image (base=$BASE_IMAGE)"
     docker build -t dops-app:latest \
+      --build-arg "BASE_IMAGE=$BASE_IMAGE" \
       --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
       -f docker/cloud/Dockerfile .
   fi
@@ -160,6 +165,14 @@ health_gate() {
   done
   return 1
 }
+
+# 基座镜像预检（2026-11-18 基座化）：缺镜像时 docker build 会以晦涩的
+# "pull access denied" 失败并连带回滚整次部署，这里提前给出可操作提示。
+if [ "$DEPS_CHANGED" = "1" ] && ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+  log "ERROR: base image $BASE_IMAGE missing -> build it first (gitee dops-docker: ./build.sh python312)"
+  write_status error "$LOCAL_SHA" "$REMOTE_SHA" "base image missing: $BASE_IMAGE"
+  exit 1
+fi
 
 if apply "$REMOTE_SHA" && health_gate; then
   log "DEPLOY OK: $(git rev-parse --short HEAD)"
