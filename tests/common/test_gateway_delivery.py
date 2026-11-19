@@ -45,21 +45,21 @@ class WorkerRoutingTests(unittest.TestCase):
 
     def test_group_kinds_route_to_send_group(self):
         rows = [_row("remind"), _row("check"), _row("leaderboard"),
-                _row("channel_daily")]
+                _row("channel_daily"), _row("price_broadcast")]
         worker, outbox, deliverer = _worker(rows)
 
         report = worker.deliver_once()
 
-        self.assertEqual(deliverer.send_group.call_count, 4)
+        self.assertEqual(deliverer.send_group.call_count, 5)
         deliverer.send_group.assert_any_call(
             region="hangzhou", title="标题", body_md="正文", at_user_ids=["u1"],
         )
         deliverer.send_ding.assert_not_called()
-        self.assertEqual(outbox.mark_delivered.call_count, 4)
+        self.assertEqual(outbox.mark_delivered.call_count, 5)
         outbox.mark_delivered.assert_any_call(
             "hangzhou:remind:2026-09-11", delivered_at=_NOW,
         )
-        self.assertEqual(report.delivered_count, 4)
+        self.assertEqual(report.delivered_count, 5)
         self.assertEqual(report.failed_count, 0)
 
     def test_ding_routes_to_send_ding(self):
